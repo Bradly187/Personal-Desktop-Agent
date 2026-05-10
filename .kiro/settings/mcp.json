@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "desktop-agent": {
+      "command": "python",
+      "args": ["E:/Personal_Desktop_Agent/mcp_server/desktop_mcp_server.py"],
+      "env": {
+        "SAFE_MODE": "1"
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+name: DesktopAgent
+options:
+  bundleIdPrefix: com.bradtarber
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "15.0"
+  groupSortPosition: top
+  createIntermediateGroups: true
+
+settings:
+  SWIFT_VERSION: "5.9"
+  PRODUCT_BUNDLE_IDENTIFIER: com.bradtarber.DesktopAgent
+  TARGETED_DEVICE_FAMILY: "2"
+  SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+  ENABLE_BITCODE: NO
+
+targets:
+  DesktopAgent:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: .
+        excludes:
+          - "project.yml"
+          - "DesktopAgent.entitlements"
+          - "Info.plist"
+    entitlements:
+      path: DesktopAgent.entitlements
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Desktop Agent
+        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        UILaunchStoryboardName: LaunchScreen
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        NSCameraUsageDescription: "Used for gaze and head tracking."
+        NSMicrophoneUsageDescription: "Used for voice keyword detection."
+        NSSpeechRecognitionUsageDescription: "Used for on-device keyword matching."
+        NSMotionUsageDescription: "Used for tilt-based cursor control."
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES

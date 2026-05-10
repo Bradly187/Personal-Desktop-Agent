@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentcore-fallback"
+version = "0.2.0"
+description = "AgentCore cloud fallback agent with memory for ambiguous desktop commands"
+requires-python = ">=3.10"
+
+dependencies = [
+    "bedrock-agentcore[strands-agents] >= 1.0.3",
+    "boto3 >= 1.38.0",
+    "strands-agents >= 1.13.0",
+]

@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "name": "Sync Docs on Source Change",
+  "description": "When Python or Swift source files (or related config files) are edited, ask the agent to update documentation in README.md or the docs/ folder to reflect the changes.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "*.py",
+      "*.swift",
+      "requirements.txt",
+      "*.toml",
+      "*.yaml",
+      "*.yml",
+      "*.json"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "A source file was just edited. Review the change and determine if any documentation needs updating. If so, update the README.md at the project root or files in the docs/ folder to reflect the new behavior, APIs, configuration, or usage instructions. Only make documentation changes if the source change is meaningful (e.g., new features, changed interfaces, updated dependencies). Skip trivial changes like formatting or comments."
+  }
+}

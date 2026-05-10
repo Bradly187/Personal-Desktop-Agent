@@ -1,0 +1,47 @@
+default_agent: FallbackAgent
+agents:
+  FallbackAgent:
+    name: FallbackAgent
+    language: python
+    entrypoint: src/main.py
+    deployment_type: direct_code_deploy
+    runtime_type: PYTHON_3_10
+    platform: linux/amd64
+    source_path: src
+    aws:
+      execution_role: null
+      execution_role_auto_create: true
+      account: null
+      region: us-east-1
+      ecr_repository: null
+      ecr_auto_create: false
+      s3_path: null
+      s3_auto_create: true
+      network_configuration:
+        network_mode: PUBLIC
+        network_mode_config: null
+      protocol_configuration:
+        server_protocol: HTTP
+      observability:
+        enabled: true
+      lifecycle_configuration:
+        idle_runtime_session_timeout: null
+        max_lifetime: null
+    bedrock_agentcore:
+      agent_id: null
+      agent_arn: null
+      agent_session_id: null
+    # DEPLOYMENT STRATEGY:
+    # 1. First deploy with NO_MEMORY to verify agent works
+    # 2. Create memory resource: agentcore memory create desktop_fallback_memory --wait
+    # 3. Update mode to STM_AND_LTM and set memory_id
+    # 4. Redeploy
+    memory:
+      mode: NO_MEMORY
+      memory_id: null
+      memory_arn: null
+      memory_name: desktop_fallback_memory
+      event_expiry_days: 90
+      first_invoke_memory_check_done: false
+      was_created_by_toolkit: false
+    is_generated_by_agentcore_create: false

@@ -1,0 +1,141 @@
+import ARKit
+import SwiftUI
+
+/// Streams gaze position from ARKit TrueDepth camera at the ARKit frame rate.
+/// On-device dwell timer fires gaze_dwell when gaze is stable for `dwellTimeout` seconds.
+/// Requires: front-facing TrueDepth camera (iPad Pro 2020+, iPad mini 6+, iPad Air 5+).
+@MainActor
+final class GazeTracker: NSObject, ObservableObject {
+
+    private let session = ARSession()
+    private weak var ws: WebSocketManager?
+    private var settings: SettingsStore?
+
+    // Dwell state
+    private var dwellStart: Date?
+    private var lastStablePoint: CGPoint?
+    private let stabilityThreshold: CGFloat = 0.04   // fraction of screen diagonal
+
+    // Ring animation progress (0…1)
+    @Published var dwellProgress: Double = 0
+
+    init(ws: WebSocketManager, settings: SettingsStore) {
+        self.ws = ws
+        self.settings = settings
+        super.init()
+    }
+
+    // MARK: — Lifecycle
+
+    func start() {
+        guard ARFaceTrackingConfiguration.isSupported else {
+            print("GazeTracker: ARFaceTracking not supported on this device")
+            return
+        }
+        guard let settings, settings.gazeEnabled else { return }
+
+        let config = ARFaceTrackingConfiguration()
+        config.isLightEstimationEnabled = false
+        session.delegate = self
+        session.run(config)
+    }
+
+    func stop() {
+        session.pause()
+        dwellProgress = 0
+    }
+
+    // MARK: — Gaze extraction
+
+    private func extractGaze(from anchor: ARFaceAnchor) -> (CGPoint, Float)? {
+        // ARKit provides leftEyeTransform and rightEyeTransform relative to face.
+        // We project the gaze direction onto the camera plane to get screen-space coords.
+        let leftEye = anchor.leftEyeTransform
+        let rightEye = anchor.rightEyeTransform
+
+        // Average eye position in world space
+        let eyePos = simd_float3(
+            (leftEye.columns.3.x + rightEye.columns.3.x) / 2,
+            (leftEye.columns.3.y + rightEye.columns.3.y) / 2,
+            (leftEye.columns.3.z + rightEye.columns.3.z) / 2
+        )
+
+        // Look vector: -Z column of the average eye transform
+        let leftFwd = simd_float3(-leftEye.columns.2.x, -leftEye.columns.2.y, -leftEye.columns.2.z)
+        let rightFwd = simd_float3(-rightEye.columns.2.x, -rightEye.columns.2.y, -rightEye.columns.2.z)
+        let gazeDir = normalize((leftFwd + rightFwd) / 2)
+
+        // Project to a virtual screen plane 0.5 m in front of the face
+        guard gazeDir.z < -0.01 else { return nil }
+        let t: Float = 0.5 / (-gazeDir.z)
+        let hitX = eyePos.x + gazeDir.x * t
+        let hitY = eyePos.y + gazeDir.y * t
+
+        // Normalize to [0,1]; clamp
+        let nx = CGFloat(min(max((hitX + 0.3) / 0.6, 0), 1))
+        let ny = CGFloat(min(max(1 - (hitY + 0.3) / 0.6, 0), 1))
+
+        let conf = Float(anchor.blendShapes[.eyeBlinkLeft] ?? 0)
+        let openness = 1 - conf   // higher when eye is open
+
+        return (CGPoint(x: nx, y: ny), openness)
+    }
+
+    private func handleGaze(_ point: CGPoint, conf: Float) {
+        guard let settings else { return }
+        ws?.sendGaze(x: point.x, y: point.y, confidence: Double(conf))
+
+        // Dwell detection
+        let threshold = CGFloat(stabilityThreshold)
+        if let last = lastStablePoint,
+           abs(point.x - last.x) < threshold && abs(point.y - last.y) < threshold {
+            // Gaze is stable
+            if dwellStart == nil { dwellStart = Date() }
+            let elapsed = Date().timeIntervalSince(dwellStart!)
+            let progress = min(elapsed / settings.dwellTimeout, 1.0)
+            dwellProgress = progress
+            if elapsed >= settings.dwellTimeout {
+                ws?.sendGazeDwell(x: point.x, y: point.y)
+                dwellStart = nil
+                dwellProgress = 0
+            }
+        } else {
+            lastStablePoint = point
+            dwellStart = nil
+            dwellProgress = 0
+        }
+    }
+}
+
+// MARK: — ARSessionDelegate
+
+extension GazeTracker: ARSessionDelegate {
+    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        guard let faceAnchor = anchors.first(where: { $0 is ARFaceAnchor }) as? ARFaceAnchor else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let (point, conf) = self.extractGaze(from: faceAnchor) {
+                self.handleGaze(point, conf: conf)
+            }
+        }
+    }
+}
+
+// MARK: — Dwell ring overlay
+
+struct DwellRingView: View {
+    @ObservedObject var tracker: GazeTracker
+
+    var body: some View {
+        if tracker.dwellProgress > 0 {
+            Circle()
+                .trim(from: 0, to: tracker.dwellProgress)
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                .frame(width: 44, height: 44)
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 0.1), value: tracker.dwellProgress)
+        }
+    }
+}
