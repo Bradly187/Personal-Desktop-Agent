@@ -21,6 +21,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 | 10 | [10-nemoclaw-system-architecture.md](10-nemoclaw-system-architecture.md) | Full pipeline with NemoClaw additions: Gate 0, NemotronInference, log field |
 | 11 | [11-nemoclaw-gate-flow.md](11-nemoclaw-gate-flow.md) | HybridCoordinator gate decision flowchart with gate_that_decided labels |
 | 12 | [12-nemoclaw-inference-tiers.md](12-nemoclaw-inference-tiers.md) | Local inference backends mapped against RTX 5090 VRAM budget |
+| 14 | [14-database-schema.md](14-database-schema.md) | agent.db (11 tables) + analytics.duckdb ER diagrams; pipeline write topology; index coverage |
 
 ---
 

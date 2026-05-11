@@ -46,6 +46,7 @@ from local_inference import LocalInference, OllamaInference, _build_prompt
 if TYPE_CHECKING:
     from agentcore_fallback.client import AgentCoreFallbackClient
     from continuous_trainer import ContinuousTrainer
+    from db import AgentDB
     from dev_agent import DevAgent
 
 log = logging.getLogger(__name__)
@@ -84,8 +85,7 @@ class CoordinatorConfig:
     latency_budget_ms: float = 600.0
     latency_ema_alpha: float = 0.1          # smoothing factor for EMA
 
-    # Logging
-    routing_log_path: Path = field(default_factory=lambda: Path("routing_log.jsonl"))
+    # (routing_log_path removed — outcomes written to agent.db commands table)
 
     # AWS Bedrock (cloud fallback — raw API, used when AgentCore unavailable)
     bedrock_model_id: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
@@ -169,38 +169,6 @@ async def _retranscribe(cmd: Command) -> Command:
     return cmd
 
 
-# ---------------------------------------------------------------------------
-# Outcome logger
-# ---------------------------------------------------------------------------
-
-class _OutcomeLogger:
-    def __init__(self, path: Path) -> None:
-        self._path = path
-
-    def log(
-        self,
-        cmd: Command,
-        route: str,               # "local" | "cloud" | "discard"
-        action_str: str,
-        latency_ms: float,
-        gate_that_decided: str,   # decisive gate label (see module docstring)
-    ) -> None:
-        record = {
-            "ts": time.time(),
-            "source": cmd.source,
-            "text": cmd.text,
-            "route": route,
-            "gate_that_decided": gate_that_decided,
-            "action": action_str,
-            "latency_ms": round(latency_ms, 1),
-            "whisper_logprob": cmd.whisper_logprob,
-            "gesture_confidence": cmd.gesture_confidence,
-        }
-        try:
-            with self._path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
-        except OSError as exc:
-            log.warning("OutcomeLogger write failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -219,16 +187,19 @@ class HybridCoordinator:
         trainer: Optional["ContinuousTrainer"] = None,
         dev_agent: Optional["DevAgent"] = None,
         agentcore_client: Optional["AgentCoreFallbackClient"] = None,
+        agent_db: Optional["AgentDB"] = None,
+        session_id: int = -1,
     ) -> None:
         self._local = local or OllamaInference()
         self._cfg = config or CoordinatorConfig()
         self._cloud = _CloudInference(self._cfg.bedrock_model_id, self._cfg.bedrock_region)
         self._agentcore = agentcore_client
         self._executor = CommandExecutor()
-        self._logger = _OutcomeLogger(self._cfg.routing_log_path)
         self._trainer = trainer
-        self._dev_agent = dev_agent          # handles non-command domains
-        self._latency_ema: Optional[float] = None  # None until first measurement
+        self._dev_agent = dev_agent
+        self._agent_db = agent_db
+        self._session_id = session_id
+        self._latency_ema: Optional[float] = None
 
         # Lazy-init AgentCore client if enabled but not provided
         if self._agentcore is None and self._cfg.agentcore_enabled:
@@ -275,6 +246,10 @@ class HybridCoordinator:
         t0 = time.monotonic()
         route_label = "local"
         gate_that_decided = "all_pass"
+        action_str: Optional[str] = None
+        success: Optional[bool] = None
+        error_msg: Optional[str] = None
+        command_id: int = -1
 
         try:
             source = cmd.source
@@ -312,21 +287,37 @@ class HybridCoordinator:
 
             # --- Execute the action ----------------------------------------
             result = await self._execute_action(action_str, cmd)
+            success = result.get("status") == "ok"
 
             # Record successful local executions for few-shot learning
-            if (self._trainer and route_label == "local"
-                    and result.get("status") == "ok"):
-                await self._trainer.record_success(cmd, action_str)
+            if (self._trainer and route_label == "local" and success):
+                await self._trainer.record_success(
+                    cmd, action_str, command_id=command_id
+                )
 
         except Exception as exc:
             log.error("HybridCoordinator.route error: %s", exc)
+            error_msg = str(exc)
             return {"status": "error", "error": str(exc)}
 
         finally:
             latency_ms = (time.monotonic() - t0) * 1000
             self._update_ema(latency_ms)
+            if self._agent_db and self._agent_db.available:
+                try:
+                    command_id = await self._agent_db.insert_command(
+                        session_id=self._session_id,
+                        cmd=cmd,
+                        action=action_str,
+                        route=route_label,
+                        gate_that_decided=gate_that_decided,
+                        latency_ms=latency_ms,
+                        success=success,
+                        error_msg=error_msg,
+                    )
+                except Exception as db_exc:
+                    log.warning("AgentDB.insert_command failed: %s", db_exc)
 
-        self._logger.log(cmd, route_label, action_str, latency_ms, gate_that_decided)
         return result
 
     # ---------------------------------------------------------------------- #
@@ -433,7 +424,23 @@ class HybridCoordinator:
         )
         t0 = time.monotonic()
         action_str = await self._local.infer(cmd, few_shot_examples=examples)
-        self._update_ema((time.monotonic() - t0) * 1000)
+        latency_ms = (time.monotonic() - t0) * 1000
+        self._update_ema(latency_ms)
+        if self._agent_db and self._agent_db.available:
+            status = self._local.get_status()
+            error = action_str if action_str.startswith("CLARIFY inference") else None
+            await self._agent_db.insert_inference(
+                command_id=None,
+                model=status.get("model", "unknown"),
+                domain="command",
+                prompt=None,
+                response=action_str,
+                tokens_in=None,
+                tokens_out=None,
+                latency_ms=latency_ms,
+                backend=status.get("backend", "ollama"),
+                error=error,
+            )
         return action_str
 
     async def _run_cloud(self, cmd: Command) -> str:

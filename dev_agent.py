@@ -39,6 +39,7 @@ from model_router import ModelRouter, RouterResult
 if TYPE_CHECKING:
     from command_executor import Command, CommandExecutor
     from continuous_trainer import ContinuousTrainer
+    from db import AgentDB
     from hybrid_coordinator import HybridCoordinator
     from mcp_server.tools import screen as screen_tools
 
@@ -140,13 +141,15 @@ class DevAgent:
         coordinator: Optional["HybridCoordinator"] = None,
         trainer: Optional["ContinuousTrainer"] = None,
         session_context: Optional[list[str]] = None,
+        agent_db: Optional["AgentDB"] = None,
     ) -> None:
         self._router = router
         self._coordinator = coordinator
         self._trainer = trainer
+        self._agent_db = agent_db
         self._classifier = DomainClassifier()
-        self._context: list[str] = session_context or []  # rolling window
-        self._results_log: list[AgentResult] = []
+        self._context: list[str] = session_context or []
+        self._results_log: list[AgentResult] = []  # kept for get_last_result()
 
     # ---------------------------------------------------------------------- #
     # Primary entry point
@@ -203,6 +206,7 @@ class DevAgent:
             total_latency_ms=(time.monotonic() - t0) * 1000,
         )
         self._results_log.append(result)
+        await self._persist_run(result, command_id=None)
         return result
 
     # ---------------------------------------------------------------------- #
@@ -271,6 +275,7 @@ class DevAgent:
             total_latency_ms=(time.monotonic() - t0) * 1000,
         )
         self._results_log.append(result)
+        await self._persist_run(result, command_id=None)
         return result
 
     # ---------------------------------------------------------------------- #
@@ -382,6 +387,37 @@ class DevAgent:
             keys = [k.strip() for k in re.split(r"[+\s]+", args) if k.strip()]
             params["keys"] = keys
         return params
+
+    # ---------------------------------------------------------------------- #
+    # DB persistence
+    # ---------------------------------------------------------------------- #
+
+    async def _persist_run(
+        self, result: AgentResult, command_id: Optional[int]
+    ) -> None:
+        if not self._agent_db or not self._agent_db.available:
+            return
+        run_id = await self._agent_db.insert_agent_run(
+            command_id=command_id,
+            goal=result.goal,
+            domain=result.domain,
+            model_used=result.model_used,
+            step_count=len(result.steps),
+            success=result.success,
+            total_latency_ms=result.total_latency_ms,
+            error=result.error,
+        )
+        for i, step in enumerate(result.steps):
+            await self._agent_db.insert_agent_step(
+                run_id=run_id,
+                step_num=i + 1,
+                action=step.action,
+                args=step.args or None,
+                body=step.body or None,
+                result=step.result,
+                success=step.success,
+                latency_ms=step.latency_ms,
+            )
 
     # ---------------------------------------------------------------------- #
     # Context management

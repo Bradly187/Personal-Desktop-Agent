@@ -301,9 +301,74 @@ def main() -> None:
 
     _print_summary(all_results, baseline_gb)
 
-    out = Path("benchmark_results.json")
-    out.write_text(json.dumps(all_results, indent=2), encoding="utf-8")
-    print(f"  Full results saved to {out}\n")
+    _save_to_analytics(all_results)
+
+
+def _save_to_analytics(all_results: list[dict]) -> None:
+    """Persist benchmark results to analytics.duckdb (preferred) with JSON fallback."""
+    try:
+        from db import AnalyticsDB
+        import subprocess as _sp
+        git_hash: str | None = None
+        try:
+            git_hash = _sp.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=_sp.DEVNULL, text=True,
+            ).strip()
+        except Exception:
+            pass
+
+        analytics = AnalyticsDB()
+        analytics.open(Path("analytics.duckdb"))
+        if not analytics.available:
+            raise RuntimeError("DuckDB unavailable")
+
+        run_id = analytics.insert_benchmark_run(
+            ts=time.time(),
+            git_hash=git_hash,
+            mode="standard",
+        )
+        for r in all_results:
+            if "error" in r:
+                result_id = analytics.insert_benchmark_result(
+                    run_id=run_id,
+                    model=r["model"],
+                    accuracy_pct=None, correct=None, total=None,
+                    p50_ms=None, p95_ms=None,
+                    vram_before_gb=None, vram_after_gb=None, vram_delta_gb=None,
+                    error=r["error"],
+                )
+                continue
+            result_id = analytics.insert_benchmark_result(
+                run_id=run_id,
+                model=r["model"],
+                accuracy_pct=r.get("accuracy_pct"),
+                correct=r.get("correct"),
+                total=r.get("total"),
+                p50_ms=r.get("p50_ms"),
+                p95_ms=r.get("p95_ms"),
+                vram_before_gb=r.get("vram_before_gb"),
+                vram_after_gb=r.get("vram_after_load_gb"),
+                vram_delta_gb=r.get("vram_delta_gb"),
+            )
+            for p in r.get("prompts", []):
+                analytics.insert_benchmark_prompt(
+                    result_id=result_id,
+                    prompt=p["prompt"],
+                    expected=p["expected"],
+                    got=p.get("got"),
+                    correct=bool(p.get("correct")),
+                    p50_ms=p.get("p50_ms"),
+                    p95_ms=p.get("p95_ms"),
+                )
+        analytics.close()
+        print(f"  Results saved to analytics.duckdb (run_id={run_id})\n")
+    except Exception as exc:
+        # Fallback to JSON so a missing duckdb dependency doesn't break benchmarking
+        print(f"  [WARN] analytics.duckdb unavailable ({exc}), falling back to JSON")
+        out = Path("benchmark_results.json")
+        out.write_text(json.dumps(all_results, indent=2), encoding="utf-8")
+        print(f"  Full results saved to {out}\n")
 
 
 if __name__ == "__main__":

@@ -39,5 +39,11 @@ nvidia-ml-py==13.595.45
 # ── Continuous learning (ContinuousTrainer) ───────────────────────────────────
 aiosqlite==0.20.0
 
+# ── Analytics / ML feature extraction (AnalyticsDB) ──────────────────────────
+duckdb==1.5.2
+
+# ── Semantic few-shot retrieval (MiniLM embeddings in AgentDB) ────────────────
+sentence-transformers>=3.0.0
+
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1

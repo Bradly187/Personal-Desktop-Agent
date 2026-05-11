@@ -51,8 +51,9 @@ log = logging.getLogger("ipad_bridge")
 from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from fusion_engine import FusionEngine
-    from lidar_receiver import LiDARReceiver
     from gesture_processor import GestureProcessor
+    from lidar_receiver import LiDARReceiver
+    from whisper_stream import WhisperStream
 
 # ---------------------------------------------------------------------------
 # Optional mDNS — graceful if zeroconf unavailable
@@ -86,6 +87,7 @@ class IPadBridge:
         self._fusion: Optional["FusionEngine"] = None
         self._lidar: Optional["LiDARReceiver"] = None
         self._gesture: Optional["GestureProcessor"] = None
+        self._whisper: Optional["WhisperStream"] = None
 
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
@@ -102,6 +104,9 @@ class IPadBridge:
 
     def set_gesture_processor(self, gesture: "GestureProcessor") -> None:
         self._gesture = gesture
+
+    def set_whisper_stream(self, whisper: "WhisperStream") -> None:
+        self._whisper = whisper
 
     # ---------------------------------------------------------------------- #
     # Startup
@@ -269,7 +274,13 @@ class IPadBridge:
             return
 
         if msg_type == "audio_stream":
-            log.debug("audio_stream received (WhisperStream not yet built)")
+            if self._whisper and self._whisper.available:
+                samples_b64 = msg.get("samples", "")
+                frames = int(msg.get("frames", 0))
+                if samples_b64:
+                    self._whisper.on_audio_chunk(samples_b64, frames)
+            else:
+                log.debug("audio_stream received (WhisperStream not wired or unavailable)")
             return
 
         log.warning("Unknown message type: %s", msg_type)

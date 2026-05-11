@@ -18,13 +18,18 @@ build/
 
 # Large binaries — do not commit
 *.zip
+*.tar.gz
 files/
 files.zip
+codemagic.yaml
 
-# Runtime data
+# Runtime data — databases and legacy flat files (all replaced by agent.db / analytics.duckdb)
+agent.db
+analytics.duckdb
+trainer.db
+few_shot_memory.db
 routing_log.jsonl
 benchmark_results.json
-few_shot_memory.db
 gesture_calibration.json
 hotwords.txt
 
@@ -33,5 +38,8 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Docs — large PDFs (keep markdown docs)
+# Docs — large binaries (keep markdown docs)
 docs/*.pdf
+docs/*.ipa
+docs/*.exe
+docs/*.xip

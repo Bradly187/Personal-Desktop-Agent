@@ -276,49 +276,43 @@ flowchart LR
 
 ## 4. Persistent Storage Schema
 
+> **Updated 2026-05-11:** The project now uses two databases (`agent.db` + `analytics.duckdb`) instead of JSONL and JSON files.
+> Full ER diagrams and design rationale: [14-database-schema.md](14-database-schema.md) and `docs/database-design.md`.
+
 ```mermaid
-erDiagram
-    FEW_SHOT_EXAMPLES {
-        INTEGER id PK          "AUTOINCREMENT"
-        TEXT    command_text   "Natural language input"
-        TEXT    action_text    "LLM action output"
-        TEXT    source         "Command source tag"
-        TEXT    token_key      "Space-joined sorted tokens"
-        INTEGER usage_count    "Times retrieved + used"
-        REAL    avg_logprob    "Whisper logprob (voice only)"
-        REAL    gesture_conf   "Gesture conf (gesture only)"
-        TEXT    created_at     "ISO-8601"
-        TEXT    last_used_at   "ISO-8601"
-        INTEGER is_stale       "1 = pruned by compaction"
-    }
+flowchart LR
+    subgraph agentdb["agent.db (SQLite — 11 tables)"]
+        direction TB
+        sessions
+        commands
+        inferences
+        few_shot_examples
+        gesture_samples
+        gesture_calibration
+        sensor_events
+        agent_runs
+        agent_steps
+        word_counts
+        hotwords
+        settings_versions
+    end
 
-    ROUTING_LOG_ENTRY {
-        STRING  ts             "ISO-8601 timestamp"
-        STRING  command_text   "Verbatim Command.text"
-        STRING  source         "Command.source tag"
-        FLOAT   whisper_logprob
-        FLOAT   gesture_conf
-        INT     gate_reached   "0=bypass, 1-4=first gate fired"
-        STRING  routed_to      "local | cloud"
-        STRING  service        "ollama | bedrock | transcribe"
-        STRING  action         "Action string from inference"
-        STRING  outcome        "success | failure | clarify"
-        FLOAT   latency_ms
-        FLOAT   vram_free_gb
-        FLOAT   latency_ema_ms
-        INT     token_count
-        BOOL    had_complexity
-    }
+    subgraph analyticsdb["analytics.duckdb (DuckDB)"]
+        direction TB
+        benchmark_runs
+        benchmark_results
+        benchmark_prompts
+        note["Attaches agent.db as 'ops'\nfor cross-database OLAP"]
+    end
 
-    GESTURE_CALIBRATION {
-        STRING  gesture_name   "e.g. POINT, PINCH, SWIPE_DOWN"
-        FLOAT   confidence_floor "p10(samples) - 0.05"
-        FLOAT   p10
-        FLOAT   p50
-        FLOAT   p90
-        INT     sample_count
-        STRING  last_updated   "ISO-8601"
-    }
+    sessions --> commands --> inferences
+    commands --> few_shot_examples
+    commands --> gesture_samples
+    commands --> sensor_events
+    commands --> agent_runs --> agent_steps
+    word_counts -.->|"promotes when count≥3"| hotwords
+    gesture_samples -.->|"p10 every 5 min"| gesture_calibration
+    benchmark_runs --> benchmark_results --> benchmark_prompts
 ```
 
 ---
@@ -328,27 +322,22 @@ erDiagram
 ```mermaid
 flowchart TD
     EXE([Command executed\noutcome = success])
-    EXE --> LOG[routing_log.jsonl\nOutcomeLogger.record]
-    EXE --> FSM[few_shot_memory.db\nFewShotMemory.record_success]
+    EXE --> CMD["agent.db: commands\n(HybridCoordinator.route)"]
+    EXE --> FSE["agent.db: few_shot_examples\n(ContinuousTrainer.record_success)"]
+    EXE --> GS["agent.db: gesture_samples\n(when source=gesture)"]
 
-    LOG --> T5[ThresholdTuner\nevery 5 min]
-    LOG --> V30[VocabularyBuilder\nevery 30 min]
-    LOG --> G5[GestureCalibrator\nevery 5 min]
+    CMD --> ADAPT["ContinuousTrainer\nadaptation loop every 5 min\n(queries commands table)"]
 
-    T5 -->|"cloud_rate > 30%\nlocal_fail < 10%\n→ relax logprob_min -0.05"| COORD[HybridCoordinator\nupdate_thresholds]
-    T5 -->|"cloud_rate < 5%\n→ tighten logprob_min +0.02"| COORD
+    ADAPT -->|"cloud_rate > 30%\nlocal_fail < 10%\n→ relax logprob_min -0.05"| COORD["HybridCoordinator\nCoordinatorConfig"]
 
-    V30 -->|"word freq ≥ 3\nin success transcriptions"| HOT[hotwords.txt]
-    HOT -->|reload| WHISPER[WhisperTranscriber]
+    ADAPT -->|"word count ≥ 3\n→ INSERT OR IGNORE"| HW["agent.db: hotwords"]
+    HW -->|reload| WHISPER["WhisperStream"]
 
-    G5 -->|"≥ 10 samples per gesture\np10 - 0.05 = new floor"| GCAL[gesture_calibration.json]
-    GCAL -->|load at startup| GDEB[GestureDebouncer\nper-gesture floor]
+    GS --> GCAL["agent.db: gesture_calibration\n(p10 − 0.05, append-only)"]
+    GCAL -->|"SELECT MAX(ts) per gesture"| GFLOOR["GestureProcessor\nconfidence floor"]
 
-    FSM -->|"retrieve k examples\nranked by token overlap\n× recency × usage_count"| PA[PromptAugmenter]
-    PA -->|"prepend few-shot\nbefore each LLM call"| LOCAL[LocalInference\nOllama]
-
-    NIGHTLY([Nightly 02:00\nCompaction])
-    NIGHTLY -->|"last_used > 30 days\nAND usage_count < 3\n→ is_stale = 1"| FSM
+    FSE -->|"SELECT domain= ORDER BY ts DESC LIMIT 1000\nrank by Jaccard × recency × log(usage)"| PA["few-shot examples\n(top-5 for prompt)"]
+    PA -->|"prepend before each LLM call"| LOCAL["LocalInference\nOllama"]
 ```
 
 ---

@@ -173,7 +173,7 @@ def _print_startup_table(port: int, safe_mode: bool) -> None:
 
     def _check_whisper():
         from faster_whisper import WhisperModel  # noqa: F401
-        return "OK", "faster-whisper available (model loads on first use)"
+        return "OK", "faster-whisper available"
 
     def _check_safe_mode():
         return ("ACTIVE", "keyboard_type and mouse_drag blocked") if safe_mode else ("off", "")
@@ -187,15 +187,20 @@ def _print_startup_table(port: int, safe_mode: bool) -> None:
         import numpy as np
         return "OK", f"v{np.__version__}  (LiDAR depth maps)"
 
-    check("GPU / VRAM (pynvml)",        _check_pynvml)
-    check("Ollama LLM server",          _check_ollama)
-    check("Whisper (faster-whisper)",   _check_whisper)
-    check("Screen OCR (tesseract)",     _check_tesseract)
-    check("Handwriting OCR (pix2tex)", _check_pix2tex)
-    check("Gesture (mediapipe+opencv)", _check_mediapipe)
-    check("LiDAR depth (numpy)",        _check_numpy)
-    check("mDNS discovery (zeroconf)", _check_mdns)
-    check("SAFE_MODE",                  _check_safe_mode)
+    def _check_sentence_transformers():
+        from sentence_transformers import SentenceTransformer  # noqa: F401
+        return "OK", "MiniLM available (loads on first few-shot query)"
+
+    check("GPU / VRAM (pynvml)",            _check_pynvml)
+    check("Ollama LLM server",              _check_ollama)
+    check("Whisper (faster-whisper)",       _check_whisper)
+    check("MiniLM (sentence-transformers)", _check_sentence_transformers)
+    check("Screen OCR (tesseract)",         _check_tesseract)
+    check("Handwriting OCR (pix2tex)",      _check_pix2tex)
+    check("Gesture (mediapipe+opencv)",     _check_mediapipe)
+    check("LiDAR depth (numpy)",            _check_numpy)
+    check("mDNS discovery (zeroconf)",      _check_mdns)
+    check("SAFE_MODE",                      _check_safe_mode)
 
     w_name = max(len(r[0]) for r in rows) + 2
     w_status = max(len(r[1]) for r in rows) + 2
@@ -290,6 +295,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from gesture_processor import GestureProcessor
     from model_router import ModelRouter
     from dev_agent import DevAgent
+    from whisper_stream import WhisperStream
 
     if args.safe_mode:
         os.environ["SAFE_MODE"] = "1"
@@ -342,17 +348,27 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     gesture = GestureProcessor()
     gesture.set_lidar(lidar)
 
+    whisper = WhisperStream()
+    whisper.set_fusion_engine(fusion)
+
     bridge = IPadBridge(port=args.port)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
     bridge.set_gesture_processor(gesture)
+    bridge.set_whisper_stream(whisper)
 
     shutdown = _ShutdownController()
-    shutdown.register(fusion, gesture)
+    shutdown.register(fusion, gesture, whisper)
     shutdown.arm()
 
-    # --- Start trainer ---
+    # --- Start trainer and WhisperStream ---
     await trainer.start()
+    await whisper.start()
+
+    # --- Sync hotwords into WhisperStream once trainer is ready ---
+    hotwords = await trainer.get_hotwords()
+    if hotwords:
+        whisper.update_hotwords(hotwords)
 
     # --- Print startup table (task 4.4) ---
     if not args.quiet:
