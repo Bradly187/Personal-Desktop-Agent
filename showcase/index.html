@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Personal Desktop Agent — Accessibility Control System</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root {
+  --bg: #0f0f13;
+  --surface: #1a1a24;
+  --surface2: #252535;
+  --border: #2e2e42;
+  --text: #e8e8f0;
+  --text2: #9898b0;
+  --accent: #6366f1;
+  --accent2: #818cf8;
+  --green: #34d399;
+  --amber: #fbbf24;
+  --red: #f87171;
+  --radius: 16px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+/* Hero */
+.hero {
+  padding: 100px 0 80px;
+  text-align: center;
+  background: linear-gradient(180deg, #1a1a2e 0%, var(--bg) 100%);
+  border-bottom: 1px solid var(--border);
+}
+.hero h1 {
+  font-size: clamp(2.5rem, 5vw, 4rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 16px;
+  background: linear-gradient(135deg, var(--accent2), var(--green));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.hero .subtitle {
+  font-size: 1.25rem;
+  color: var(--text2);
+  max-width: 700px;
+  margin: 0 auto 32px;
+}
+.hero .badges {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 0.85rem;
+  color: var(--text2);
+}
+.badge .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+}
+.badge .dot.green { background: var(--green); }
+.badge .dot.amber { background: var(--amber); }
+.badge .dot.red { background: var(--red); }
+
+/* Section */
+section { padding: 80px 0; }
+section h2 {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+section .section-desc {
+  color: var(--text2);
+  font-size: 1.1rem;
+  margin-bottom: 40px;
+  max-width: 700px;
+}
+
+/* Cards grid */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 20px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  transition: border-color 0.2s, transform 0.2s;
+}
+.card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+.card .card-icon {
+  font-size: 2rem;
+  margin-bottom: 12px;
+}
+.card h3 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.card p {
+  color: var(--text2);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.card .tech-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+.tech-tag {
+  padding: 3px 10px;
+  background: var(--surface2);
+  border-radius: 12px;
+  font-size: 0.75rem;
+  color: var(--accent2);
+  border: 1px solid var(--border);
+}
+
+/* Stats row */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 60px;
+}
+.stat {
+  text-align: center;
+  padding: 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.stat .number {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: var(--accent2);
+}
+.stat .label {
+  font-size: 0.85rem;
+  color: var(--text2);
+  margin-top: 4px;
+}
+
+/* Diagram section */
+.diagram-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+  margin-bottom: 24px;
+  overflow-x: auto;
+}
+.diagram-section h3 {
+  font-size: 1.1rem;
+  margin-bottom: 20px;
+  color: var(--text2);
+}
+.mermaid {
+  display: flex;
+  justify-content: center;
+}
+
+/* Priority table */
+.priority-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px;
+}
+.priority-table th, .priority-table td {
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.priority-table th {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  color: var(--text2);
+  font-weight: 600;
+}
+.priority-table td { font-size: 0.9rem; }
+.priority-table tr:hover { background: var(--surface2); }
+.priority-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+/* Screenshots */
+.screenshots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.screenshot-placeholder {
+  aspect-ratio: 16/10;
+  background: var(--surface2);
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text2);
+  font-size: 0.9rem;
+}
+
+/* Footer */
+footer {
+  padding: 40px 0;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  color: var(--text2);
+  font-size: 0.85rem;
+}
+footer a { color: var(--accent2); text-decoration: none; }
+footer a:hover { text-decoration: underline; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .cards { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  section { padding: 50px 0; }
+  .hero { padding: 60px 0 50px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Hero -->
+<header class="hero">
+  <div class="container">
+    <h1>Personal Desktop Agent</h1>
+    <p class="subtitle">
+      A multimodal accessibility system that enables hands-free Windows desktop control
+      through voice, eye gaze, head tracking, iPad touch, tilt, and sound actions —
+      built for a user with rheumatoid arthritis.
+    </p>
+    <div class="badges">
+      <span class="badge"><span class="dot green"></span>Python 3.11 + asyncio</span>
+      <span class="badge"><span class="dot green"></span>Swift / SwiftUI (iPadOS 17+)</span>
+      <span class="badge"><span class="dot green"></span>RTX 5090 local inference</span>
+      <span class="badge"><span class="dot amber"></span>AWS Bedrock fallback</span>
+    </div>
+  </div>
+</header>
+
+<!-- Stats -->
+<section>
+  <div class="container">
+    <div class="stats">
+      <div class="stat"><div class="number">10</div><div class="label">Input Modalities</div></div>
+      <div class="stat"><div class="number">14</div><div class="label">MCP Tools</div></div>
+      <div class="stat"><div class="number">&lt;100ms</div><div class="label">Touch Latency</div></div>
+      <div class="stat"><div class="number">60Hz</div><div class="label">Fusion Engine Tick</div></div>
+      <div class="stat"><div class="number">4</div><div class="label">Routing Gates</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Architecture Cards -->
+<section>
+  <div class="container">
+    <h2>System Components</h2>
+    <p class="section-desc">
+      Each layer operates independently and degrades gracefully. No single sensor is required —
+      the system adapts to whatever inputs are available.
+    </p>
+    <div class="cards">
+
+      <div class="card">
+        <div class="card-icon">🖥️</div>
+        <h3>MCP Server</h3>
+        <p>Standalone Model Context Protocol server exposing 14 desktop control tools via stdio transport. Claude calls these tools directly to act on the Windows desktop.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">pyautogui</span>
+          <span class="tech-tag">win32gui</span>
+          <span class="tech-tag">mss</span>
+          <span class="tech-tag">pix2tex</span>
+          <span class="tech-tag">EasyOCR</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">📱</div>
+        <h3>iPad Bridge</h3>
+        <p>WebSocket server on port 8765 receiving 13 message types from the iPad app. Dispatches sensor data to FusionEngine, trackpad events directly to pyautogui, and handwriting to OCR.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">aiohttp</span>
+          <span class="tech-tag">WebSocket</span>
+          <span class="tech-tag">mDNS</span>
+          <span class="tech-tag">asyncio</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">🧠</div>
+        <h3>Fusion Engine</h3>
+        <p>10-level priority sensor fusion running at 60 Hz. Higher-priority inputs (touch, sound) short-circuit lower ones (voice). Tilt and head tracking bypass the LLM entirely.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">asyncio</span>
+          <span class="tech-tag">60Hz tick</span>
+          <span class="tech-tag">priority queue</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">🔀</div>
+        <h3>Hybrid Coordinator</h3>
+        <p>4-gate routing engine deciding local vs cloud inference. Gate 0 (privacy) forces local for sensitive commands. Gates 1-4 check confidence, complexity, VRAM, and latency.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">Ollama</span>
+          <span class="tech-tag">AWS Bedrock</span>
+          <span class="tech-tag">pynvml</span>
+          <span class="tech-tag">EMA tracking</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">🤖</div>
+        <h3>Local Inference</h3>
+        <p>Abstract base class with swappable backends. OllamaInference (dev, ~450ms), VLLMInference (production target, ~280ms), and NemotronInference (4B model for constrained VRAM).</p>
+        <div class="tech-tags">
+          <span class="tech-tag">Ollama</span>
+          <span class="tech-tag">vLLM</span>
+          <span class="tech-tag">Nemotron-mini</span>
+          <span class="tech-tag">RTX 5090</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">👁️</div>
+        <h3>iPad Sensors</h3>
+        <p>Native Swift app capturing TrueDepth gaze, ARKit head pose, Core Motion tilt, Speech Framework keywords, and AVFoundation sound actions — all streamed over WebSocket.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">ARKit</span>
+          <span class="tech-tag">Core Motion</span>
+          <span class="tech-tag">Speech</span>
+          <span class="tech-tag">AVFoundation</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">✍️</div>
+        <h3>Handwriting OCR</h3>
+        <p>Apple Pencil strokes captured on iPad, sent as PNG to PC. pix2tex converts handwritten math to LaTeX, then to Unicode for pasting into any application.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">pix2tex</span>
+          <span class="tech-tag">pylatexenc</span>
+          <span class="tech-tag">PencilKit</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">🌐</div>
+        <h3>Web Client</h3>
+        <p>Safari fallback when native app isn't available. Full trackpad, command grid, scientific keypad, and Scribble handwriting input — served directly by the bridge server.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">Vanilla JS</span>
+          <span class="tech-tag">WebSocket</span>
+          <span class="tech-tag">PWA-ready</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">📈</div>
+        <h3>Continuous Trainer</h3>
+        <p>Background learning system that adapts routing thresholds, gesture confidence floors, and Whisper vocabulary based on usage patterns. No manual reconfiguration needed.</p>
+        <div class="tech-tags">
+          <span class="tech-tag">aiosqlite</span>
+          <span class="tech-tag">few-shot memory</span>
+          <span class="tech-tag">threshold tuning</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- Sensor Priority -->
+<section style="background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="container">
+    <h2>Sensor Priority Hierarchy</h2>
+    <p class="section-desc">
+      The FusionEngine evaluates inputs in strict priority order every 16ms.
+      Higher-priority inputs short-circuit lower ones — a touch command always wins over voice.
+    </p>
+    <table class="priority-table">
+      <thead>
+        <tr><th>Priority</th><th>Input</th><th>Source</th><th>Latency</th><th>Gate Behavior</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="priority-num">1</span></td><td>iPad touch command</td><td>SwiftUI button tap</td><td>&lt;20ms</td><td>Bypass all gates</td></tr>
+        <tr><td><span class="priority-num">2</span></td><td>Sound action</td><td>Cluck / pop / hiss</td><td>&lt;60ms</td><td>Bypass all gates</td></tr>
+        <tr><td><span class="priority-num">3</span></td><td>Gaze dwell click</td><td>ARKit stable gaze</td><td>~1000ms dwell</td><td>Bypass all gates</td></tr>
+        <tr><td><span class="priority-num">4</span></td><td>Gaze + voice "click"</td><td>ARKit + Speech</td><td>&lt;85ms</td><td>Bypass all gates</td></tr>
+        <tr><td><span class="priority-num">5</span></td><td>Gaze + gesture POINT</td><td>ARKit + MediaPipe</td><td>&lt;35ms</td><td>Bypass all gates</td></tr>
+        <tr><td><span class="priority-num">6</span></td><td>Tilt navigation</td><td>Core Motion</td><td>&lt;16ms</td><td>Direct pyautogui (no LLM)</td></tr>
+        <tr><td><span class="priority-num">7</span></td><td>Head tracking</td><td>ARKit face anchor</td><td>&lt;16ms</td><td>Direct pyautogui (no LLM)</td></tr>
+        <tr><td><span class="priority-num">8</span></td><td>Gesture command</td><td>iPad camera → MediaPipe</td><td>&lt;35ms</td><td>Full 4-gate check</td></tr>
+        <tr><td><span class="priority-num">9</span></td><td>On-device keyword</td><td>Speech Framework</td><td>&lt;50ms</td><td>Skip Gate 1</td></tr>
+        <tr><td><span class="priority-num">10</span></td><td>PC-transcribed voice</td><td>Whisper large-v3</td><td>&lt;600ms</td><td>Full 4-gate check</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- Architecture Diagrams -->
+<section>
+  <div class="container">
+    <h2>Architecture Diagrams</h2>
+    <p class="section-desc">Interactive diagrams showing the system's data flow and routing logic.</p>
+
+    <div class="diagram-section">
+      <h3>iPad ↔ PC Split</h3>
+      <pre class="mermaid">
+flowchart LR
+    subgraph iPad["iPad Pro (Native Swift App)"]
+        direction TB
+        CM["Core Motion\n(Tilt @ 60Hz)"]
+        ARK["ARKit\n(Gaze + Head)"]
+        SPE["Speech Framework\n(Keywords)"]
+        AVF["AVFoundation\n(Sound detection)"]
+        CAM["Camera Feed\n(Gesture frames)"]
+        TOUCH["SwiftUI Touch\n(Commands + Trackpad)"]
+    end
+
+    subgraph WS["WebSocket :8765"]
+        direction TB
+        MSG["13 JSON message types"]
+    end
+
+    subgraph PC["Desktop PC (Python + RTX 5090)"]
+        direction TB
+        BRIDGE["IPadBridge"]
+        FUSION["FusionEngine\n(60Hz, 10 rules)"]
+        WHISPER["WhisperStream\n(GPU)"]
+        COORD["HybridCoordinator\n(4-gate routing)"]
+        AGENT["DesktopAgent\n(pyautogui)"]
+    end
+
+    CM --> MSG
+    ARK --> MSG
+    SPE --> MSG
+    AVF --> MSG
+    CAM --> MSG
+    TOUCH --> MSG
+
+    MSG --> BRIDGE
+    BRIDGE --> FUSION
+    BRIDGE --> WHISPER
+    FUSION --> COORD
+    COORD --> AGENT
+      </pre>
+    </div>
+
+    <div class="diagram-section">
+      <h3>4-Gate Routing Decision</h3>
+      <pre class="mermaid">
+flowchart TD
+    A([Receive Command]) --> B{"source?"}
+
+    B -->|"touch / sound / gaze_dwell / multimodal"| BYPASS["Bypass all gates → direct local"]
+    B -->|"voice_local"| SKIP1["Skip Gate 1 → Gate 2"]
+    B -->|"gesture / voice"| G1
+
+    BYPASS --> LOCAL
+    SKIP1 --> G2
+
+    G1{"Gate 1 — Confidence\nlogprob ≥ min\ngesture_conf ≥ min"}
+    G1 -->|pass| G2
+    G1 -->|fail| TRANSCRIBE["Amazon Transcribe\n(re-transcribe)"]
+
+    TRANSCRIBE --> G2
+
+    G2{"Gate 2 — Complexity\ntokens ≤ max\nno multi-step keywords"}
+    G2 -->|pass| G3
+    G2 -->|fail| CLOUD
+
+    G3{"Gate 3 — VRAM\nfree ≥ 8 GB"}
+    G3 -->|pass| G4
+    G3 -->|fail| CLOUD
+
+    G4{"Gate 4 — Latency\nEMA ≤ budget"}
+    G4 -->|pass| LOCAL
+    G4 -->|fail| CLOUD
+
+    LOCAL["Local LLM\n(Ollama / vLLM)"]
+    CLOUD["AWS Bedrock\n(Claude)"]
+      </pre>
+    </div>
+
+    <div class="diagram-section">
+      <h3>VRAM Allocation — RTX 5090 (31.8 GB measured)</h3>
+      <pre class="mermaid">
+pie title RTX 5090 VRAM Budget
+    "OS + drivers + desktop" : 8.3
+    "Whisper large-v3" : 4.2
+    "LLM headroom (available)" : 19.0
+    "YOLOv8 + EasyOCR + reserve" : 0.3
+      </pre>
+    </div>
+
+  </div>
+</section>
+
+<!-- Screenshots -->
+<section>
+  <div class="container">
+    <h2>Screenshots</h2>
+    <p class="section-desc">Visual walkthrough of the system in action.</p>
+    <div class="screenshots">
+      <div class="screenshot-placeholder">📱 iPad Web Client — Command Pad</div>
+      <div class="screenshot-placeholder">📱 iPad Web Client — Trackpad Mode</div>
+      <div class="screenshot-placeholder">🖥️ Bridge Server Terminal Output</div>
+      <div class="screenshot-placeholder">🖥️ MCP Server Tool Execution</div>
+      <div class="screenshot-placeholder">📊 Routing Log Analysis</div>
+      <div class="screenshot-placeholder">✍️ Handwriting → LaTeX → Unicode</div>
+    </div>
+  </div>
+</section>
+
+<!-- Design Principles -->
+<section style="background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);">
+  <div class="container">
+    <h2>Design Principles</h2>
+    <div class="cards" style="grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));">
+      <div class="card" style="border-color: var(--green);">
+        <h3>🌿 Graceful Degradation</h3>
+        <p>Every modality is optional. The system functions with any subset of sensors active. No hard dependencies on any single input.</p>
+      </div>
+      <div class="card" style="border-color: var(--accent);">
+        <h3>⚡ Local-First</h3>
+        <p>All inference runs on the RTX 5090. AWS services are fallback only, triggered when local confidence is low or GPU is saturated.</p>
+      </div>
+      <div class="card" style="border-color: var(--amber);">
+        <h3>🔄 Adaptive</h3>
+        <p>Routing thresholds, gesture floors, and Whisper vocabulary self-tune over time. No manual reconfiguration required.</p>
+      </div>
+      <div class="card" style="border-color: var(--red);">
+        <h3>♿ RA-Aware UX</h3>
+        <p>Oversized touch targets, dwell activation, palm rejection, relaxed thresholds on bad pain days. Lower-effort interactions always preferred.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Tech Stack -->
+<section>
+  <div class="container">
+    <h2>Tech Stack</h2>
+    <div class="cards" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));">
+      <div class="card">
+        <h3>PC-Side (Python)</h3>
+        <p style="font-family: monospace; font-size: 0.8rem; color: var(--text2); line-height: 2;">
+          faster-whisper · ultralytics · mediapipe · opencv-python · sounddevice · torch · pynvml · boto3 · ollama · aiosqlite · aiohttp · pyautogui · mcp · mss · Pillow · pix2tex
+        </p>
+      </div>
+      <div class="card">
+        <h3>iPad-Side (Swift)</h3>
+        <p style="font-family: monospace; font-size: 0.8rem; color: var(--text2); line-height: 2;">
+          Core Motion · ARKit · Speech Framework · AVFoundation · SwiftUI · URLSession WebSocket · PencilKit · Combine
+        </p>
+      </div>
+      <div class="card">
+        <h3>Cloud (Fallback Only)</h3>
+        <p style="font-family: monospace; font-size: 0.8rem; color: var(--text2); line-height: 2;">
+          Amazon Bedrock (Claude) · Amazon Transcribe · Amazon Polly · AWS Lambda
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p>Built by <a href="https://bradtarver.com">Brad Tarver</a> · <a href="https://github.com/Bradly187/Personal-Desktop-Agent">View on GitHub</a></p>
+    <p style="margin-top: 8px;">Designed for accessibility. Powered by local AI.</p>
+  </div>
+</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#6366f1',
+      primaryTextColor: '#e8e8f0',
+      primaryBorderColor: '#2e2e42',
+      lineColor: '#818cf8',
+      secondaryColor: '#1a1a24',
+      tertiaryColor: '#252535',
+      background: '#1a1a24',
+      mainBkg: '#1a1a24',
+      nodeBorder: '#2e2e42',
+    }
+  });
+</script>
+</body>
+</html>
