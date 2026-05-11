@@ -251,7 +251,7 @@ private struct KeyButton: View {
         Button(action: action) {
             Text(key.label)
                 .font(.system(size: 18, weight: .medium, design: .rounded))
-                .frame(maxWidth: key.isWide ? .infinity : nil, minWidth: 64, minHeight: 64)
+                .frame(minWidth: 64, maxWidth: key.isWide ? .infinity : nil, minHeight: 64)
                 .background(key.accent ? Color.accentColor : Color(.secondarySystemGroupedBackground))
                 .foregroundStyle(key.accent ? .white : .primary)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
