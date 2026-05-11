@@ -4,7 +4,6 @@
 # Install all:  pip install -r requirements.txt
 #
 # Not-yet-installed (install separately when ready):
-#   faster-whisper>=1.0.0      # WhisperStream GPU transcription
 #   ultralytics>=8.0.0         # YOLOv8-pose gesture recognition
 #   mediapipe>=0.10.0          # Hand landmarks / iris gaze estimation
 #   sounddevice>=0.4.6         # System mic audio capture
@@ -38,7 +37,7 @@ pylatexenc==2.10
 nvidia-ml-py==13.595.45
 
 # ── Continuous learning (ContinuousTrainer) ───────────────────────────────────
-aiosqlite>=0.19.0
+aiosqlite==0.20.0
 
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1

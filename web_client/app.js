@@ -7,7 +7,7 @@
 const DEFAULTS = {
   serverHost: '192.168.18.2',
   serverPort: 8765,
-  trackpadSpeed: 1.5,
+  trackpadSpeed: 2.5,
   keywordEnabled: true,
   keywordList: ['click', 'scroll', 'open', 'close', 'copy', 'paste', 'undo'],
   commandButtons: [
@@ -188,12 +188,11 @@ function initCopyPaste() {
 }
 
 // ============================================================================
-// TRACKPAD — simple, no accumulation, stops instantly on lift
+// TRACKPAD — minimal latency, no throttle on moves, coalesced touches
 // ============================================================================
 function initTrackpad() {
   const area = document.getElementById('trackpad-area');
   let tracking = false, lastX=0, lastY=0, moved=false, startTime=0, fingerCount=0;
-  let lastSend = 0;
 
   area.addEventListener('touchstart', e => {
     e.preventDefault();
@@ -209,22 +208,33 @@ function initTrackpad() {
     e.preventDefault();
     if(!tracking || !e.touches.length) return;
 
-    // Throttle to ~60fps
-    const now = Date.now();
-    if(now - lastSend < 16) return;
-    lastSend = now;
+    // Use coalesced touches for smoother tracking (Safari 16.4+)
+    const touches = (e.getCoalescedEvents && e.getCoalescedEvents()) || [e];
+    let totalDx = 0, totalDy = 0;
 
-    const t = e.touches[0];
-    const rawDx = t.clientX - lastX;
-    const rawDy = t.clientY - lastY;
-    lastX = t.clientX;
-    lastY = t.clientY;
+    for(const te of touches) {
+      const t = te.touches ? te.touches[0] : e.touches[0];
+      if(!t) continue;
+      totalDx += t.clientX - lastX;
+      totalDy += t.clientY - lastY;
+      lastX = t.clientX;
+      lastY = t.clientY;
+    }
+
+    // If coalesced events didn't work, fall back to simple delta
+    if(touches.length <= 1) {
+      const t = e.touches[0];
+      totalDx = t.clientX - lastX;
+      totalDy = t.clientY - lastY;
+      lastX = t.clientX;
+      lastY = t.clientY;
+    }
 
     // Skip large jumps from finger count changes
-    if(Math.abs(rawDx)>40 || Math.abs(rawDy)>40) return;
+    if(Math.abs(totalDx)>80 || Math.abs(totalDy)>80) return;
 
-    const dx = Math.round(rawDx * settings.trackpadSpeed);
-    const dy = Math.round(rawDy * settings.trackpadSpeed);
+    const dx = Math.round(totalDx * settings.trackpadSpeed);
+    const dy = Math.round(totalDy * settings.trackpadSpeed);
     if(dx===0 && dy===0) return;
 
     moved = true;
@@ -240,13 +250,11 @@ function initTrackpad() {
   area.addEventListener('touchend', e => {
     e.preventDefault();
     if(e.touches.length > 0) {
-      // Still have fingers — reset to remaining
       lastX = e.touches[0].clientX;
       lastY = e.touches[0].clientY;
       fingerCount = e.touches.length;
       return;
     }
-    // All fingers up — stop completely
     tracking = false;
     if(!moved && (Date.now()-startTime)<250) {
       msgCounter++;

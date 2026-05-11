@@ -72,7 +72,7 @@ body {
 /* Trackpad */
 #trackpad-area {
   background: var(--surface); border-radius: var(--radius);
-  touch-action: none; position: relative; height: 35vh;
+  touch-action: none; position: relative; flex: 1; min-height: 45vh;
   display: flex; align-items: center; justify-content: center;
   margin-bottom: 8px;
 }
@@ -164,41 +164,35 @@ button.reconnect-btn {
 <div id="content">
   <!-- Commands + Trackpad Combined Page -->
   <div class="page active" id="page-commands">
-    <!-- Primary actions — large buttons, most used -->
+    <!-- Trackpad — takes most of the space -->
+    <div id="trackpad-area"><span class="hint">Drag to move · Tap to click · 2-finger for right-click</span></div>
+    <!-- Click buttons — directly below trackpad -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:4px 0">
-      <button class="cmd-btn" id="btn-click" style="min-height:60px;font-size:14px">👆 Click</button>
-      <button class="cmd-btn" id="btn-rclick" style="min-height:60px;font-size:14px">👆 Right Click</button>
+      <button class="cmd-btn" id="btn-click" style="min-height:56px;font-size:14px">👆 Click</button>
+      <button class="cmd-btn" id="btn-rclick" style="min-height:56px;font-size:14px">👆 Right Click</button>
     </div>
-    <!-- Scroll — hold-to-repeat -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:4px 0">
-      <button class="cmd-btn" id="btn-scrollup" style="min-height:50px">⬆️ Scroll Up</button>
-      <button class="cmd-btn" id="btn-scrolldn" style="min-height:50px">⬇️ Scroll Down</button>
+    <!-- Copy/Paste — directly below click buttons -->
+    <div style="display:flex;gap:8px;padding:4px 0">
+      <button id="copy-btn" style="flex:1;padding:12px;background:var(--surface);border:2px solid var(--green);border-radius:10px;color:var(--green);font-size:15px;font-weight:600">📋 Copy</button>
+      <button id="paste-btn" style="flex:1;padding:12px;background:var(--surface);border:2px solid var(--accent);border-radius:10px;color:var(--accent);font-size:15px;font-weight:600">📌 Paste</button>
+      <button class="cmd-btn" id="btn-undo" style="min-height:44px;font-size:12px;flex:0.6">↩ Undo</button>
     </div>
-    <!-- Keyboard shortcuts — compact row -->
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:4px 0">
-      <button class="cmd-btn" id="btn-undo" style="min-height:44px;font-size:11px">↩ Undo</button>
+    <!-- Scroll + shortcuts — compact row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr;gap:6px;padding:4px 0">
+      <button class="cmd-btn" id="btn-scrollup" style="min-height:44px;font-size:11px">⬆️ Up</button>
+      <button class="cmd-btn" id="btn-scrolldn" style="min-height:44px;font-size:11px">⬇️ Down</button>
       <button class="cmd-btn" id="btn-tab" style="min-height:44px;font-size:11px">⇥ Tab</button>
       <button class="cmd-btn" id="btn-enter" style="min-height:44px;font-size:11px">⏎ Enter</button>
       <button class="cmd-btn" id="btn-esc" style="min-height:44px;font-size:11px">✕ Esc</button>
       <button class="cmd-btn" id="btn-space" style="min-height:44px;font-size:11px">␣ Space</button>
     </div>
-    <!-- App launchers — small, bottom -->
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:4px 0">
-      <button class="cmd-btn" id="btn-kiro" style="min-height:44px;font-size:11px">🟢 Kiro</button>
-      <button class="cmd-btn" id="btn-claude" style="min-height:44px;font-size:11px">🟠 Claude</button>
-      <button class="cmd-btn" id="btn-chrome" style="min-height:44px;font-size:11px">🌐 Chrome</button>
-      <button class="cmd-btn" id="btn-screenshot" style="min-height:44px;font-size:11px">📷 Shot</button>
-    </div>
-    <!-- Select mode -->
-    <div style="display:flex;gap:8px;padding:4px 0">
-      <button id="select-toggle" style="flex:1;padding:10px;background:var(--surface);border:2px solid var(--surface2);border-radius:8px;color:var(--text);font-size:14px;font-weight:600">⬚ Select Mode</button>
-    </div>
-    <!-- Trackpad -->
-    <div id="trackpad-area"><span class="hint">Drag to move · Tap to click · 2-finger for right-click</span></div>
-    <!-- Copy/Paste pinned at bottom -->
-    <div style="display:flex;gap:8px;padding:8px 0">
-      <button id="copy-btn" style="flex:1;padding:14px;background:var(--surface);border:2px solid var(--green);border-radius:10px;color:var(--green);font-size:16px;font-weight:600">📋 Copy</button>
-      <button id="paste-btn" style="flex:1;padding:14px;background:var(--surface);border:2px solid var(--accent);border-radius:10px;color:var(--accent);font-size:16px;font-weight:600">📌 Paste</button>
+    <!-- App launchers + select mode -->
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:4px 0">
+      <button class="cmd-btn" id="btn-kiro" style="min-height:40px;font-size:10px">🟢 Kiro</button>
+      <button class="cmd-btn" id="btn-claude" style="min-height:40px;font-size:10px">🟠 Claude</button>
+      <button class="cmd-btn" id="btn-chrome" style="min-height:40px;font-size:10px">🌐 Chrome</button>
+      <button class="cmd-btn" id="btn-screenshot" style="min-height:40px;font-size:10px">📷 Shot</button>
+      <button id="select-toggle" style="min-height:40px;background:var(--surface);border:2px solid var(--surface2);border-radius:8px;color:var(--text);font-size:10px;font-weight:600">⬚ Select</button>
     </div>
   </div>
 

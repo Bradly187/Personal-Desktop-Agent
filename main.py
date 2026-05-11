@@ -21,9 +21,11 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 log = logging.getLogger("desktop_agent")
 
@@ -227,9 +229,15 @@ class _ShutdownController:
 
     def arm(self) -> None:
         """Install signal handler — must be called from the running event loop."""
+        import sys as _sys
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, self._handle_sigint)
-        loop.add_signal_handler(signal.SIGTERM, self._handle_sigint)
+        if _sys.platform == "win32":
+            # Windows doesn't support loop.add_signal_handler; use signal module directly
+            signal.signal(signal.SIGINT, lambda *_: self._stop_event.set())
+            signal.signal(signal.SIGTERM, lambda *_: self._stop_event.set())
+        else:
+            loop.add_signal_handler(signal.SIGINT, self._handle_sigint)
+            loop.add_signal_handler(signal.SIGTERM, self._handle_sigint)
 
     def _handle_sigint(self) -> None:
         log.info("Shutdown signal received — stopping gracefully ...")
@@ -238,17 +246,20 @@ class _ShutdownController:
     async def wait_for_shutdown(self) -> None:
         await self._stop_event.wait()
 
-    async def shutdown(self, trainer=None) -> None:
+    async def shutdown(self, trainer=None, agent_db=None, session_id: int = -1) -> None:
         log.info("Saving calibration and flushing logs ...")
 
-        # Save gesture calibration and stop trainer (flushes hotwords / DB)
+        # Stop trainer (flushes final gesture calibration)
         if trainer is not None:
             await trainer.stop()
+
+        # Close session record in DB
+        if agent_db is not None and session_id >= 0:
+            await agent_db.close_session(session_id)
 
         # Stop registered components (FusionEngine, GestureProcessor, etc.)
         for comp in reversed(self._components):
             try:
-                # GestureProcessor uses close(), others use stop()
                 method = getattr(comp, "close", None) or getattr(comp, "stop", None)
                 if method:
                     result = method()
@@ -256,6 +267,9 @@ class _ShutdownController:
                         await result
             except Exception as exc:
                 log.warning("Shutdown error for %s: %s", comp, exc)
+
+        if agent_db is not None:
+            await agent_db.close()
 
         log.info("Shutdown complete.")
 
@@ -266,6 +280,7 @@ class _ShutdownController:
 
 async def _run_pipeline(args: argparse.Namespace) -> None:
     from command_executor import CommandExecutor
+    from db import AgentDB
     from local_inference import OllamaInference
     from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
     from fusion_engine import FusionEngine, FusionConfig
@@ -286,20 +301,39 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     except Exception:
         sw, sh = 1920, 1080
 
+    # --- Open agent.db and start session ---
+    agent_db = AgentDB()
+    await agent_db.open(Path("agent.db"))
+
+    git_hash: Optional[str] = None
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        pass
+
+    mode = "safe" if args.safe_mode else "normal"
+    session_id = await agent_db.insert_session(mode=mode, git_hash=git_hash)
+    log.info("Session %d started (mode=%s git=%s)", session_id, mode, git_hash or "unknown")
+
     # --- Build components ---
     cfg = CoordinatorConfig()
     local = OllamaInference()
 
-    trainer = ContinuousTrainer(
-        db_path=Path("trainer.db"),
-        calibration_path=Path("gesture_calibration.json"),
-        routing_log_path=cfg.routing_log_path,
-        config=cfg,
-    )
+    trainer = ContinuousTrainer(agent_db=agent_db, config=cfg)
 
     router = ModelRouter()
-    coordinator = HybridCoordinator(local=local, config=cfg, trainer=trainer)
-    dev_agent = DevAgent(router=router, coordinator=coordinator, trainer=trainer)
+    coordinator = HybridCoordinator(
+        local=local, config=cfg, trainer=trainer,
+        agent_db=agent_db, session_id=session_id,
+    )
+    dev_agent = DevAgent(
+        router=router, coordinator=coordinator, trainer=trainer,
+        agent_db=agent_db,
+    )
     coordinator.set_dev_agent(dev_agent)
     fusion = FusionEngine(screen_width=sw, screen_height=sh)
     fusion.set_coordinator(coordinator)
@@ -339,7 +373,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
-    await shutdown.shutdown(trainer=trainer)
+    await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id)
 
 
 # ---------------------------------------------------------------------------

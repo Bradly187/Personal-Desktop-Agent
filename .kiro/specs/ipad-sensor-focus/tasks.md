@@ -42,7 +42,11 @@
   - 4-gate routing: confidence → complexity → VRAM (pynvml) → latency EMA → local or Bedrock
   - Outcome logging to `routing_log.jsonl`
 
-- [ ] **1.6 Integration test: touch command "scroll down" executes end-to-end**
+- [x] **1.6 Integration test: touch command "scroll down" executes end-to-end**
+  - `tests/test_touch_scroll_e2e.py` — standalone async test (no pytest)
+  - Sends `touch_command` SCROLL/CLICK over WebSocket → verifies `mouse_scroll`/`mouse_click` called
+  - Mocks desktop tool functions; validates direction, clicks, coordinates
+  - Also tests SCROLL up, default params, and CLICK with explicit coords
 
 ---
 
@@ -101,9 +105,13 @@
   - Persist to `UserDefaults`: all sensor preferences, keyword list, sound mappings, command buttons
   - `SettingsView` with Dynamic Type Form layout
 
-- [ ] **2.11 Integration test: gaze dwell fires click on desktop target**
+- [x] **2.11 Integration test: gaze dwell fires click on desktop target**
+  - `tests/test_gaze_dwell_click.py` — standalone async test (no pytest)
+  - Full pipeline: WebSocket → IPadBridge → FusionEngine Rule 3 → HybridCoordinator bypass → CommandExecutor
+  - Mocks LLM (returns "CLICK") and `mouse_click`; verifies gaze coords map to screen pixels
+  - Tests center, top-left, bottom-right positions + gate bypass verification
 
-- [ ] **2.12 Integration test: tilt navigation moves cursor proportionally**
+- [x] **2.12 Integration test: tilt navigation moves cursor proportionally**
 
 - [x] **2.15 Implement `HandwritingCanvasView`**
   - `PKCanvasView` with `.pencilOnly` policy — finger touches pan, Pencil draws

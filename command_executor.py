@@ -2,8 +2,9 @@
 
 Maps the agent's action vocabulary onto the MCP server's desktop-control tools.
 
-Accessibility verbs (9): CLICK, SCROLL, TYPE, OPEN, CLOSE, HOTKEY, DICTATE, CLARIFY, SCREENSHOT
-Dev-agent verbs (5):     WRITE_FILE, RUN_TERMINAL, EXPLAIN, SEARCH_WEB, READ_SCREEN
+Accessibility verbs (11): CLICK, MOUSEDOWN, MOUSEUP, SCROLL, TYPE, OPEN, CLOSE, HOTKEY, DICTATE, CLARIFY, SCREENSHOT
+  MOUSEDOWN/MOUSEUP are executed synchronously in execute() and never reach _dispatch().
+Dev-agent verbs (5):      WRITE_FILE, RUN_TERMINAL, EXPLAIN, SEARCH_WEB, READ_SCREEN
 
 Imported directly by ipad_bridge.py so there's no HTTP round-trip;
 the same tool functions that Claude calls are called here in-process.
@@ -92,21 +93,6 @@ class CommandExecutor:
             x, y = self._resolve_coords(cmd)
             btn = p.get("button", "left")
             return mouse.mouse_click(x, y, button=btn)
-
-        # ------------------------------------------------------------------ #
-        # MOUSEDOWN / MOUSEUP — for drag-select (text highlighting)
-        # ------------------------------------------------------------------ #
-        if action == "MOUSEDOWN":
-            import pyautogui
-            x, y = pyautogui.position()
-            pyautogui.mouseDown(x, y, button='left')
-            return {"mousedown": True, "x": x, "y": y}
-
-        if action == "MOUSEUP":
-            import pyautogui
-            x, y = pyautogui.position()
-            pyautogui.mouseUp(x, y, button='left')
-            return {"mouseup": True, "x": x, "y": y}
 
         # ------------------------------------------------------------------ #
         # SCROLL

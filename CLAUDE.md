@@ -7,21 +7,33 @@ Multimodal accessibility desktop control for a single user with rheumatoid arthr
 The user controls a Windows desktop through voice, eye gaze, head pose, hand gesture, iPad tilt, mouth sounds, and direct touch — all mapped to a constrained 9-verb action vocabulary. Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
 
 - Full requirements (17): `.kiro/specs/ipad-sensor-focus/requirements.md`
-- Architecture diagrams (9): `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md`
+- Architecture diagrams (12): `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md`
 - Tech stack: `.kiro/steering/tech.md`
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phase 1 complete; Phase 2 in progress
+## Current Status — Phases 1–4 skeleton complete
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `requirements.txt`
 
-**Done (Phase 2 — added 2026-05-07):**
+**Done (Phase 2):**
 - `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); `routing_log.jsonl` outcome logging
 - `local_inference.py` — `LocalInference` ABC + `OllamaInference`, `VLLMInference` (stub), `NemotronInference`
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
 - `iPadApp/DesktopAgent/` — SwiftUI app: `WebSocketManager`, `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `SettingsStore`
+
+**Done (Phase 3 skeleton):**
+- `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce
+- `lidar_receiver.py` — Decodes `depth_frame` messages; confidence-map filtering; `get_depth_at()`
+- `domain_classifier.py` — Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL
+- `model_router.py` — VRAM-aware specialist model selection; domain-tuned prompts
+- `dev_agent.py` — Plan→execute→reflect agentic loop; 5 dev verbs; session context
+
+**Done (Phase 4 skeleton):**
+- `continuous_trainer.py` — Few-shot SQLite DB; threshold adaptation; gesture calibration JSON
+- `main.py` — Unified entry point; `--measure-vram`; startup status table; Ctrl-C shutdown
+- `benchmark_models.py` — Ollama model benchmark; p50/p95 latency; VRAM snapshots
 
 **Not yet built:** `WhisperStream`, full `VLLMInference` (task 2.13), integration tests (tasks 1.6, 2.11, 2.12)
 

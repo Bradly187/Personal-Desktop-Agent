@@ -1,0 +1,104 @@
+name: Build iPad App
+
+on:
+  push:
+    paths:
+      - 'iPadApp/**'
+      - '.github/workflows/build-ipad-app.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 16.3
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Generate Xcode project with XcodeGen
+        run: |
+          brew install xcodegen
+          cd iPadApp/DesktopAgent
+          # Create Info.plist for XcodeGen
+          cat > Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key>
+            <string>Desktop Agent</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0</string>
+            <key>UILaunchStoryboardName</key>
+            <string>LaunchScreen</string>
+            <key>UIRequiresFullScreen</key>
+            <true/>
+            <key>UISupportedInterfaceOrientations~ipad</key>
+            <array>
+              <string>UIInterfaceOrientationPortrait</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+            </array>
+            <key>UIBackgroundModes</key>
+            <array>
+              <string>audio</string>
+            </array>
+            <key>NSCameraUsageDescription</key>
+            <string>Used for gaze and head tracking.</string>
+            <key>NSMicrophoneUsageDescription</key>
+            <string>Used for voice keyword detection.</string>
+            <key>NSSpeechRecognitionUsageDescription</key>
+            <string>Used for on-device keyword matching.</string>
+            <key>NSMotionUsageDescription</key>
+            <string>Used for tilt-based cursor control.</string>
+          </dict>
+          </plist>
+          EOF
+          xcodegen generate
+
+      - name: Build for iPad (unsigned)
+        run: |
+          cd iPadApp/DesktopAgent
+          xcodebuild build \
+            -project DesktopAgent.xcodeproj \
+            -scheme DesktopAgent \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            | tee build.log | tail -30
+
+      - name: Package .app
+        run: |
+          APP_PATH=$(find iPadApp/DesktopAgent/build -name "*.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app found, checking DerivedData..."
+            APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "DesktopAgent.app" -type d | head -1)
+          fi
+          if [ -n "$APP_PATH" ]; then
+            echo "Found app at: $APP_PATH"
+            mkdir -p Payload
+            cp -R "$APP_PATH" Payload/
+            zip -r DesktopAgent-unsigned.ipa Payload/
+            echo "IPA created: DesktopAgent-unsigned.ipa"
+          else
+            echo "ERROR: Could not find built .app"
+            exit 1
+          fi
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DesktopAgent-unsigned
+          path: DesktopAgent-unsigned.ipa
+          retention-days: 30
