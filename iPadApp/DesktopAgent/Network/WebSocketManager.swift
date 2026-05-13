@@ -253,4 +253,8 @@ extension WebSocketManager {
         msgCounter += 1
         send(["type": "handwriting_image", "id": "hw-\(msgCounter)", "image": base64PNG])
     }
+
+    func sendAudioStream(samplesBase64: String, frames: Int) {
+        send(["type": "audio_stream", "samples": samplesBase64, "frames": frames])
+    }
 }

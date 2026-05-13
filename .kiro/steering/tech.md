@@ -85,7 +85,7 @@ pip install -r requirements.txt
 python mcp_server/desktop_mcp_server.py
 
 # Run the full pipeline
-python desktop_agent.py --full
+python main.py --full
 
 # Run budget sensor stack
 python budget_sensor_fusion.py
