@@ -47,7 +47,9 @@ final class AudioStreamerController: ObservableObject {
         // Observe streamer's isStreaming state
         cancellable = streamer?.$isStreaming
             .receive(on: RunLoop.main)
-            .assign(to: &$isStreaming)
+            .sink { [weak self] value in
+                self?.isStreaming = value
+            }
     }
 
     func start() {
