@@ -98,22 +98,24 @@ class LocalInference(ABC):
 class OllamaInference(LocalInference):
     """Calls a local Ollama server via its HTTP API.
 
-    Default model: llama3.2:3b  (2.0 GB VRAM — benchmarked 2026-05-08, 100% accuracy on
-    all 9 action verbs, fastest among tested models, leaves the most VRAM alongside Whisper).
+    Default model: llama3.1:8b  (4.6 GB VRAM — benchmarked 2026-05-13, 100% accuracy on
+    all 12 test prompts covering 9 action verbs, robust on edge cases).
 
-    Benchmark results on RTX 5090 (5 models, 12 prompts × 3 runs):
-      llama3.2:3b      100% accuracy   2.0 GB   <- default
-      llama3.1:8b      100% accuracy   4.9 GB   <- fallback
-      nemotron-mini     25% accuracy   2.7 GB   (not suitable without fine-tuning)
-      deepseek-r1:8b     0% accuracy   5.2 GB   (reasoning model, wrong output format)
-      gpt-oss:20b        0% accuracy  13.0 GB   (doesn't follow verb-first format)
+    Benchmark results on RTX 5090 (10 models, 12 prompts × 2 runs):
+      llama3.1:8b      100% accuracy   4.6 GB   <- default
+      llama3.2:3b      100% accuracy   6.3 GB
+      qwen3-coder:30b  100% accuracy  18.1 GB   (code specialist)
+      qwen2.5-coder     83% accuracy   0.9 GB
+      nemotron-mini      25% accuracy   2.5 GB   (not suitable)
+      gpt-oss:20b         0% accuracy   9.6 GB   (doesn't follow verb-first format)
+      qwen3-vl:30b        0% accuracy  18.2 GB   (vision model, wrong task)
 
-    Install: https://ollama.com  then: ollama pull llama3.2:3b
+    Install: https://ollama.com  then: ollama pull llama3.1:8b
     """
 
     def __init__(
         self,
-        model: str = "llama3.2:3b",
+        model: str = "llama3.1:8b",
         host: str = "http://localhost:11434",
         timeout: float = 10.0,
     ) -> None:

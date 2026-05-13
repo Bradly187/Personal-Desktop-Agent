@@ -174,7 +174,7 @@ class DevAgent:
             return AgentResult(
                 goal=text,
                 domain="command",
-                model_used="llama3.2:3b",
+                model_used="llama3.1:8b",
                 response_text=str(result_dict),
                 total_latency_ms=(time.monotonic() - t0) * 1000,
             )

@@ -4,13 +4,13 @@ Maps each domain to a specialist Ollama model with a domain-tuned system
 prompt. Handles the different output formats each model produces (structured
 verb-first for the command classifier, free-form for reasoning/code/vision).
 
-Model lineup (RTX 5090, 31.8 GB, baseline 8.3 GB, Whisper 4.2 GB):
-  command  → llama3.2:3b     (2.0 GB)  fast action classifier, verb-first output
-  code     → qwen3-coder:30b (18 GB)   code generation, ML/QC frameworks
-  math     → deepseek-r1:8b  (5.2 GB)  chain-of-thought reasoning, proofs
-  vision   → qwen3-vl:30b    (19 GB)   screenshot analysis, diagram reading
-  plan     → gpt-oss:20b     (13 GB)   project decomposition, structured plans
-  general  → gpt-oss:20b     (13 GB)   explanation, research synthesis
+Model lineup (RTX 5090, 32 GB VRAM):
+  command  → llama3.1:8b      (4.6 GB)  fast action classifier, verb-first output, 100% accuracy
+  code     → qwen3-coder:30b  (18 GB)   code generation, ML/QC frameworks
+  math     → deepseek-r1:8b   (5.2 GB)  chain-of-thought reasoning, proofs
+  vision   → qwen3-vl:30b     (19 GB)   screenshot analysis, diagram reading
+  plan     → llama3.1:8b      (4.6 GB)  project decomposition, structured plans
+  general  → llama3.1:8b      (4.6 GB)  explanation, research synthesis
 
 Each specialist model uses a domain-specific system prompt calibrated for
 ML/agentic AI, quantum computing, and software development contexts.
@@ -150,10 +150,10 @@ class ModelProfile:
 
 _PROFILES: dict[str, ModelProfile] = {
     "command": ModelProfile(
-        name="llama3.2:3b",
+        name="llama3.1:8b",
         domain="command",
         system_prompt=_COMMAND_PROMPT,
-        vram_gb=2.0,
+        vram_gb=4.6,
         max_tokens=32,
         free_form=False,
     ),
@@ -184,18 +184,18 @@ _PROFILES: dict[str, ModelProfile] = {
         free_form=True,
     ),
     "plan": ModelProfile(
-        name="gpt-oss:20b",
+        name="llama3.1:8b",
         domain="plan",
         system_prompt=_PLAN_PROMPT,
-        vram_gb=13.0,
+        vram_gb=4.6,
         max_tokens=2048,
         free_form=True,
     ),
     "general": ModelProfile(
-        name="gpt-oss:20b",
+        name="llama3.1:8b",
         domain="general",
         system_prompt=_GENERAL_PROMPT,
-        vram_gb=13.0,
+        vram_gb=4.6,
         max_tokens=1024,
         free_form=True,
     ),
@@ -203,12 +203,12 @@ _PROFILES: dict[str, ModelProfile] = {
 
 # Fallback chain per domain when preferred model won't fit in VRAM
 _FALLBACK: dict[str, list[str]] = {
-    "code":    ["qwen3-coder:30b", "gpt-oss:20b", "llama3.1:8b", "llama3.2:3b"],
-    "math":    ["deepseek-r1:8b",  "gpt-oss:20b", "llama3.1:8b", "llama3.2:3b"],
-    "vision":  ["qwen3-vl:30b",   "gpt-oss:20b", "llama3.1:8b", "llama3.2:3b"],
-    "plan":    ["gpt-oss:20b",    "llama3.1:8b", "llama3.2:3b"],
-    "general": ["gpt-oss:20b",    "llama3.1:8b", "llama3.2:3b"],
-    "command": ["llama3.2:3b",    "llama3.1:8b"],
+    "code":    ["qwen3-coder:30b", "llama3.1:8b", "llama3.2:3b"],
+    "math":    ["deepseek-r1:8b",  "llama3.1:8b", "llama3.2:3b"],
+    "vision":  ["qwen3-vl:30b",   "llama3.1:8b", "llama3.2:3b"],
+    "plan":    ["llama3.1:8b",    "llama3.2:3b"],
+    "general": ["llama3.1:8b",    "llama3.2:3b"],
+    "command": ["llama3.1:8b",    "llama3.2:3b"],
 }
 
 
@@ -251,7 +251,7 @@ class ModelRouter:
     def select_profile(self, domain: str) -> ModelProfile:
         """Choose the best available profile for the domain given current VRAM."""
         free_gb = _free_vram_gb()
-        chain = _FALLBACK.get(domain, ["llama3.2:3b"])
+        chain = _FALLBACK.get(domain, ["llama3.1:8b"])
 
         for model_name in chain:
             # Find profile for this model name
@@ -269,7 +269,7 @@ class ModelRouter:
                 return profile
 
         # Ultimate fallback
-        log.warning("ModelRouter: no profile fits VRAM, falling back to llama3.2:3b")
+        log.warning("ModelRouter: no profile fits VRAM, falling back to llama3.1:8b")
         return self._profiles["command"]
 
     # ---------------------------------------------------------------------- #

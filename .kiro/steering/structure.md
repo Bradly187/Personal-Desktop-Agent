@@ -13,10 +13,11 @@ project/
 │       ├── windows.py        # get_active_window, list_windows, focus_window
 │       └── handwriting.py    # recognize_math (pix2tex LaTeX OCR, GPU), latex_to_unicode
 ├── requirements.txt          # Pinned Python dependencies
+├── main.py                   # Unified entry point (--full, --measure-vram, --safe-mode)
 ├── hybrid_coordinator.py     # 4-gate routing engine (local vs cloud)
 ├── whisper_stream.py         # Audio from iPad mic → Silero VAD → Whisper → Command
-├── gesture_stream.py         # Camera frames from iPad → YOLOv8/MediaPipe → Command
-├── desktop_agent.py          # Command → mouse/keyboard execution
+├── gesture_processor.py       # iPad camera frames → MediaPipe Hands → Command
+├── command_executor.py        # Command → mouse/keyboard execution
 ├── continuous_trainer.py     # Background learning (thresholds, vocab, few-shot)
 ├── iPadApp/                  # Native Swift/SwiftUI Xcode project (iPadOS 17+)
 │   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector
