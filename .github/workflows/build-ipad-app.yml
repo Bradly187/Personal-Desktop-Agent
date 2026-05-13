@@ -168,32 +168,12 @@ jobs:
 
       - name: Upload to TestFlight
         if: ${{ github.event_name == 'push' || github.event.inputs.deploy_testflight == 'true' }}
-        env:
-          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          APP_STORE_CONNECT_API_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-        run: |
-          # Write the API key — use perl to ensure newlines are correct
-          mkdir -p ./private_keys
-          echo "$APP_STORE_CONNECT_API_KEY" | perl -pe 's/\\n/\n/g' > ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
-
-          # Verify the key looks right
-          echo "Lines in key file:"
-          wc -l ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
-          echo "First line:"
-          head -1 ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
-          echo "Last line:"
-          tail -1 ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
-
-          # Upload with API_PRIVATE_KEYS_DIR
-          export API_PRIVATE_KEYS_DIR=$(pwd)/private_keys
-          xcrun altool --upload-app \
-            --type ios \
-            --file $RUNNER_TEMP/export/DesktopAgent.ipa \
-            --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID"
-
-          echo "✅ Upload complete. Check App Store Connect for processing status."
+        uses: apple-actions/upload-testflight-build@v1
+        with:
+          app-path: ${{ runner.temp }}/export/DesktopAgent.ipa
+          issuer-id: ${{ secrets.ASC_ISSUER_ID }}
+          api-key-id: ${{ secrets.ASC_KEY_ID }}
+          api-private-key: ${{ secrets.ASC_PRIVATE_KEY }}
 
       - name: Upload IPA as artifact
         uses: actions/upload-artifact@v4
