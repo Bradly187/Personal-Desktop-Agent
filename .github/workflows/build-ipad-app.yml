@@ -173,31 +173,25 @@ jobs:
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           APP_STORE_CONNECT_API_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write the API key
+          # Write the API key — use perl to ensure newlines are correct
           mkdir -p ./private_keys
-          echo "$APP_STORE_CONNECT_API_KEY" > ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          echo "$APP_STORE_CONNECT_API_KEY" | perl -pe 's/\\n/\n/g' > ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
 
-          # Upload using xcodebuild (modern approach, replaces altool)
-          xcodebuild -exportArchive \
-            -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
-            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
-            -exportPath $RUNNER_TEMP/upload_export \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath $(pwd)/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8 \
-            -authenticationKeyID "$APP_STORE_CONNECT_API_KEY_ID" \
-            -authenticationKeyIssuerID "$APP_STORE_CONNECT_API_ISSUER_ID" \
-            2>&1 || true
+          # Verify the key looks right
+          echo "Lines in key file:"
+          wc -l ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          echo "First line:"
+          head -1 ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          echo "Last line:"
+          tail -1 ./private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
 
-          # If xcodebuild upload didn't work, try altool with API_PRIVATE_KEYS_DIR
-          if [ ! -f "$RUNNER_TEMP/upload_export/DesktopAgent.ipa" ] || true; then
-            export API_PRIVATE_KEYS_DIR=$(pwd)/private_keys
-            xcrun altool --upload-app \
-              --type ios \
-              --file $RUNNER_TEMP/export/DesktopAgent.ipa \
-              --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
-              --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID" \
-              2>&1
-          fi
+          # Upload with API_PRIVATE_KEYS_DIR
+          export API_PRIVATE_KEYS_DIR=$(pwd)/private_keys
+          xcrun altool --upload-app \
+            --type ios \
+            --file $RUNNER_TEMP/export/DesktopAgent.ipa \
+            --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID"
 
           echo "✅ Upload complete. Check App Store Connect for processing status."
 
