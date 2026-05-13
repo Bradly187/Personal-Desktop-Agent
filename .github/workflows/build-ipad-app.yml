@@ -173,15 +173,17 @@ jobs:
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           APP_STORE_CONNECT_API_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write the API key to a file for xcrun
+          # Write the API key file (preserve newlines)
           mkdir -p ~/.private_keys
-          echo -n "$APP_STORE_CONNECT_API_KEY" > ~/.private_keys/AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8
+          printf '%s\n' "$APP_STORE_CONNECT_API_KEY" > ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
 
+          # Use xcrun altool with explicit key path
           xcrun altool --upload-app \
             --type ios \
             --file $RUNNER_TEMP/export/DesktopAgent.ipa \
             --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID"
+            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID" \
+            --private-key ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
 
           echo "✅ Uploaded to TestFlight! Check App Store Connect for processing status."
 
