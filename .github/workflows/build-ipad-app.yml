@@ -173,39 +173,25 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write key file with correct permissions
+          # Write key file
           KEY_DIR="$HOME/.private_keys"
           mkdir -p "$KEY_DIR"
           KEY_FILE="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
           echo "$ASC_PRIVATE_KEY" > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
 
-          # Debug
-          echo "Key file: $KEY_FILE"
-          echo "File size: $(wc -c < "$KEY_FILE") bytes"
-          echo "Line count: $(wc -l < "$KEY_FILE")"
-          ls -la "$KEY_FILE"
+          # Use xcodebuild to upload (the modern replacement for altool)
+          xcodebuild -exportArchive \
+            -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
+            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
+            -exportPath $RUNNER_TEMP/upload_output \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_FILE" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            2>&1 | tee upload.log
 
-          # Try iTMSTransporter directly (what altool calls under the hood)
-          TRANSPORTER=$(find /Applications/Xcode*.app -name "iTMSTransporter" -type f 2>/dev/null | head -1)
-          if [ -n "$TRANSPORTER" ]; then
-            echo "Using iTMSTransporter at: $TRANSPORTER"
-            "$TRANSPORTER" -m upload \
-              -assetFile "$RUNNER_TEMP/export/DesktopAgent.ipa" \
-              -assetDescription "$RUNNER_TEMP/export/DesktopAgent.ipa" \
-              -k "$KEY_FILE" \
-              -w \
-              -apiKey "$ASC_KEY_ID" \
-              -apiIssuer "$ASC_ISSUER_ID" \
-              -v informational
-          else
-            echo "iTMSTransporter not found, falling back to altool"
-            xcrun altool --upload-app \
-              --type ios \
-              --file "$RUNNER_TEMP/export/DesktopAgent.ipa" \
-              --apiKey "$ASC_KEY_ID" \
-              --apiIssuer "$ASC_ISSUER_ID"
-          fi
+          echo "✅ Upload step complete. Check App Store Connect."
 
       - name: Upload IPA as artifact
         uses: actions/upload-artifact@v4
