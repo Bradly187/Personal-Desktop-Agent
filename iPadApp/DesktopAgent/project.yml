@@ -1,15 +1,15 @@
 name: DesktopAgent
 options:
-  bundleIdPrefix: com.bradtarber
+  bundleIdPrefix: com.bradtarver
   deploymentTarget:
     iOS: "17.0"
-  xcodeVersion: "15.0"
+  xcodeVersion: "16.3"
   groupSortPosition: top
   createIntermediateGroups: true
 
 settings:
   SWIFT_VERSION: "5.9"
-  PRODUCT_BUNDLE_IDENTIFIER: com.bradtarber.DesktopAgent
+  PRODUCT_BUNDLE_IDENTIFIER: com.bradtarver.DesktopAgent
   TARGETED_DEVICE_FAMILY: "2"
   SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
   ENABLE_BITCODE: NO
