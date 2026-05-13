@@ -168,12 +168,44 @@ jobs:
 
       - name: Upload to TestFlight
         if: ${{ github.event_name == 'push' || github.event.inputs.deploy_testflight == 'true' }}
-        uses: apple-actions/upload-testflight-build@v1
-        with:
-          app-path: ${{ runner.temp }}/export/DesktopAgent.ipa
-          issuer-id: ${{ secrets.ASC_ISSUER_ID }}
-          api-key-id: ${{ secrets.ASC_KEY_ID }}
-          api-private-key: ${{ secrets.ASC_PRIVATE_KEY }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          # Write key file with correct permissions
+          KEY_DIR="$HOME/.private_keys"
+          mkdir -p "$KEY_DIR"
+          KEY_FILE="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_PRIVATE_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+
+          # Debug
+          echo "Key file: $KEY_FILE"
+          echo "File size: $(wc -c < "$KEY_FILE") bytes"
+          echo "Line count: $(wc -l < "$KEY_FILE")"
+          ls -la "$KEY_FILE"
+
+          # Try iTMSTransporter directly (what altool calls under the hood)
+          TRANSPORTER=$(find /Applications/Xcode*.app -name "iTMSTransporter" -type f 2>/dev/null | head -1)
+          if [ -n "$TRANSPORTER" ]; then
+            echo "Using iTMSTransporter at: $TRANSPORTER"
+            "$TRANSPORTER" -m upload \
+              -assetFile "$RUNNER_TEMP/export/DesktopAgent.ipa" \
+              -assetDescription "$RUNNER_TEMP/export/DesktopAgent.ipa" \
+              -k "$KEY_FILE" \
+              -w \
+              -apiKey "$ASC_KEY_ID" \
+              -apiIssuer "$ASC_ISSUER_ID" \
+              -v informational
+          else
+            echo "iTMSTransporter not found, falling back to altool"
+            xcrun altool --upload-app \
+              --type ios \
+              --file "$RUNNER_TEMP/export/DesktopAgent.ipa" \
+              --apiKey "$ASC_KEY_ID" \
+              --apiIssuer "$ASC_ISSUER_ID"
+          fi
 
       - name: Upload IPA as artifact
         uses: actions/upload-artifact@v4
