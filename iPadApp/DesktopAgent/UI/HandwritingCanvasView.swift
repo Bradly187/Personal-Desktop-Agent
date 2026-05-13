@@ -135,9 +135,20 @@ final class HandwritingViewModel: ObservableObject {
         isRecognizing = true
         result = nil
 
-        // Render drawing to PNG
+        // Render drawing onto a white background so pix2tex receives dark-on-light
+        // content regardless of device dark/light mode.  PKDrawing.image(from:scale:)
+        // produces a transparent-background PNG; compositing here means the PC-side
+        // recognizer never sees a solid-black image.
         let bounds = drawing.bounds.insetBy(dx: -20, dy: -20)
-        let image = drawing.image(from: bounds, scale: UIScreen.main.scale)
+        let scale = UIScreen.main.scale
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = scale
+        let renderer = UIGraphicsImageRenderer(size: bounds.size, format: fmt)
+        let image = renderer.image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: bounds.size))
+            drawing.image(from: bounds, scale: scale).draw(at: .zero)
+        }
         guard let pngData = image.pngData() else {
             isRecognizing = false
             return
@@ -166,10 +177,11 @@ struct PKCanvasRepresentable: UIViewRepresentable {
         canvas.isOpaque = true
         canvas.delegate = context.coordinator
 
-        // Provide a tool picker
+        // Provide a tool picker; stored on the coordinator to prevent deallocation.
         let picker = PKToolPicker()
         picker.setVisible(true, forFirstResponder: canvas)
         picker.addObserver(canvas)
+        context.coordinator.toolPicker = picker
         canvas.becomeFirstResponder()
 
         return canvas
@@ -185,6 +197,8 @@ struct PKCanvasRepresentable: UIViewRepresentable {
 
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         @Binding var drawing: PKDrawing
+        var toolPicker: PKToolPicker?   // retains picker so it isn't immediately deallocated
+
         init(drawing: Binding<PKDrawing>) { _drawing = drawing }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {

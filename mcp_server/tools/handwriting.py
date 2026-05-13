@@ -152,8 +152,17 @@ def recognize_math(png_bytes: bytes) -> dict:
         return {"error": "pix2tex not installed — run: pip install pix2tex"}
 
     try:
-        from PIL import Image
-        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        img_raw = Image.open(io.BytesIO(png_bytes))
+        # PencilKit renders on a transparent background.  PIL's convert("RGB")
+        # fills transparent pixels with black, which hides dark pen strokes and
+        # produces a solid-black image that pix2tex cannot recognise.
+        # Composite onto white so pix2tex always receives dark-on-light content.
+        if img_raw.mode == "RGBA":
+            background = Image.new("RGB", img_raw.size, (255, 255, 255))
+            background.paste(img_raw, mask=img_raw.split()[3])
+            img = background
+        else:
+            img = img_raw.convert("RGB")
     except Exception as exc:
         return {"error": f"Failed to decode image: {exc}"}
 
