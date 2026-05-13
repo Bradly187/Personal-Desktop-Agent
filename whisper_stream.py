@@ -246,6 +246,13 @@ class WhisperStream:
         self._buffer = None
         self._buffer_start_ts = 0.0
 
+        # Skip GPU call if the entire buffer is below the silence threshold.
+        # Whisper's vad_filter=True catches this too, but checking here avoids
+        # the to_thread overhead and VRAM use for silence-only segments.
+        if _rms(audio) < self._silence_thresh:
+            log.debug("WhisperStream: buffer is all silence — skipping transcription")
+            return
+
         log.debug("WhisperStream: transcribing %.1f s of audio (force=%s)", duration, force)
         await asyncio.to_thread(self._transcribe, audio)
 
