@@ -6,6 +6,15 @@ on:
       - 'iPadApp/**'
       - '.github/workflows/build-ipad-app.yml'
   workflow_dispatch:
+    inputs:
+      deploy_testflight:
+        description: 'Upload to TestFlight after build'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   build:
@@ -21,11 +30,44 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Generate Xcode project with XcodeGen
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Install signing certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          brew install xcodegen
+          # Create a temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          CERT_PATH=$RUNNER_TEMP/certificate.p12
+          echo -n "$CERTIFICATE_P12" | base64 --decode -o $CERT_PATH
+          security import $CERT_PATH -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Install provisioning profile
+        env:
+          PROVISIONING_PROFILE: ${{ secrets.PROVISIONING_PROFILE }}
+        run: |
+          PP_PATH=$RUNNER_TEMP/profile.mobileprovision
+          echo -n "$PROVISIONING_PROFILE" | base64 --decode -o $PP_PATH
+
+          # Install to the standard location
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          PP_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(/usr/bin/security cms -D -i $PP_PATH))
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/$PP_UUID.mobileprovision
+          echo "PROVISIONING_PROFILE_UUID=$PP_UUID" >> $GITHUB_ENV
+
+      - name: Generate Xcode project
+        run: |
           cd iPadApp/DesktopAgent
-          # Create Info.plist for XcodeGen
           cat > Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -34,7 +76,7 @@ jobs:
             <key>CFBundleDisplayName</key>
             <string>Desktop Agent</string>
             <key>CFBundleVersion</key>
-            <string>1</string>
+            <string>${{ github.run_number }}</string>
             <key>CFBundleShortVersionString</key>
             <string>1.0</string>
             <key>UILaunchStoryboardName</key>
@@ -64,48 +106,93 @@ jobs:
           EOF
           xcodegen generate
 
-      - name: Build for iPad
+      - name: Build and archive
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
         run: |
           cd iPadApp/DesktopAgent
-          xcodebuild build \
+          xcodebuild archive \
             -project DesktopAgent.xcodeproj \
             -scheme DesktopAgent \
             -destination 'generic/platform=iOS' \
-            -configuration Debug \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=NO \
+            -configuration Release \
+            -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_UUID" \
+            PRODUCT_BUNDLE_IDENTIFIER=com.bradtarber.DesktopAgent \
             2>&1 | tee build.log
-          # Check for build success
-          if grep -q "BUILD SUCCEEDED" build.log; then
-            echo "Build succeeded!"
+
+          if grep -q "ARCHIVE SUCCEEDED" build.log; then
+            echo "Archive succeeded!"
           else
-            echo "Build failed. Last 50 lines:"
+            echo "Archive failed. Last 50 lines:"
             tail -50 build.log
             exit 1
           fi
 
-      - name: Find and package .app
+      - name: Export IPA
         run: |
-          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Debug-iphoneos/DesktopAgent.app" -type d | head -1)
-          echo "App path: $APP_PATH"
-          if [ -z "$APP_PATH" ] || [ ! -f "$APP_PATH/DesktopAgent" ]; then
-            echo "ERROR: No valid .app with executable found"
-            echo "Contents of app dir (if exists):"
-            ls -la "$APP_PATH/" 2>/dev/null || echo "  (not found)"
-            exit 1
-          fi
-          echo "App contents:"
-          ls -la "$APP_PATH/"
-          mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          zip -r DesktopAgent-unsigned.ipa Payload/
-          ls -la DesktopAgent-unsigned.ipa
+          cat > $RUNNER_TEMP/ExportOptions.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${{ secrets.TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.bradtarber.DesktopAgent</key>
+              <string>${{ secrets.PROVISIONING_PROFILE_NAME }}</string>
+            </dict>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
 
-      - name: Upload IPA artifact
+          xcodebuild -exportArchive \
+            -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
+            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
+            -exportPath $RUNNER_TEMP/export
+
+          echo "Exported IPA:"
+          ls -la $RUNNER_TEMP/export/*.ipa
+
+      - name: Upload to TestFlight
+        if: ${{ github.event_name == 'push' || github.event.inputs.deploy_testflight == 'true' }}
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          # Write the API key to a file for xcrun
+          mkdir -p ~/.private_keys
+          echo -n "$APP_STORE_CONNECT_API_KEY" > ~/.private_keys/AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8
+
+          xcrun altool --upload-app \
+            --type ios \
+            --file $RUNNER_TEMP/export/DesktopAgent.ipa \
+            --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID"
+
+          echo "✅ Uploaded to TestFlight! Check App Store Connect for processing status."
+
+      - name: Upload IPA as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DesktopAgent-unsigned
-          path: DesktopAgent-unsigned.ipa
+          name: DesktopAgent-signed
+          path: ${{ runner.temp }}/export/DesktopAgent.ipa
           retention-days: 30
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true

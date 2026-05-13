@@ -88,7 +88,7 @@ final class SettingsStore: ObservableObject {
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
         headEnabled = defaults.object(forKey: "headEnabled") as? Bool ?? false
         headSmoothingFactor = defaults.double(forKey: "headSmoothingFactor").nonZero ?? 0.3
-        trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 1.0
+        trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 2.0
         palmRejectRadius = defaults.double(forKey: "palmRejectRadius").nonZero ?? 25.0
         keywordList = defaults.stringArray(forKey: "keywordList") ?? ["click", "scroll", "open"]
 

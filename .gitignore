@@ -43,3 +43,15 @@ docs/*.pdf
 docs/*.ipa
 docs/*.exe
 docs/*.xip
+
+# Signing — NEVER commit these
+docs/distribution.key
+docs/distribution.pem
+docs/distribution.p12
+docs/distribution.cer
+docs/ios_development.cer
+docs/CertificateSigningRequest.certSigningRequest
+docs/cert_base64.txt
+docs/profile_base64.txt
+docs/*.mobileprovision
+docs/*.p8

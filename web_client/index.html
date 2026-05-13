@@ -51,9 +51,10 @@ body {
 .tab svg { width: 22px; height: 22px; fill: currentColor; }
 
 /* Main content */
-#content { flex: 1; overflow-y: auto; padding: 40px 12px 70px; }
+#content { flex: 1; padding: 40px 12px 70px; overflow: hidden; }
 .page { display: none; height: 100%; }
-.page.active { display: flex; flex-direction: column; }
+.page.active { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+#page-commands.active { flex-direction: row; }
 
 /* Command grid */
 #cmd-grid {
@@ -72,9 +73,10 @@ body {
 /* Trackpad */
 #trackpad-area {
   background: var(--surface); border-radius: var(--radius);
-  touch-action: none; position: relative; flex: 1; min-height: 45vh;
+  touch-action: none; position: relative; flex: 1; min-height: 100px;
   display: flex; align-items: center; justify-content: center;
-  margin-bottom: 8px;
+  margin-bottom: 8px; user-select: none; -webkit-user-select: none;
+  -webkit-touch-callout: none; overflow: hidden;
 }
 #trackpad-area .hint { color: var(--text2); font-size: 13px; pointer-events: none; }
 
@@ -153,6 +155,33 @@ button.reconnect-btn {
   font-size: 11px; color: var(--text2); text-align: center; padding: 4px;
   position: fixed; top: 30px; left: 50%; transform: translateX(-50%); z-index: 99;
 }
+
+/* Sortable grid buttons */
+.grid-btn {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; min-height: 64px; background: var(--surface); border: none;
+  border-radius: var(--radius); color: var(--text); font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: background 0.15s, transform 0.15s, border-color 0.2s;
+  user-select: none; -webkit-user-select: none; touch-action: manipulation;
+  border: 2px solid transparent;
+}
+.grid-btn:active { background: var(--accent); }
+.grid-btn.large { min-height: 80px; font-size: 16px; }
+.grid-btn.accent-border { border-color: var(--accent); color: var(--accent); }
+.grid-btn.green-border { border-color: var(--green); color: var(--green); }
+.grid-btn.span2 { grid-column: span 2; }
+
+/* Edit mode — wiggle animation */
+#sortable-grid.editing .grid-btn {
+  animation: wiggle 0.3s ease-in-out infinite alternate;
+  border-color: var(--accent);
+}
+#sortable-grid.editing .grid-btn:nth-child(even) { animation-delay: 0.15s; }
+@keyframes wiggle { from { transform: rotate(-0.5deg); } to { transform: rotate(0.5deg); } }
+
+/* SortableJS ghost/drag styles */
+.sortable-ghost { opacity: 0.4; }
+.sortable-chosen { transform: scale(1.05); box-shadow: 0 4px 20px rgba(10,132,255,0.3); }
 </style>
 </head>
 <body>
@@ -162,37 +191,21 @@ button.reconnect-btn {
 
 <!-- Content Pages -->
 <div id="content">
-  <!-- Commands + Trackpad Combined Page -->
-  <div class="page active" id="page-commands">
-    <!-- Trackpad — takes most of the space -->
-    <div id="trackpad-area"><span class="hint">Drag to move · Tap to click · 2-finger for right-click</span></div>
-    <!-- Click buttons — directly below trackpad -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:4px 0">
-      <button class="cmd-btn" id="btn-click" style="min-height:56px;font-size:14px">👆 Click</button>
-      <button class="cmd-btn" id="btn-rclick" style="min-height:56px;font-size:14px">👆 Right Click</button>
+  <!-- Commands + Trackpad Combined Page — split layout -->
+  <div class="page active" id="page-commands" style="flex-direction:row;gap:10px;">
+    <!-- LEFT HALF: Sortable button grid -->
+    <div style="flex:1;display:flex;flex-direction:column;gap:6px;overflow-y:auto;padding-right:4px;">
+      <!-- Lock/unlock toggle -->
+      <div style="display:flex;align-items:center;gap:8px;padding:2px 0;">
+        <button id="layout-lock" style="padding:6px 12px;background:var(--surface);border:1px solid var(--surface2);border-radius:8px;color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;">🔒 Locked</button>
+        <button id="layout-reset" style="padding:6px 12px;background:var(--surface);border:1px solid var(--surface2);border-radius:8px;color:var(--red);font-size:12px;font-weight:600;cursor:pointer;display:none;">↺ Reset</button>
+      </div>
+      <!-- Sortable grid container -->
+      <div id="sortable-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;flex:1;align-content:start;"></div>
     </div>
-    <!-- Copy/Paste — directly below click buttons -->
-    <div style="display:flex;gap:8px;padding:4px 0">
-      <button id="copy-btn" style="flex:1;padding:12px;background:var(--surface);border:2px solid var(--green);border-radius:10px;color:var(--green);font-size:15px;font-weight:600">📋 Copy</button>
-      <button id="paste-btn" style="flex:1;padding:12px;background:var(--surface);border:2px solid var(--accent);border-radius:10px;color:var(--accent);font-size:15px;font-weight:600">📌 Paste</button>
-      <button class="cmd-btn" id="btn-undo" style="min-height:44px;font-size:12px;flex:0.6">↩ Undo</button>
-    </div>
-    <!-- Scroll + shortcuts — compact row -->
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr;gap:6px;padding:4px 0">
-      <button class="cmd-btn" id="btn-scrollup" style="min-height:44px;font-size:11px">⬆️ Up</button>
-      <button class="cmd-btn" id="btn-scrolldn" style="min-height:44px;font-size:11px">⬇️ Down</button>
-      <button class="cmd-btn" id="btn-tab" style="min-height:44px;font-size:11px">⇥ Tab</button>
-      <button class="cmd-btn" id="btn-enter" style="min-height:44px;font-size:11px">⏎ Enter</button>
-      <button class="cmd-btn" id="btn-esc" style="min-height:44px;font-size:11px">✕ Esc</button>
-      <button class="cmd-btn" id="btn-space" style="min-height:44px;font-size:11px">␣ Space</button>
-    </div>
-    <!-- App launchers + select mode -->
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:4px 0">
-      <button class="cmd-btn" id="btn-kiro" style="min-height:40px;font-size:10px">🟢 Kiro</button>
-      <button class="cmd-btn" id="btn-claude" style="min-height:40px;font-size:10px">🟠 Claude</button>
-      <button class="cmd-btn" id="btn-chrome" style="min-height:40px;font-size:10px">🌐 Chrome</button>
-      <button class="cmd-btn" id="btn-screenshot" style="min-height:40px;font-size:10px">📷 Shot</button>
-      <button id="select-toggle" style="min-height:40px;background:var(--surface);border:2px solid var(--surface2);border-radius:8px;color:var(--text);font-size:10px;font-weight:600">⬚ Select</button>
+    <!-- RIGHT HALF: Trackpad -->
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px;">
+      <div id="trackpad-area" style="flex:1;min-height:unset;"><span class="hint">Drag · Tap · 2-finger right-click</span></div>
     </div>
   </div>
 
@@ -229,6 +242,7 @@ button.reconnect-btn {
   <button class="tab" data-page="settings"><svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.61 3.61 0 018.4 12 3.61 3.61 0 0112 8.4a3.61 3.61 0 013.6 3.6 3.61 3.61 0 01-3.6 3.6z"/></svg>Settings</button>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

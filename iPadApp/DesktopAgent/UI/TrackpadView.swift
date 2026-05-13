@@ -173,13 +173,27 @@ struct TrackpadView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: — Fractional accumulator (prevents Int truncation from dropping small moves)
+    @State private var accumX: CGFloat = 0
+    @State private var accumY: CGFloat = 0
+
     // MARK: — Event handling
 
     private func handle(_ event: TrackpadEvent) {
         switch event {
         case .move(let dx, let dy):
             let s = settings.trackpadSpeed
-            wsManager.sendTrackpadMove(dx: Int(dx * s), dy: Int(dy * s))
+            accumX += dx * s
+            accumY += dy * s
+
+            let ix = Int(accumX)
+            let iy = Int(accumY)
+
+            if ix != 0 || iy != 0 {
+                accumX -= CGFloat(ix)
+                accumY -= CGFloat(iy)
+                wsManager.sendTrackpadMove(dx: ix, dy: iy)
+            }
         case .tap(let fingers):
             if fingers == 1 {
                 wsManager.sendTrackpadTap(button: "left")
@@ -192,6 +206,9 @@ struct TrackpadView: View {
             } else {
                 wsManager.sendTrackpadScroll(direction: dx < 0 ? "left" : "right")
             }
+        case .ended:
+            accumX = 0
+            accumY = 0
         }
     }
 }
@@ -202,6 +219,7 @@ enum TrackpadEvent {
     case move(dx: CGFloat, dy: CGFloat)
     case tap(fingers: Int)
     case scroll(dx: CGFloat, dy: CGFloat)
+    case ended
 }
 
 // MARK: — UIViewRepresentable gesture engine
@@ -280,6 +298,7 @@ struct TrackpadGestureView: UIViewRepresentable {
                 }
             default:
                 prevTranslation = .zero
+                onEvent(.ended)
             }
         }
 

@@ -99,173 +99,247 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 // ============================================================================
-// COMMANDS — static buttons wired individually for optimal layout
+// COMMANDS — data-driven sortable grid
 // ============================================================================
-function renderCommands() {
-  wireBtn('btn-click', 'CLICK', {});
-  wireBtn('btn-rclick', 'CLICK', {button:'right'});
-  wireScroll('btn-scrollup', {direction:'up'});
-  wireScroll('btn-scrolldn', {direction:'down'});
-  wireBtn('btn-undo', 'HOTKEY', {keys:'ctrl,z'});
-  wireBtn('btn-tab', 'HOTKEY', {keys:'tab'});
-  wireBtn('btn-enter', 'HOTKEY', {keys:'enter'});
-  wireBtn('btn-esc', 'HOTKEY', {keys:'escape'});
-  wireBtn('btn-space', 'HOTKEY', {keys:'space'});
-  wireBtn('btn-kiro', 'OPEN', {target:'Kiro'});
-  wireBtn('btn-claude', 'OPEN', {target:'Claude'});
-  wireBtn('btn-chrome', 'OPEN', {target:'Google Chrome'});
-  wireBtn('btn-screenshot', 'SCREENSHOT', {});
+
+// Default button definitions (order matters — this is the default layout)
+const DEFAULT_BUTTON_ORDER = [
+  { id: 'copy',       label: '📋 Copy',    action: 'HOTKEY',      params: {keys:'ctrl,c'}, style: 'green-border' },
+  { id: 'paste',      label: '📌 Paste',   action: 'HOTKEY',      params: {keys:'ctrl,v'}, style: 'accent-border' },
+  { id: 'undo',       label: '↩ Undo',     action: 'HOTKEY',      params: {keys:'ctrl,z'} },
+  { id: 'scrollup',   label: '⬆️ Up',      action: 'SCROLL',      params: {direction:'up'}, holdScroll: true },
+  { id: 'scrolldn',   label: '⬇️ Down',    action: 'SCROLL',      params: {direction:'down'}, holdScroll: true },
+  { id: 'tab',        label: '⇥ Tab',      action: 'HOTKEY',      params: {keys:'tab'} },
+  { id: 'enter',      label: '⏎ Enter',    action: 'HOTKEY',      params: {keys:'enter'} },
+  { id: 'esc',        label: '✕ Esc',      action: 'HOTKEY',      params: {keys:'escape'} },
+  { id: 'space',      label: '␣ Space',    action: 'HOTKEY',      params: {keys:'space'} },
+  { id: 'kiro',       label: '🟢 Kiro',    action: 'OPEN',        params: {target:'Kiro'} },
+  { id: 'claude',     label: '🟠 Claude',  action: 'OPEN',        params: {target:'Claude'} },
+  { id: 'chrome',     label: '🌐 Chrome',  action: 'OPEN',        params: {target:'Google Chrome'} },
+  { id: 'select',     label: '⬚ Select',   action: '_SELECT',     params: {} },
+  { id: 'screenshot', label: '📷 Shot',    action: 'SCREENSHOT',  params: {} },
+  { id: 'click',      label: '👆 Click',   action: 'CLICK',       params: {}, style: 'large' },
+  { id: 'rclick',     label: '👆 Right',   action: 'CLICK',       params: {button:'right'}, style: 'large' },
+];
+
+function getButtonOrder() {
+  const saved = localStorage.getItem('da_btn_order');
+  if (saved) {
+    try {
+      const ids = JSON.parse(saved);
+      // Rebuild from saved order, adding any new buttons at the end
+      const map = Object.fromEntries(DEFAULT_BUTTON_ORDER.map(b => [b.id, b]));
+      const ordered = ids.map(id => map[id]).filter(Boolean);
+      // Add any buttons not in saved order (new additions)
+      DEFAULT_BUTTON_ORDER.forEach(b => { if (!ids.includes(b.id)) ordered.push(b); });
+      return ordered;
+    } catch(e) {}
+  }
+  return [...DEFAULT_BUTTON_ORDER];
 }
 
-function wireBtn(id, action, params) {
-  const el = document.getElementById(id);
-  if(!el) return;
+function saveButtonOrder() {
+  const grid = document.getElementById('sortable-grid');
+  const ids = Array.from(grid.children).map(el => el.dataset.btnId);
+  localStorage.setItem('da_btn_order', JSON.stringify(ids));
+}
+
+let sortableInstance = null;
+let layoutLocked = true;
+
+function renderCommands() {
+  const grid = document.getElementById('sortable-grid');
+  grid.innerHTML = '';
+  const buttons = getButtonOrder();
+
+  buttons.forEach(btn => {
+    const el = document.createElement('button');
+    el.className = 'grid-btn';
+    if (btn.style) btn.style.split(' ').forEach(c => el.classList.add(c));
+    el.dataset.btnId = btn.id;
+    el.textContent = btn.label;
+    grid.appendChild(el);
+    wireGridButton(el, btn);
+  });
+
+  initSortable();
+  initLayoutLock();
+}
+
+function wireGridButton(el, btn) {
+  if (btn.action === '_SELECT') {
+    // Select mode — special handling
+    el.addEventListener('touchstart', e => {
+      e.preventDefault();
+      if (layoutLocked) handleSelectToggle(el);
+    }, {passive:false});
+    return;
+  }
+
+  if (btn.holdScroll) {
+    // Hold-to-repeat scroll
+    let iv = null, holdTime = 0;
+    const start = () => {
+      if (!layoutLocked) return;
+      el.style.background = 'var(--accent)';
+      holdTime = 0;
+      const go = () => { holdTime += 100; sendCommand('SCROLL', 'scroll', {...btn.params, amount: String(holdTime<500?5:holdTime<1500?15:30)}); };
+      go(); iv = setInterval(go, 100);
+    };
+    const stop = () => { el.style.background = ''; if(iv){clearInterval(iv);iv=null;} };
+    el.addEventListener('touchstart', e => { e.preventDefault(); start(); }, {passive:false});
+    el.addEventListener('touchend', e => { e.preventDefault(); stop(); }, {passive:false});
+    el.addEventListener('touchcancel', stop);
+    return;
+  }
+
+  // Standard button
   el.addEventListener('touchstart', e => {
     e.preventDefault();
-    el.style.background='var(--accent)';
-    sendCommand(action, el.textContent.trim(), params);
-    setTimeout(()=>el.style.background='',150);
+    if (!layoutLocked) return; // Don't fire commands in edit mode
+    el.style.background = 'var(--accent)';
+    sendCommand(btn.action, el.textContent.trim(), btn.params);
+    setTimeout(() => el.style.background = '', 150);
   }, {passive:false});
 }
 
-function wireScroll(id, params) {
-  const el = document.getElementById(id);
-  if(!el) return;
-  let iv=null, holdTime=0;
-  const start = () => { el.style.background='var(--accent)'; holdTime=0; const go=()=>{holdTime+=100;sendCommand('SCROLL','scroll',{...params,amount:String(holdTime<500?5:holdTime<1500?15:30)});}; go(); iv=setInterval(go,100); };
-  const stop = () => { el.style.background=''; if(iv){clearInterval(iv);iv=null;} };
-  el.addEventListener('touchstart',e=>{e.preventDefault();start();},{passive:false});
-  el.addEventListener('touchend',e=>{e.preventDefault();stop();},{passive:false});
-  el.addEventListener('touchcancel',stop);
+function initSortable() {
+  const grid = document.getElementById('sortable-grid');
+  sortableInstance = new Sortable(grid, {
+    animation: 200,
+    delay: 300,
+    delayOnTouchOnly: true,
+    ghostClass: 'sortable-ghost',
+    chosenClass: 'sortable-chosen',
+    disabled: true, // Start locked
+    onEnd: () => saveButtonOrder(),
+  });
 }
 
-// ============================================================================
-// SELECT MODE
-// ============================================================================
+function initLayoutLock() {
+  const lockBtn = document.getElementById('layout-lock');
+  const resetBtn = document.getElementById('layout-reset');
+  const grid = document.getElementById('sortable-grid');
+
+  lockBtn.addEventListener('click', () => {
+    layoutLocked = !layoutLocked;
+    sortableInstance.option('disabled', layoutLocked);
+    grid.classList.toggle('editing', !layoutLocked);
+    lockBtn.textContent = layoutLocked ? '🔒 Locked' : '🔓 Editing';
+    lockBtn.style.borderColor = layoutLocked ? 'var(--surface2)' : 'var(--accent)';
+    lockBtn.style.color = layoutLocked ? 'var(--text2)' : 'var(--accent)';
+    resetBtn.style.display = layoutLocked ? 'none' : 'inline-block';
+  });
+
+  resetBtn.addEventListener('click', () => {
+    localStorage.removeItem('da_btn_order');
+    renderCommands();
+    showStatus('Layout reset to default', 2000);
+  });
+}
+
+// Select mode (preserved from before)
 let selectMode = false, selectTimer = null;
 
-function initSelectButton() {
-  const btn = document.getElementById('select-toggle');
-  btn.addEventListener('touchstart', e => {
-    e.preventDefault();
-    if(!selectMode) {
-      selectMode = true;
-      btn.style.background='var(--accent)'; btn.style.borderColor='var(--accent)'; btn.style.color='#fff';
-      btn.textContent='⬛ Selecting — tap to stop';
-      sendCommand('MOUSEDOWN','mousedown');
-      selectTimer = setTimeout(()=>{ if(selectMode) toggleSelectOff(); }, 10000);
-    } else {
-      toggleSelectOff();
-    }
-  }, {passive:false});
+function handleSelectToggle(btn) {
+  if (!selectMode) {
+    selectMode = true;
+    btn.style.background = 'var(--accent)'; btn.style.borderColor = 'var(--accent)'; btn.style.color = '#fff';
+    btn.textContent = '⬛ Stop';
+    sendCommand('MOUSEDOWN', 'mousedown');
+    selectTimer = setTimeout(() => { if(selectMode) toggleSelectOff(); }, 10000);
+  } else {
+    toggleSelectOff();
+  }
 }
 
 function toggleSelectOff() {
   selectMode = false; clearTimeout(selectTimer);
-  const btn = document.getElementById('select-toggle');
-  btn.style.background='var(--surface)'; btn.style.borderColor='var(--surface2)'; btn.style.color='var(--text)';
-  btn.textContent='⬚ Select Mode';
-  sendCommand('MOUSEUP','mouseup');
+  const btn = document.querySelector('[data-btn-id="select"]');
+  if (btn) {
+    btn.style.background = ''; btn.style.borderColor = ''; btn.style.color = '';
+    btn.textContent = '⬚ Select';
+  }
+  sendCommand('MOUSEUP', 'mouseup');
 }
 
-// ============================================================================
-// COPY / PASTE (debounced, touchstart only)
-// ============================================================================
-function initCopyPaste() {
-  let last = 0;
-  document.getElementById('copy-btn').addEventListener('touchstart', e => {
-    e.preventDefault(); e.stopPropagation();
-    if(Date.now()-last<600) return; last=Date.now();
-    sendCommand('HOTKEY','Copy',{keys:'ctrl,c'});
-    showStatus('Copied', 1500);
-  }, {passive:false});
-  document.getElementById('paste-btn').addEventListener('touchstart', e => {
-    e.preventDefault(); e.stopPropagation();
-    if(Date.now()-last<600) return; last=Date.now();
-    sendCommand('HOTKEY','Paste',{keys:'ctrl,v'});
-    showStatus('Pasted', 1500);
-  }, {passive:false});
-}
+// Copy/Paste debounce is now handled by the grid button wiring (HOTKEY with ctrl,c / ctrl,v)
+
+// (Select mode and Copy/Paste are now handled by the sortable grid above)
 
 // ============================================================================
-// TRACKPAD — minimal latency, no throttle on moves, coalesced touches
+// TRACKPAD — minimal latency, no throttle on moves
 // ============================================================================
 function initTrackpad() {
   const area = document.getElementById('trackpad-area');
+  if(!area) { console.error('trackpad-area not found!'); return; }
   let tracking = false, lastX=0, lastY=0, moved=false, startTime=0, fingerCount=0;
 
-  area.addEventListener('touchstart', e => {
+  area.addEventListener('pointerdown', e => {
     e.preventDefault();
-    fingerCount = e.touches.length;
-    lastX = e.touches[0].clientX;
-    lastY = e.touches[0].clientY;
+    area.style.background = 'var(--surface2)';
+    try { area.setPointerCapture(e.pointerId); } catch(ex) {}
+    fingerCount = 1;
+    lastX = e.clientX;
+    lastY = e.clientY;
     tracking = true;
     moved = false;
     startTime = Date.now();
-  }, {passive:false});
+  });
 
-  area.addEventListener('touchmove', e => {
+  area.addEventListener('pointermove', e => {
+    if(!tracking) return;
     e.preventDefault();
-    if(!tracking || !e.touches.length) return;
 
-    // Use coalesced touches for smoother tracking (Safari 16.4+)
-    const touches = (e.getCoalescedEvents && e.getCoalescedEvents()) || [e];
-    let totalDx = 0, totalDy = 0;
+    const rawDx = e.clientX - lastX;
+    const rawDy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
 
-    for(const te of touches) {
-      const t = te.touches ? te.touches[0] : e.touches[0];
-      if(!t) continue;
-      totalDx += t.clientX - lastX;
-      totalDy += t.clientY - lastY;
-      lastX = t.clientX;
-      lastY = t.clientY;
-    }
+    if(Math.abs(rawDx)>80 || Math.abs(rawDy)>80) return;
 
-    // If coalesced events didn't work, fall back to simple delta
-    if(touches.length <= 1) {
-      const t = e.touches[0];
-      totalDx = t.clientX - lastX;
-      totalDy = t.clientY - lastY;
-      lastX = t.clientX;
-      lastY = t.clientY;
-    }
-
-    // Skip large jumps from finger count changes
-    if(Math.abs(totalDx)>80 || Math.abs(totalDy)>80) return;
-
-    const dx = Math.round(totalDx * settings.trackpadSpeed);
-    const dy = Math.round(totalDy * settings.trackpadSpeed);
+    const dx = Math.round(rawDx * settings.trackpadSpeed);
+    const dy = Math.round(rawDy * settings.trackpadSpeed);
     if(dx===0 && dy===0) return;
 
     moved = true;
+    send({type:'trackpad', event:'move', dx, dy});
+  });
 
-    if(e.touches.length >= 2) {
-      const dir = Math.abs(dy)>=Math.abs(dx) ? (dy>0?'down':'up') : (dx>0?'right':'left');
-      send({type:'trackpad', event:'scroll', direction:dir, clicks:3});
-    } else {
-      send({type:'trackpad', event:'move', dx, dy});
-    }
-  }, {passive:false});
-
-  area.addEventListener('touchend', e => {
+  area.addEventListener('pointerup', e => {
     e.preventDefault();
-    if(e.touches.length > 0) {
-      lastX = e.touches[0].clientX;
-      lastY = e.touches[0].clientY;
-      fingerCount = e.touches.length;
-      return;
-    }
+    area.style.background = 'var(--surface)';
     tracking = false;
     if(!moved && (Date.now()-startTime)<250) {
       msgCounter++;
-      const button = fingerCount>=2 ? 'right' : 'left';
-      send({type:'trackpad', id:`tp-${msgCounter}`, event:'tap', button});
+      send({type:'trackpad', id:`tp-${msgCounter}`, event:'tap', button:'left'});
     }
-    fingerCount = 0;
     moved = false;
-  }, {passive:false});
+  });
 
-  area.addEventListener('touchcancel', () => { tracking=false; fingerCount=0; moved=false; }, {passive:false});
+  area.addEventListener('pointercancel', () => { tracking=false; moved=false; area.style.background='var(--surface)'; });
+
+  // Fallback: also listen for touchmove in case pointermove doesn't fire on iOS
+  area.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if(!tracking) return;
+    const t = e.touches[0];
+    if(!t) return;
+
+    const rawDx = t.clientX - lastX;
+    const rawDy = t.clientY - lastY;
+    lastX = t.clientX;
+    lastY = t.clientY;
+
+    if(Math.abs(rawDx)>80 || Math.abs(rawDy)>80) return;
+
+    const dx = Math.round(rawDx * settings.trackpadSpeed);
+    const dy = Math.round(rawDy * settings.trackpadSpeed);
+    if(dx===0 && dy===0) return;
+
+    moved = true;
+    send({type:'trackpad', event:'move', dx, dy});
+  }, {passive:false});
 }
 
 // ============================================================================
@@ -431,8 +505,6 @@ document.addEventListener('DOMContentLoaded', () => {
   renderKeypad();
   renderSettings();
   initTrackpad();
-  initSelectButton();
-  initCopyPaste();
   initPickupDetection();
   connect();
   setTimeout(()=>{ if(settings.keywordEnabled) startKeywords(); }, 1000);
