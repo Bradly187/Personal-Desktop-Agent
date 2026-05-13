@@ -70,15 +70,22 @@ final class SoundDetector {
         // Compute magnitude spectrum
         var real = [Float](repeating: 0, count: fftSize / 2)
         var imag = [Float](repeating: 0, count: fftSize / 2)
-        var split = DSPSplitComplex(realp: &real, imagp: &imag)
-
-        channelData.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { ptr in
-            vDSP_ctoz(ptr, 2, &split, 1, vDSP_Length(fftSize / 2))
-        }
-        vDSP_fft_zrip(fftSetup!, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
-
         var magnitudes = [Float](repeating: 0, count: fftSize / 2)
-        vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(fftSize / 2))
+
+        real.withUnsafeMutableBufferPointer { realBuf in
+            imag.withUnsafeMutableBufferPointer { imagBuf in
+                var split = DSPSplitComplex(realp: realBuf.baseAddress!, imagp: imagBuf.baseAddress!)
+
+                channelData.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { ptr in
+                    vDSP_ctoz(ptr, 2, &split, 1, vDSP_Length(fftSize / 2))
+                }
+                vDSP_fft_zrip(fftSetup!, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
+
+                magnitudes.withUnsafeMutableBufferPointer { magBuf in
+                    vDSP_zvmags(&split, 1, magBuf.baseAddress!, 1, vDSP_Length(fftSize / 2))
+                }
+            }
+        }
 
         let sound = classify(magnitudes: magnitudes)
         guard let sound else { return }
