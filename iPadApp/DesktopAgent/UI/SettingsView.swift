@@ -77,6 +77,14 @@ struct SettingsView: View {
                     }
                 }
 
+                // Audio Streaming
+                Section("Audio Streaming") {
+                    Toggle("Stream mic to PC (Whisper)", isOn: $settings.audioStreamEnabled)
+                    Text("Sends iPad microphone audio to the PC for full voice command processing via Whisper large-v3.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 // Sound mappings
                 Section("Sound Mappings") {
                     ForEach(Array(settings.soundMappings.keys.sorted()), id: \.self) { sound in

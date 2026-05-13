@@ -16,7 +16,7 @@ Message types — 13 total:
   sound_action      →  FusionEngine.on_sound_action() (when wired)
   depth_frame       →  LiDARReceiver.on_depth_frame() (when wired)
   camera_frame      →  GestureProcessor.on_camera_frame() (when wired)
-  audio_stream      →  WhisperStream (not yet built — logged and ignored)
+  audio_stream      →  WhisperStream.on_audio_chunk() (VAD + Whisper transcription)
 
 Usage:
   python ipad_bridge.py [--port 8765] [--no-mdns] [--debug]
@@ -347,12 +347,10 @@ class IPadBridge:
 
             elif event == "tap":
                 button = msg.get("button", "left")
-                from tools import mouse as mouse_tools
-                cx, cy = pyautogui.position()
-                result = await asyncio.to_thread(
-                    mouse_tools.mouse_click, cx, cy, button=button
-                )
-                return {"status": "ok", "result": result}
+                # Click in place — no moveTo, no coordinate lookup.
+                # pyautogui.click() without x,y clicks at current cursor position.
+                pyautogui.click(button=button, _pause=False)
+                return {"status": "ok"}
 
             elif event == "scroll":
                 direction = msg.get("direction", "down")
@@ -475,10 +473,14 @@ class IPadBridge:
             port=self.port,
             properties={"version": "1", "name": "Personal Desktop Agent"},
         )
-        self._zeroconf = Zeroconf()
-        self._zeroconf.register_service(info)
-        log.info("mDNS: %s._desktop-agent._tcp.local. → %s:%d",
-                 hostname, local_ip, self.port)
+        try:
+            self._zeroconf = Zeroconf()
+            self._zeroconf.register_service(info)
+            log.info("mDNS: %s._desktop-agent._tcp.local. → %s:%d",
+                     hostname, local_ip, self.port)
+        except Exception as exc:
+            log.warning("mDNS registration failed (non-fatal): %s", exc)
+            self._zeroconf = None
 
     def _stop_mdns(self) -> None:
         if self._zeroconf:

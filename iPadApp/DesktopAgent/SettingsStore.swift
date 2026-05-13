@@ -56,6 +56,11 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(keywordList, forKey: "keywordList") }
     }
 
+    // MARK: — Audio Streaming (iPad mic → PC Whisper)
+    @Published var audioStreamEnabled: Bool {
+        didSet { defaults.set(audioStreamEnabled, forKey: "audioStreamEnabled") }
+    }
+
     // MARK: — Sound mappings  {"cluck": "CLICK", "pop": "SCROLL down", ...}
     @Published var soundMappings: [String: String] {
         didSet {
@@ -91,6 +96,7 @@ final class SettingsStore: ObservableObject {
         trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 2.0
         palmRejectRadius = defaults.double(forKey: "palmRejectRadius").nonZero ?? 25.0
         keywordList = defaults.stringArray(forKey: "keywordList") ?? ["click", "scroll", "open"]
+        audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false
 
         if let data = defaults.data(forKey: "soundMappings"),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
