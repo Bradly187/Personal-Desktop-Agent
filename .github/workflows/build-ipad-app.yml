@@ -173,17 +173,21 @@ jobs:
           APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           APP_STORE_CONNECT_API_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write the API key file (preserve newlines)
-          mkdir -p ~/.private_keys
-          printf '%s\n' "$APP_STORE_CONNECT_API_KEY" > ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          # Write the API key file to both discovery locations
+          mkdir -p ~/.appstoreconnect/private_keys ~/.private_keys
+          echo "$APP_STORE_CONNECT_API_KEY" > ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          cp ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8 ~/.appstoreconnect/private_keys/
 
-          # Use xcrun altool with explicit key path
+          # Debug: verify key file exists and has content
+          echo "Key file size:"
+          wc -c ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+          head -1 ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+
           xcrun altool --upload-app \
             --type ios \
             --file $RUNNER_TEMP/export/DesktopAgent.ipa \
             --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID" \
-            --private-key ~/.private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
+            --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID"
 
           echo "✅ Uploaded to TestFlight! Check App Store Connect for processing status."
 
