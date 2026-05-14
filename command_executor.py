@@ -13,6 +13,7 @@ the same tool functions that Claude calls are called here in-process.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import subprocess
 import sys
@@ -152,11 +153,40 @@ class CommandExecutor:
             return keyboard.keyboard_paste(cmd.text)
 
         # ------------------------------------------------------------------ #
-        # SCREENSHOT — capture the desktop and return base64 PNG
+        # SCREENSHOT — capture the active window (or explicit region)
         # ------------------------------------------------------------------ #
         if action == "SCREENSHOT":
             region = p.get("region")  # optional {"left","top","width","height"}
-            return screen.screenshot(region=region)
+            if not region:
+                # Default: capture the active window
+                from tools import windows as win_tools
+                win = win_tools.get_active_window()
+                if win.get("width") and win.get("height"):
+                    region = {
+                        "left": win["x"],
+                        "top": win["y"],
+                        "width": win["width"],
+                        "height": win["height"],
+                    }
+            result = screen.screenshot(region=region)
+            # Copy to Windows clipboard so user can Ctrl+V
+            try:
+                import base64
+                from PIL import Image
+                import win32clipboard
+                img_bytes = base64.b64decode(result["image_base64"])
+                img = Image.open(io.BytesIO(img_bytes))
+                # Convert to BMP for clipboard (strip 14-byte BMP file header)
+                bmp_buf = io.BytesIO()
+                img.save(bmp_buf, format="BMP")
+                bmp_data = bmp_buf.getvalue()[14:]  # skip BITMAPFILEHEADER
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp_data)
+                win32clipboard.CloseClipboard()
+            except Exception as exc:
+                log.warning("Failed to copy screenshot to clipboard: %s", exc)
+            return result
 
         # ------------------------------------------------------------------ #
         # CLARIFY — nothing to execute; caller should prompt user
@@ -228,12 +258,12 @@ class CommandExecutor:
 
     @staticmethod
     def _resolve_coords(cmd: Command) -> tuple[int, int]:
-        """Return (x, y) from explicit params → gaze coords → screen centre."""
+        """Return (x, y) from explicit params → gaze coords → current cursor position."""
         p = cmd.params
         if "x" in p and "y" in p:
             return int(p["x"]), int(p["y"])
         if cmd.gaze_coords:
             return cmd.gaze_coords
-        # Fall back to centre of primary monitor
-        size = screen.get_screen_size()
-        return size["width"] // 2, size["height"] // 2
+        # Fall back to current cursor position (click where the user is looking/pointing)
+        import pyautogui
+        return pyautogui.position()

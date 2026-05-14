@@ -45,6 +45,11 @@ targets:
         NSMicrophoneUsageDescription: "Used for voice keyword detection."
         NSSpeechRecognitionUsageDescription: "Used for on-device keyword matching."
         NSMotionUsageDescription: "Used for tilt-based cursor control."
+        NSLocalNetworkUsageDescription: "Connects to the Desktop Agent bridge on your local network."
+        NSBonjourServices:
+          - "_desktop-agent._tcp"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         INFOPLIST_FILE: Info.plist

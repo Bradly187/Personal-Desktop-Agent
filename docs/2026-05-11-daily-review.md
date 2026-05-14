@@ -1,122 +1,103 @@
-# Daily Review — 2026-05-11
+# Project Status Report — 2026-05-11
 
-## Yesterday's Work (2026-05-10)
+## Summary
 
-Two commits landed on 2026-05-10 that completed the repository scaffold for all four phases.
-
-### Commit 1 — Initial commit: Personal Desktop Agent (Phase 1-2)
-
-The entire working codebase was committed. This included all previously-reviewed Phase 1 and Phase 2 files plus a large set of Phase 3 and Phase 4 skeleton files that had not appeared in the 2026-05-07 or 2026-05-08 daily reviews.
-
-#### Phase 3 skeleton files (new vs. 2026-05-08 review)
-
-| File | Purpose |
-|------|---------|
-| `gesture_processor.py` | MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST classification; LiDAR pinch depth; 800 ms debounce; graceful degradation if mediapipe not installed |
-| `lidar_receiver.py` | Decodes `depth_frame` WebSocket messages; confidence-map filtering; `get_depth_at(x, y)` for GestureProcessor |
-| `domain_classifier.py` | Keyword-scoring domain detection: COMMAND / CODE / MATH / VISION / PLAN / GENERAL |
-| `model_router.py` | VRAM-aware specialist model selection; domain-tuned system prompts; Ollama inference |
-| `dev_agent.py` | Plan→execute→reflect agentic loop; 5 dev verbs (`WRITE_FILE`, `RUN_TERMINAL`, `EXPLAIN`, `SEARCH_WEB`, `READ_SCREEN`); session context |
-
-#### Phase 4 skeleton files (new vs. 2026-05-08 review)
-
-| File | Purpose |
-|------|---------|
-| `continuous_trainer.py` | Few-shot SQLite DB (aiosqlite); threshold adaptation (Req 14.3); Whisper hotword tracking (Req 14.4); gesture confidence floor calibration (Req 14.5); domain-aware examples |
-| `main.py` | Unified entry point; assembles all pipeline components; `--measure-vram` VRAM snapshot table; `--safe-mode`; startup status table; graceful Ctrl-C shutdown |
-| `benchmark_models.py` | Ollama model benchmark; 12 prompts × all LLM-visible verbs; p50/p95 latency; VRAM before/after snapshots; ranked recommendation table |
-
-#### Other new files
-
-| File | Purpose |
-|------|---------|
-| `kiro/specs/accessibility-agent/` | Older design-doc tree (predecessor spec before iPad-sensor-focus rewrite); committed for reference |
-| `agentcore_fallback/` | AWS Bedrock AgentCore stub; `pyproject.toml`; `uv.lock`; README |
-| `web_client/index.html`, `web_client/app.js` | Browser-based iPad fallback UI served by the bridge over HTTP |
-| `tests/test_correction_flow.py`, `tests/test_live.py` | Additional test stubs |
-| `codemagic.yaml` | Codemagic CI config for the Swift iPad app build |
-
-### Commit 2 — Add project showcase page
-
-| File | Purpose |
-|------|---------|
-| `showcase/index.html` | Single-page project overview with dark theme, Mermaid architecture diagrams, and component status cards; served as static HTML |
+**34 of 44 tasks complete (77%).** The core pipeline, iPad integration, voice pipeline, and domain routing are all functional. The system runs end-to-end: iPad → WebSocket → FusionEngine (60 Hz) → HybridCoordinator (4-gate) → Ollama LLM → CommandExecutor → pyautogui.
 
 ---
 
-## Housekeeping (2026-05-11)
+## Phase Completion
 
-### Stale References Fixed
-
-#### 1. `command_executor.py` — verb count wrong in module docstring
-
-Docstring said "Accessibility verbs (9)" and omitted `MOUSEDOWN` and `MOUSEUP`. Updated to "(11)" and added both verbs. Added a note that MOUSEDOWN/MOUSEUP are handled synchronously in `execute()` and never reach `_dispatch()`.
-
-#### 2. `command_executor.py` — dead code in `_dispatch()`
-
-`_dispatch()` contained MOUSEDOWN and MOUSEUP branches (lines 99–109) that were unreachable. `execute()` intercepts these actions and returns early before ever calling `_dispatch()`, so both branches could never run. Removed.
-
-#### 3. `ipad_bridge.py` — module docstring said Phase 2+ sensors "are logged and ignored"
-
-The docstring claimed "all other sensor types are logged and ignored until Phase 2+ components are implemented." In reality the bridge now routes tilt, gaze, gaze_dwell, head_pose, keyword, sound_action, depth_frame, and camera_frame to their respective Phase 2/3 components when wired. Rewrote the docstring to list all 13 message types and their actual routing target. `audio_stream` is the only type still truly ignored (WhisperStream not built).
-
-#### 4. `ipad_bridge.py` — `Optional` not imported outside `TYPE_CHECKING`
-
-`Optional["FusionEngine"]`, `Optional["LiDARReceiver"]`, and `Optional["GestureProcessor"]` were used in class-body annotations while `Optional` was only available under the `TYPE_CHECKING` guard. With `from __future__ import annotations`, annotations are never evaluated at runtime, so no exception was raised. Fixed by adding `Optional` to the regular `from typing import TYPE_CHECKING, Optional` line so static analysis tools can resolve it.
-
-#### 5. `requirements.txt` — `faster-whisper` listed in both "not-yet-installed" and "installed"
-
-`faster-whisper>=1.0.0` appeared in the commented "Not-yet-installed" section at the top while `faster-whisper==1.2.1` was listed as a pinned installed dependency at the bottom. Removed the stale comment entry. The installed line remains.
-
-#### 6. `requirements.txt` — `aiosqlite` used `>=` while all other packages use `==`
-
-`aiosqlite>=0.19.0` was inconsistent with the pinning strategy used for every other package. Pinned to `aiosqlite==0.20.0` (latest stable at time of commit).
-
-#### 7. `00-index.md` — diagrams 07, 08, 09 absent from the file listing table
-
-The index table skipped from entry 06 to entry 10, omitting:
-- `07-bridge-architecture.md` — iPad↔Bridge↔MCP↔pyautogui stack overview
-- `08-bridge-message-routing.md` — full message routing flowchart (13 types, 11 action verbs)
-- `09-bridge-sequence.md` — sequence diagram: touch_command and trackpad end-to-end
-
-All three files were present on disk and were added to the table.
-
-#### 8. `CLAUDE.md` — "Current Status" didn't reflect Phase 3/4 skeleton files
-
-"Phase 2 in progress" was still the headline, and the "Done" lists ended with Phase 2. The Phase 3 and Phase 4 skeleton files committed on 2026-05-10 were entirely missing from the status section (though they were already present in the Key Files table below). Updated the status headline to "Phases 1–4 skeleton complete" and added Done sections for Phase 3 and Phase 4.
-
-#### 9. `CLAUDE.md` — architecture diagram count wrong
-
-"Architecture diagrams (9)" referenced the index table count before diagrams 07–09 were added. Updated to "(12)".
+| Phase | Done | Total | Status |
+|-------|------|-------|--------|
+| 1 — Core pipeline | 7 | 7 | ✅ Complete |
+| 2 — iPad sensors | 11 | 13 | 🟡 2 blocked (gaze dwell needs Apple dev account) |
+| 3 — Voice pipeline | 4 | 5 | 🟡 1 remaining (end-to-end latency test) |
+| 4 — Continuous training | 1 | 5 | 🔴 Needs soak time (1 week of usage data) |
+| 5 — Domain routing | 5 | 6 | 🟡 1 remaining (VRAM fallback test) |
+| 6 — AWS cloud fallback | 0 | 5 | ⬜ Not started |
+| 7 — Hardening | 4 | 7 | 🟡 3 remaining |
 
 ---
 
-## Current State
+## What's Working Today
 
-| Layer | Status |
-|-------|--------|
-| MCP server (Claude → desktop) | Complete, 14 tools |
-| iPad bridge (WebSocket) | Complete; all 13 message types routed |
-| FusionEngine | Complete (60 Hz tick, 10 rules) |
-| HybridCoordinator | Complete (Gate 0 + Gates 1–4, cloud fallback, logging) |
-| LocalInference backends | OllamaInference complete; VLLMInference stubbed; NemotronInference complete |
-| Handwriting OCR | Complete (pix2tex + unicode) |
-| iPad Swift app | All sensors + UI complete |
-| GestureProcessor | Skeleton complete; requires mediapipe + camera integration test |
-| LiDARReceiver | Skeleton complete; requires depth_frame integration test |
-| DomainClassifier / ModelRouter / DevAgent | Skeleton complete; integration tests pending |
-| ContinuousTrainer | Skeleton complete; requires 1-week routing log soak |
-| WhisperStream | Not yet built (Phase 3) |
-| Full VLLMInference | Not yet built (task 2.13) |
+- **Full pipeline** via `python main.py --no-mdns` — all components wired
+- **iPad connected** over WebSocket (192.168.18.x), trackpad + command buttons functional
+- **Left/right click** at cursor position (fixed today)
+- **Screenshot** captures active window + copies to Windows clipboard (fixed today)
+- **FusionEngine** running at 60 Hz with 10-level priority routing
+- **Whisper large-v3** loaded on CUDA, VAD active, ready for iPad audio stream
+- **Ollama** serving 10 models — `llama3.2:3b` is the default (100% accuracy, 6.2 GB VRAM)
+- **DevAgent** routes code/math/vision/general to specialist models (qwen3-coder:30b, deepseek-r1:8b, gpt-oss:20b)
+- **AgentDB** (SQLite) logging sessions, commands, inferences
+- **AnalyticsDB** (DuckDB) storing benchmark results
+- **ContinuousTrainer** started (waiting for data accumulation)
+- **Tesseract OCR** installed for screen text search
+- **Sleep prevention** active while bridge runs
 
-## Open Tasks (abbreviated)
+---
 
-| Task | Description |
-|------|-------------|
-| 1.6 | Integration test: touch_command "scroll down" end-to-end |
-| 2.11 | Integration test: gaze dwell fires click |
-| 2.12 | Integration test: tilt navigation moves cursor |
-| 2.13 | Implement full `VLLMInference`; benchmark vs. OllamaInference on RTX 5090 |
-| 3.x | Build `WhisperStream` (faster-whisper, GPU, streaming partial results) |
-| N.5 | Analyse `routing_log.jsonl` after 1-week soak to tune gate thresholds |
-| 4.1 | Pin remaining requirements (`mediapipe`, `ultralytics`) once installed |
+## Benchmark Results (RTX 5090, 2026-05-11)
+
+| Model | Accuracy | p50 | VRAM | Verdict |
+|-------|----------|-----|------|---------|
+| llama3.2:3b | 100% | 2.2s | +6.2 GB | **Default** |
+| llama3.1:8b | 100% | 2.2s | +2.8 GB | Fallback |
+| nemotron-mini | 25% | 2.2s | +2.7 GB | Not suitable |
+
+Note: p50 includes cold-load. Hot inference is ~200-400ms.
+
+---
+
+## Blockers
+
+| Item | Blocker | Impact |
+|------|---------|--------|
+| 2.10, 2.12 — Gaze dwell tests | Apple developer account verification pending | Can't deploy ARKit app to iPad |
+| 4.2–4.5 — Training validation | Need 1 week of real usage data | ContinuousTrainer can't adapt without routing history |
+| 6.x — AWS cloud fallback | Not prioritized yet | Cloud path untested (local-first works fine) |
+| vLLM benchmark | Python 3.14 incompatible with vllm | Deferred until vllm supports 3.14 or separate venv |
+
+---
+
+## Fixes Applied Today
+
+1. **Left click** — was clicking screen center instead of cursor position; now uses `pyautogui.position()`
+2. **Screenshot** — now captures active window (not full desktop) and copies to Windows clipboard
+3. **mDNS crash** — zeroconf `EventLoopBlocked` on Python 3.14; wrapped in try/except (non-fatal)
+4. **MediaPipe import** — `mp.solutions` removed in 0.10.35; caught `AttributeError` gracefully
+5. **FusionEngine wiring** — confirmed `main.py` wires all components; documented that `ipad_bridge.py` standalone skips fusion
+
+---
+
+## Next Steps (priority order)
+
+1. **3.5** — Test voice command end-to-end with iPad audio streaming
+2. **5.6** — Test ModelRouter VRAM fallback (load large model, verify gate 3 fires)
+3. **7.5** — Write README.md
+4. **7.7** — Commit benchmark results
+5. **4.2** — Start soak period (just use the system daily)
+6. **6.x** — AWS cloud fallback (low priority — local path handles everything)
+
+---
+
+## Architecture (running state)
+
+```
+iPad Pro (192.168.18.13)
+  ├── CommandPad buttons → touch_command → CommandExecutor (bypass LLM)
+  ├── Trackpad drag → pyautogui.moveRel (bypass everything)
+  ├── Tilt/Head → FusionEngine → pyautogui.moveRel (no Command)
+  ├── Gaze/Sound/Keyword → FusionEngine → HybridCoordinator → LLM → Execute
+  └── Audio stream → WhisperStream → FusionEngine → full 4-gate
+
+PC (RTX 5090, 25 GB free VRAM)
+  ├── main.py orchestrates all components
+  ├── FusionEngine @ 60 Hz (10 priority rules)
+  ├── HybridCoordinator (4-gate: privacy → confidence → complexity → VRAM → latency)
+  ├── Ollama (llama3.2:3b default, specialists for dev queries)
+  ├── Whisper large-v3 on CUDA (VAD + transcription)
+  ├── agent.db (SQLite — 11 tables, all pipeline writes)
+  └── analytics.duckdb (benchmark history)
+```

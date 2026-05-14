@@ -511,7 +511,7 @@ class IPadBridge:
 
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", self.port)
+        site = web.TCPSite(runner, "0.0.0.0", self.port, reuse_address=True)
         await site.start()
 
         log.info("Bridge listening on :%d  (ws://0.0.0.0:%d/ws)", self.port, self.port)

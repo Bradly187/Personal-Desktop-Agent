@@ -1,7 +1,7 @@
 # Database Schema Diagrams
 
 Two stores make up the persistence layer:
-- **`agent.db`** (SQLite) — all operational pipeline writes; 11 tables
+- **`agent.db`** (SQLite) — all operational pipeline writes; 12 tables
 - **`analytics.duckdb`** (DuckDB) — benchmark history; attaches `agent.db` for OLAP queries
 
 ---
@@ -255,8 +255,8 @@ flowchart TD
     MR -->|"INSERT after specialist infer"| I
 
     BM["benchmark_models.py\n(offline, sync)"] -->|"INSERT run + results + prompts"| BR
-    BM -->|""| BRE
-    BM -->|""| BP
+    BM --> BRE
+    BM --> BP
 
     style agentdb fill:#1a3a5c,color:#fff
     style analyticsdb fill:#2d1a5c,color:#fff
