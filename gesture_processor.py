@@ -43,12 +43,12 @@ log = logging.getLogger(__name__)
 try:
     import mediapipe as mp
     import numpy as np
-    _MP_AVAILABLE = True
     _hands_solution = mp.solutions.hands
-except ImportError:
+    _MP_AVAILABLE = True
+except (ImportError, AttributeError):
     _MP_AVAILABLE = False
     log.warning(
-        "mediapipe not installed — GestureProcessor disabled. "
+        "mediapipe not installed or incompatible — GestureProcessor disabled. "
         "Install with: pip install mediapipe"
     )
 

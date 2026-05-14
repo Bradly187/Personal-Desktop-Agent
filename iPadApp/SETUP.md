@@ -27,7 +27,7 @@ Delete the auto-generated `ContentView.swift` and `DesktopAgentApp.swift` that X
 
 | Capability | Why |
 |---|---|
-| Background Modes → Audio | KeywordListener mic continues in background |
+| Background Modes → Audio | KeywordListener + AudioStreamer mic continues in background |
 | Speech Recognition | SFSpeechRecognizer |
 | Camera | ARKit face tracking |
 | Motion Usage | Core Motion tilt |
@@ -39,7 +39,7 @@ Add these usage description strings:
 
 ```
 NSCameraUsageDescription         = "Used for gaze and head tracking."
-NSMicrophoneUsageDescription     = "Used for voice keyword detection."
+NSMicrophoneUsageDescription     = "Used for voice keyword detection and audio streaming to PC."
 NSSpeechRecognitionUsageDescription = "Used for on-device keyword matching."
 NSMotionUsageDescription         = "Used for tilt-based cursor control."
 ```
@@ -51,6 +51,14 @@ NSMotionUsageDescription         = "Used for tilt-based cursor control."
 - AVFoundation
 - Speech
 - PencilKit
+
+## Settings
+
+All sensor preferences are persisted in `UserDefaults` via `SettingsStore.swift`. Notable toggles:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `audioStreamEnabled` | `false` | When enabled, streams iPad mic audio to the PC for Whisper large-v3 transcription. Requires the Background Modes → Audio capability. |
 
 ## Build Options
 

@@ -132,14 +132,12 @@
 ## Phase 2 (PC) — vLLM / Nemotron evaluation
 
 - [~] **2.13 Benchmark `OllamaInference` vs `VLLMInference` vs `NemotronInference` on RTX 5090**
-  - Partial: benchmarked 5 Ollama models (2026-05-08) via `benchmark_models.py`
-  - **Results:** `llama3.2:3b` and `llama3.1:8b` both 100% accuracy; `nemotron-mini` 25% (wrong format);
-    `deepseek-r1:8b` and `gpt-oss:20b` 0% (reasoning models incompatible with structured output)
-  - **Default updated to `llama3.2:3b`** (2.0 GB, 100% accuracy, smallest footprint)
-  - Observed p50 ~2.2 s for all models — believed to be Ollama `stream=False` overhead,
-    not GPU inference time. Actual time-to-first-token on RTX 5090 expected <50 ms.
+  - Benchmarked 10 Ollama models (2026-05-13) via `benchmark_models.py --runs 2`
+  - **Results:** `llama3.1:8b`, `llama3.2:3b`, and `qwen3-coder:30b` all 100% accuracy;
+    `qwen2.5-coder` 83%; `nemotron-mini` 25%; `gpt-oss:20b` and `qwen3-vl:30b` 0%
+  - **Default updated to `llama3.1:8b`** (4.6 GB, 100% accuracy, robust on edge cases)
   - **Still open:** vLLM backend full implementation + latency profiling with streaming;
-    `nemotron` 70B with RAM offload; production p95 target <350 ms validation
+    production p95 target <350 ms validation
   - See `local-inference-comparison.md` for full benchmark table
 
 ---

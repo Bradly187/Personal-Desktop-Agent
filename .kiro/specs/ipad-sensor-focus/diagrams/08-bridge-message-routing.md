@@ -25,7 +25,7 @@ flowchart TD
     ACTION -- HOTKEY --> HOTKEY["hotkey(*keys)"]
     ACTION -- DICTATE --> DICTATE["keyboard_type(text)"]
     ACTION -- CLARIFY --> CLARIFY["no-op\nreturn message"]
-    ACTION -- SCREENSHOT --> SCREENSHOT["screen.screenshot(region?)\n→ ack + screenshot msg"]
+    ACTION -- SCREENSHOT --> SCREENSHOT["screen.screenshot(region)\ndefault: active window\n→ ack + screenshot msg"]
 
     TP --> TPEV{"trackpad\nevent?"}
     TPEV -- move --> MOVE["mouse_move(cx+dx, cy+dy)"]

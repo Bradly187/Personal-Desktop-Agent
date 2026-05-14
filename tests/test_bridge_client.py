@@ -63,6 +63,7 @@ TEST_MESSAGES = [
         "dx": 50,
         "dy": 0,
         "description": "Trackpad move cursor right 50px",
+        "expect_ack": False,
     },
     {
         "id": "t5",
@@ -71,6 +72,7 @@ TEST_MESSAGES = [
         "direction": "up",
         "clicks": 2,
         "description": "Trackpad scroll up",
+        "expect_ack": False,
     },
     {
         "id": "t6",
@@ -114,13 +116,24 @@ async def run_tests() -> int:
                 for test in TEST_MESSAGES:
                     desc = test["description"]
                     msg_id = test["id"]
-                    payload = {k: v for k, v in test.items() if k != "description"}
+                    expect_ack = test.get("expect_ack", True)
+                    payload = {k: v for k, v in test.items()
+                               if k not in ("description", "expect_ack")}
 
                     print(f"  [{msg_id}] {desc}")
                     print(f"        > sending: {json.dumps(payload)}")
 
                     await ws.send_json(payload)
                     start = time.perf_counter()
+
+                    # Trackpad events don't send acks (high-frequency, fire-and-forget)
+                    if not expect_ack:
+                        await asyncio.sleep(0.2)
+                        elapsed = (time.perf_counter() - start) * 1000
+                        print(f"        < (no ack expected — fire-and-forget)  ({elapsed:.0f} ms)")
+                        passed += 1
+                        print()
+                        continue
 
                     # Collect ack (and any status message that follows)
                     ack_received = False

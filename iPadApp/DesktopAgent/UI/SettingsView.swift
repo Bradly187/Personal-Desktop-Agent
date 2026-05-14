@@ -16,7 +16,10 @@ struct SettingsView: View {
                             .autocorrectionDisabled()
                     }
                     LabeledContent("Port") {
-                        TextField("8765", value: $settings.serverPort, format: .number)
+                        TextField("8765", text: Binding(
+                            get: { String(settings.serverPort) },
+                            set: { settings.serverPort = Int($0.filter(\.isWholeNumber)) ?? 8765 }
+                        ))
                             .multilineTextAlignment(.trailing)
                             .keyboardType(.numberPad)
                     }

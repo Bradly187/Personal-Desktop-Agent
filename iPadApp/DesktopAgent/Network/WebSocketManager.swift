@@ -114,6 +114,8 @@ final class WebSocketManager: ObservableObject {
                 }
                 try await self._receiveLoop(task: wsTask)
             } catch {
+                print("[WebSocketManager] Connection error: \(error.localizedDescription)")
+                print("[WebSocketManager] URL was: \(url)")
                 await MainActor.run {
                     self._handleDisconnect(error: error)
                 }

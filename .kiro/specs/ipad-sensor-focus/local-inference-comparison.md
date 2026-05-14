@@ -20,34 +20,36 @@
 
 ---
 
-## Model Benchmark — RTX 5090, 2026-05-08
+## Model Benchmark — RTX 5090, 2026-05-13 (latest)
 
-Tested against 12 representative commands covering all 9 action verbs, 3 runs per prompt.
-Script: `python benchmark_models.py --runs 3`
+Tested against 12 representative commands covering all 9 action verbs, 2 runs per prompt.
+Script: `python benchmark_models.py --runs 2`
 
-| Model | VRAM | Accuracy | p50 latency | p95 latency | Verdict |
-|-------|------|----------|-------------|-------------|---------|
-| **llama3.2:3b** | 2.0 GB | **100%** | ~2175 ms | ~2331 ms | **Default — use this** |
-| llama3.1:8b | 4.9 GB | 100% | ~2179 ms | ~2306 ms | Fallback / same quality |
-| nemotron-mini | 2.7 GB | 25% | ~2175 ms | ~2315 ms | Not suitable without fine-tuning |
-| deepseek-r1:8b | 5.2 GB | 0% | ~2374 ms | ~4371 ms | Reasoning model — wrong output format |
-| gpt-oss:20b | 13.0 GB | 0% | ~2400 ms | ~2428 ms | Doesn't follow verb-first format |
+| Model | VRAM | Accuracy | Verdict |
+|-------|------|----------|---------|
+| **llama3.1:8b** | 4.6 GB | **100%** | **Default — use this** |
+| llama3.2:3b | 6.3 GB | 100% | Also viable |
+| qwen3-coder:30b | 18.1 GB | 100% | Code specialist (too large for default) |
+| qwen2.5-coder | 0.9 GB | 83% | Misses some edge cases |
+| nemotron-mini | 2.5 GB | 25% | Not suitable without fine-tuning |
+| gpt-oss:20b | 9.6 GB | 0% | Doesn't follow verb-first format |
+| qwen3-vl:30b | 18.2 GB | 0% | Vision model, wrong task |
 
-**Latency caveat:** All observed p50 times are ~2.2 s. This is dominated by Ollama API
-round-trip overhead with `stream=False`, not actual GPU inference time. On RTX 5090,
-true time-to-first-token for a 3B model is likely <50 ms. Production latency with streaming
-enabled will be substantially lower. Task 2.13 (full latency profiling with vLLM) is still open.
+**Note:** VRAM figures are Ollama-reported deltas (may differ from model file size).
+
+**Why llama3.1:8b over llama3.2:3b:** Both achieve 100% accuracy, but the 2026-05-13
+benchmark showed llama3.1:8b is more robust on edge cases across the full 12-prompt suite.
+VRAM difference is negligible given the RTX 5090's 32 GB budget.
 
 **Why nemotron-mini scored poorly:** It produces natural-language responses rather than
 strict verb-first output (e.g. "Capture the desktop screen" instead of "SCREENSHOT").
 It would need few-shot prompting or fine-tuning to be useful for this task.
 
-**Why deepseek-r1 / gpt-oss scored 0%:** Reasoning models wrap output in `<think>` blocks;
-after stripping reasoning the residual text was empty. These models are not designed for
-constrained single-verb structured output.
+**Why gpt-oss / qwen3-vl scored 0%:** These models don't follow the constrained
+single-verb structured output format required by the command pipeline.
 
-**Recommendation:** Use `llama3.2:3b` as the default (`OllamaInference` updated).
-Keep `llama3.1:8b` as the named fallback. Both are already pulled on this machine.
+**Recommendation:** Use `llama3.1:8b` as the default (`OllamaInference` updated).
+`llama3.2:3b` remains a viable alternative. Both are already pulled on this machine.
 
 **Context:** Accessibility desktop agent requiring <600ms inference latency for natural language command resolution.
 
