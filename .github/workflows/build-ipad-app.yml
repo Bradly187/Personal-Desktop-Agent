@@ -139,25 +139,31 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write key file
+          # Write API key file
           KEY_DIR="$HOME/.private_keys"
           mkdir -p "$KEY_DIR"
           KEY_FILE="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
           echo "$ASC_PRIVATE_KEY" > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
 
-          # Use xcodebuild to upload (the modern replacement for altool)
-          xcodebuild -exportArchive \
-            -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
-            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
-            -exportPath $RUNNER_TEMP/upload_output \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$KEY_FILE" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+          # Find the exported IPA
+          IPA_PATH=$(find $RUNNER_TEMP/export -name "*.ipa" | head -1)
+          echo "Uploading: $IPA_PATH"
+
+          # Upload using xcrun altool (works with API key auth)
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$IPA_PATH" \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID" \
             2>&1 | tee upload.log
 
-          echo "✅ Upload step complete. Check App Store Connect."
+          if grep -q "No errors uploading" upload.log; then
+            echo "✅ Upload succeeded! Build will appear in TestFlight shortly."
+          else
+            echo "⚠️ Upload may have failed. Check App Store Connect."
+            cat upload.log
+          fi
 
       - name: Upload IPA as artifact
         uses: actions/upload-artifact@v4
