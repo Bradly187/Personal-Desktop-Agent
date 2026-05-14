@@ -132,6 +132,18 @@ class IPadBridge:
         log.info("Client connected: %s", peer)
         self._clients.add(ws)
 
+        # Send welcome message so the iPad client confirms the connection is alive
+        # (WebSocketManager waits for first receive before transitioning to .connected)
+        try:
+            await ws.send_json({
+                "type": "status",
+                "active_window": None,
+                "cursor": {"x": 0, "y": 0},
+                "ts": time.time(),
+            })
+        except Exception as exc:
+            log.debug("Failed to send welcome: %s", exc)
+
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
