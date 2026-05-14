@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "enabled": true,
+  "name": "Run Tests",
+  "description": "Perform unit tests, network tests, smoke trace...",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "This hook is intended to create robust testing patterns.\nThe agent will run unit tests, systems tests, security tests, and other tests as determined by user input."
+  }
+}
