@@ -9,7 +9,7 @@ Usage:
     python main.py --safe-mode           # set SAFE_MODE=1 for MCP server
 
 Ctrl-C triggers graceful shutdown (task 4.3):
-  saves gesture_calibration.json, flushes routing_log.jsonl, stops all components.
+  flushes agent.db writes, stops all components.
 
 Startup status table (task 4.4) is printed before the bridge starts.
 """

@@ -61,7 +61,7 @@
   - `URLSessionWebSocketTask` persistent connection
   - Exponential backoff reconnect (1s → 2s → 4s → 8s → 30s max)
   - Connection status indicator (green/yellow/red) via `ConnectionState` enum + `ConnectionBanner`
-  - Manual IP entry in SettingsView; mDNS discovery deferred to integration test phase
+  - Manual IP entry in SettingsView; mDNS discovery implemented in iPad App Hardening spec (ServiceDiscovery.swift)
 
 - [x] **2.3 Implement `TiltSensor`**
   - `CMMotionManager.startDeviceMotionUpdates` at 60 Hz

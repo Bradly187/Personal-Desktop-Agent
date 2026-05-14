@@ -24,7 +24,7 @@ Gate 3 — VRAM:  vram_free_gb ≥ vram_free_min_gb  (via pynvml)
 Gate 4 — Latency EMA:  latency_ema_ms ≤ latency_budget_ms
   fail → AWS Bedrock
 
-After inference: log outcome to routing_log.jsonl, call CommandExecutor.execute().
+After inference: log outcome to agent.db (AgentDB), call CommandExecutor.execute().
 Each log entry includes `gate_that_decided`: which gate was the decisive routing
 factor ("bypass", "gate0_privacy", "gate2_complexity", "gate3_vram",
 "gate4_latency", "all_pass", "discard").

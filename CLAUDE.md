@@ -21,7 +21,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); `routing_log.jsonl` outcome logging
 - `local_inference.py` — `LocalInference` ABC + `OllamaInference`, `VLLMInference` (stub), `NemotronInference`
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app: `WebSocketManager`, `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `SettingsStore`
+- `iPadApp/DesktopAgent/` — SwiftUI app: `SensorManager` (lifecycle hub), `SharedAudioSession` (shared AVAudioEngine), `ServiceDiscovery` (mDNS NWBrowser), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`
 
 **Done (Phase 3 skeleton):**
 - `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce

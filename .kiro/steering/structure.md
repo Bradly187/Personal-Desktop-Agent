@@ -20,9 +20,14 @@ project/
 ├── command_executor.py        # Command → mouse/keyboard execution
 ├── continuous_trainer.py     # Background learning (thresholds, vocab, few-shot)
 ├── iPadApp/                  # Native Swift/SwiftUI Xcode project (iPadOS 17+)
-│   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector
-│   ├── UI/                   # CommandPadView, TrackpadView, SettingsView
-│   ├── Network/              # WebSocketManager (URLSession, Bonjour/mDNS discovery)
+│   ├── Audio/                # SharedAudioSession — shared AVAudioEngine for all 3 audio sensors
+│   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector, AudioStreamer
+│   ├── UI/                   # CommandPadView, TrackpadView, ScientificKeypadView, HandwritingCanvasView,
+│   │                         #   ScreenshotOverlayView, SettingsView
+│   ├── DesignSystem/         # DesignTokens, AppTheme, Components/ (DAButton, DACard, DAConnectionBanner, DASectionHeader)
+│   ├── Network/              # WebSocketManager, ServiceDiscovery (NWBrowser mDNS)
+│   ├── SensorManager.swift   # Lifecycle hub: starts/stops all 6 sensors, wires Combine toggles
+│   ├── ScreenshotStore.swift # Decodes screenshot messages, publishes to UI
 │   └── SettingsStore.swift   # UserDefaults persistence for all sensor preferences
 ├── ipad_bridge.py            # WebSocket server :8765, receives all iPad sensor streams
 │                             # dispatches to FusionEngine/WhisperStream/GestureProcessor
@@ -88,9 +93,11 @@ class Command:
 
 ## Persistent Files
 
-| File | Writer | Reader |
-|------|--------|--------|
-| routing_log.jsonl | OutcomeLogger | ThresholdTuner, VocabBuilder |
-| hotwords.txt | VocabularyBuilder | WhisperTranscriber |
-| gesture_calibration.json | GestureCalibrator | GestureCalibrator (startup) |
-| few_shot_memory.db | FewShotMemory | PromptAugmenter |
+All persistence goes through `db.py`. Legacy flat files are superseded by AgentDB.
+
+| Store | Writer | Reader |
+|-------|--------|--------|
+| `agent.db` (SQLite / AgentDB) | All pipeline components | ContinuousTrainer, HybridCoordinator, ModelRouter |
+| `analytics.duckdb` (AnalyticsDB) | BenchmarkModels | AnalyticsDB OLAP queries |
+
+Legacy files (`routing_log.jsonl`, `hotwords.txt`, `gesture_calibration.json`, `few_shot_memory.db`) are migrated by `migrate.py` — delete after running once.
