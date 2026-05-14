@@ -5,12 +5,16 @@ import Foundation
 /// Classifies mouth sounds (cluck, pop, hiss) from the microphone.
 /// Uses onset detection + spectral shape heuristics on AVAudioEngine FFT data.
 /// 500 ms debounce prevents duplicate fires.
+///
+/// Uses SharedAudioSession for audio input — does NOT own its own AVAudioEngine.
 @MainActor
 final class SoundDetector {
 
-    private let engine = AVAudioEngine()
+    private let sharedAudioSession: SharedAudioSession
     private weak var ws: WebSocketManager?
     private var settings: SettingsStore?
+
+    private static let consumerID = "SoundDetector"
 
     private var lastFireTime: Date?
     private let debounceDuration: TimeInterval = 0.5
@@ -20,9 +24,10 @@ final class SoundDetector {
     private var fftSetup: FFTSetup?
     private var prevMag: Float = 0
 
-    init(ws: WebSocketManager, settings: SettingsStore) {
+    init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
         self.settings = settings
+        self.sharedAudioSession = sharedAudioSession
         fftSetup = vDSP_create_fftsetup(vDSP_Length(log2(Float(fftSize))), FFTRadix(FFT_RADIX2))
     }
 
@@ -33,21 +38,13 @@ final class SoundDetector {
     // MARK: — Lifecycle
 
     func start() {
-        do {
-            let input = engine.inputNode
-            let format = input.outputFormat(forBus: 0)
-            input.installTap(onBus: 0, bufferSize: AVAudioFrameCount(fftSize), format: format) {
-                [weak self] buffer, _ in
-                self?.analyze(buffer: buffer)
-            }
-            try engine.start()
-        } catch {
-            print("SoundDetector: engine start failed: \(error)")
+        sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
+            self?.analyze(buffer: buffer)
         }
     }
 
     func stop() {
-        engine.stop()
+        sharedAudioSession.removeConsumer(Self.consumerID)
     }
 
     // MARK: — Sound classification

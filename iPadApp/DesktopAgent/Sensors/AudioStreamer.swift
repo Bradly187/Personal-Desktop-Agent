@@ -7,17 +7,19 @@ import Foundation
 /// Audio format: 16-bit signed integer PCM, 16 kHz mono.
 /// Messages sent as `audio_stream` type with base64-encoded samples.
 ///
-/// This runs independently of KeywordListener — both can use the mic
-/// simultaneously via AVAudioEngine's tap mechanism (separate taps on
-/// different buses or shared engine with multiple taps).
+/// Uses SharedAudioSession for audio input — does NOT own its own AVAudioEngine.
+/// All three audio sensors (KeywordListener, SoundDetector, AudioStreamer) share
+/// the same engine via the fan-out tap pattern in SharedAudioSession.
 @MainActor
 final class AudioStreamer: ObservableObject {
 
     @Published var isStreaming = false
 
-    private let engine = AVAudioEngine()
+    private let sharedAudioSession: SharedAudioSession
     private weak var ws: WebSocketManager?
     private var settings: SettingsStore?
+
+    private static let consumerID = "AudioStreamer"
 
     /// Target sample rate for Whisper (16 kHz)
     private let targetSampleRate: Double = 16000
@@ -25,10 +27,13 @@ final class AudioStreamer: ObservableObject {
     private let bufferFrames: AVAudioFrameCount = 800
     /// Converter for resampling to 16kHz mono int16
     private var converter: AVAudioConverter?
+    /// Output format for the converter (16kHz mono Int16)
+    private var outputFormat: AVAudioFormat?
 
-    init(ws: WebSocketManager, settings: SettingsStore) {
+    init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
         self.settings = settings
+        self.sharedAudioSession = sharedAudioSession
     }
 
     // MARK: — Lifecycle
@@ -36,44 +41,39 @@ final class AudioStreamer: ObservableObject {
     func start() {
         guard !isStreaming else { return }
 
-        do {
-            let inputNode = engine.inputNode
-            let inputFormat = inputNode.outputFormat(forBus: 0)
-
-            // Target format: 16kHz mono Int16
-            guard let outputFormat = AVAudioFormat(
-                commonFormat: .pcmFormatInt16,
-                sampleRate: targetSampleRate,
-                channels: 1,
-                interleaved: true
-            ) else {
-                print("AudioStreamer: failed to create output format")
-                return
-            }
-
-            // Create converter if sample rates differ
-            if inputFormat.sampleRate != targetSampleRate || inputFormat.channelCount != 1 {
-                converter = AVAudioConverter(from: inputFormat, to: outputFormat)
-            }
-
-            inputNode.installTap(onBus: 0, bufferSize: bufferFrames, format: inputFormat) {
-                [weak self] buffer, _ in
-                self?.processBuffer(buffer, outputFormat: outputFormat)
-            }
-
-            try engine.start()
-            isStreaming = true
-        } catch {
-            print("AudioStreamer: engine start failed: \(error)")
+        // Target format: 16kHz mono Int16
+        guard let outFmt = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: true
+        ) else {
+            print("AudioStreamer: failed to create output format")
+            return
         }
+        outputFormat = outFmt
+
+        // Create converter if sample rates differ from the shared engine's input format
+        let inputFormat = sharedAudioSession.inputFormat
+        if inputFormat.sampleRate != targetSampleRate || inputFormat.channelCount != 1 {
+            converter = AVAudioConverter(from: inputFormat, to: outFmt)
+        }
+
+        // Register with shared audio session and receive buffers via fan-out
+        sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
+            guard let self, let outputFormat = self.outputFormat else { return }
+            self.processBuffer(buffer, outputFormat: outputFormat)
+        }
+
+        isStreaming = true
     }
 
     func stop() {
         guard isStreaming else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        sharedAudioSession.removeConsumer(Self.consumerID)
         isStreaming = false
         converter = nil
+        outputFormat = nil
     }
 
     // MARK: — Processing

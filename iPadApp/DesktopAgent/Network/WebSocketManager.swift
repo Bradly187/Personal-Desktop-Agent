@@ -34,6 +34,9 @@ final class WebSocketManager: ObservableObject {
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
 
+    // mDNS service discovery — injected at runtime
+    var serviceDiscovery: ServiceDiscovery?
+
     private var task: URLSessionWebSocketTask?
     private var reconnectAttempt = 0
     private var reconnectWorkItem: DispatchWorkItem?
@@ -90,28 +93,45 @@ final class WebSocketManager: ObservableObject {
 
     // MARK: — Connection internals
 
-    private func _connect() {
-        let url: URL
-        if let settings {
-            url = settings.wsURL
-        } else {
-            url = URL(string: "ws://192.168.1.100:8765/ws")!
+    /// Determines the WebSocket URL to connect to.
+    /// Priority: mDNS discovered endpoint (if no manual override) > manual settings > fallback default.
+    private func resolveConnectionURL() -> URL {
+        // If mDNS discovered a host and user hasn't manually overridden, use discovered endpoint
+        if let discovery = serviceDiscovery,
+           !discovery.hasManualOverride,
+           let host = discovery.discoveredHost,
+           let port = discovery.discoveredPort {
+            if let url = URL(string: "ws://\(host):\(port)/ws") {
+                return url
+            }
         }
+        // Fall back to manual settings or default
+        return settings?.wsURLOrDefault ?? URL(string: "ws://192.168.18.2:8765/ws")!
+    }
+
+    private func _connect() {
+        let url = resolveConnectionURL()
 
         let session = URLSession(configuration: .default)
         let wsTask = session.webSocketTask(with: url)
         self.task = wsTask
         wsTask.resume()
 
+        // 6.1: State must be .connecting after resume, NOT .connected
+        state = .connecting
+
         receiveTask = Task { [weak self] in
             guard let self else { return }
             do {
-                // URLSessionWebSocketTask doesn't have a connected callback,
-                // so we optimistically mark connected and let errors roll back.
+                // 6.2: Wait for first successful receive to confirm connection is truly alive
+                let firstMessage = try await wsTask.receive()
                 await MainActor.run {
+                    // 6.3: Only transition to .connected and reset reconnectAttempt
+                    // after first successful message receive
                     self.state = .connected
                     self.reconnectAttempt = 0
                 }
+                self._handleReceived(message: firstMessage)
                 try await self._receiveLoop(task: wsTask)
             } catch {
                 print("[WebSocketManager] Connection error: \(error.localizedDescription)")
@@ -126,16 +146,20 @@ final class WebSocketManager: ObservableObject {
     private func _receiveLoop(task: URLSessionWebSocketTask) async throws {
         while !Task.isCancelled {
             let message = try await task.receive()
-            switch message {
-            case .string(let text):
+            _handleReceived(message: message)
+        }
+    }
+
+    private func _handleReceived(message: URLSessionWebSocketTask.Message) {
+        switch message {
+        case .string(let text):
+            _handle(text: text)
+        case .data(let data):
+            if let text = String(data: data, encoding: .utf8) {
                 _handle(text: text)
-            case .data(let data):
-                if let text = String(data: data, encoding: .utf8) {
-                    _handle(text: text)
-                }
-            @unknown default:
-                break
             }
+        @unknown default:
+            break
         }
     }
 
@@ -187,9 +211,12 @@ final class WebSocketManager: ObservableObject {
         receiveTask?.cancel()
         receiveTask = nil
 
-        let delay = min(pow(2.0, Double(reconnectAttempt)), maxBackoffSeconds)
+        // 6.5: Always transition to .reconnecting on failure (not .disconnected)
+        // This ensures the UI shows reconnection state immediately
         reconnectAttempt += 1
-        state = reconnectAttempt == 1 ? .disconnected : .reconnecting(attempt: reconnectAttempt)
+        state = .reconnecting(attempt: reconnectAttempt)
+
+        let delay = min(pow(2.0, Double(reconnectAttempt - 1)), maxBackoffSeconds)
 
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in

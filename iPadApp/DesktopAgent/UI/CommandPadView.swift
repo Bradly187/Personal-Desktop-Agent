@@ -1,26 +1,29 @@
 import SwiftUI
 
 /// Configurable button grid for sending explicit desktop commands.
-/// Minimum 80×80 pt touch targets per iOS accessibility guidelines.
+/// Uses DesignTokens.Size.touchTargetMin (80pt) for all primary action buttons.
 /// Palm rejection via UITouch.majorRadius threshold.
 struct CommandPadView: View {
     @EnvironmentObject var wsManager: WebSocketManager
     @EnvironmentObject var settings: SettingsStore
 
+    @Environment(\.appTheme) private var theme
+
     private let columns = [
-        GridItem(.adaptive(minimum: 80, maximum: 160), spacing: 12)
+        GridItem(.adaptive(minimum: DesignTokens.Size.touchTargetMin, maximum: 160),
+                 spacing: DesignTokens.Spacing.md)
     ]
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 12) {
+                LazyVGrid(columns: columns, spacing: DesignTokens.Spacing.md) {
                     ForEach(settings.commandButtons) { button in
                         CommandButtonView(button: button)
                             .environmentObject(wsManager)
                     }
                 }
-                .padding()
+                .padding(DesignTokens.Spacing.lg)
             }
             .navigationTitle("Commands")
             .toolbar {
@@ -35,33 +38,39 @@ struct CommandPadView: View {
     }
 }
 
-// MARK: — Individual command button
+// MARK: — Individual command button (DAButton pattern)
 
 private struct CommandButtonView: View {
     let button: CommandButton
     @EnvironmentObject var wsManager: WebSocketManager
 
-    @State private var isPressed = false
+    @Environment(\.appTheme) private var theme
+
     @State private var flash = false
 
     var body: some View {
         Button {
             sendCommand()
         } label: {
-            VStack(spacing: 4) {
+            VStack(spacing: DesignTokens.Spacing.sm) {
                 Image(systemName: iconName(for: button.action))
-                    .font(.title2)
+                    .font(.system(size: DesignTokens.Size.iconSize))
+                    .foregroundStyle(theme.accent)
                 Text(button.label)
-                    .font(.caption)
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textPrimary)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
             }
-            .frame(maxWidth: .infinity, minHeight: 80)
-            .background(flash ? Color.accentColor.opacity(0.3) : Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .contentShape(Rectangle())    // full hit area
+            .frame(maxWidth: .infinity,
+                   minHeight: DesignTokens.Size.touchTargetMin)
+            .background(flash ? theme.accent.opacity(0.3) : theme.surfaceSecondary)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(button.label)
+        .accessibilityHint("Double-tap to send \(button.action) command")
     }
 
     private func sendCommand() {

@@ -7,19 +7,19 @@ import SwiftUI
 ///   2. Click buttons row: Left Click, Right Click
 ///   3. Shortcut buttons row: Copy, Paste, Undo, Scroll ↓, Scroll ↑
 ///
-/// The click buttons sit directly above the shortcut row so they're
-/// easy to reach without lifting the hand far from the trackpad.
+/// Click buttons use DesignTokens.Size.touchTargetMin (80pt) minimum.
+/// Shortcut buttons use DesignTokens.Size.touchTargetCompact (64pt) minimum.
 ///
 /// Gesture area:
 ///   Single-finger drag  → cursor move
 ///   Two-finger drag     → scroll
-///   (Taps on the surface still work as before, but the explicit
-///    buttons below are the primary click targets for low-effort use)
 ///
 /// Palm rejection: touches with majorRadius > palmRejectRadius are ignored.
 struct TrackpadView: View {
     @EnvironmentObject var wsManager: WebSocketManager
     @EnvironmentObject var settings: SettingsStore
+
+    @Environment(\.appTheme) private var theme
 
     @State private var isFullScreen = false
 
@@ -42,30 +42,30 @@ struct TrackpadView: View {
         VStack(spacing: 0) {
             // Trackpad gesture surface — fills available space
             trackpadSurface
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
+                .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                .padding(.horizontal, DesignTokens.Spacing.md)
+                .padding(.top, DesignTokens.Spacing.sm)
 
-            // Click buttons row
-            HStack(spacing: 12) {
+            // Click buttons row (80pt minimum touch targets)
+            HStack(spacing: DesignTokens.Spacing.md) {
                 clickButton(label: "Left Click", icon: "cursorarrow.click", button: "left")
                 clickButton(label: "Right Click", icon: "cursorarrow.click.2", button: "right")
                 fullScreenButton
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
+            .padding(.horizontal, DesignTokens.Spacing.md)
+            .padding(.top, DesignTokens.Spacing.md)
 
-            // Shortcut buttons row (Copy, Paste, Undo, Scroll ↓, Scroll ↑)
-            HStack(spacing: 10) {
+            // Shortcut buttons row (64pt compact minimum)
+            HStack(spacing: DesignTokens.Spacing.sm) {
                 shortcutButton(label: "Copy", icon: "doc.on.doc", keys: ["ctrl", "c"])
                 shortcutButton(label: "Paste", icon: "doc.on.clipboard", keys: ["ctrl", "v"])
                 shortcutButton(label: "Undo", icon: "arrow.uturn.backward", keys: ["ctrl", "z"])
                 scrollButton(label: "↓", direction: "down")
                 scrollButton(label: "↑", direction: "up")
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
-            .padding(.bottom, 12)
+            .padding(.horizontal, DesignTokens.Spacing.md)
+            .padding(.top, DesignTokens.Spacing.sm)
+            .padding(.bottom, DesignTokens.Spacing.md)
         }
     }
 
@@ -81,10 +81,11 @@ struct TrackpadView: View {
                         withAnimation { isFullScreen = false }
                     } label: {
                         Image(systemName: "arrow.down.right.and.arrow.up.left")
-                            .padding(10)
+                            .padding(DesignTokens.Spacing.md)
                             .background(.regularMaterial, in: Circle())
                     }
-                    .padding()
+                    .accessibilityLabel("Exit full screen")
+                    .padding(DesignTokens.Spacing.lg)
                     Spacer()
                 }
                 Spacer()
@@ -100,6 +101,8 @@ struct TrackpadView: View {
             handle(event)
         }
         .background(Color(.systemGroupedBackground))
+        .accessibilityLabel("Trackpad surface")
+        .accessibilityHint("Drag to move cursor, two-finger drag to scroll")
     }
 
     // MARK: — Button builders
@@ -108,18 +111,23 @@ struct TrackpadView: View {
         Button {
             wsManager.sendTrackpadTap(button: button)
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: DesignTokens.Spacing.sm) {
                 Image(systemName: icon)
-                    .font(.body)
+                    .font(.system(size: DesignTokens.Size.iconSize))
+                    .foregroundStyle(theme.accent)
                 Text(label)
-                    .font(.subheadline.weight(.medium))
+                    .font(DesignTokens.Typography.body)
+                    .foregroundStyle(theme.textPrimary)
             }
-            .frame(maxWidth: .infinity, minHeight: 56)
-            .background(Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .frame(maxWidth: .infinity,
+                   minHeight: DesignTokens.Size.touchTargetMin)
+            .background(theme.surfaceSecondary)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityHint("Double-tap to \(button) click")
     }
 
     private var fullScreenButton: some View {
@@ -127,31 +135,40 @@ struct TrackpadView: View {
             withAnimation { isFullScreen = true }
         } label: {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
-                .font(.body)
-                .frame(width: 56, height: 56)
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .font(.system(size: DesignTokens.Size.iconSize))
+                .foregroundStyle(theme.accent)
+                .frame(width: DesignTokens.Size.touchTargetMin,
+                       height: DesignTokens.Size.touchTargetMin)
+                .background(theme.surfaceSecondary)
+                .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Full screen trackpad")
+        .accessibilityHint("Double-tap to expand trackpad to full screen")
     }
 
     private func shortcutButton(label: String, icon: String, keys: [String]) -> some View {
         Button {
             wsManager.sendCommand(action: "HOTKEY", text: label, params: ["keys": keys])
         } label: {
-            VStack(spacing: 2) {
+            VStack(spacing: DesignTokens.Spacing.xs) {
                 Image(systemName: icon)
-                    .font(.callout)
+                    .font(.system(size: DesignTokens.Size.iconSize))
+                    .foregroundStyle(theme.accent)
                 Text(label)
-                    .font(.caption2)
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textPrimary)
             }
-            .frame(maxWidth: .infinity, minHeight: 48)
-            .background(Color(.tertiarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: .infinity,
+                   minHeight: DesignTokens.Size.touchTargetCompact)
+            .background(theme.surfaceTertiary)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityHint("Double-tap to send \(label) shortcut")
     }
 
     private func scrollButton(label: String, direction: String) -> some View {
@@ -159,18 +176,23 @@ struct TrackpadView: View {
             wsManager.sendCommand(action: "SCROLL", text: "Scroll \(direction)",
                                   params: ["direction": direction])
         } label: {
-            VStack(spacing: 2) {
+            VStack(spacing: DesignTokens.Spacing.xs) {
                 Image(systemName: direction == "down" ? "chevron.down" : "chevron.up")
-                    .font(.callout)
+                    .font(.system(size: DesignTokens.Size.iconSize))
+                    .foregroundStyle(theme.accent)
                 Text(label)
-                    .font(.caption2)
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textPrimary)
             }
-            .frame(maxWidth: .infinity, minHeight: 48)
-            .background(Color(.tertiarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: .infinity,
+                   minHeight: DesignTokens.Size.touchTargetCompact)
+            .background(theme.surfaceTertiary)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Scroll \(direction)")
+        .accessibilityHint("Double-tap to scroll \(direction)")
     }
 
     // MARK: — Fractional accumulator (prevents Int truncation from dropping small moves)

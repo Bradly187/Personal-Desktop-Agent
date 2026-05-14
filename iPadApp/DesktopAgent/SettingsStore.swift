@@ -12,8 +12,21 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(serverPort, forKey: "serverPort") }
     }
 
-    var wsURL: URL {
-        URL(string: "ws://\(serverHost):\(serverPort)/ws")!
+    /// Returns a valid WebSocket URL or nil if host/port are invalid.
+    /// Never force-unwraps user input.
+    var wsURL: URL? {
+        let trimmedHost = serverHost.trimmingCharacters(in: .whitespaces)
+        guard !trimmedHost.isEmpty,
+              serverPort > 0, serverPort <= 65535 else {
+            return nil
+        }
+        return URL(string: "ws://\(trimmedHost):\(serverPort)/ws")
+    }
+
+    /// Always returns a valid URL — falls back to a compile-time safe literal
+    /// when user input is invalid.
+    var wsURLOrDefault: URL {
+        wsURL ?? URL(string: "ws://192.168.18.2:8765/ws")!
     }
 
     // MARK: — Tilt
@@ -84,7 +97,7 @@ final class SettingsStore: ObservableObject {
     private let defaults = UserDefaults.standard
 
     init() {
-        serverHost = defaults.string(forKey: "serverHost") ?? "192.168.1.100"
+        serverHost = defaults.string(forKey: "serverHost") ?? "192.168.18.2"
         serverPort = defaults.integer(forKey: "serverPort").nonZero ?? 8765
         tiltSensitivity = defaults.double(forKey: "tiltSensitivity").nonZero ?? 1.0
         tiltDeadZone = defaults.double(forKey: "tiltDeadZone").nonZero ?? 0.02

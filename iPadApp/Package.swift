@@ -19,6 +19,11 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("PencilKit"),
             ]
+        ),
+        .testTarget(
+            name: "DesktopAgentTests",
+            dependencies: ["DesktopAgent"],
+            path: "Tests"
         )
     ]
 )

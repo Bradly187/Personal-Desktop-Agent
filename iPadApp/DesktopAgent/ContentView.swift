@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var wsManager: WebSocketManager
     @EnvironmentObject var settings: SettingsStore
+    @EnvironmentObject var screenshotStore: ScreenshotStore
 
     var body: some View {
         TabView {
@@ -32,44 +33,19 @@ struct ContentView: View {
                 }
         }
         .overlay(alignment: .top) {
-            ConnectionBanner()
+            // Task 13.6: Replaced private ConnectionBanner with shared DAConnectionBanner component
+            DAConnectionBanner()
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+                .padding(.top, DesignTokens.Spacing.sm)
         }
-    }
-}
-
-// Small top banner showing WebSocket connection state
-private struct ConnectionBanner: View {
-    @EnvironmentObject var wsManager: WebSocketManager
-
-    private var color: Color {
-        switch wsManager.state {
-        case .connected: return .green
-        case .connecting, .reconnecting: return .yellow
-        case .disconnected: return .red
+        .overlay {
+            ScreenshotOverlayView()
         }
-    }
-
-    private var label: String {
-        switch wsManager.state {
-        case .connected: return "Connected"
-        case .connecting: return "Connecting…"
-        case .reconnecting(let attempt): return "Reconnecting (\(attempt))…"
-        case .disconnected: return "Disconnected"
+        .onReceive(wsManager.$lastMessage) { message in
+            guard let message else { return }
+            if case .screenshot(_, let imageBase64, let mime) = message {
+                screenshotStore.handleScreenshot(base64: imageBase64, mime: mime)
+            }
         }
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(.regularMaterial, in: Capsule())
-        .padding(.top, 4)
     }
 }

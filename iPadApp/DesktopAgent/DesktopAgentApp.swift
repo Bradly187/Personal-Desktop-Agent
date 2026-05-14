@@ -1,62 +1,49 @@
 import SwiftUI
-import Combine
 
 @main
 struct DesktopAgentApp: App {
-    @StateObject private var wsManager = WebSocketManager()
-    @StateObject private var settings = SettingsStore()
-    @StateObject private var audioStreamer = AudioStreamerController()
+    @StateObject private var wsManager: WebSocketManager
+    @StateObject private var settings: SettingsStore
+    @StateObject private var sensorManager: SensorManager
+    @StateObject private var screenshotStore = ScreenshotStore()
+    @StateObject private var serviceDiscovery = ServiceDiscovery()
+
+    init() {
+        let ws = WebSocketManager()
+        let s = SettingsStore()
+        _wsManager = StateObject(wrappedValue: ws)
+        _settings = StateObject(wrappedValue: s)
+        _sensorManager = StateObject(wrappedValue: SensorManager(ws: ws, settings: s))
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(\.appTheme, .default)
                 .environmentObject(wsManager)
                 .environmentObject(settings)
-                .environmentObject(audioStreamer)
+                .environmentObject(sensorManager)
+                .environmentObject(screenshotStore)
+                .environmentObject(serviceDiscovery)
                 .onAppear {
                     wsManager.settings = settings
-                    audioStreamer.wire(ws: wsManager, settings: settings)
+                    wsManager.serviceDiscovery = serviceDiscovery
+
+                    // Determine if user has manually changed host from default
+                    let defaultHost = "192.168.1.100"
+                    serviceDiscovery.hasManualOverride = (settings.serverHost != defaultHost)
+
+                    // Start mDNS discovery
+                    serviceDiscovery.startBrowsing()
+
+                    sensorManager.startAll()
                     wsManager.connect()
                 }
                 .onDisappear {
-                    audioStreamer.stop()
+                    serviceDiscovery.stopBrowsing()
+                    sensorManager.stopAll()
                     wsManager.disconnect()
                 }
-                .onReceive(settings.$audioStreamEnabled) { enabled in
-                    if enabled {
-                        audioStreamer.start()
-                    } else {
-                        audioStreamer.stop()
-                    }
-                }
         }
-    }
-}
-
-/// Thin controller that owns the AudioStreamer and exposes observable state.
-/// Separated from AudioStreamer to allow lazy initialization after wsManager is ready.
-@MainActor
-final class AudioStreamerController: ObservableObject {
-    @Published var isStreaming = false
-
-    private var streamer: AudioStreamer?
-    private var cancellable: AnyCancellable?
-
-    func wire(ws: WebSocketManager, settings: SettingsStore) {
-        streamer = AudioStreamer(ws: ws, settings: settings)
-        // Observe streamer's isStreaming state
-        cancellable = streamer?.$isStreaming
-            .receive(on: RunLoop.main)
-            .sink { [weak self] value in
-                self?.isStreaming = value
-            }
-    }
-
-    func start() {
-        streamer?.start()
-    }
-
-    func stop() {
-        streamer?.stop()
     }
 }
