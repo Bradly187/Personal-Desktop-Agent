@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from command_executor import Command, CommandExecutor
-from local_inference import LocalInference, OllamaInference, _build_prompt
+from local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from agentcore_fallback.client import AgentCoreFallbackClient
@@ -50,6 +50,20 @@ if TYPE_CHECKING:
     from dev_agent import DevAgent
 
 log = logging.getLogger(__name__)
+
+# Cloud system prompt — mirrors local _SYSTEM_PROMPT but adds misrecognition
+# guidance specific to voice+accessibility input.  Kept separate so we can
+# tune cloud behaviour independently of the local LLM prompt.
+_CLOUD_SYSTEM_PROMPT = (
+    _SYSTEM_PROMPT
+    + "\n\nAdditional guidance for cloud disambiguation:\n"
+    "- Common voice misrecognitions to correct automatically:\n"
+    '  "clothes"→CLOSE  "scroll done"→SCROLL down  "hot key"→HOTKEY\n'
+    '  "oh pen"→OPEN  "clique"→CLICK  "tight"→TYPE\n'
+    "- For multi-step commands (\"close then open\"): execute the FIRST action "
+    "and emit CLARIFY for the remaining steps.\n"
+    "- For gesture-source commands: POINT→CLICK FIST→CLOSE PALM→SCROLL up."
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -88,14 +102,17 @@ class CoordinatorConfig:
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
     # AWS Bedrock (cloud fallback — raw API, used when AgentCore unavailable)
-    bedrock_model_id: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
+    # Model: Claude Haiku 4.5 cross-region inference profile (verified 2026-05-15).
+    # Claude 3.5 Haiku is now marked Legacy and requires explicit model access re-grant.
+    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     bedrock_region: str = "us-east-1"
 
-    # AgentCore fallback (preferred cloud path when deployed)
-    agentcore_enabled: bool = True
+    # AgentCore fallback (preferred cloud path — set True after `bedrock-agentcore deploy`)
+    # Disabled by default: raw Bedrock is the active cloud path until AgentCore is deployed.
+    agentcore_enabled: bool = False
     agentcore_dev_url: str = "http://localhost:8080/invocations"
     agentcore_deployed_url: str | None = None
-    agentcore_use_dev: bool = True  # True = local dev server, False = deployed
+    agentcore_use_dev: bool = False  # False = use deployed_url; True = localhost dev server
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +143,20 @@ class _CloudInference:
             log.error("CloudInference unavailable: %s", exc)
             return f"CLARIFY cloud unavailable: {exc}"
 
-        prompt = _build_prompt(cmd)
+        # Build few-shot context string for the user message
+        context_lines = ""
+        if cmd.session_context:
+            joined = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
+            context_lines = f"\n\nRecent commands:\n{joined}"
+
+        user_content = f"Command: {cmd.text}{context_lines}"
+
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 64,
             "temperature": 0.0,
-            "messages": [{"role": "user", "content": prompt}],
+            "system": _CLOUD_SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_content}],
         }
 
         t0 = time.monotonic()
@@ -157,15 +182,139 @@ class _CloudInference:
 # Amazon Transcribe re-transcription (Gate 1 voice fallback)
 # ---------------------------------------------------------------------------
 
-async def _retranscribe(cmd: Command) -> Command:
-    """Stub: re-transcribe audio via Amazon Transcribe.
+# Phonetic vocabulary corrections for the most common voice misrecognitions.
+# Applied as a fast first pass before (optionally) calling Amazon Transcribe.
+# Keyed on lowercased word/phrase, mapped to the correct desktop-control word.
+_VOICE_CORRECTIONS: dict[str, str] = {
+    "clothes":     "close",
+    "clothe":      "close",
+    "scroll done": "scroll down",
+    "clique":      "click",
+    "tight":       "type",
+    "oh pen":      "open",
+    "oh pen up":   "open up",
+    "hot key":     "hotkey",
+    "screen shot": "screenshot",
+}
 
-    In production this would send cmd.params.get('audio_bytes') to the
-    Transcribe streaming API and return a new Command with updated text
-    and logprob.  For now we return the command unchanged so routing
-    continues to Gate 2 (best-effort).
+
+def _apply_vocabulary_corrections(text: str) -> tuple[str, bool]:
+    """Replace known voice misrecognitions with the intended desktop-control word.
+
+    Returns (corrected_text, changed).  Checks multi-word phrases first so
+    'scroll done' beats 'done' matching nothing.
     """
-    log.debug("Transcribe fallback invoked for %r (stub — passing through)", cmd.text)
+    lower = text.lower()
+    # Longest-phrase-first so "scroll done" beats a single-word match
+    for wrong, right in sorted(_VOICE_CORRECTIONS.items(), key=lambda kv: -len(kv[0])):
+        if wrong in lower:
+            corrected = lower.replace(wrong, right)
+            # Restore original capitalisation pattern (title-case first word)
+            parts = corrected.split()
+            if parts:
+                parts[0] = parts[0].capitalize()
+            return " ".join(parts), True
+    return text, False
+
+
+async def _retranscribe(cmd: Command) -> Command:
+    """Attempt to improve a low-confidence voice transcript before Gate 2.
+
+    Two-stage approach:
+      1. Vocabulary correction — instant, no network, fixes the 6 deterministic
+         misrecognitions documented in the cloud system prompt.
+      2. Amazon Transcribe streaming — tried when `amazon-transcribe` is installed
+         AND audio bytes were preserved in cmd.params['audio_bytes'].  Falls back
+         gracefully (returns corrected or original cmd) on any error or timeout.
+
+    To enable Transcribe streaming:
+        pip install amazon-transcribe
+    Audio bytes are preserved automatically by WhisperStream when
+    `preserve_audio=True` (default True from Phase 6 onwards).
+    """
+    # --- Stage 1: deterministic vocabulary correction (always runs) ----------
+    corrected_text, changed = _apply_vocabulary_corrections(cmd.text)
+    if changed:
+        log.info(
+            "Gate 1 vocab correction: %r → %r", cmd.text, corrected_text
+        )
+        from dataclasses import replace as dc_replace
+        cmd = dc_replace(cmd, text=corrected_text, whisper_logprob=0.0)
+
+    # --- Stage 2: Amazon Transcribe streaming (optional) --------------------
+    audio_bytes: bytes | None = cmd.params.get("audio_bytes")
+    sample_rate: int = cmd.params.get("sample_rate", 16_000)
+
+    if not audio_bytes:
+        log.debug(
+            "Gate 1 Transcribe: no audio bytes in cmd.params — skipping "
+            "(WhisperStream.preserve_audio must be True)"
+        )
+        return cmd
+
+    try:
+        from amazon_transcribe.client import TranscribeStreamingClient  # type: ignore
+        from amazon_transcribe.handlers import TranscriptResultStreamHandler  # type: ignore
+        from amazon_transcribe.model import TranscriptEvent  # type: ignore
+    except ImportError:
+        log.debug("Gate 1 Transcribe: amazon-transcribe not installed — using vocab correction only")
+        return cmd
+
+    class _ResultHandler(TranscriptResultStreamHandler):
+        def __init__(self, stream):
+            super().__init__(stream)
+            self.transcript = ""
+            self.confidence = 0.0
+
+        async def handle_transcript_event(self, event: TranscriptEvent):
+            for result in event.transcript.results:
+                if not result.is_partial and result.alternatives:
+                    alt = result.alternatives[0]
+                    self.transcript = alt.transcript
+                    items = getattr(alt, "items", []) or []
+                    confs = [
+                        getattr(i, "confidence", 1.0)
+                        for i in items
+                        if getattr(i, "confidence", None) is not None
+                    ]
+                    self.confidence = sum(confs) / len(confs) if confs else 0.8
+
+    try:
+        t_client = TranscribeStreamingClient(region="us-east-1")
+
+        async def _audio_gen():
+            chunk = 3200  # 100 ms of 16 kHz int16
+            for i in range(0, len(audio_bytes), chunk):
+                yield audio_bytes[i: i + chunk]
+
+        stream = await t_client.start_stream_transcription(
+            language_code="en-US",
+            media_sample_rate_hz=sample_rate,
+            media_encoding="pcm",
+        )
+
+        handler = _ResultHandler(stream.output_stream)
+        await asyncio.wait_for(
+            asyncio.gather(stream.input_stream.send_audio_event(audio_chunk=audio_bytes),
+                           stream.input_stream.end_stream(),
+                           handler.handle_events()),
+            timeout=3.0,
+        )
+
+        if handler.transcript and handler.transcript.lower() != cmd.text.lower():
+            log.info(
+                "Gate 1 Transcribe: %r → %r (conf=%.2f)",
+                cmd.text, handler.transcript, handler.confidence,
+            )
+            from dataclasses import replace as dc_replace
+            logprob_equiv = -max(0.0, 1.0 - handler.confidence)
+            cmd = dc_replace(cmd, text=handler.transcript, whisper_logprob=logprob_equiv)
+
+    except asyncio.TimeoutError:
+        log.warning("Gate 1 Transcribe: timed out after 3s — using vocab-corrected text")
+    except Exception as exc:
+        log.warning("Gate 1 Transcribe: error — %s (using vocab-corrected text)", exc)
+
     return cmd
 
 

@@ -104,6 +104,9 @@ class WhisperStream:
         min_speech_s: float = 0.3,         # minimum duration worth transcribing
         max_buffer_s: float = 30.0,        # force-transcribe after this long
         poll_interval_s: float = 0.15,     # background loop cadence
+        # Phase 6: preserve audio bytes so Gate 1 can re-transcribe via
+        # Amazon Transcribe when whisper_logprob is below the Gate 1 threshold.
+        preserve_audio: bool = True,
     ) -> None:
         self._model_size = model_size
         self._device = device
@@ -114,6 +117,7 @@ class WhisperStream:
         self._max_buffer_s = max_buffer_s
         self._poll_s = poll_interval_s
 
+        self._preserve_audio = preserve_audio
         self._model: Optional[WhisperModel] = None
         self._fusion: Optional["FusionEngine"] = None
         self._hotwords: list[str] = []
@@ -288,11 +292,19 @@ class WhisperStream:
         log.info("WhisperStream: %r (logprob=%.2f)", text, avg_logprob)
 
         from command_executor import Command
+        params: dict = {}
+        if self._preserve_audio:
+            # Gate 1 re-transcription: HybridCoordinator._retranscribe() uses
+            # these bytes when amazon-transcribe is installed and logprob is low.
+            params["audio_bytes"] = audio.astype("int16").tobytes()
+            params["sample_rate"] = self.SAMPLE_RATE
+
         cmd = Command(
             text=text,
             action="DICTATE",   # placeholder — HybridCoordinator will reclassify
             source="voice",
             whisper_logprob=avg_logprob,
+            params=params,
         )
         # on_voice() is thread-safe (just sets self._voice = cmd)
         self._fusion.on_voice(cmd)
