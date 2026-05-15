@@ -143,10 +143,12 @@ def _benchmark_model(model_name: str, runs: int) -> dict:
 
     vram_before = _vram_used_gb()
 
-    # Warm-up (also loads model into VRAM)
-    print("  Warming up (loading model) ...", end="", flush=True)
+    # Warm-up with the FULL system prompt so the prefix KV cache is primed.
+    # Using just "click OK" would prime a different context and cause every
+    # subsequent request to miss the prefix cache (~2100 ms overhead each).
+    print("  Warming up (loading + priming KV prefix cache) ...", end="", flush=True)
     try:
-        _generate(model_name, "click OK", timeout=120.0)
+        _generate(model_name, TEST_PROMPTS[0][1], timeout=120.0)
     except Exception as exc:
         print(f" FAILED: {exc}")
         return {"model": model_name, "error": str(exc)}
@@ -276,31 +278,118 @@ def _print_summary(results: list[dict], baseline_gb: float | None) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _benchmark_vllm(model: str, runs: int) -> dict:
+    """Benchmark VLLMInference against the same 12-prompt suite."""
+    print(f"\n  {'-' * 60}")
+    print(f"  Backend: vllm  |  Model: {model}")
+    print(f"  {'-' * 60}")
+
+    from local_inference import VLLMInference
+    from command_executor import Command
+
+    backend = VLLMInference(model=model)
+
+    # Warm-up load
+    print("  Loading engine (first call — downloads weights if absent) ...", flush=True)
+    t_load = time.monotonic()
+    try:
+        warm_cmd = Command(text="click OK", action="", source="benchmark")
+        asyncio.run(backend.infer(warm_cmd))
+    except Exception as exc:
+        print(f"  FAILED: {exc}")
+        return {"model": f"vllm:{model}", "error": str(exc)}
+    print(f"  Engine ready in {(time.monotonic() - t_load):.1f}s")
+
+    vram_after_load = _vram_used_gb()
+
+    results = []
+    correct = 0
+    all_latencies: list[float] = []
+
+    for expected_verb, prompt_text in TEST_PROMPTS:
+        latencies: list[float] = []
+        last_response = ""
+        for _ in range(runs):
+            cmd = Command(text=prompt_text, action="", source="benchmark")
+            t0 = time.monotonic()
+            try:
+                response = asyncio.run(backend.infer(cmd))
+                latencies.append((time.monotonic() - t0) * 1000)
+                last_response = response
+            except Exception as exc:
+                print(f"    ERROR: {exc}")
+                latencies.append(float("inf"))
+
+        s = sorted(latencies)
+        p50 = s[len(s) // 2]
+        p95 = s[min(len(s) - 1, int(len(s) * 0.95))]
+        all_latencies.extend(latencies)
+
+        got_verb = last_response.split()[0].upper() if last_response else "?"
+        hit = got_verb == expected_verb
+        if hit:
+            correct += 1
+        mark = "+" if hit else "X"
+        print(f"  {mark} [{expected_verb:<10}] {prompt_text:<36}  =>  {last_response[:30]:<30}  p50={p50:.0f}ms")
+        results.append({
+            "prompt": prompt_text, "expected": expected_verb,
+            "got": last_response, "correct": hit,
+            "p50_ms": round(p50, 1), "p95_ms": round(p95, 1),
+        })
+
+    finite = [l for l in all_latencies if l != float("inf")]
+    sf = sorted(finite)
+    overall_p50 = round(sf[len(sf) // 2], 1) if sf else None
+    overall_p95 = round(sf[min(len(sf) - 1, int(len(sf) * 0.95))], 1) if sf else None
+    accuracy = round(correct / len(TEST_PROMPTS) * 100, 1)
+
+    print(f"\n  Accuracy: {correct}/{len(TEST_PROMPTS)} ({accuracy}%)")
+    print(f"  Latency:  p50={overall_p50}ms  p95={overall_p95}ms")
+    print(f"  VRAM after load: {vram_after_load} GB")
+
+    return {
+        "model": f"vllm:{model}",
+        "accuracy_pct": accuracy, "correct": correct, "total": len(TEST_PROMPTS),
+        "p50_ms": overall_p50, "p95_ms": overall_p95,
+        "vram_before_gb": None, "vram_after_load_gb": vram_after_load, "vram_delta_gb": None,
+        "prompts": results,
+    }
+
+
 def main() -> None:
-    p = argparse.ArgumentParser(description="Benchmark Ollama models for desktop agent command classification")
+    p = argparse.ArgumentParser(description="Benchmark Ollama and vLLM models for desktop agent command classification")
     p.add_argument("--runs", type=int, default=3, help="Inference runs per prompt for latency stats (default: 3)")
-    p.add_argument("--models", type=str, default="", help="Comma-separated model names (default: all pulled models)")
+    p.add_argument("--models", type=str, default="", help="Comma-separated Ollama model names (default: all pulled)")
+    p.add_argument("--vllm", type=str, default="", metavar="HF_MODEL",
+                   help="Also benchmark VLLMInference with this HuggingFace model ID "
+                        "(e.g. meta-llama/Meta-Llama-3.1-8B-Instruct). Requires: pip install vllm")
     args = p.parse_args()
 
+    all_results: list[dict] = []
+    baseline_gb = _vram_used_gb()
+    print(f"VRAM baseline: {baseline_gb} GB used")
+
+    # --- vLLM benchmark (optional) ---
+    if args.vllm:
+        print(f"\n[vLLM] Benchmarking {args.vllm} with {args.runs} run(s) × {len(TEST_PROMPTS)} prompts")
+        vllm_result = _benchmark_vllm(args.vllm, args.runs)
+        all_results.append(vllm_result)
+
+    # --- Ollama benchmark ---
     available = _list_models()
     if args.models:
         names = [m.strip() for m in args.models.split(",")]
     else:
         names = [m["name"] for m in available]
         sizes = {m["name"]: round(m["size"] / (1024**3), 1) for m in available}
-        print(f"\nAvailable models: {', '.join(f'{n} ({sizes[n]}GB)' for n in names)}")
+        print(f"\nAvailable Ollama models: {', '.join(f'{n} ({sizes[n]}GB)' for n in names)}")
 
-    baseline_gb = _vram_used_gb()
-    print(f"VRAM baseline: {baseline_gb} GB used")
-    print(f"\nRunning {args.runs} run(s) × {len(TEST_PROMPTS)} prompts per model\n")
-
-    all_results = []
+    print(f"\nRunning {args.runs} run(s) × {len(TEST_PROMPTS)} prompts per Ollama model\n")
     for name in names:
         result = _benchmark_model(name, args.runs)
         all_results.append(result)
 
     _print_summary(all_results, baseline_gb)
-
     _save_to_analytics(all_results)
 
 
