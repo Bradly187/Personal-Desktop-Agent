@@ -50,10 +50,10 @@ struct DAConnectionBanner: View {
             .frame(maxWidth: .infinity, minHeight: 44)
             .background(statusColor.opacity(0.1))
             .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
-            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!isDisconnected)
+        .allowsHitTesting(isDisconnected)
         .accessibilityLabel(accessibilityLabelText)
         .accessibilityHint(isDisconnected ? "Double-tap to reconnect" : "")
     }

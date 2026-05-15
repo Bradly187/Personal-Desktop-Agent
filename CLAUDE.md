@@ -12,7 +12,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–6 complete (2026-05-15)
+## Current Status — Phases 1–6 complete + touch-debug fix (2026-05-16)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
@@ -43,7 +43,12 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Gregory neural, 16kHz PCM) for cloud-routed CLARIFY actions; SEARCH_WEB URL-encoded via `urllib.parse`
 - Cloud path: raw Bedrock `us.anthropic.claude-haiku-4-5-20251001-v1:0` (8/8 accuracy on voice misrecognitions); AgentCore (Strands + LTM memory) code complete in `agentcore_fallback/`, deployment deferred (bedrock-agentcore 1.9.0 CLI missing)
 
-**Test suite (2026-05-15):** 198 pytest tests + 30 standalone integration scripts = 228 total, all passing
+**Done (Touch-debug fix — 2026-05-16):**
+- `DwellToolbarContainer.swift` — outer ZStack `.allowsHitTesting(false)` with toolbar `.allowsHitTesting(true)`; removed `.frame(maxWidth: .infinity)` in top/bottom modes; bottom mode uses VStack + `Color.clear.frame(height:56).allowsHitTesting(false)` spacer; floating mode `.contentShape(RoundedRectangle(...))` before `.gesture(DragGesture())`
+- `DAConnectionBanner.swift` — added `.allowsHitTesting(isDisconnected)`; removed `.contentShape(Rectangle())`
+- Tests: `OverlayTouchInterceptionTests.swift` (bug condition geometry), `OverlayPreservationTests.swift` (17 preservation property tests)
+
+**Test suite (2026-05-16):** 198 pytest tests + 30 standalone integration scripts + 6 Swift XCTest files = 234 total
 
 ## Run Commands
 

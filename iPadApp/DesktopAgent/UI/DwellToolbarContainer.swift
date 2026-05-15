@@ -28,6 +28,10 @@ struct DwellToolbarContainer: View {
         // ZStack separates the measurement layer (no hit testing) from the
         // interactive toolbar. Unlike .overlay on the GeometryReader, this
         // ensures the toolbar is a sibling — not a child — of the disabled layer.
+        //
+        // The outer ZStack disables hit-testing so its empty alignment space
+        // does not intercept touches destined for tab content underneath.
+        // The toolbar content re-enables hit-testing on itself.
         ZStack(alignment: toolbarAlignment) {
             // Measurement layer — captures size, never intercepts touches
             GeometryReader { geometry in
@@ -45,7 +49,9 @@ struct DwellToolbarContainer: View {
 
             // Interactive toolbar — only its visible frame receives touches
             toolbarPositioned
+                .allowsHitTesting(true)
         }
+        .allowsHitTesting(false)
     }
 
     // MARK: — Alignment
@@ -65,24 +71,31 @@ struct DwellToolbarContainer: View {
         switch settings.toolbarPosition {
         case .top:
             toolbarView
-                .frame(maxWidth: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: DesignTokens.Radius.md)
                         .fill(theme.surfacePrimary.opacity(0.95))
                 )
+                .contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                 .padding(.top, safeAreaInsets.top > 0 ? 0 : DesignTokens.Spacing.sm)
                 .padding(.horizontal, DesignTokens.Spacing.md)
 
         case .bottom:
-            toolbarView
-                .frame(maxWidth: .infinity)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignTokens.Radius.md)
-                        .fill(theme.surfacePrimary.opacity(0.95))
-                )
-                // Push above the tab bar (~49pt) so it doesn't cover tab icons
-                .padding(.bottom, 56)
-                .padding(.horizontal, DesignTokens.Spacing.md)
+            VStack(spacing: 0) {
+                toolbarView
+                    .background(
+                        RoundedRectangle(cornerRadius: DesignTokens.Radius.md)
+                            .fill(theme.surfacePrimary.opacity(0.95))
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                    .padding(.horizontal, DesignTokens.Spacing.md)
+
+                // Non-interactive spacer pushes toolbar above the tab bar (~49pt)
+                // without intercepting touches meant for the tab bar
+                Color.clear
+                    .frame(height: 56)
+                    .allowsHitTesting(false)
+            }
+            .allowsHitTesting(true) // VStack itself allows hit-testing for toolbar content
 
         case .floating:
             floatingToolbar
@@ -124,6 +137,7 @@ struct DwellToolbarContainer: View {
                     .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
             )
             .offset(constrainedOffset)
+            .contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
             .gesture(
                 DragGesture()
                     .updating($dragTranslation) { value, state, _ in
