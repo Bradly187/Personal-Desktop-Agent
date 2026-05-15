@@ -73,12 +73,26 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 class IPadBridge:
+    # Valid dwell action types for set_dwell_action messages
+    VALID_DWELL_ACTIONS: set[str] = {
+        "left_click", "right_click", "double_click", "drag_start", "drag_end"
+    }
+
+    # Valid feature names for set_feature_toggle messages
+    VALID_FEATURES: set[str] = {
+        "gaze_dwell_click", "gaze_dwell_right_click", "gaze_dwell_double_click",
+        "gaze_dwell_drag", "edge_scroll", "gaze_cursor_mode",
+    }
+
     def __init__(self, port: int = 8765):
         self.port = port
 
         # Screen dimensions (resolved lazily at start)
         self._screen_w: int = 1920
         self._screen_h: int = 1080
+
+        # Active dwell action type (default: left_click)
+        self._active_dwell_action: str = "left_click"
 
         # Direct executor for Phase 1 touch/trackpad commands
         self._executor = CommandExecutor()
@@ -139,6 +153,7 @@ class IPadBridge:
                 "type": "status",
                 "active_window": None,
                 "cursor": {"x": 0, "y": 0},
+                "active_dwell_action": self._active_dwell_action,
                 "ts": time.time(),
             })
         except Exception as exc:
@@ -203,6 +218,17 @@ class IPadBridge:
             return
 
         # ------------------------------------------------------------------ #
+        # Dwell action selection — updates active dwell action type
+        # ------------------------------------------------------------------ #
+        if msg_type == "set_dwell_action":
+            await self._handle_set_dwell_action(ws, msg)
+            return
+
+        if msg_type == "set_feature_toggle":
+            await self._handle_set_feature_toggle(ws, msg)
+            return
+
+        # ------------------------------------------------------------------ #
         # Sensor streams — dispatched to FusionEngine / Phase 3 components
         # No ack sent for high-frequency streams (tilt, gaze, head_pose).
         # All sensor handlers are wrapped in try/except to prevent malformed
@@ -240,7 +266,9 @@ class IPadBridge:
                 if self._fusion:
                     x = float(msg.get("x", 0.5))
                     y = float(msg.get("y", 0.5))
-                    self._fusion.on_gaze_dwell(x, y)
+                    # Use action_type from message, fall back to stored active dwell action
+                    action_type = msg.get("action_type") or self._active_dwell_action
+                    self._fusion.on_gaze_dwell(x, y, action_type)
             except (ValueError, TypeError) as exc:
                 log.debug("Bad gaze_dwell data: %s", exc)
             return
@@ -403,6 +431,87 @@ class IPadBridge:
 
         result = await asyncio.to_thread(hw_tools.recognize_math, png_bytes)
         await self._send_handwriting_result(ws, msg_id, result)
+
+    # ---------------------------------------------------------------------- #
+    # set_dwell_action — updates active dwell action type
+    # ---------------------------------------------------------------------- #
+
+    async def _handle_set_dwell_action(
+        self, ws: web.WebSocketResponse, msg: dict
+    ) -> None:
+        """Handle set_dwell_action message. Validates action_type and updates state."""
+        msg_id = msg.get("id")
+        action_type = msg.get("action_type")
+
+        if action_type not in self.VALID_DWELL_ACTIONS:
+            error_msg = (
+                f"invalid action_type: {action_type!r}; "
+                f"must be one of {sorted(self.VALID_DWELL_ACTIONS)}"
+            )
+            log.warning("set_dwell_action rejected: %s", error_msg)
+            payload: dict = {"type": "ack", "status": "error", "error": error_msg}
+            if msg_id is not None:
+                payload["id"] = msg_id
+            try:
+                await ws.send_json(payload)
+            except Exception as exc:
+                log.debug("Failed to send error ack: %s", exc)
+            return
+
+        self._active_dwell_action = action_type
+        log.info("Active dwell action set to: %s", action_type)
+
+        payload = {"type": "ack", "status": "ok", "action_type": action_type}
+        if msg_id is not None:
+            payload["id"] = msg_id
+        try:
+            await ws.send_json(payload)
+        except Exception as exc:
+            log.debug("Failed to send ack: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # set_feature_toggle — update feature enabled/disabled state
+    # ---------------------------------------------------------------------- #
+
+    async def _handle_set_feature_toggle(self, ws: web.WebSocketResponse, msg: dict) -> None:
+        """Handle set_feature_toggle messages. Validates feature name and forwards to FusionEngine."""
+        msg_id = msg.get("id")
+        feature = msg.get("feature")
+        enabled = msg.get("enabled")
+
+        # Validate feature name
+        if feature not in self.VALID_FEATURES:
+            payload: dict = {
+                "type": "ack",
+                "id": msg_id,
+                "status": "error",
+                "error": f"unknown feature: {feature!r}",
+            }
+            try:
+                await ws.send_json(payload)
+            except Exception as exc:
+                log.debug("Failed to send ack: %s", exc)
+            return
+
+        # Coerce enabled to bool
+        enabled = bool(enabled)
+
+        # Forward to FusionEngine
+        if self._fusion:
+            self._fusion.set_feature_toggle(feature, enabled)
+
+        # Respond with success ack
+        payload = {
+            "type": "ack",
+            "id": msg_id,
+            "status": "ok",
+            "feature": feature,
+            "enabled": enabled,
+        }
+        try:
+            await ws.send_json(payload)
+        except Exception as exc:
+            log.debug("Failed to send ack: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Response helpers

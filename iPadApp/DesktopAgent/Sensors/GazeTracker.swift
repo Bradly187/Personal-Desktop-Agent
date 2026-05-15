@@ -85,6 +85,13 @@ final class GazeTracker: NSObject, ObservableObject {
         guard let settings else { return }
         ws?.sendGaze(x: point.x, y: point.y, confidence: Double(conf))
 
+        // Suppress dwell timer when all dwell actions are disabled (gaze stream continues)
+        guard !settings.allDwellActionsDisabled else {
+            dwellStart = nil
+            dwellProgress = 0
+            return
+        }
+
         // Dwell detection
         let threshold = CGFloat(stabilityThreshold)
         if let last = lastStablePoint,
@@ -95,7 +102,14 @@ final class GazeTracker: NSObject, ObservableObject {
             let progress = min(elapsed / settings.dwellTimeout, 1.0)
             dwellProgress = progress
             if elapsed >= settings.dwellTimeout {
-                ws?.sendGazeDwell(x: point.x, y: point.y)
+                let firedAction = settings.activeDwellAction
+                ws?.sendGazeDwell(x: point.x, y: point.y, actionType: firedAction)
+
+                // Apply state transitions: drag auto-advance (dragStart→dragEnd, dragEnd→leftClick)
+                settings.applyDwellTransition(firedAction: firedAction)
+                // Apply one-shot reset: if enabled and action was rightClick/doubleClick, revert to leftClick
+                settings.applyOneShotResetIfNeeded()
+
                 dwellStart = nil
                 dwellProgress = 0
             }

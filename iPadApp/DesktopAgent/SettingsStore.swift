@@ -1,5 +1,27 @@
 import Foundation
 import Combine
+import CoreGraphics
+
+// MARK: — Toolbar Position
+
+/// Supported positions for the dwell action toolbar.
+/// Persisted to UserDefaults; defaults to `.bottom` on fresh install.
+enum ToolbarPosition: String, Codable, CaseIterable {
+    case top = "top"
+    case bottom = "bottom"
+    case floating = "floating"
+}
+
+// MARK: — Dwell Action Types
+
+/// Supported gaze dwell action types. Raw values match the WebSocket protocol strings.
+enum DwellActionType: String, Codable, CaseIterable {
+    case leftClick = "left_click"
+    case rightClick = "right_click"
+    case doubleClick = "double_click"
+    case dragStart = "drag_start"
+    case dragEnd = "drag_end"
+}
 
 /// Persists all user-configurable sensor preferences to UserDefaults.
 final class SettingsStore: ObservableObject {
@@ -48,6 +70,78 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(dwellTimeout, forKey: "dwellTimeout") }
     }
 
+    /// The currently active dwell action type. Persisted to UserDefaults.
+    @Published var activeDwellAction: DwellActionType {
+        didSet { defaults.set(activeDwellAction.rawValue, forKey: "activeDwellAction") }
+    }
+
+    /// When true, non-default actions (rightClick, doubleClick) reset to leftClick after one fire.
+    @Published var oneShotEnabled: Bool {
+        didSet { defaults.set(oneShotEnabled, forKey: "oneShotEnabled") }
+    }
+
+    /// Transient drag state — true between drag-start and drag-end. Not persisted.
+    @Published var isDragging: Bool = false
+
+    // MARK: — Toolbar Position
+
+    /// The user's selected toolbar position. Persisted to UserDefaults.
+    /// Defaults to `.bottom` on fresh install (Requirement 6.8).
+    @Published var toolbarPosition: ToolbarPosition {
+        didSet { defaults.set(toolbarPosition.rawValue, forKey: "toolbarPosition") }
+    }
+
+    /// Floating toolbar offset from center, persisted so the toolbar stays where the user left it.
+    @Published var toolbarFloatingOffset: CGSize {
+        didSet {
+            defaults.set(Double(toolbarFloatingOffset.width), forKey: "toolbarFloatingOffsetX")
+            defaults.set(Double(toolbarFloatingOffset.height), forKey: "toolbarFloatingOffsetY")
+        }
+    }
+
+    // MARK: — Dwell Action State Transitions
+
+    /// Applies one-shot reset after a non-default dwell action fires.
+    /// When `oneShotEnabled` is true and the fired action is rightClick or doubleClick,
+    /// resets `activeDwellAction` to `.leftClick`.
+    ///
+    /// - Returns: `true` if a reset occurred, `false` otherwise.
+    @discardableResult
+    func applyOneShotResetIfNeeded() -> Bool {
+        guard oneShotEnabled else { return false }
+
+        switch activeDwellAction {
+        case .rightClick, .doubleClick:
+            // Setting the property triggers DwellActionSyncer for WebSocket sync.
+            activeDwellAction = .leftClick
+            return true
+        case .leftClick, .dragStart, .dragEnd:
+            // One-shot does not apply to leftClick (already default) or drag (has its own state machine)
+            return false
+        }
+    }
+
+    // MARK: — Drag State Machine
+
+    /// Applies dwell action state transitions after a dwell fires.
+    /// - dragStart fires → auto-transition to dragEnd, isDragging = true
+    /// - dragEnd fires → reset to leftClick, isDragging = false
+    /// Setting `activeDwellAction` triggers DwellActionSyncer for WebSocket sync.
+    func applyDwellTransition(firedAction: DwellActionType) {
+        switch firedAction {
+        case .dragStart:
+            activeDwellAction = .dragEnd
+            isDragging = true
+
+        case .dragEnd:
+            activeDwellAction = .leftClick
+            isDragging = false
+
+        default:
+            break
+        }
+    }
+
     // MARK: — Head tracking
     @Published var headEnabled: Bool {
         didSet { defaults.set(headEnabled, forKey: "headEnabled") }
@@ -67,6 +161,35 @@ final class SettingsStore: ObservableObject {
     // MARK: — Voice / Keywords
     @Published var keywordList: [String] {
         didSet { defaults.set(keywordList, forKey: "keywordList") }
+    }
+
+    // MARK: — Feature Toggles (Gaze Dwell Actions)
+    @Published var gazeDwellClickEnabled: Bool {
+        didSet { defaults.set(gazeDwellClickEnabled, forKey: "gazeDwellClickEnabled") }
+    }
+    @Published var gazeDwellRightClickEnabled: Bool {
+        didSet { defaults.set(gazeDwellRightClickEnabled, forKey: "gazeDwellRightClickEnabled") }
+    }
+    @Published var gazeDwellDoubleClickEnabled: Bool {
+        didSet { defaults.set(gazeDwellDoubleClickEnabled, forKey: "gazeDwellDoubleClickEnabled") }
+    }
+    @Published var gazeDwellDragEnabled: Bool {
+        didSet { defaults.set(gazeDwellDragEnabled, forKey: "gazeDwellDragEnabled") }
+    }
+    @Published var edgeScrollEnabled: Bool {
+        didSet { defaults.set(edgeScrollEnabled, forKey: "edgeScrollEnabled") }
+    }
+    @Published var gazeCursorModeEnabled: Bool {
+        didSet { defaults.set(gazeCursorModeEnabled, forKey: "gazeCursorModeEnabled") }
+    }
+
+    /// True when all four dwell action types are disabled (click, right-click, double-click, drag).
+    /// Edge scroll and gaze-to-cursor are independent and not considered here.
+    var allDwellActionsDisabled: Bool {
+        !gazeDwellClickEnabled &&
+        !gazeDwellRightClickEnabled &&
+        !gazeDwellDoubleClickEnabled &&
+        !gazeDwellDragEnabled
     }
 
     // MARK: — Audio Streaming (iPad mic → PC Whisper)
@@ -94,9 +217,12 @@ final class SettingsStore: ObservableObject {
 
     // MARK: — Init
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
-    init() {
+    /// Creates a SettingsStore backed by the given UserDefaults instance.
+    /// Defaults to `.standard` for production use. Pass a custom suite for test isolation.
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         serverHost = defaults.string(forKey: "serverHost") ?? "192.168.18.2"
         serverPort = defaults.integer(forKey: "serverPort").nonZero ?? 8765
         tiltSensitivity = defaults.double(forKey: "tiltSensitivity").nonZero ?? 1.0
@@ -104,11 +230,40 @@ final class SettingsStore: ObservableObject {
         tiltEnabled = defaults.object(forKey: "tiltEnabled") as? Bool ?? true
         gazeEnabled = defaults.object(forKey: "gazeEnabled") as? Bool ?? true
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
+
+        if let savedAction = defaults.string(forKey: "activeDwellAction"),
+           let action = DwellActionType(rawValue: savedAction) {
+            activeDwellAction = action
+        } else {
+            activeDwellAction = .leftClick
+        }
+        oneShotEnabled = defaults.object(forKey: "oneShotEnabled") as? Bool ?? false
+
+        // Toolbar position — default to .bottom on fresh install (Requirement 6.8)
+        if let savedPosition = defaults.string(forKey: "toolbarPosition"),
+           let position = ToolbarPosition(rawValue: savedPosition) {
+            toolbarPosition = position
+        } else {
+            toolbarPosition = .bottom
+        }
+
+        // Floating offset — default to center (zero offset)
+        let offsetX = defaults.double(forKey: "toolbarFloatingOffsetX")
+        let offsetY = defaults.double(forKey: "toolbarFloatingOffsetY")
+        toolbarFloatingOffset = CGSize(width: offsetX, height: offsetY)
+
         headEnabled = defaults.object(forKey: "headEnabled") as? Bool ?? false
         headSmoothingFactor = defaults.double(forKey: "headSmoothingFactor").nonZero ?? 0.3
         trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 2.0
         palmRejectRadius = defaults.double(forKey: "palmRejectRadius").nonZero ?? 25.0
         keywordList = defaults.stringArray(forKey: "keywordList") ?? ["click", "scroll", "open"]
+        gazeDwellClickEnabled = defaults.object(forKey: "gazeDwellClickEnabled") as? Bool ?? true
+        gazeDwellRightClickEnabled = defaults.object(forKey: "gazeDwellRightClickEnabled") as? Bool ?? true
+        gazeDwellDoubleClickEnabled = defaults.object(forKey: "gazeDwellDoubleClickEnabled") as? Bool ?? true
+        gazeDwellDragEnabled = defaults.object(forKey: "gazeDwellDragEnabled") as? Bool ?? true
+        edgeScrollEnabled = defaults.object(forKey: "edgeScrollEnabled") as? Bool ?? true
+        gazeCursorModeEnabled = defaults.object(forKey: "gazeCursorModeEnabled") as? Bool ?? true
+
         audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false
 
         if let data = defaults.data(forKey: "soundMappings"),

@@ -39,6 +39,11 @@ struct ContentView: View {
                 .padding(.top, DesignTokens.Spacing.sm)
         }
         .overlay {
+            // Task 11.2: Dwell action toolbar overlaid on main content
+            DwellToolbarContainer(settings: settings, ws: wsManager)
+                .allowsHitTesting(true)
+        }
+        .overlay {
             ScreenshotOverlayView()
         }
         .onReceive(wsManager.$lastMessage) { message in

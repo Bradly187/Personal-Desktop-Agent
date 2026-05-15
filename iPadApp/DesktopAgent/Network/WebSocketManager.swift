@@ -230,6 +230,15 @@ final class WebSocketManager: ObservableObject {
     }
 }
 
+// MARK: — Dwell action helpers
+
+extension WebSocketManager {
+    /// Sends a `set_dwell_action` message to the PC bridge, informing it of the new active action type.
+    func sendSetDwellAction(_ action: DwellActionType) {
+        send(["type": "set_dwell_action", "action_type": action.rawValue])
+    }
+}
+
 // MARK: — Sensor message helpers
 
 extension WebSocketManager {
@@ -241,9 +250,9 @@ extension WebSocketManager {
         send(["type": "gaze", "x": x, "y": y, "confidence": confidence])
     }
 
-    func sendGazeDwell(x: Double, y: Double) {
+    func sendGazeDwell(x: Double, y: Double, actionType: DwellActionType) {
         msgCounter += 1
-        send(["type": "gaze_dwell", "id": "gd-\(msgCounter)", "x": x, "y": y])
+        send(["type": "gaze_dwell", "id": "gd-\(msgCounter)", "x": x, "y": y, "action_type": actionType.rawValue])
     }
 
     func sendHeadPose(pitch: Double, yaw: Double) {
