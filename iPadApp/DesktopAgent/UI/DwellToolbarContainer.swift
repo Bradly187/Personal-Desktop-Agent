@@ -80,7 +80,8 @@ struct DwellToolbarContainer: View {
                     RoundedRectangle(cornerRadius: DesignTokens.Radius.md)
                         .fill(theme.surfacePrimary.opacity(0.95))
                 )
-                .padding(.bottom, safeAreaInsets.bottom > 0 ? 0 : DesignTokens.Spacing.sm)
+                // Push above the tab bar (~49pt) so it doesn't cover tab icons
+                .padding(.bottom, 56)
                 .padding(.horizontal, DesignTokens.Spacing.md)
 
         case .floating:
