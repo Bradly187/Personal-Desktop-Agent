@@ -31,6 +31,69 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Amazon Polly TTS — spoken clarification for cloud-routed commands
+# ---------------------------------------------------------------------------
+
+_POLLY_VOICE = "Gregory"          # en-US Neural male; natural for a desktop assistant
+_POLLY_SAMPLE_RATE = 16_000       # 16 kHz PCM matches sounddevice default input rate
+_POLLY_MAX_CHARS = 3_000          # Polly hard limit for standard text input
+_POLLY_TIMEOUT_S = 5              # boto3 connect + read timeout
+
+
+def _polly_speak(message: str) -> bool:
+    """Speak a clarification message via Amazon Polly Neural TTS.
+
+    Called from _dispatch() which already runs in asyncio.to_thread, so
+    this function is safe to block.
+
+    Returns True if audio played successfully; False on any error
+    (missing credentials, network timeout, sounddevice failure, etc.).
+    All exceptions are caught internally — never raises.
+    """
+    if not message:
+        return False
+
+    if len(message) > _POLLY_MAX_CHARS:
+        message = message[:_POLLY_MAX_CHARS]
+
+    try:
+        import boto3
+        from botocore.config import Config
+        import numpy as np
+        import sounddevice as sd
+    except ImportError as exc:
+        log.debug("Polly TTS: dependency missing (%s) — install boto3, numpy, sounddevice", exc)
+        return False
+
+    try:
+        cfg = Config(connect_timeout=_POLLY_TIMEOUT_S, read_timeout=_POLLY_TIMEOUT_S)
+        polly = boto3.client("polly", region_name="us-east-1", config=cfg)
+
+        resp = polly.synthesize_speech(
+            Text=message,
+            OutputFormat="pcm",
+            SampleRate=str(_POLLY_SAMPLE_RATE),
+            VoiceId=_POLLY_VOICE,
+            Engine="neural",
+            LanguageCode="en-US",
+        )
+
+        audio_bytes: bytes = resp["AudioStream"].read()
+        if not audio_bytes:
+            log.warning("Polly TTS: empty audio stream returned")
+            return False
+
+        audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        sd.play(audio, samplerate=_POLLY_SAMPLE_RATE, blocking=True)
+        log.info("Polly TTS: spoke %d chars via voice=%s", len(message), _POLLY_VOICE)
+        return True
+
+    except Exception as exc:
+        log.warning("Polly TTS failed: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Universal DTO (mirrors the spec's Command dataclass)
 # ---------------------------------------------------------------------------
 
@@ -189,10 +252,14 @@ class CommandExecutor:
             return result
 
         # ------------------------------------------------------------------ #
-        # CLARIFY — nothing to execute; caller should prompt user
+        # CLARIFY — prompt user; speak via Polly when routed through cloud
         # ------------------------------------------------------------------ #
         if action == "CLARIFY":
-            return {"clarify": True, "message": p.get("message", "Unclear command")}
+            message = p.get("message", "Unclear command")
+            spoken = False
+            if p.get("route") == "cloud":
+                spoken = _polly_speak(message)
+            return {"clarify": True, "message": message, "spoken": spoken}
 
         # ================================================================== #
         # Dev-agent extended verbs

@@ -435,7 +435,7 @@ class HybridCoordinator:
                 action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
 
             # --- Execute the action ----------------------------------------
-            result = await self._execute_action(action_str, cmd)
+            result = await self._execute_action(action_str, cmd, route_label=route_label)
             success = result.get("status") == "ok"
 
             # Record successful local executions for few-shot learning
@@ -609,7 +609,9 @@ class HybridCoordinator:
     # Action execution
     # ---------------------------------------------------------------------- #
 
-    async def _execute_action(self, action_str: str, cmd: Command) -> dict:
+    async def _execute_action(
+        self, action_str: str, cmd: Command, route_label: str = "local"
+    ) -> dict:
         """Parse the LLM's action string and execute it via CommandExecutor."""
         if not action_str:
             return {"status": "error", "error": "empty action string"}
@@ -618,7 +620,11 @@ class HybridCoordinator:
         verb = parts[0].upper()
         target = parts[1] if len(parts) > 1 else ""
 
-        # Build an execution Command from the parsed action string
+        params = self._parse_params(verb, target, cmd)
+        # CLARIFY from a cloud route should speak via Polly TTS
+        if route_label == "cloud":
+            params["route"] = "cloud"
+
         exec_cmd = Command(
             text=target or cmd.text,
             action=verb,
@@ -627,7 +633,7 @@ class HybridCoordinator:
             gesture_confidence=cmd.gesture_confidence,
             session_context=cmd.session_context,
             gaze_coords=cmd.gaze_coords,
-            params=self._parse_params(verb, target, cmd),
+            params=params,
         )
 
         return await self._executor.execute(exec_cmd)
