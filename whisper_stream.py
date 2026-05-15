@@ -26,7 +26,12 @@ import asyncio
 import base64
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+# Shared approval gate directory — approval_hook.py writes "pending",
+# WhisperStream responds with the transcript in "response".
+_APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
 log = logging.getLogger(__name__)
 
@@ -298,6 +303,23 @@ class WhisperStream:
             # these bytes when amazon-transcribe is installed and logprob is low.
             params["audio_bytes"] = audio.astype("int16").tobytes()
             params["sample_rate"] = self.SAMPLE_RATE
+
+        # ---------------------------------------------------------------------------
+        # Approval gate intercept — check before forwarding to FusionEngine.
+        # approval_hook.py (Claude Code PreToolUse) writes a "pending" signal file
+        # when waiting for a yes/no from the user. If we see it, write the
+        # transcript as the approval response and suppress it from the pipeline so
+        # "yes" / "no" never reaches the desktop action pipeline.
+        # ---------------------------------------------------------------------------
+        _approval_pending = _APPROVAL_DIR / "pending"
+        _approval_response = _APPROVAL_DIR / "response"
+        if _approval_pending.exists():
+            try:
+                _approval_response.write_text(text, encoding="utf-8")
+                log.info("WhisperStream: approval response → %r", text)
+            except Exception as exc:
+                log.warning("WhisperStream: could not write approval response: %s", exc)
+            return  # consumed by approval gate — do NOT forward to FusionEngine
 
         cmd = Command(
             text=text,

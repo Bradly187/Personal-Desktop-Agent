@@ -30,6 +30,11 @@ import sys
 import time
 from pathlib import Path
 
+# Must match _APPROVAL_DIR in whisper_stream.py
+_APPROVAL_DIR = Path.home() / ".claude" / "approval"
+_PENDING_FILE  = _APPROVAL_DIR / "pending"
+_RESPONSE_FILE = _APPROVAL_DIR / "response"
+
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -167,6 +172,33 @@ def _transcribe(audio: "np.ndarray") -> str:
         return ""
 
 
+def _request_ipad_approval(timeout_s: float = 7.0) -> str | None:
+    """Signal WhisperStream to intercept the next iPad utterance for approval.
+
+    Writes a pending marker so _transcribe() reroutes the next voice segment
+    here instead of to FusionEngine.  Returns the transcript or None on timeout
+    (bridge not running or user stayed silent).
+    """
+    _APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
+    _RESPONSE_FILE.unlink(missing_ok=True)          # clear any stale response
+    _PENDING_FILE.write_text(str(time.time()), encoding="utf-8")
+
+    deadline = time.monotonic() + timeout_s
+    try:
+        while time.monotonic() < deadline:
+            if _RESPONSE_FILE.exists():
+                # utf-8-sig silently strips BOM (safe for both WhisperStream
+                # plain-UTF-8 writes and PowerShell BOM-UTF-8 test writes)
+                transcript = _RESPONSE_FILE.read_text(encoding="utf-8-sig").strip()
+                return transcript
+            time.sleep(0.1)
+        return None  # timeout — bridge not running or no speech detected
+    finally:
+        # Always clean up so a stale pending file doesn't block future commands
+        _PENDING_FILE.unlink(missing_ok=True)
+        _RESPONSE_FILE.unlink(missing_ok=True)
+
+
 def _parse_response(transcript: str, default: str) -> bool:
     """Return True (approved) or False (rejected) from the transcript."""
     words = set(transcript.lower().split())
@@ -214,23 +246,28 @@ def main() -> None:
     voice = config.get("voice_id", "Gregory")
     _polly_speak(message, voice)
 
-    # --- Record user response -------------------------------------------------
-    record_s: float = float(config.get("record_s", 4.0))
-    device = config.get("device")  # None = OS default; set to name substring to override
-    try:
-        audio = _record(record_s, device=device)
-    except Exception:
-        # Audio capture failed — apply timeout policy
-        sys.exit(0 if config.get("timeout_action", "approve") == "approve" else 2)
-
     timeout_action: str = config.get("timeout_action", "approve")
 
-    # Silence → auto-apply timeout action
-    if not _has_voice(audio):
-        sys.exit(0 if timeout_action == "approve" else 2)
+    # --- Prefer iPad mic via WhisperStream (bridge must be running) -----------
+    # Signal the bridge; if it responds within 7s the iPad utterance is used
+    # and not forwarded to FusionEngine (so "yes"/"no" won't trigger a command).
+    transcript = _request_ipad_approval(timeout_s=7.0)
 
-    # --- Transcribe and decide ------------------------------------------------
-    transcript = _transcribe(audio)
+    if transcript is None:
+        # Bridge not running or no speech — fall back to PC microphone
+        log.debug("approval_hook: iPad path timed out, falling back to PC mic")
+        record_s: float = float(config.get("record_s", 4.0))
+        device = config.get("device")
+        try:
+            audio = _record(record_s, device=device)
+        except Exception:
+            sys.exit(0 if timeout_action == "approve" else 2)
+
+        if not _has_voice(audio):
+            sys.exit(0 if timeout_action == "approve" else 2)
+
+        transcript = _transcribe(audio)
+
     approved = _parse_response(transcript, timeout_action)
 
     if approved:
