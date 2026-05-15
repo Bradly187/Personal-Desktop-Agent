@@ -194,6 +194,44 @@
     The 6 CLARIFY failures are SCREENSHOT+DICTATE test artefacts from 2026-05-07
     (CommandExecutor win32 clipboard ops slow at cold start) — not a routing problem.
 
+---
+
+## Phase 6 — Cloud fallback (agentcore_fallback/)
+
+- [x] **6.1 Raw Bedrock path — activate and verify (2026-05-15)**
+  - Updated model: `anthropic.claude-3-5-haiku-20241022-v1:0` (legacy) →
+    `us.anthropic.claude-haiku-4-5-20251001-v1:0` (active cross-region profile)
+  - `_CloudInference.infer()` now uses proper system/messages format for Claude 4.x
+  - `_CLOUD_SYSTEM_PROMPT` extends base vocab with voice misrecognition guidance
+  - 8/8 accuracy on disambiguation test (clothes→CLOSE, scroll done→SCROLL down, etc.)
+  - `agentcore_enabled: False` by default — raw Bedrock is active cloud tier
+
+- [x] **6.2 Gate 1 re-transcription — replace stub (2026-05-15)**
+  - Stage 1: `_apply_vocabulary_corrections()` — instant phonetic fix for 6 common
+    misrecognitions (no deps, 0ms overhead)
+  - Stage 2: Amazon Transcribe streaming — activated when `pip install amazon-transcribe`;
+    3s timeout; falls back to Stage 1 gracefully
+  - `WhisperStream.preserve_audio=True` (default) stores int16 audio bytes +
+    sample_rate in `Command.params` for Transcribe re-use
+  - `dataclasses.replace()` resets `whisper_logprob=0.0` after correction so command
+    clears Gate 1 on retry
+
+- [x] **6.3 Cloud-path integration tests (2026-05-15)** — `tests/test_cloud_path.py`
+  - 8 tests: real Bedrock call, Gate 2 routing, misrecognition, bad-creds degradation,
+    Gate 0 privacy block, AgentCore→Bedrock fall-through, Gate 1 vocab + retranscribe
+
+- [ ] **6.4 AgentCore Tier 1 deployment — deferred**
+  - Code complete: `agentcore_fallback/src/main.py` (Strands Agent + STM/LTM memory)
+  - Blocked: `bedrock-agentcore==1.9.0` ships without `bedrock_agentcore.cli` module;
+    CLI `bedrock-agentcore deploy` fails at import. Options:
+      a) Downgrade: `uv add "bedrock-agentcore<1.9.0"` in agentcore_fallback/ and retry
+      b) AWS console: zip `agentcore_fallback/src/` → Bedrock AgentCore → Create Agent Runtime
+      c) SDK: `boto3.client("bedrock-agentcore-control").create_agent_runtime()` with
+         `codeConfiguration` pointing to S3 zip + IAM execution role
+  - AWS account pre-filled in `.bedrock_agentcore.yaml` (567877624345, us-east-1)
+  - Priority: LOW — raw Bedrock (6.1) provides 90% of cloud value;
+    AgentCore adds cross-session LTM memory which partially overlaps ContinuousTrainer
+
 - [ ] **N.6 Evaluate Nemotron-4 340B with RAM offload (stretch goal)**
   - 192 GB RAM + 32 GB VRAM on this machine makes llama.cpp offloaded 340B feasible
   - Adds a third inference tier: fast-small (VRAM-only ≤8B) → slow-large (RAM-offloaded 340B) → cloud
