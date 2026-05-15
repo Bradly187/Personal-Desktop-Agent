@@ -2,6 +2,9 @@ name: Build iPad App
 
 on:
   push:
+    branches:
+      - main
+      - mvp
     paths:
       - 'iPadApp/**'
       - '.github/workflows/build-ipad-app.yml'
