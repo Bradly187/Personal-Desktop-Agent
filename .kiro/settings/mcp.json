@@ -9,7 +9,8 @@
         "SAFE_MODE": "1"
       },
       "autoApprove": [
-        "mouse_click"
+        "mouse_click",
+        "screenshot"
       ]
     }
   }

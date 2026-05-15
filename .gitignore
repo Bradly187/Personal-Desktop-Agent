@@ -23,6 +23,12 @@ files/
 files.zip
 codemagic.yaml
 
+# Runtime logs — generated at startup, never commit
+bridge.log
+bridge_err.log
+*.log
+_archive/
+
 # Runtime data — databases and legacy flat files (all replaced by agent.db / analytics.duckdb)
 agent.db
 analytics.duckdb
