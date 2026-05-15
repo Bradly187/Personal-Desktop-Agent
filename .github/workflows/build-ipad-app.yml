@@ -142,7 +142,8 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write API key file — use printf to preserve newlines in .p8 key
+          # Write API key file to the directory altool expects
+          # altool searches: ./private_keys/ and ~/private_keys/
           KEY_DIR="$HOME/private_keys"
           mkdir -p "$KEY_DIR"
           KEY_FILE="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
@@ -151,53 +152,32 @@ jobs:
 
           # Verify key file looks valid
           echo "API Key ID: $ASC_KEY_ID"
+          echo "Issuer ID: $ASC_ISSUER_ID"
           echo "Key file size: $(wc -c < "$KEY_FILE") bytes"
-          head -1 "$KEY_FILE"
-          tail -1 "$KEY_FILE"
+          echo "Key file first line: $(head -1 "$KEY_FILE")"
+          echo "Key file last line: $(tail -1 "$KEY_FILE")"
+          echo "Key file line count: $(wc -l < "$KEY_FILE")"
 
           # Find the exported IPA
           IPA_PATH=$(find $RUNNER_TEMP/export -name "*.ipa" | head -1)
           echo "Uploading: $IPA_PATH"
 
-          # Upload using xcrun altool with explicit key path
+          # Upload using xcrun altool (key discovered from ~/private_keys/)
           xcrun altool --upload-app \
             --type ios \
             --file "$IPA_PATH" \
             --apiKey "$ASC_KEY_ID" \
             --apiIssuer "$ASC_ISSUER_ID" \
-            --private-key "$KEY_FILE" \
             2>&1 | tee upload.log
 
           if grep -q "No errors uploading" upload.log; then
             echo "✅ Upload succeeded! Build will appear in TestFlight shortly."
           else
-            echo "⚠️ altool upload failed, trying xcrun xcodebuild -exportArchive with upload..."
-            # Fallback: use xcodebuild's built-in upload via export options
-            cat > $RUNNER_TEMP/UploadExportOptions.plist << UEOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>app-store-connect</string>
-            <key>teamID</key>
-            <string>${{ secrets.TEAM_ID }}</string>
-            <key>signingStyle</key>
-            <string>manual</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>com.bradtarver.DesktopAgent</key>
-              <string>${{ secrets.PROVISIONING_PROFILE_NAME }}</string>
-            </dict>
-            <key>destination</key>
-            <string>upload</string>
-          </dict>
-          </plist>
-          UEOF
+            echo "⚠️ altool failed. Trying xcodebuild -exportArchive with direct upload..."
 
             xcodebuild -exportArchive \
               -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
-              -exportOptionsPlist $RUNNER_TEMP/UploadExportOptions.plist \
+              -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
               -allowProvisioningUpdates \
               -authenticationKeyPath "$KEY_FILE" \
               -authenticationKeyID "$ASC_KEY_ID" \
@@ -207,8 +187,14 @@ jobs:
             if grep -q "EXPORT SUCCEEDED\|Upload Succeeded" upload2.log; then
               echo "✅ Upload succeeded via xcodebuild! Build will appear in TestFlight shortly."
             else
-              echo "❌ Both upload methods failed. Check secrets configuration."
-              tail -30 upload2.log
+              echo "❌ Both upload methods failed."
+              echo ""
+              echo "TROUBLESHOOTING:"
+              echo "1. Verify ASC_KEY_ID matches the Key ID in App Store Connect → Integrations"
+              echo "2. Verify ASC_ISSUER_ID matches the Issuer ID at the top of that page"
+              echo "3. Verify the API key has Admin or App Manager access (not Developer)"
+              echo "4. Verify the key status is Active (not revoked)"
+              echo "5. Verify ASC_PRIVATE_KEY contains the full .p8 file including BEGIN/END lines"
               exit 1
             fi
           fi
