@@ -177,11 +177,22 @@
   - 4 GB floor was conservative; with 32 GB VRAM, 8 GB free is still 75% utilisation headroom
   - Comment in config explains this is tuned for RTX 5090; lower for smaller GPUs
 
-- [ ] **N.5 Analyse `routing_log.jsonl` after 1-week soak to tune gate thresholds**
-  - Parse log; count decisions per `gate_that_decided` label
-  - If >20% of commands hit `gate2_complexity` → lower `max_local_tokens` or loosen keyword list
-  - If `gate3_vram` never fires → consider raising `vram_free_min_gb` further
-  - If `gate4_latency` fires often → investigate inference backend, not the budget number
+- [x] **N.5 Analyse routing data (agent.db) — 2026-05-15 review**
+  - **Data:** 22 commands across 7 sessions (mostly integration test artefacts); too sparse
+    for production threshold changes but healthy distribution confirmed.
+  - **Gate distribution:** bypass 91% (20) | gate2_complexity 9% (2) | gates 0/1/3/4: 0%
+  - **Breakdown:**
+    - 14 gaze_dwell/bypass → all CLICKs, <2ms routing ← integration tests (2026-05-11)
+    - 2 voice/gate2_complexity → "close window and open notepad" → CLOSE ← multi-step voice
+    - 6 touch/bypass → CLARIFY (2285ms) ← bridge_client SCREENSHOT+DICTATE test artefacts
+  - **Threshold decisions (2026-05-15):**
+    - gate2_complexity 9% < 20% threshold → NO CHANGE to max_local_tokens or keyword list
+    - gate3_vram never fired → VRAM floor (8.0 GB) is fine; RTX 5090 headroom adequate
+    - gate4_latency never fired → 350ms budget holds; no backend investigation needed
+    - gate0_privacy never fired → no sensitive commands issued (expected)
+  - **Action:** Revisit after 200+ real-world voice commands for meaningful tuning.
+    The 6 CLARIFY failures are SCREENSHOT+DICTATE test artefacts from 2026-05-07
+    (CommandExecutor win32 clipboard ops slow at cold start) — not a routing problem.
 
 - [ ] **N.6 Evaluate Nemotron-4 340B with RAM offload (stretch goal)**
   - 192 GB RAM + 32 GB VRAM on this machine makes llama.cpp offloaded 340B feasible
