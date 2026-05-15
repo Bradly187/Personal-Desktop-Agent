@@ -27,8 +27,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 16.3
-        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+      - name: Select Xcode 26
+        run: |
+          # Find the latest Xcode 26.x installed
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ]; then
+            echo "No Xcode 26.x found, listing available:"
+            ls /Applications/Xcode*.app
+            exit 1
+          fi
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -178,6 +187,7 @@ jobs:
             xcodebuild -exportArchive \
               -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
               -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
+              -exportPath $RUNNER_TEMP/upload-export \
               -allowProvisioningUpdates \
               -authenticationKeyPath "$KEY_FILE" \
               -authenticationKeyID "$ASC_KEY_ID" \

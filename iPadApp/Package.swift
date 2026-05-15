@@ -11,7 +11,9 @@ let package = Package(
             name: "DesktopAgent",
             path: "DesktopAgent",
             exclude: ["project.yml", "DesktopAgent.entitlements"],
-            resources: [],
+            resources: [
+                .process("Assets.xcassets"),
+            ],
             linkerSettings: [
                 .linkedFramework("ARKit"),
                 .linkedFramework("CoreMotion"),
