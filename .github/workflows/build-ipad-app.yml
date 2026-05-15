@@ -142,30 +142,75 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write API key file
-          KEY_DIR="$HOME/.private_keys"
+          # Write API key file — use printf to preserve newlines in .p8 key
+          KEY_DIR="$HOME/private_keys"
           mkdir -p "$KEY_DIR"
           KEY_FILE="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
-          echo "$ASC_PRIVATE_KEY" > "$KEY_FILE"
+          printf '%s\n' "$ASC_PRIVATE_KEY" > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
+
+          # Verify key file looks valid
+          echo "API Key ID: $ASC_KEY_ID"
+          echo "Key file size: $(wc -c < "$KEY_FILE") bytes"
+          head -1 "$KEY_FILE"
+          tail -1 "$KEY_FILE"
 
           # Find the exported IPA
           IPA_PATH=$(find $RUNNER_TEMP/export -name "*.ipa" | head -1)
           echo "Uploading: $IPA_PATH"
 
-          # Upload using xcrun altool (works with API key auth)
+          # Upload using xcrun altool with explicit key path
           xcrun altool --upload-app \
             --type ios \
             --file "$IPA_PATH" \
             --apiKey "$ASC_KEY_ID" \
             --apiIssuer "$ASC_ISSUER_ID" \
+            --private-key "$KEY_FILE" \
             2>&1 | tee upload.log
 
           if grep -q "No errors uploading" upload.log; then
             echo "✅ Upload succeeded! Build will appear in TestFlight shortly."
           else
-            echo "⚠️ Upload may have failed. Check App Store Connect."
-            cat upload.log
+            echo "⚠️ altool upload failed, trying xcrun xcodebuild -exportArchive with upload..."
+            # Fallback: use xcodebuild's built-in upload via export options
+            cat > $RUNNER_TEMP/UploadExportOptions.plist << UEOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${{ secrets.TEAM_ID }}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.bradtarver.DesktopAgent</key>
+              <string>${{ secrets.PROVISIONING_PROFILE_NAME }}</string>
+            </dict>
+            <key>destination</key>
+            <string>upload</string>
+          </dict>
+          </plist>
+          UEOF
+
+            xcodebuild -exportArchive \
+              -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
+              -exportOptionsPlist $RUNNER_TEMP/UploadExportOptions.plist \
+              -allowProvisioningUpdates \
+              -authenticationKeyPath "$KEY_FILE" \
+              -authenticationKeyID "$ASC_KEY_ID" \
+              -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+              2>&1 | tee upload2.log
+
+            if grep -q "EXPORT SUCCEEDED\|Upload Succeeded" upload2.log; then
+              echo "✅ Upload succeeded via xcodebuild! Build will appear in TestFlight shortly."
+            else
+              echo "❌ Both upload methods failed. Check secrets configuration."
+              tail -30 upload2.log
+              exit 1
+            fi
           fi
 
       - name: Upload IPA as artifact
