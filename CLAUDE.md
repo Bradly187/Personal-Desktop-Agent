@@ -12,34 +12,38 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–4 skeleton complete
+## Current Status — Phases 1–6 complete (2026-05-15)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
 **Done (Phase 2):**
-- `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz
-- `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); `routing_log.jsonl` outcome logging
-- `local_inference.py` — `LocalInference` ABC + `OllamaInference`, `VLLMInference` (stub), `NemotronInference`
+- `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz; enhanced gaze dwell (5 action types, drag state machine, edge scroll, gaze-to-cursor mode)
+- `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
+- `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090), `NemotronInference`
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app: `SensorManager` (lifecycle hub), `SharedAudioSession` (shared AVAudioEngine), `ServiceDiscovery` (mDNS NWBrowser), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`
+- `iPadApp/DesktopAgent/` — SwiftUI app (35 Swift files): `SensorManager`, `SharedAudioSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
 
-**Done (Phase 3 skeleton):**
+**Done (Phase 3):**
 - `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce
 - `lidar_receiver.py` — Decodes `depth_frame` messages; confidence-map filtering; `get_depth_at()`
 - `domain_classifier.py` — Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL
-- `model_router.py` — VRAM-aware specialist model selection; domain-tuned prompts
+- `model_router.py` — VRAM-aware specialist model selection; 2 GB tolerance; domain-tuned prompts; fallback chain per domain
 - `dev_agent.py` — Plan→execute→reflect agentic loop; 5 dev verbs; session context
-- `tests/test_gaze_dwell_click.py`, `tests/test_gaze_dwell_e2e.py`, `tests/test_tilt_navigation.py` — integration tests (tasks 2.11, 2.12)
 
-**Done (Phase 4 skeleton):**
+**Done (Phase 4):**
 - `continuous_trainer.py` — Routing threshold adaptation; few-shot ranking; gesture confidence floors; delegates storage to `AgentDB`
 - `main.py` — Unified entry point; `--measure-vram`; startup status table; Ctrl-C shutdown
-- `benchmark_models.py` — Ollama model benchmark; p50/p95 latency; VRAM snapshots
-- `whisper_stream.py` — GPU-accelerated speech; Silero VAD + faster-whisper; emits `Command(source="voice")` to FusionEngine
+- `benchmark_models.py` — Ollama model benchmark; p50/p95 latency; VRAM snapshots; `--vllm` flag for VLLMInference comparison
+- `whisper_stream.py` — GPU-accelerated speech; Silero VAD + faster-whisper; preserves audio bytes in `Command.params` for Gate 1 Transcribe re-transcription
 - `db.py` — `AgentDB` (aiosqlite, 12 tables) + `AnalyticsDB` (DuckDB); MiniLM semantic few-shot retrieval
 - `migrate.py` — One-time migration from legacy files (trainer.db, routing_log.jsonl, benchmark_results.json) to new DB layer
 
-**Not yet built:** full `VLLMInference` (task 2.13)
+**Done (Phase 6 — cloud fallback):**
+- `hybrid_coordinator.py` — `_retranscribe()`: Stage 1 phonetic vocabulary correction (6 misrecognitions, 0ms), Stage 2 Amazon Transcribe streaming (activates when `pip install amazon-transcribe`); Gate 1 route label propagated to executor
+- `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Gregory neural, 16kHz PCM) for cloud-routed CLARIFY actions; SEARCH_WEB URL-encoded via `urllib.parse`
+- Cloud path: raw Bedrock `us.anthropic.claude-haiku-4-5-20251001-v1:0` (8/8 accuracy on voice misrecognitions); AgentCore (Strands + LTM memory) code complete in `agentcore_fallback/`, deployment deferred (bedrock-agentcore 1.9.0 CLI missing)
+
+**Test suite (2026-05-15):** 198 pytest tests + 30 standalone integration scripts = 228 total, all passing
 
 ## Run Commands
 
@@ -115,7 +119,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `mcp_server/tools/handwriting.py` | pix2tex LaTeX OCR; latex_to_unicode fallback converter |
 | `fusion_engine.py` | 60 Hz tick loop; 10-level sensor priority; direct pyautogui for tilt/head |
 | `hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); AWS Bedrock fallback; outcome logger |
-| `local_inference.py` | `LocalInference` ABC; `OllamaInference`, `VLLMInference` (stub), `NemotronInference` |
+| `local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (complete; needs CUDA 13.x torch to activate), `NemotronInference` |
 | `continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture confidence floors; delegates all storage to `AgentDB` |
 | `lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
 | `gesture_processor.py` | MediaPipe Hands; POINT/PINCH/PALM/FIST; LiDAR pinch depth; 800 ms debounce |

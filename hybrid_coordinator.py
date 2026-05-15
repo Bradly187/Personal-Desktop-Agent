@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from command_executor import Command, CommandExecutor
+from dataclasses import replace as _dc_replace
 from local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
 
 if TYPE_CHECKING:
@@ -238,8 +239,7 @@ async def _retranscribe(cmd: Command) -> Command:
         log.info(
             "Gate 1 vocab correction: %r → %r", cmd.text, corrected_text
         )
-        from dataclasses import replace as dc_replace
-        cmd = dc_replace(cmd, text=corrected_text, whisper_logprob=0.0)
+        cmd = _dc_replace(cmd, text=corrected_text, whisper_logprob=0.0)
 
     # --- Stage 2: Amazon Transcribe streaming (optional) --------------------
     audio_bytes: bytes | None = cmd.params.get("audio_bytes")
@@ -308,7 +308,7 @@ async def _retranscribe(cmd: Command) -> Command:
             )
             from dataclasses import replace as dc_replace
             logprob_equiv = -max(0.0, 1.0 - handler.confidence)
-            cmd = dc_replace(cmd, text=handler.transcript, whisper_logprob=logprob_equiv)
+            cmd = _dc_replace(cmd, text=handler.transcript, whisper_logprob=logprob_equiv)
 
     except asyncio.TimeoutError:
         log.warning("Gate 1 Transcribe: timed out after 3s — using vocab-corrected text")
@@ -438,20 +438,8 @@ class HybridCoordinator:
             result = await self._execute_action(action_str, cmd, route_label=route_label)
             success = result.get("status") == "ok"
 
-            # Record successful local executions for few-shot learning
-            if (self._trainer and route_label == "local" and success):
-                await self._trainer.record_success(
-                    cmd, action_str, command_id=command_id
-                )
-
-        except Exception as exc:
-            log.error("HybridCoordinator.route error: %s", exc)
-            error_msg = str(exc)
-            return {"status": "error", "error": str(exc)}
-
-        finally:
+            # Persist to DB now so command_id is valid before trainer uses it
             latency_ms = (time.monotonic() - t0) * 1000
-            self._update_ema(latency_ms)
             if self._agent_db and self._agent_db.available:
                 try:
                     command_id = await self._agent_db.insert_command(
@@ -466,6 +454,21 @@ class HybridCoordinator:
                     )
                 except Exception as db_exc:
                     log.warning("AgentDB.insert_command failed: %s", db_exc)
+
+            # Record successful local executions for few-shot learning
+            if (self._trainer and route_label == "local" and success):
+                await self._trainer.record_success(
+                    cmd, action_str, command_id=command_id
+                )
+
+        except Exception as exc:
+            log.error("HybridCoordinator.route error: %s", exc)
+            error_msg = str(exc)
+            return {"status": "error", "error": str(exc)}
+
+        finally:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self._update_ema(latency_ms)
 
         return result
 

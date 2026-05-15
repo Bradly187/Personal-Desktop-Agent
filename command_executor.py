@@ -84,8 +84,20 @@ def _polly_speak(message: str) -> bool:
             return False
 
         audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        sd.play(audio, samplerate=_POLLY_SAMPLE_RATE, blocking=True)
-        log.info("Polly TTS: spoke %d chars via voice=%s", len(message), _POLLY_VOICE)
+        duration_s = len(audio) / _POLLY_SAMPLE_RATE
+        timeout_s = duration_s + _POLLY_TIMEOUT_S  # audio duration + network buffer
+
+        sd.play(audio, samplerate=_POLLY_SAMPLE_RATE)
+        deadline = time.monotonic() + timeout_s
+        while sd.get_stream().active:
+            if time.monotonic() > deadline:
+                sd.stop()
+                log.warning("Polly TTS: playback timed out after %.1fs", timeout_s)
+                return False
+            time.sleep(0.05)
+
+        log.info("Polly TTS: spoke %d chars (%.1fs) via voice=%s",
+                 len(message), duration_s, _POLLY_VOICE)
         return True
 
     except Exception as exc:
@@ -305,8 +317,9 @@ class CommandExecutor:
         # params: {query: str}
         # ------------------------------------------------------------------ #
         if action == "SEARCH_WEB":
+            from urllib.parse import urlencode
             query = p.get("query", cmd.text)
-            url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+            url = "https://www.google.com/search?" + urlencode({"q": query})
             webbrowser.open(url)
             return {"opened": url}
 
