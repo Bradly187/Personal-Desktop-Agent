@@ -39,9 +39,10 @@ struct ContentView: View {
                 .padding(.top, DesignTokens.Spacing.sm)
         }
         .overlay {
-            // Task 11.2: Dwell action toolbar overlaid on main content
+            // Task 11.2: Dwell action toolbar overlaid on main content.
+            // Container uses GeometryReader (fills screen) but only the toolbar
+            // itself should receive touches — empty space passes through.
             DwellToolbarContainer(settings: settings, ws: wsManager)
-                .allowsHitTesting(true)
         }
         .overlay {
             ScreenshotOverlayView()
