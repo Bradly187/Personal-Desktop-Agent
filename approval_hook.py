@@ -79,24 +79,19 @@ def _needs_approval(tool_name: str, config: dict) -> bool:
 
 def _build_message(tool_name: str, tool_input: dict) -> str:
     """Return a short spoken description of the pending action."""
-    name = lambda p: Path(p).name if p else "a file"
+    folder = lambda p: Path(p).parent.name if p else "a folder"
 
-    if tool_name == "Edit":
-        return f"Edit {name(tool_input.get('file_path'))}. Approve?"
-    if tool_name == "Write":
-        return f"Write {name(tool_input.get('file_path'))}. Approve?"
+    if tool_name in ("Edit", "Write"):
+        return f"Approve write to {folder(tool_input.get('file_path'))}?"
     if tool_name in ("Bash", "PowerShell"):
-        raw = tool_input.get("command", "a command")
-        # Trim to first 80 chars for comfortable speaking
-        cmd = raw.strip().replace("\n", " ")[:80]
-        return f"Run: {cmd}. Approve?"
+        # First word of the command (the executable) gives enough context
+        raw = tool_input.get("command", "a command").strip().split()[0]
+        return f"Approve running {raw}?"
     if tool_name == "Agent":
-        desc = tool_input.get("description", "a sub-agent task")[:60]
-        return f"Launch agent: {desc}. Approve?"
+        return "Approve launching a sub-agent?"
     if tool_name == "computer":
-        action = tool_input.get("action", "browser action")
-        return f"Computer control: {action}. Approve?"
-    return f"{tool_name}. Approve?"
+        return "Approve browser control?"
+    return f"Approve {tool_name}?"
 
 
 # ---------------------------------------------------------------------------
