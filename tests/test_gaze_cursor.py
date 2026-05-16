@@ -72,7 +72,7 @@ class TestEMASmoothing:
     def test_cursor_moves_to_pixel_coords(self, mock_move, engine):
         run(engine._apply_gaze_cursor(0.5, 0.5, 0.9))
         # First sample: EMA = (0.5, 0.5), pixel = (960, 540)
-        mock_move.assert_called_once_with(960, 540, duration=0)
+        mock_move.assert_called_once_with(960, 540, _pause=False)
 
 
 class TestDisplacementClamping:
@@ -108,7 +108,7 @@ class TestDisplacementClamping:
             loop.run_until_complete(engine._apply_gaze_cursor(0.51, 0.51, 0.9))
         finally:
             loop.close()
-        alpha = 0.3
+        alpha = engine._cfg.gaze_cursor_ema_alpha  # read from config — survives tuning
         expected_x = alpha * 0.51 + (1 - alpha) * 0.5
         expected_y = alpha * 0.51 + (1 - alpha) * 0.5
         assert engine._gaze_cursor_ema[0] == pytest.approx(expected_x, abs=1e-6)

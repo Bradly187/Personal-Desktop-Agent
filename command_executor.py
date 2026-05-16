@@ -264,13 +264,18 @@ class CommandExecutor:
             return result
 
         # ------------------------------------------------------------------ #
-        # CLARIFY — prompt user; speak via Polly when routed through cloud
+        # CLARIFY — speak via Polly Bidirectional Streaming TTS (always)
         # ------------------------------------------------------------------ #
         if action == "CLARIFY":
             message = p.get("message", "Unclear command")
             spoken = False
-            if p.get("route") == "cloud":
-                spoken = _polly_speak(message)
+            try:
+                from polly_stream import get_client as _get_tts
+                spoken = _get_tts().speak_sync(message)
+            except Exception as _tts_exc:
+                log.debug("TTS speak failed, falling back to legacy Polly: %s", _tts_exc)
+                if p.get("route") == "cloud":
+                    spoken = _polly_speak(message)
             return {"clarify": True, "message": message, "spoken": spoken}
 
         # ================================================================== #

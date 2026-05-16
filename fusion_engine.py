@@ -60,7 +60,7 @@ class FusionConfig:
     edge_scroll_max_speed: int = 10        # scroll units/tick at screen edge
 
     # Gaze-to-cursor
-    gaze_cursor_ema_alpha: float = 0.3       # EMA smoothing factor for cursor position
+    gaze_cursor_ema_alpha: float = 0.12      # EMA smoothing factor for cursor position
     gaze_cursor_max_jump_pct: float = 0.05   # max 5% of screen diagonal per tick
     gaze_cursor_conf_min: float = 0.55       # minimum confidence to move cursor
     gaze_cursor_lost_timeout_s: float = 0.5  # hold position after gaze lost this long
@@ -437,16 +437,33 @@ class FusionEngine:
         # Gaze stability — used by Rules 4 & 5
         stable = self._gaze_buf.stable_centroid(self._diag)
 
-        # Rule 4 — Gaze stable + voice keyword "click" (bypass all gates)
-        if stable and self._voice_local and self._voice_local.lower().strip() == "click":
+        # Rule 4 — Voice keyword "click":
+        # In gaze-to-cursor mode, click at the EMA cursor position immediately —
+        # no stability requirement because the cursor is already smoothed.
+        # Outside gaze-to-cursor mode, require stable gaze as before.
+        # Either way, consume the keyword so it never falls through to DICTATE.
+        if self._voice_local and self._voice_local.lower().strip() == "click":
             self._voice_local = None
-            cmd = Command(
-                text="gaze voice click",
-                action="CLICK",
-                source="multimodal",
-                gaze_coords=(int(stable[0] * self._w), int(stable[1] * self._h)),
-            )
-            await self._emit(cmd)
+            if self._feature_toggles.get("gaze_cursor_mode", False) and self._gaze_cursor_ema is not None:
+                ema_x, ema_y = self._gaze_cursor_ema
+                px_x = max(0, min(self._w, round(ema_x * self._w)))
+                px_y = max(0, min(self._h, round(ema_y * self._h)))
+                cmd = Command(
+                    text="gaze voice click",
+                    action="CLICK",
+                    source="multimodal",
+                    gaze_coords=(px_x, px_y),
+                )
+                await self._emit(cmd)
+            elif stable:
+                cmd = Command(
+                    text="gaze voice click",
+                    action="CLICK",
+                    source="multimodal",
+                    gaze_coords=(int(stable[0] * self._w), int(stable[1] * self._h)),
+                )
+                await self._emit(cmd)
+            # No EMA and no stable gaze — drop silently (don't fall through to DICTATE)
             return
 
         # Rule 5 — Gaze stable + POINT gesture
@@ -462,10 +479,13 @@ class FusionEngine:
             return
 
         # Rule 6 — Tilt navigation (direct to pyautogui, no Command, no LLM)
-        # Suppressed when gaze-to-cursor mode is active (even if gaze is temporarily lost)
+        # In gaze-to-cursor mode, suppressed while gaze is active (prevents fighting).
+        # When gaze is lost (not recent), tilt breaks through as an escape hatch —
+        # clears EMA so gaze reinitialises fresh when it is reacquired.
         if self._tilt:
-            if self._feature_toggles.get("gaze_cursor_mode", False):
-                self._tilt = None  # consume and discard
+            gaze_cursor_on = self._feature_toggles.get("gaze_cursor_mode", False)
+            if gaze_cursor_on and gaze_is_recent:
+                self._tilt = None  # gaze is driving — discard tilt, no return
             else:
                 rx, ry = self._tilt
                 self._tilt = None
@@ -473,20 +493,27 @@ class FusionEngine:
                 if abs(rx) > dz or abs(ry) > dz:
                     dx = int(ry * self._cfg.tilt_sensitivity)
                     dy = int(-rx * self._cfg.tilt_sensitivity)
+                    if gaze_cursor_on:
+                        # Tilt broke through gaze-cursor — reset EMA so gaze
+                        # doesn't snap to a stale position when it comes back.
+                        self._gaze_cursor_ema = None
                     await asyncio.to_thread(pyautogui.moveRel, dx, dy, duration=0)
                 return
 
         # Rule 7 — Head tracking (direct to pyautogui, no Command, no LLM)
-        # Suppressed when gaze-to-cursor mode is active (even if gaze is temporarily lost)
+        # Same escape-hatch logic as Rule 6.
         if self._head:
-            if self._feature_toggles.get("gaze_cursor_mode", False):
-                self._head = None  # consume and discard
+            gaze_cursor_on = self._feature_toggles.get("gaze_cursor_mode", False)
+            if gaze_cursor_on and gaze_is_recent:
+                self._head = None  # gaze is driving — discard head, no return
             else:
                 pitch, yaw = self._head
                 self._head = None
                 dx = int(yaw * self._cfg.head_sensitivity)
                 dy = int(-pitch * self._cfg.head_sensitivity)
                 if dx or dy:
+                    if gaze_cursor_on:
+                        self._gaze_cursor_ema = None
                     await asyncio.to_thread(pyautogui.moveRel, dx, dy, duration=0)
                 return
 
@@ -682,9 +709,11 @@ class FusionEngine:
         px_y = max(0, min(self._h, round(ema_y * self._h)))
 
         # --- Move cursor ---
+        # moveTo is a single Win32 SendInput call (~microseconds); calling it
+        # synchronously avoids thread-pool overhead at 60 Hz.
         self._gaze_cursor_last = (px_x, px_y)
         try:
-            await asyncio.to_thread(pyautogui.moveTo, px_x, px_y, duration=0)
+            pyautogui.moveTo(px_x, px_y, _pause=False)
         except Exception as exc:
             log.error("Gaze-to-cursor: pyautogui.moveTo failed: %s", exc)
 
