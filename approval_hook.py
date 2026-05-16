@@ -98,7 +98,7 @@ def _build_message(tool_name: str, tool_input: dict) -> str:
 # Polly TTS
 # ---------------------------------------------------------------------------
 
-def _polly_speak(text: str, voice_id: str = "Gregory") -> None:
+def _polly_speak(text: str, voice_id: str = "Danielle") -> None:
     """Speak text via Polly, block until speech finishes, then return."""
     try:
         import boto3
@@ -238,7 +238,7 @@ def main() -> None:
 
     # --- Speak the action description ----------------------------------------
     message = _build_message(tool_name, tool_input)
-    voice = config.get("voice_id", "Gregory")
+    voice = config.get("voice_id", "Danielle")
     _polly_speak(message, voice)
 
     timeout_action: str = config.get("timeout_action", "approve")

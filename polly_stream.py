@@ -147,7 +147,7 @@ def shutdown() -> None:
 # Synchronous HTTP call (safe to call from asyncio.to_thread / _dispatch)
 # ---------------------------------------------------------------------------
 
-def _http_post_speak(text: str, voice: str = "Ruth") -> bytes | None:
+def _http_post_speak(text: str, voice: str = "Danielle") -> bytes | None:
     """POST to the sidecar and return OGG Vorbis bytes, or None on failure."""
     if not _ensure_started():
         return None
@@ -218,7 +218,7 @@ class PollyStreamClient:
     or instantiated per-component.
     """
 
-    def __init__(self, voice: str = "Ruth") -> None:
+    def __init__(self, voice: str = "Danielle") -> None:
         self.voice = voice
 
     # --- Synchronous (for use from threads / _dispatch) --------------------
@@ -324,7 +324,7 @@ class PollyStreamClient:
 _default_client: Optional[PollyStreamClient] = None
 
 
-def get_client(voice: str = "Ruth") -> PollyStreamClient:
+def get_client(voice: str = "Danielle") -> PollyStreamClient:
     """Return the module-level singleton, creating it on first call."""
     global _default_client
     if _default_client is None:

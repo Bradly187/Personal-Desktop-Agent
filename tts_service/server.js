@@ -35,7 +35,7 @@ import { fromIni, fromEnv } from "@aws-sdk/credential-providers";
 
 const PORT          = parseInt(process.env.TTS_PORT      || "8766", 10);
 const REGION        = process.env.AWS_DEFAULT_REGION     || "us-east-1";
-const DEFAULT_VOICE = process.env.TTS_VOICE              || "Ruth";
+const DEFAULT_VOICE = process.env.TTS_VOICE              || "Danielle";
 const DEFAULT_ENGINE= process.env.TTS_ENGINE             || "generative";
 
 // ---------------------------------------------------------------------------

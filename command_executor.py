@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Amazon Polly TTS — spoken clarification for cloud-routed commands
 # ---------------------------------------------------------------------------
 
-_POLLY_VOICE = "Gregory"          # en-US Neural male; natural for a desktop assistant
+_POLLY_VOICE = "Danielle"         # en-US Generative female; also supports Long-form
 _POLLY_SAMPLE_RATE = 16_000       # 16 kHz PCM matches sounddevice default input rate
 _POLLY_MAX_CHARS = 3_000          # Polly hard limit for standard text input
 _POLLY_TIMEOUT_S = 5              # boto3 connect + read timeout
