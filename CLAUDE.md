@@ -136,6 +136,52 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `db.py` | `AgentDB` (aiosqlite, 12 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval |
 | `migrate.py` | One-time migration from legacy trainer.db / routing_log.jsonl / benchmark_results.json to new DB layer; run once then delete |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
+| `polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar |
+| `tts_service/server.js` | Node.js sidecar (port 8766); calls `StartSpeechSynthesisStream` (AWS SDK v3); returns OGG Vorbis; Python decodes with soundfile |
+| `approval_hook.py` | Claude Code `PreToolUse` gate; Danielle speaks action description; records iPad mic via WhisperStream signal file or PC mic fallback; yes/no → exit 0/2 |
+| `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device, timeout |
+
+## Polly TTS Voice
+
+**Current voice: Danielle** (en-US, Generative engine, 24 kHz)
+
+Danielle is the only en-US female voice that supports both the Generative engine (bidirectional streaming sidecar — lowest latency, most natural prosody) and the Long-form engine (batch path — best for multi-paragraph responses).
+
+### Changing the voice
+
+One line in `approval_config.json`:
+```json
+"voice_id": "Danielle"
+```
+Takes effect immediately — no restart required. The sidecar reads the voice from each POST request.
+
+### Available voices (en-US, verified 2026-05-15)
+
+| Voice | Gender | Generative | Long-form | Notes |
+|-------|--------|-----------|-----------|-------|
+| **Danielle** | Female | ✅ | ✅ | Current — most capable, both engines |
+| Ruth | Female | ✅ | ✅ | Previous default |
+| Joanna | Female | ✅ | — | Professional; Alexa-adjacent |
+| Salli | Female | ✅ | — | Upbeat, clear |
+| Matthew | Male | ✅ | — | |
+| Stephen | Male | ✅ | — | |
+| Gregory | Male | — | ✅ | Long-form only (was original default) |
+
+### TTS paths and engines
+
+| Path | Engine | Voice source | When |
+|------|--------|-------------|------|
+| `polly_stream.py` → `tts_service/server.js` | Generative 24kHz | `approval_config.json` → POST body | CLARIFY questions, DevAgent EXPLAIN |
+| `approval_hook.py` `_polly_speak()` | Neural 16kHz | `approval_config.json` `voice_id` | "Approve write to…?" gate |
+| `command_executor.py` `_polly_speak()` | Neural 16kHz | `_POLLY_VOICE` constant | Sidecar-down fallback |
+
+### iPad mic approval flow
+
+When the bridge is running, Danielle's question plays through PC speakers, then
+the next utterance into the **iPad mic** is captured by WhisperStream and routed
+to the approval gate via `~/.claude/approval/pending` + `response` signal files.
+If the bridge is not running, the PC's **Realtek USB Audio** mic is used instead
+(4-second recording window, auto-approve on silence).
 
 ## WebSocket Protocol
 
