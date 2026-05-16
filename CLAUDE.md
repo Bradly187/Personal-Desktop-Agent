@@ -21,7 +21,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
 - `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090), `NemotronInference`
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app (35 Swift files): `SensorManager`, `SharedAudioSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
+- `iPadApp/DesktopAgent/` — SwiftUI app (37 Swift files): `SensorManager`, `SharedAudioSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
 
 **Done (Phase 3):**
 - `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce
@@ -40,8 +40,21 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 
 **Done (Phase 6 — cloud fallback):**
 - `hybrid_coordinator.py` — `_retranscribe()`: Stage 1 phonetic vocabulary correction (6 misrecognitions, 0ms), Stage 2 Amazon Transcribe streaming (activates when `pip install amazon-transcribe`); Gate 1 route label propagated to executor
-- `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Gregory neural, 16kHz PCM) for cloud-routed CLARIFY actions; SEARCH_WEB URL-encoded via `urllib.parse`
+- `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Danielle neural, 16kHz PCM) sidecar-down fallback for CLARIFY; primary path uses `polly_stream.get_client().speak_sync()`; SEARCH_WEB URL-encoded via `urllib.parse`
 - Cloud path: raw Bedrock `us.anthropic.claude-haiku-4-5-20251001-v1:0` (8/8 accuracy on voice misrecognitions); AgentCore (Strands + LTM memory) code complete in `agentcore_fallback/`, deployment deferred (bedrock-agentcore 1.9.0 CLI missing)
+
+**Done (LiDAR gesture depth + Settings UI + housekeeping — 2026-05-16):**
+- `LiDARStreamer.swift` — ARWorldTrackingConfiguration + `.smoothedSceneDepth`; 5 fps depth / 10 fps camera; serialises `depth_frame` (float32 + uint8 conf) and `camera_frame` (JPEG 480px) matching PC bridge protocol; publishes UIImages for debug view
+- `LiDARDebugView.swift` — Sensors tab: camera top, depth heatmap bottom (blue=near → red=far, 0–4 m), stats bar, Start/Stop button
+- `lidar_receiver.py` bug fix: `is_fresh()` compared `time.monotonic()` vs Unix timestamp (always True after first frame); fixed to use `_recv_mono`
+- `gesture_processor.py`: `pinch_dist_mm` renamed `pinch_z_delta_mm` (Z-axis delta only, not 3D Euclidean)
+- `chatterbox_tts.py` — local GPU TTS backend; `ChatterboxClient` mirrors `PollyStreamClient` interface; emotion exaggeration, paralinguistic tags, zero-shot voice cloning via audio prompt; dispatched from `polly_stream.get_client()` when `tts_backend == "chatterbox"` in `approval_config.json`
+- `health_viz.py` — cosmic nebula system health visualisation; CPU/GPU metrics drive particle density and colour
+- `start_agent.bat` — Windows startup script; launches `main.py` with rolling log to `logs/agent_startup.log`
+- Settings UI: keyword list, sound mappings, command pad editor all migrated from read-only `Text` to editable `TextField` bindings
+- Approval hook bug fix: `log` was undefined (NameError on PC-mic fallback); fixed with `import logging` + logger instance
+- `command_executor.py`: `sd.get_stream().active` lacked None guard → `AttributeError`; fixed to `sd.get_stream() and sd.get_stream().active`
+- `approval_config.json`: `"device"` narrowed from `"Realtek USB Audio"` (matched 3 devices, threw sounddevice exception → silent auto-approve) to `"Microphone (Realtek USB Audio)"`
 
 **Done (Touch-debug fix — 2026-05-16):**
 - `DwellToolbarContainer.swift` — outer ZStack `.allowsHitTesting(false)` with toolbar `.allowsHitTesting(true)`; removed `.frame(maxWidth: .infinity)` in top/bottom modes; bottom mode uses VStack + `Color.clear.frame(height:56).allowsHitTesting(false)` spacer; floating mode `.contentShape(RoundedRectangle(...))` before `.gesture(DragGesture())`
@@ -136,10 +149,13 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `db.py` | `AgentDB` (aiosqlite, 12 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval |
 | `migrate.py` | One-time migration from legacy trainer.db / routing_log.jsonl / benchmark_results.json to new DB layer; run once then delete |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
-| `polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar |
+| `polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
+| `chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
 | `tts_service/server.js` | Node.js sidecar (port 8766); calls `StartSpeechSynthesisStream` (AWS SDK v3); returns OGG Vorbis; Python decodes with soundfile |
 | `approval_hook.py` | Claude Code `PreToolUse` gate; Danielle speaks action description; records iPad mic via WhisperStream signal file or PC mic fallback; yes/no → exit 0/2 |
-| `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device, timeout |
+| `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device (`"Microphone (Realtek USB Audio)"`), timeout, tts_backend |
+| `health_viz.py` | Cosmic nebula system health visualisation; CPU/GPU/VRAM metrics drive particle density, rotation speed, and palette |
+| `start_agent.bat` | Windows startup script; activates venv and runs `main.py`; logs to `logs/agent_startup.log` |
 
 ## Polly TTS Voice
 
@@ -172,6 +188,7 @@ Takes effect immediately — no restart required. The sidecar reads the voice fr
 | Path | Engine | Voice source | When |
 |------|--------|-------------|------|
 | `polly_stream.py` → `tts_service/server.js` | Generative 24kHz | `approval_config.json` → POST body | CLARIFY questions, DevAgent EXPLAIN |
+| `chatterbox_tts.py` (via `polly_stream.get_client()`) | Local GPU | exaggeration/cfg in `approval_config.json` | When `tts_backend == "chatterbox"` |
 | `approval_hook.py` `_polly_speak()` | Neural 16kHz | `approval_config.json` `voice_id` | "Approve write to…?" gate |
 | `command_executor.py` `_polly_speak()` | Neural 16kHz | `_POLLY_VOICE` constant | Sidecar-down fallback |
 
@@ -180,8 +197,8 @@ Takes effect immediately — no restart required. The sidecar reads the voice fr
 When the bridge is running, Danielle's question plays through PC speakers, then
 the next utterance into the **iPad mic** is captured by WhisperStream and routed
 to the approval gate via `~/.claude/approval/pending` + `response` signal files.
-If the bridge is not running, the PC's **Realtek USB Audio** mic is used instead
-(4-second recording window, auto-approve on silence).
+If the bridge is not running, the PC's **Microphone (Realtek USB Audio)** mic is
+used instead (4-second recording window, auto-approve on silence).
 
 ## WebSocket Protocol
 
@@ -189,7 +206,7 @@ If the bridge is not running, the PC's **Realtek USB Audio** mic is used instead
 
 **PC → iPad (4 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image)
 
-`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 10. The remaining 9 sensor types (gaze, head_pose, keyword, etc.) are dispatched to FusionEngine or logged until their pipeline stages are wired.
+`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 10. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. The remaining sensor types (gaze, head_pose, keyword, etc.) are dispatched to FusionEngine.
 
 ## Sensor Priority (FusionEngine — `fusion_engine.py`)
 
