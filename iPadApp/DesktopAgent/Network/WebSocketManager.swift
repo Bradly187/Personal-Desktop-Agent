@@ -335,4 +335,25 @@ extension WebSocketManager {
     func sendAudioStream(samplesBase64: String, frames: Int) {
         send(["type": "audio_stream", "samples": samplesBase64, "frames": frames])
     }
+
+    func sendDepthFrame(width: Int, height: Int, depthB64: String, confB64: String, ts: Double) {
+        send([
+            "type": "depth_frame",
+            "ts": ts,
+            "width": width,
+            "height": height,
+            "depth_b64": depthB64,
+            "conf_b64": confB64,
+        ])
+    }
+
+    func sendCameraFrame(width: Int, height: Int, imageB64: String, ts: Double) {
+        send([
+            "type": "camera_frame",
+            "ts": ts,
+            "width": width,
+            "height": height,
+            "image_b64": imageB64,
+        ])
+    }
 }

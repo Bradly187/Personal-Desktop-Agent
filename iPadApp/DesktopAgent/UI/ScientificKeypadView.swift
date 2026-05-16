@@ -16,22 +16,24 @@ struct ScientificKeypadView: View {
     // MARK: — Layout
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Display
-            displayPanel
-            Divider()
-            // Mode toggle
-            Picker("Mode", selection: $isScientific) {
-                Text("Basic").tag(false)
-                Text("Scientific").tag(true)
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Display
+                displayPanel
+                Divider()
+                // Mode toggle
+                Picker("Mode", selection: $isScientific) {
+                    Text("Basic").tag(false)
+                    Text("Scientific").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+                .padding(.vertical, DesignTokens.Spacing.sm)
+                // Keys
+                keyGrid
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, DesignTokens.Spacing.lg)
-            .padding(.vertical, DesignTokens.Spacing.sm)
-            // Keys
-            keyGrid
+            .navigationTitle("Keypad")
         }
-        .navigationTitle("Keypad")
     }
 
     private var displayPanel: some View {

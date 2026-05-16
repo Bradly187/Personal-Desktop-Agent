@@ -130,15 +130,21 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> STOPPED
 
-    STOPPED --> LISTENING : start() called\nSFSpeechRecognizer ready\nAVAudioEngine running
+    STOPPED --> LISTENING : start() called\nSFSpeechRecognizer ready\nSharedAudioSession consumer registered
 
     LISTENING --> RECOGNIZING : Speech detected\n(audio level above threshold)
 
-    RECOGNIZING --> KEYWORD_MATCH : On-device model\nmatches a keyword\nwith conf ≥ threshold
+    RECOGNIZING --> KEYWORD_FIRED : Incremental scan finds keyword\nin new transcript content\n& cooldown (0.5s) elapsed
+
+    RECOGNIZING --> KEYWORD_SUPPRESSED : Keyword found but\ncooldown still active
 
     RECOGNIZING --> NO_MATCH : Recognition completes\nno keyword matched
 
-    KEYWORD_MATCH --> LISTENING : Send keyword event\nto WebSocket\n{"type":"keyword",...}
+    KEYWORD_FIRED --> RECOGNIZING : Send keyword event\nto WebSocket\n{"type":"keyword",...}\nContinue recognizing\n(no restart)
+
+    KEYWORD_SUPPRESSED --> RECOGNIZING : Skip — same keyword\nfired within 0.5s
+
+    RECOGNIZING --> LISTENING : Recognition ends\n(timeout or error)\nAuto-restart seamlessly
 
     NO_MATCH --> STREAMING_AUDIO : Buffer accumulated audio\nstream to PC for Whisper
 
@@ -146,10 +152,20 @@ stateDiagram-v2
 
     LISTENING --> STOPPED : stop() called
 
-    note right of KEYWORD_MATCH
+    note right of KEYWORD_FIRED
         Fast path — no PC round-trip.
         Executes in < 50ms typically.
         Bypasses WhisperStream GPU.
+        Recognition continues without
+        endAudio() — multiple keywords
+        can fire per session.
+    end note
+
+    note right of RECOGNIZING
+        Incremental scanning: only new
+        transcript content (since last check)
+        is evaluated. Prevents re-firing
+        on repeated partial results.
     end note
 
     note right of STREAMING_AUDIO

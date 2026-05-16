@@ -62,5 +62,10 @@ mediapipe==0.10.35
 # ── Audio capture (iPad audio_stream + local mic) ────────────────────────────
 sounddevice==0.5.5
 
+# ── Chatterbox local TTS (chatterbox_tts.py — RTX 5090, MIT licence) ─────────
+# Emotion exaggeration (0.25–2.0), paralinguistic tags, zero-shot voice cloning.
+# Models auto-download from HuggingFace on first call (~2 GB, cached).
+chatterbox-tts
+
 # ── AWS cloud fallback (Phase 6 — Bedrock, Transcribe, Polly) ────────────────
 boto3==1.38.28

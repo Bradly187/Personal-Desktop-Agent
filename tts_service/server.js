@@ -67,7 +67,7 @@ const polly = new PollyClient({ region: REGION, credentials });
  *      We consume AudioEvent chunks until StreamClosedEvent.
  *
  * @param {string}  text         - Text to synthesize (already sentence-chunked by caller)
- * @param {string}  voice        - Polly voice ID (default Ruth)
+ * @param {string}  voice        - Polly voice ID (default Danielle)
  * @param {string}  engine       - "generative" | "neural" | "standard"
  * @param {string}  languageCode - BCP-47 language tag (default en-US)
  * @returns {Promise<Buffer>}    - Complete OGG Vorbis audio bytes

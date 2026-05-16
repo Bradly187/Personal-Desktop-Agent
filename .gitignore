@@ -16,6 +16,9 @@ build/
 *.swp
 *.swo
 
+# Node.js
+node_modules/
+
 # Large binaries — do not commit
 *.zip
 *.tar.gz

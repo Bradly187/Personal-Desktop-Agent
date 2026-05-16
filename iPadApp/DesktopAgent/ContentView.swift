@@ -31,6 +31,11 @@ struct ContentView: View {
                 .tabItem {
                     Label("Settings", systemImage: "gearshape.fill")
                 }
+
+            LiDARDebugView()
+                .tabItem {
+                    Label("Sensors", systemImage: "sensor.tag.radiowaves.forward")
+                }
         }
         .overlay(alignment: .top) {
             // Task 13.6: Replaced private ConnectionBanner with shared DAConnectionBanner component

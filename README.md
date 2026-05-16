@@ -86,6 +86,7 @@ iPad Sensors → WebSocket → ipad_bridge.py → FusionEngine (priority routing
 ├── continuous_trainer.py      # Background learning (thresholds, vocab, few-shot)
 ├── domain_classifier.py       # Route to specialist models
 ├── model_router.py            # VRAM-aware model selection
+├── health_viz.py              # Cosmic nebula system health visualization (pygame-ce)
 ├── dev_agent.py               # Plan→execute→reflect for dev tasks
 ├── local_inference.py         # Ollama / vLLM / Nemotron backends
 ├── mcp_server/                # MCP server (16 tools for Claude)
@@ -120,8 +121,38 @@ Push changes to `iPadApp/` → GitHub Actions builds and uploads to TestFlight a
 
 Set `SAFE_MODE=1` to block destructive tools during testing.
 
+## Health Visualization
+
+A cosmic nebula visualization of system health. Particles swirl outward from the center in spiral arms, creating a depth effect. Health metrics drive color (cyan-teal → golden amber → coral → deep rose), rotation speed, particle density, and arm structure.
+
+```bash
+pip install pygame-ce
+python health_viz.py
+python health_viz.py --width 1000 --height 700 --fps 36
+```
+
+CPU usage drives rotation speed and arm brightness. GPU VRAM/util drives core glow intensity. Temperature shifts the palette warmer. Process count and network connections control particle density. Press `Esc` or `Q` to quit.
+
+### Temperature Monitoring
+
+GPU temperature is read via pynvml (always available when an NVIDIA GPU is present). CPU package temperature requires LibreHardwareMonitor or OpenHardwareMonitor running with its WMI provider exposed — install the `wmi` Python package (`pip install wmi`). If neither WMI namespace is available, CPU temp reports as 0 and the visualization continues without it.
+
+Thermal thresholds used for color mapping and error scoring:
+
+| Range | Meaning |
+|-------|---------|
+| < 40 °C | Cool (green) |
+| 40–65 °C | Warm (transition) |
+| 65–80 °C | Hot (amber/warning) |
+| > 90 °C | Critical (red, adds to error count) |
+
 ## Configuration
 
+- **Tilt sensitivity**: Scales rotation rate to cursor movement (default 1.0)
+- **Tilt dead zone**: Minimum rotation rate threshold to filter noise (default 0.02 rad/s); applied per-axis independently
+- **Tilt smoothing**: EMA filter (α=0.3) reduces jitter while preserving responsiveness; sub-pixel accumulation ensures small sustained tilts still produce movement
+- **Tilt inversion**: Reverses tilt-to-cursor mapping for users who prefer opposite direction (default off)
+- **Gravity-compensated projection**: Tilt uses the device gravity vector to project rotation rate into a ground-aligned frame. This means "tilt right" always maps to horizontal cursor movement regardless of the angle the iPad is held at (e.g. flat on a lap vs. propped at 30°). No user configuration needed — it adapts automatically.
 - **Trackpad speed**: Adjustable in web client Settings tab
 - **Palm rejection radius**: Configurable per-session
 - **Gaze dwell duration**: Default 800ms, adapts via ContinuousTrainer

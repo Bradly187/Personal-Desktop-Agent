@@ -89,7 +89,7 @@ def _polly_speak(message: str) -> bool:
 
         sd.play(audio, samplerate=_POLLY_SAMPLE_RATE)
         deadline = time.monotonic() + timeout_s
-        while sd.get_stream().active:
+        while sd.get_stream() and sd.get_stream().active:
             if time.monotonic() > deadline:
                 sd.stop()
                 log.warning("Polly TTS: playback timed out after %.1fs", timeout_s)

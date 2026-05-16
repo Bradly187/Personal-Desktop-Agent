@@ -96,8 +96,9 @@ class _GestureResult:
     # Tip coordinates in normalised screen space [0,1]
     index_tip_nx: float
     index_tip_ny: float
-    # 3D pinch distance in mm (None if LiDAR unavailable)
-    pinch_dist_mm: Optional[float] = None
+    # Z-axis depth delta between fingertips in mm (None if LiDAR unavailable).
+    # This is abs(d_index - d_thumb)*1000, not full 3D Euclidean distance.
+    pinch_z_delta_mm: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -283,19 +284,20 @@ class GestureProcessor:
         # Index tip position in normalised screen coords
         ix, iy = _tip_xy(lm, 8)
 
-        # Requirement 10.4 — 3D pinch distance when LiDAR available
-        pinch_mm: Optional[float] = None
+        # Requirement 10.4 — Z-axis depth delta when LiDAR available.
+        # Rejects 2D-detected pinches where fingertips are far apart in depth
+        # (e.g. index pointing forward while thumb is at rest).
+        pinch_z_delta_mm: Optional[float] = None
         if gesture_name == "PINCH" and self._lidar and self._lidar.is_fresh():
             d_index = self._lidar.get_depth_at(ix, iy)
             tx, ty = _tip_xy(lm, 4)
             d_thumb = self._lidar.get_depth_at(tx, ty)
             if d_index is not None and d_thumb is not None:
-                pinch_mm = abs(d_index - d_thumb) * 1000.0
-                # Override classification if 3D distance suggests no pinch
-                if pinch_mm > _PINCH_THRESH_MM:
+                pinch_z_delta_mm = abs(d_index - d_thumb) * 1000.0
+                if pinch_z_delta_mm > _PINCH_THRESH_MM:
                     log.debug(
-                        "GestureProcessor: PINCH rejected by LiDAR depth (%.0f mm > %.0f mm)",
-                        pinch_mm, _PINCH_THRESH_MM,
+                        "GestureProcessor: PINCH rejected by LiDAR Z-delta (%.0f mm > %.0f mm)",
+                        pinch_z_delta_mm, _PINCH_THRESH_MM,
                     )
                     return None
 
@@ -303,7 +305,7 @@ class GestureProcessor:
         log.info(
             "Gesture: %s → %s  conf=%.2f  hand=%s  tip=(%.3f, %.3f)%s",
             gesture_name, action, conf, hand_label, ix, iy,
-            f"  pinch={pinch_mm:.0f}mm" if pinch_mm is not None else "",
+            f"  z_delta={pinch_z_delta_mm:.0f}mm" if pinch_z_delta_mm is not None else "",
         )
 
         return Command(
@@ -317,7 +319,7 @@ class GestureProcessor:
                 "hand": hand_label,
                 "tip_x": ix,
                 "tip_y": iy,
-                "pinch_mm": pinch_mm,
+                "pinch_z_delta_mm": pinch_z_delta_mm,
             },
         )
 

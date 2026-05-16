@@ -6,7 +6,7 @@ in approval_config.json.  The script:
   1. Reads the tool name + input from stdin (JSON from Claude Code).
   2. Checks approval_config.json — if the tool is "silent", exits 0 immediately.
   3. Builds a short spoken description of the action.
-  4. Calls Amazon Polly (Gregory neural) to speak it aloud.
+  4. Calls Amazon Polly (Danielle neural) to speak it aloud.
   5. Records up to `record_s` seconds of audio from the default mic.
   6. Detects voice activity — if silence the whole time, auto-approves.
   7. Transcribes with faster-whisper "tiny" (CPU, loads in ~1s).
@@ -35,7 +35,10 @@ _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 _PENDING_FILE  = _APPROVAL_DIR / "pending"
 _RESPONSE_FILE = _APPROVAL_DIR / "response"
 
+import logging
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants

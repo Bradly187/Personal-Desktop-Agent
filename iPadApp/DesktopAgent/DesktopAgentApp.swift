@@ -38,7 +38,7 @@ struct DesktopAgentApp: App {
                     wsManager.serviceDiscovery = serviceDiscovery
 
                     // Determine if user has manually changed host from default
-                    let defaultHost = "192.168.1.100"
+                    let defaultHost = "192.168.18.2"
                     serviceDiscovery.hasManualOverride = (settings.serverHost != defaultHost)
 
                     // Start mDNS discovery

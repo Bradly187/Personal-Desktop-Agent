@@ -200,6 +200,11 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(audioStreamEnabled, forKey: "audioStreamEnabled") }
     }
 
+    // MARK: — LiDAR + Camera Streaming (rear camera + LiDAR → PC MediaPipe/GestureProcessor)
+    @Published var lidarEnabled: Bool {
+        didSet { defaults.set(lidarEnabled, forKey: "lidarEnabled") }
+    }
+
     // MARK: — Sound mappings  {"cluck": "CLICK", "pop": "SCROLL down", ...}
     @Published var soundMappings: [String: String] {
         didSet {
@@ -269,6 +274,7 @@ final class SettingsStore: ObservableObject {
         gazeCursorModeEnabled = defaults.object(forKey: "gazeCursorModeEnabled") as? Bool ?? true
 
         audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false
+        lidarEnabled = defaults.object(forKey: "lidarEnabled") as? Bool ?? false
 
         if let data = defaults.data(forKey: "soundMappings"),
            let decoded = try? JSONDecoder().decode([String: String].self, from: data) {

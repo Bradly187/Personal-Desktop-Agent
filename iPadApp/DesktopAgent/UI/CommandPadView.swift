@@ -113,17 +113,25 @@ private struct CommandPadEditorView: View {
 
     var body: some View {
         List {
-            ForEach(settings.commandButtons) { btn in
+            ForEach($settings.commandButtons) { $btn in
                 HStack {
-                    Text(btn.label)
+                    TextField("Label", text: $btn.label)
+                        .autocorrectionDisabled()
                     Spacer()
-                    Text(btn.action)
+                    TextField("Action", text: $btn.action)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .frame(width: 120)
                 }
             }
             .onDelete { idx in settings.commandButtons.remove(atOffsets: idx) }
             .onMove { from, to in settings.commandButtons.move(fromOffsets: from, toOffset: to) }
+            Button("Add button…") {
+                settings.commandButtons.append(CommandButton(label: "", action: ""))
+            }
         }
         .environment(\.editMode, $editMode)
         .navigationTitle("Edit Buttons")
