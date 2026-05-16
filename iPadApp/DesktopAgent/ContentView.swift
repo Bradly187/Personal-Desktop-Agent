@@ -82,6 +82,7 @@ struct ContentView: View {
     private func tabButton(_ index: Int, _ label: String, _ icon: String) -> some View {
         let isSelected = selectedTab == index
         return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
             selectedTab = index
         } label: {
             VStack(spacing: DesignTokens.Spacing.xs) {
@@ -95,8 +96,17 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, minHeight: DesignTokens.Size.touchTargetMin)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TabButtonStyle())
         .accessibilityLabel(label)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+// Dims the button while pressed so there's instant visual confirmation of a tap.
+private struct TabButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed ? Color.primary.opacity(0.08) : Color.clear)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
