@@ -86,10 +86,10 @@ struct DwellToolbarContainer: View {
                     .contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                     .padding(.horizontal, DesignTokens.Spacing.md)
 
-                // Spacer pushes toolbar above the tab bar (~49pt).
-                // The spacer is non-interactive; only the toolbar above receives touches.
+                // Spacer pushes toolbar above the custom tab bar (80pt).
                 Spacer()
-                    .frame(height: 56)
+                    .frame(height: 88)
+                    .allowsHitTesting(false)
             }
             // The VStack's frame is only as tall as toolbar + spacer, not full-screen.
             // Empty space around it passes through because the overlay alignment
