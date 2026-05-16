@@ -50,13 +50,11 @@ final class LiDARStreamer: NSObject, ObservableObject {
     private let depthInterval: Double   // seconds between depth sends
     private let cameraInterval: Double  // seconds between camera sends
 
-    // nonisolated(unsafe): mutable state read/written from ARSessionDelegate
-    // callbacks (non-main thread). The delegate fires serially so no data race.
-    nonisolated(unsafe) private var _lastDepthTime: Double = 0
-    nonisolated(unsafe) private var _lastCameraTime: Double = 0
-    nonisolated(unsafe) private var _depthCountWindow: Int = 0
-    nonisolated(unsafe) private var _cameraCountWindow: Int = 0
-    nonisolated(unsafe) private var _fpsWindowStart: Double = 0
+    // Throttle state accessed only from the ARSessionDelegate serial callback.
+    // Wrapped in @unchecked Sendable so nonisolated delegate methods can mutate
+    // it without requiring nonisolated(unsafe) (Swift 5.10+). Safe because
+    // ARSessionDelegate fires serially — no concurrent mutations.
+    private let _t = _LiDARThrottle()
 
     // MARK: - Init
 
@@ -100,29 +98,29 @@ extension LiDARStreamer: ARSessionDelegate {
         let now = CACurrentMediaTime()
 
         // Throttle depth
-        if let smoothed = frame.smoothedSceneDepth, now - _lastDepthTime >= depthInterval {
-            _lastDepthTime = now
-            _depthCountWindow += 1
+        if let smoothed = frame.smoothedSceneDepth, now - _t.lastDepthTime >= depthInterval {
+            _t.lastDepthTime = now
+            _t.depthCountWindow += 1
             bgQueue.async { [weak self] in self?.processDepthFrame(smoothed, ts: now) }
         }
 
         // Throttle camera
-        if now - _lastCameraTime >= cameraInterval {
-            _lastCameraTime = now
-            _cameraCountWindow += 1
+        if now - _t.lastCameraTime >= cameraInterval {
+            _t.lastCameraTime = now
+            _t.cameraCountWindow += 1
             let pixelBuffer = frame.capturedImage
             bgQueue.async { [weak self] in self?.processCameraFrame(pixelBuffer, ts: now) }
         }
 
         // Update fps counters once per second
-        if _fpsWindowStart == 0 { _fpsWindowStart = now }
-        let elapsed = now - _fpsWindowStart
+        if _t.fpsWindowStart == 0 { _t.fpsWindowStart = now }
+        let elapsed = now - _t.fpsWindowStart
         if elapsed >= 1.0 {
-            let df = Double(_depthCountWindow) / elapsed
-            let cf = Double(_cameraCountWindow) / elapsed
-            _depthCountWindow = 0
-            _cameraCountWindow = 0
-            _fpsWindowStart = now
+            let df = Double(_t.depthCountWindow) / elapsed
+            let cf = Double(_t.cameraCountWindow) / elapsed
+            _t.depthCountWindow = 0
+            _t.cameraCountWindow = 0
+            _t.fpsWindowStart = now
             Task { @MainActor [weak self] in
                 self?.depthFps = df
                 self?.cameraFps = cf
@@ -261,6 +259,18 @@ private extension LiDARStreamer {
             latestCameraImage = uiImg
         }
     }
+}
+
+// MARK: - Throttle state (Swift 5.9-compatible alternative to nonisolated(unsafe))
+
+/// Mutable throttle counters accessed only from ARSessionDelegate's serial callback.
+/// @unchecked Sendable: safe because ARSessionDelegate never fires concurrently.
+private final class _LiDARThrottle: @unchecked Sendable {
+    var lastDepthTime: Double = 0
+    var lastCameraTime: Double = 0
+    var depthCountWindow: Int = 0
+    var cameraCountWindow: Int = 0
+    var fpsWindowStart: Double = 0
 }
 
 // MARK: - Colour helpers
