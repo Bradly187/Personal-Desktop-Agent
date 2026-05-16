@@ -2,9 +2,6 @@ name: Build iPad App
 
 on:
   push:
-    branches:
-      - main
-      - mvp
     paths:
       - 'iPadApp/**'
       - '.github/workflows/build-ipad-app.yml'
@@ -27,17 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 26
-        run: |
-          # Find the latest Xcode 26.x installed
-          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
-          if [ -z "$XCODE_PATH" ]; then
-            echo "No Xcode 26.x found, listing available:"
-            ls /Applications/Xcode*.app
-            exit 1
-          fi
-          echo "Using: $XCODE_PATH"
-          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+      - name: Select Xcode 16.3
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -151,27 +139,18 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
-          # Write API key file to the directory altool expects
-          # altool searches: ./private_keys/ and ~/private_keys/
-          KEY_DIR="$HOME/private_keys"
+          # Write API key file
+          KEY_DIR="$HOME/.private_keys"
           mkdir -p "$KEY_DIR"
           KEY_FILE="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
-          printf '%s\n' "$ASC_PRIVATE_KEY" > "$KEY_FILE"
+          echo "$ASC_PRIVATE_KEY" > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
-
-          # Verify key file looks valid
-          echo "API Key ID: $ASC_KEY_ID"
-          echo "Issuer ID: $ASC_ISSUER_ID"
-          echo "Key file size: $(wc -c < "$KEY_FILE") bytes"
-          echo "Key file first line: $(head -1 "$KEY_FILE")"
-          echo "Key file last line: $(tail -1 "$KEY_FILE")"
-          echo "Key file line count: $(wc -l < "$KEY_FILE")"
 
           # Find the exported IPA
           IPA_PATH=$(find $RUNNER_TEMP/export -name "*.ipa" | head -1)
           echo "Uploading: $IPA_PATH"
 
-          # Upload using xcrun altool (key discovered from ~/private_keys/)
+          # Upload using xcrun altool (works with API key auth)
           xcrun altool --upload-app \
             --type ios \
             --file "$IPA_PATH" \
@@ -182,31 +161,8 @@ jobs:
           if grep -q "No errors uploading" upload.log; then
             echo "✅ Upload succeeded! Build will appear in TestFlight shortly."
           else
-            echo "⚠️ altool failed. Trying xcodebuild -exportArchive with direct upload..."
-
-            xcodebuild -exportArchive \
-              -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
-              -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
-              -exportPath $RUNNER_TEMP/upload-export \
-              -allowProvisioningUpdates \
-              -authenticationKeyPath "$KEY_FILE" \
-              -authenticationKeyID "$ASC_KEY_ID" \
-              -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-              2>&1 | tee upload2.log
-
-            if grep -q "EXPORT SUCCEEDED\|Upload Succeeded" upload2.log; then
-              echo "✅ Upload succeeded via xcodebuild! Build will appear in TestFlight shortly."
-            else
-              echo "❌ Both upload methods failed."
-              echo ""
-              echo "TROUBLESHOOTING:"
-              echo "1. Verify ASC_KEY_ID matches the Key ID in App Store Connect → Integrations"
-              echo "2. Verify ASC_ISSUER_ID matches the Issuer ID at the top of that page"
-              echo "3. Verify the API key has Admin or App Manager access (not Developer)"
-              echo "4. Verify the key status is Active (not revoked)"
-              echo "5. Verify ASC_PRIVATE_KEY contains the full .p8 file including BEGIN/END lines"
-              exit 1
-            fi
+            echo "⚠️ Upload may have failed. Check App Store Connect."
+            cat upload.log
           fi
 
       - name: Upload IPA as artifact
