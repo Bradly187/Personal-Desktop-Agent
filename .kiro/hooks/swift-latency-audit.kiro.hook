@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "Swift Latency Audit",
+  "description": "When Swift files in the iPad app are edited, analyzes the changes for latency anti-patterns: redundant Task hops, main-thread blocking, excessive debounce durations, missing allowsHitTesting, gesture recognizer delays, and synchronous I/O on @MainActor.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "iPadApp/**/*.swift"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Review the edited Swift file for latency anti-patterns that would affect an arthritis user who needs instant feedback. Check for:\n\n1. **Redundant Task hops**: `Task { @MainActor in }` when already on main thread (e.g., inside CMMotionManager callbacks delivered to .main, or inside @MainActor classes). Use direct calls or DispatchQueue.main.async instead.\n\n2. **Main-thread blocking**: Base64 encoding/decoding, JSON serialization, image rendering (PKDrawing.image, UIImage(data:), pngData()), or UserDefaults writes inside high-frequency paths (60Hz sensor callbacks).\n\n3. **Excessive debounce/cooldown**: Any timer > 300ms that gates user input (sound detection, tap cooldowns, gesture recognition restarts). For this user, 200-250ms is the max acceptable debounce.\n\n4. **Gesture recognizer delays**: `require(toFail:)` between tap recognizers adds 300-400ms. `minimumPressDuration` > 0 on any touch target. Missing `delaysTouchesBegan = false`.\n\n5. **Hit-testing conflicts**: `.allowsHitTesting(false)` on a parent with `.allowsHitTesting(true)` on children (children can't override parent). GeometryReader without `.allowsHitTesting(false)`. Overlays without proper alignment that fill the screen.\n\n6. **Wall clock for timing**: Using `Date()` instead of `CACurrentMediaTime()` for elapsed-time calculations (breaks on app background/resume).\n\n7. **Recognition pipeline restarts**: Tearing down and rebuilding SFSpeechRecognitionRequest on every keyword match instead of tracking transcript position.\n\nIf issues are found, report them with the specific line, estimated delay in ms, and a concrete fix. If no issues, say \"No latency issues found.\""
+  }
+}

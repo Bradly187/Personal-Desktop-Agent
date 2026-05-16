@@ -48,8 +48,8 @@ class FusionConfig:
     gaze_stability_pct: float = 0.04       # max spread as fraction of screen diagonal
     gaze_conf_min: float = 0.55            # minimum ARKit confidence to accept gaze
     gaze_buffer_frames: int = 30           # rolling window size for stability check
-    tilt_dead_zone: float = 0.02           # rad/s below which tilt is ignored
-    tilt_sensitivity: float = 300.0        # pixels moved per rad/s
+    tilt_dead_zone: float = 0.05           # rad/s below which tilt is ignored
+    tilt_sensitivity: float = 200.0        # pixels moved per rad/s
     head_sensitivity: float = 80.0         # pixels moved per degree
     sound_cooldown_s: float = 0.5          # suppress duplicate sound actions
 
@@ -143,6 +143,10 @@ class FusionEngine:
         self._voice_local: Optional[str] = None                  # keyword text
         self._voice: Optional[Command] = None
         self._tilt: Optional[tuple[float, float]] = None          # (rx, ry) rad/s
+        self._tilt_ema_x: float = 0.0                             # EMA-smoothed tilt X
+        self._tilt_ema_y: float = 0.0                             # EMA-smoothed tilt Y
+        self._tilt_accum_x: float = 0.0                           # sub-pixel accumulator X
+        self._tilt_accum_y: float = 0.0                           # sub-pixel accumulator Y
         self._head: Optional[tuple[float, float]] = None          # (pitch, yaw) degrees
 
         # --- Gaze state ---
@@ -274,6 +278,8 @@ class FusionEngine:
 
     async def _tick(self) -> None:
         import pyautogui
+        pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0
 
         tick_start = time.monotonic()
 
@@ -490,12 +496,31 @@ class FusionEngine:
                 rx, ry = self._tilt
                 self._tilt = None
                 dz = self._cfg.tilt_dead_zone
-                if abs(rx) > dz or abs(ry) > dz:
-                    dx = int(ry * self._cfg.tilt_sensitivity)
-                    dy = int(-rx * self._cfg.tilt_sensitivity)
+
+                # Apply dead zone — zero out values below threshold
+                rx = rx if abs(rx) > dz else 0.0
+                ry = ry if abs(ry) > dz else 0.0
+
+                # EMA smoothing (α=0.3 balances responsiveness vs jitter)
+                alpha = 0.3
+                self._tilt_ema_x = alpha * rx + (1 - alpha) * self._tilt_ema_x
+                self._tilt_ema_y = alpha * ry + (1 - alpha) * self._tilt_ema_y
+
+                # rx = rotationRate.x: rotation around X-axis → vertical cursor
+                #   positive rx (tilt top away) → cursor moves up (negative dy)
+                # ry = rotationRate.y: rotation around Y-axis → horizontal cursor
+                #   tilt right (negative ry) → cursor moves right (positive dx)
+                self._tilt_accum_x += -self._tilt_ema_y * self._cfg.tilt_sensitivity
+                self._tilt_accum_y += -self._tilt_ema_x * self._cfg.tilt_sensitivity
+
+                # Only move when we've accumulated at least 1 pixel
+                dx = int(self._tilt_accum_x)
+                dy = int(self._tilt_accum_y)
+
+                if dx or dy:
+                    self._tilt_accum_x -= dx
+                    self._tilt_accum_y -= dy
                     if gaze_cursor_on:
-                        # Tilt broke through gaze-cursor — reset EMA so gaze
-                        # doesn't snap to a stale position when it comes back.
                         self._gaze_cursor_ema = None
                     await asyncio.to_thread(pyautogui.moveRel, dx, dy, duration=0)
                 return

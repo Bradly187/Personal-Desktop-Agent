@@ -61,6 +61,9 @@ final class SettingsStore: ObservableObject {
     @Published var tiltEnabled: Bool {
         didSet { defaults.set(tiltEnabled, forKey: "tiltEnabled") }
     }
+    @Published var tiltInverted: Bool {
+        didSet { defaults.set(tiltInverted, forKey: "tiltInverted") }
+    }
 
     // MARK: — Gaze / Dwell
     @Published var gazeEnabled: Bool {
@@ -228,6 +231,7 @@ final class SettingsStore: ObservableObject {
         tiltSensitivity = defaults.double(forKey: "tiltSensitivity").nonZero ?? 1.0
         tiltDeadZone = defaults.double(forKey: "tiltDeadZone").nonZero ?? 0.02
         tiltEnabled = defaults.object(forKey: "tiltEnabled") as? Bool ?? true
+        tiltInverted = defaults.object(forKey: "tiltInverted") as? Bool ?? false
         gazeEnabled = defaults.object(forKey: "gazeEnabled") as? Bool ?? true
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 

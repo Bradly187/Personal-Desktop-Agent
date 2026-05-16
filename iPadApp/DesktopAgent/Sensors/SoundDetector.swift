@@ -17,7 +17,7 @@ final class SoundDetector {
     private static let consumerID = "SoundDetector"
 
     private var lastFireTime: Date?
-    private let debounceDuration: TimeInterval = 0.5
+    private let debounceDuration: TimeInterval = 0.2
 
     // FFT setup
     private let fftSize = 1024

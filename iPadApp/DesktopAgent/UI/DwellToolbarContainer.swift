@@ -6,9 +6,12 @@ import SwiftUI
 /// Floating position uses a drag gesture constrained to the safe area bounds.
 /// The selected position is persisted to UserDefaults via `SettingsStore.toolbarPosition`.
 ///
-/// Touch passthrough: The container uses a non-interactive GeometryReader for measurement
-/// only. The toolbar itself is placed via an alignment overlay so that empty space does NOT
-/// intercept touches destined for views underneath (e.g. CommandPadView, TrackpadView).
+/// Touch passthrough architecture:
+/// - A non-interactive GeometryReader captures container size (hit testing disabled).
+/// - The toolbar is placed as an `.overlay` on the GeometryReader, making it a
+///   sibling in the rendering tree — NOT a child of the disabled view.
+/// - This ensures the toolbar receives touches while empty space passes through
+///   to views underneath (TabView content, tab bar).
 ///
 /// **Validates: Requirements 6.5, 6.8**
 struct DwellToolbarContainer: View {
@@ -25,33 +28,27 @@ struct DwellToolbarContainer: View {
     @State private var safeAreaInsets: EdgeInsets = EdgeInsets()
 
     var body: some View {
-        // ZStack separates the measurement layer (no hit testing) from the
-        // interactive toolbar. Unlike .overlay on the GeometryReader, this
-        // ensures the toolbar is a sibling — not a child — of the disabled layer.
-        //
-        // The outer ZStack disables hit-testing so its empty alignment space
-        // does not intercept touches destined for tab content underneath.
-        // The toolbar content re-enables hit-testing on itself.
-        ZStack(alignment: toolbarAlignment) {
-            // Measurement layer — captures size, never intercepts touches
-            GeometryReader { geometry in
-                Color.clear
-                    .onAppear {
-                        containerSize = geometry.size
-                        safeAreaInsets = geometry.safeAreaInsets
-                    }
-                    .onChange(of: geometry.size) { _, newSize in
-                        containerSize = newSize
-                        safeAreaInsets = geometry.safeAreaInsets
-                    }
-            }
-            .allowsHitTesting(false)
-
-            // Interactive toolbar — only its visible frame receives touches
-            toolbarPositioned
-                .allowsHitTesting(true)
+        // Measurement layer — captures size, never intercepts touches.
+        // The toolbar is an overlay (not a child), so it is NOT affected
+        // by the parent's .allowsHitTesting(false).
+        GeometryReader { geometry in
+            Color.clear
+                .onAppear {
+                    containerSize = geometry.size
+                    safeAreaInsets = geometry.safeAreaInsets
+                }
+                .onChange(of: geometry.size) { _, newSize in
+                    containerSize = newSize
+                    safeAreaInsets = geometry.safeAreaInsets
+                }
         }
         .allowsHitTesting(false)
+        .overlay(alignment: toolbarAlignment) {
+            // Interactive toolbar — only its visible frame receives touches.
+            // Because this is an overlay (not a child of the disabled GeometryReader),
+            // hit testing works correctly on the toolbar content.
+            toolbarPositioned
+        }
     }
 
     // MARK: — Alignment
@@ -89,13 +86,15 @@ struct DwellToolbarContainer: View {
                     .contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                     .padding(.horizontal, DesignTokens.Spacing.md)
 
-                // Non-interactive spacer pushes toolbar above the tab bar (~49pt)
-                // without intercepting touches meant for the tab bar
-                Color.clear
+                // Spacer pushes toolbar above the tab bar (~49pt).
+                // The spacer is non-interactive; only the toolbar above receives touches.
+                Spacer()
                     .frame(height: 56)
-                    .allowsHitTesting(false)
             }
-            .allowsHitTesting(true) // VStack itself allows hit-testing for toolbar content
+            // The VStack's frame is only as tall as toolbar + spacer, not full-screen.
+            // Empty space around it passes through because the overlay alignment
+            // positions this at .bottom without filling the container.
+            .fixedSize(horizontal: false, vertical: true)
 
         case .floating:
             floatingToolbar

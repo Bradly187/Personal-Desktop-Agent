@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Combine
+import QuartzCore
 
 // MARK: — Connection state
 
@@ -30,6 +31,7 @@ final class WebSocketManager: ObservableObject {
 
     @Published private(set) var state: ConnectionState = .disconnected
     @Published private(set) var lastMessage: BridgeMessage?
+    @Published private(set) var latencyMs: Double = 0
 
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
@@ -41,8 +43,11 @@ final class WebSocketManager: ObservableObject {
     private var reconnectAttempt = 0
     private var reconnectWorkItem: DispatchWorkItem?
     private var receiveTask: Task<Void, Never>?
+    private var pingTask: Task<Void, Never>?
+    /// Timestamp of the last ping sent (monotonic, ms)
+    private var lastPingSentMs: Double = 0
 
-    private let maxBackoffSeconds: Double = 30
+    private let maxBackoffSeconds: Double = 5
     private var msgCounter: Int = 0
 
     // MARK: — Public API
@@ -56,6 +61,8 @@ final class WebSocketManager: ObservableObject {
     func disconnect() {
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
+        pingTask?.cancel()
+        pingTask = nil
         receiveTask?.cancel()
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
@@ -64,12 +71,16 @@ final class WebSocketManager: ObservableObject {
 
     func send(_ payload: [String: Any]) {
         guard let task, state == .connected else { return }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let text = String(data: data, encoding: .utf8) else { return }
-        task.send(.string(text)) { [weak self] error in
-            if let error {
-                Task { @MainActor [weak self] in
-                    self?._handleDisconnect(error: error)
+        // Serialize off the main thread for high-frequency sensor messages
+        let capturedTask = task
+        Task.detached(priority: .userInitiated) {
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            capturedTask.send(.string(text)) { error in
+                if let error {
+                    Task { @MainActor [weak self] in
+                        self?._handleDisconnect(error: error)
+                    }
                 }
             }
         }
@@ -130,6 +141,7 @@ final class WebSocketManager: ObservableObject {
                     // after first successful message receive
                     self.state = .connected
                     self.reconnectAttempt = 0
+                    self._startPingTimer()
                 }
                 self._handleReceived(message: firstMessage)
                 try await self._receiveLoop(task: wsTask)
@@ -169,6 +181,17 @@ final class WebSocketManager: ObservableObject {
         else { return }
 
         let type = json["type"] as? String ?? ""
+
+        // Handle pong for latency measurement — don't propagate to lastMessage
+        if type == "pong" {
+            let sentMs = json["t"] as? Double ?? 0
+            let nowMs = CACurrentMediaTime() * 1000
+            Task { @MainActor in
+                self.latencyMs = nowMs - sentMs
+            }
+            return
+        }
+
         let id = json["id"] as? String
 
         let parsed: BridgeMessage
@@ -210,6 +233,8 @@ final class WebSocketManager: ObservableObject {
         task = nil
         receiveTask?.cancel()
         receiveTask = nil
+        pingTask?.cancel()
+        pingTask = nil
 
         // 6.5: Always transition to .reconnecting on failure (not .disconnected)
         // This ensures the UI shows reconnection state immediately
@@ -227,6 +252,21 @@ final class WebSocketManager: ObservableObject {
         }
         reconnectWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    // MARK: — Latency Ping
+
+    private func _startPingTimer() {
+        pingTask?.cancel()
+        pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000) // every 2 seconds
+                guard !Task.isCancelled else { break }
+                guard let self else { break }
+                let nowMs = CACurrentMediaTime() * 1000
+                self.send(["type": "ping", "t": nowMs])
+            }
+        }
     }
 }
 

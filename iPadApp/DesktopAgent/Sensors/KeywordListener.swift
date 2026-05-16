@@ -24,6 +24,12 @@ final class KeywordListener: NSObject, ObservableObject {
     @Published var isListening = false
     @Published var lastKeyword: String?
 
+    /// Tracks the length of transcript already scanned to avoid re-firing on partial results
+    private var lastScannedLength: Int = 0
+    /// Per-keyword cooldown to prevent rapid re-fires
+    private var keywordCooldowns: [String: Date] = [:]
+    private let keywordCooldownDuration: TimeInterval = 0.5
+
     init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
         self.settings = settings
@@ -66,6 +72,8 @@ final class KeywordListener: NSObject, ObservableObject {
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true   // force on-device for speed + privacy
 
+        lastScannedLength = 0
+
         // Register with shared audio session and receive buffers via fan-out
         sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
             self?.request?.append(buffer)
@@ -80,7 +88,7 @@ final class KeywordListener: NSObject, ObservableObject {
                     self._checkKeywords(in: result.bestTranscription.formattedString)
                 }
                 if error != nil || (result?.isFinal ?? false) {
-                    // Restart recognition loop
+                    // Recognition ended (timeout or error) — restart seamlessly
                     self.stop()
                     self._startRecognition()
                 }
@@ -90,15 +98,26 @@ final class KeywordListener: NSObject, ObservableObject {
 
     private func _checkKeywords(in transcript: String) {
         guard let settings else { return }
+
+        // Only scan new content since last check to avoid re-firing
         let lower = transcript.lowercased()
+        guard lower.count > lastScannedLength else { return }
+
+        let newContent = String(lower.dropFirst(lastScannedLength))
+        lastScannedLength = lower.count
+
+        let now = Date()
         for keyword in settings.keywordList {
-            if lower.contains(keyword.lowercased()) {
-                let conf: Double = 0.9  // SFSpeech on-device doesn't expose confidence
-                ws?.sendKeyword(word: keyword, confidence: conf)
+            let kw = keyword.lowercased()
+            if newContent.contains(kw) {
+                // Check per-keyword cooldown
+                if let lastFire = keywordCooldowns[kw],
+                   now.timeIntervalSince(lastFire) < keywordCooldownDuration {
+                    continue
+                }
+                keywordCooldowns[kw] = now
+                ws?.sendKeyword(word: keyword, confidence: 0.9)
                 lastKeyword = keyword
-                // Reset to avoid repeated fires on the same partial result
-                request?.endAudio()
-                break
             }
         }
     }

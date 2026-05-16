@@ -35,6 +35,14 @@ struct DAConnectionBanner: View {
 
                 Spacer()
 
+                // Latency readout when connected
+                if case .connected = wsManager.state, wsManager.latencyMs > 0 {
+                    Text(String(format: "%.0fms", wsManager.latencyMs))
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(wsManager.latencyMs < 10 ? theme.connected : wsManager.latencyMs < 50 ? theme.connecting : theme.disconnected)
+                        .padding(.trailing, DesignTokens.Spacing.sm)
+                }
+
                 // Reconnect button when disconnected
                 if isDisconnected {
                     Text("Reconnect")
