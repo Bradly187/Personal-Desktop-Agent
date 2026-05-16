@@ -86,6 +86,23 @@ class LocalInference(ABC):
                 from ContinuousTrainer; injected into the prompt when provided.
         """
 
+    async def infer_stream(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ):
+        """Stream inference tokens as they arrive (AsyncIterator[str]).
+
+        Default implementation buffers the full response and yields it as a
+        single token — safe for backends that don't support streaming.
+        Override in subclasses (e.g. OllamaInference) for true token-by-token.
+
+        Used by TTS paths (CLARIFY questions, DevAgent EXPLAIN responses) where
+        starting audio synthesis before the full response is ready reduces latency.
+        """
+        result = await self.infer(cmd, few_shot_examples)
+        yield result
+
     @abstractmethod
     def get_status(self) -> dict:
         """Return a status dict: {'backend': str, 'available': bool, ...}."""
@@ -162,6 +179,69 @@ class OllamaInference(LocalInference):
             self._available = False
             log.error("OllamaInference failed: %s", exc)
             return f"CLARIFY inference error: {exc}"
+
+    async def infer_stream(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ):
+        """Stream tokens from Ollama as they arrive (true token-by-token).
+
+        Uses Ollama's native streaming API (stream=True) so each token is
+        yielded as soon as it's generated. Used by TTS paths (CLARIFY, EXPLAIN)
+        to start audio synthesis before the full response is ready.
+
+        num_predict is raised to 512 for conversational responses vs the 64
+        used in the command-classification path (infer).
+        """
+        try:
+            import aiohttp
+        except ImportError:
+            yield "CLARIFY aiohttp not installed"
+            return
+
+        prompt = _build_prompt(cmd, few_shot_examples)
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,                                 # token-by-token
+            "options": {"temperature": 0.0, "num_predict": 512},
+        }
+
+        t0 = time.monotonic()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.host}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60.0),
+                ) as resp:
+                    if resp.status != 200:
+                        yield f"CLARIFY Ollama HTTP {resp.status}"
+                        return
+                    async for raw_line in resp.content:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = __import__("json").loads(line)
+                        except Exception:
+                            continue
+                        token = chunk.get("response", "")
+                        if token:
+                            yield token
+                        if chunk.get("done"):
+                            latency_ms = (time.monotonic() - t0) * 1000
+                            log.info(
+                                "OllamaInference.stream: %r complete (%.0f ms)",
+                                cmd.text[:40], latency_ms,
+                            )
+                            self._available = True
+                            return
+        except Exception as exc:
+            self._available = False
+            log.error("OllamaInference.stream failed: %s", exc)
+            yield f"CLARIFY inference error: {exc}"
 
     def get_status(self) -> dict:
         return {

@@ -15,24 +15,26 @@ struct HandwritingCanvasView: View {
     @State private var showEditSheet = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Canvas
-            PKCanvasRepresentable(drawing: $vm.drawing)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(theme.surfacePrimary)
-                .overlay(alignment: .bottomTrailing) {
-                    canvasControls
-                }
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Canvas
+                PKCanvasRepresentable(drawing: $vm.drawing)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(theme.surfacePrimary)
+                    .overlay(alignment: .bottomTrailing) {
+                        canvasControls
+                    }
 
-            // Result bar (appears after recognition)
-            if let result = vm.result {
-                resultBar(result)
-            } else if vm.isRecognizing {
-                ProgressView("Recognizing…")
-                    .padding(DesignTokens.Spacing.lg)
+                // Result bar (appears after recognition)
+                if let result = vm.result {
+                    resultBar(result)
+                } else if vm.isRecognizing {
+                    ProgressView("Recognizing…")
+                        .padding(DesignTokens.Spacing.lg)
+                }
             }
+            .navigationTitle("Handwriting")
         }
-        .navigationTitle("Handwriting")
         .onReceive(wsManager.$lastMessage.compactMap { $0 }) { msg in
             if case .handwritingResult(_, let latex, let unicode, let error) = msg {
                 vm.handleResult(latex: latex, unicode: unicode, error: error)
@@ -177,15 +179,22 @@ final class HandwritingViewModel: ObservableObject {
         isRecognizing = true
         result = nil
 
-        // Render drawing to PNG
-        let bounds = drawing.bounds.insetBy(dx: -20, dy: -20)
-        let image = drawing.image(from: bounds, scale: UIScreen.main.scale)
-        guard let pngData = image.pngData() else {
-            isRecognizing = false
-            return
+        // Capture drawing state for background rendering
+        let drawingCopy = drawing
+        let scale = UIScreen.main.scale
+
+        Task.detached(priority: .userInitiated) {
+            let bounds = drawingCopy.bounds.insetBy(dx: -20, dy: -20)
+            let image = drawingCopy.image(from: bounds, scale: scale)
+            guard let pngData = image.pngData() else {
+                await MainActor.run { self.isRecognizing = false }
+                return
+            }
+            let b64 = pngData.base64EncodedString()
+            await MainActor.run {
+                ws.sendHandwritingImage(base64PNG: b64)
+            }
         }
-        let b64 = pngData.base64EncodedString()
-        ws.sendHandwritingImage(base64PNG: b64)
     }
 
     func handleResult(latex: String?, unicode: String?, error: String?) {
@@ -208,11 +217,13 @@ struct PKCanvasRepresentable: UIViewRepresentable {
         canvas.isOpaque = true
         canvas.delegate = context.coordinator
 
-        // Provide a tool picker
+        // Provide a tool picker — deferred so it doesn't animate during the tab switch
         let picker = PKToolPicker()
-        picker.setVisible(true, forFirstResponder: canvas)
         picker.addObserver(canvas)
-        canvas.becomeFirstResponder()
+        DispatchQueue.main.async {
+            picker.setVisible(true, forFirstResponder: canvas)
+            canvas.becomeFirstResponder()
+        }
 
         return canvas
     }

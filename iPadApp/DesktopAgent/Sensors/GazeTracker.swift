@@ -1,4 +1,5 @@
 import ARKit
+import QuartzCore
 import SwiftUI
 
 /// Streams gaze position from ARKit TrueDepth camera at the ARKit frame rate.
@@ -12,7 +13,7 @@ final class GazeTracker: NSObject, ObservableObject {
     private var settings: SettingsStore?
 
     // Dwell state
-    private var dwellStart: Date?
+    private var dwellStart: CFTimeInterval?
     private var lastStablePoint: CGPoint?
     private let stabilityThreshold: CGFloat = 0.04   // fraction of screen diagonal
 
@@ -97,8 +98,9 @@ final class GazeTracker: NSObject, ObservableObject {
         if let last = lastStablePoint,
            abs(point.x - last.x) < threshold && abs(point.y - last.y) < threshold {
             // Gaze is stable
-            if dwellStart == nil { dwellStart = Date() }
-            let elapsed = Date().timeIntervalSince(dwellStart!)
+            let now = CACurrentMediaTime()
+            if dwellStart == nil { dwellStart = now }
+            let elapsed = now - dwellStart!
             let progress = min(elapsed / settings.dwellTimeout, 1.0)
             dwellProgress = progress
             if elapsed >= settings.dwellTimeout {
@@ -128,7 +130,7 @@ extension GazeTracker: ARSessionDelegate {
         guard let faceAnchor = anchors.first(where: { $0 is ARFaceAnchor }) as? ARFaceAnchor else {
             return
         }
-        Task { @MainActor [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if let (point, conf) = self.extractGaze(from: faceAnchor) {
                 self.handleGaze(point, conf: conf)

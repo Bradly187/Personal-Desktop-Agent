@@ -7,6 +7,9 @@ struct SettingsView: View {
 
     @Environment(\.appTheme) private var theme
 
+    @State private var newSoundName = ""
+    @State private var newSoundAction = ""
+
     var body: some View {
         NavigationStack {
             Form {
@@ -64,6 +67,15 @@ struct SettingsView: View {
 
                     Button("Reconnect") { wsManager.disconnect(); wsManager.connect() }
                         .accessibilityHint("Double-tap to disconnect and reconnect to the PC")
+
+                    // Latency monitor
+                    if case .connected = wsManager.state {
+                        LabeledContent("Latency") {
+                            Text(String(format: "%.1f ms", wsManager.latencyMs))
+                                .font(DesignTokens.Typography.caption)
+                                .foregroundStyle(wsManager.latencyMs < 10 ? theme.connected : wsManager.latencyMs < 50 ? theme.connecting : theme.disconnected)
+                        }
+                    }
                 } header: {
                     DASectionHeader(title: "Connection")
                 }
@@ -71,6 +83,7 @@ struct SettingsView: View {
                 // Tilt
                 Section {
                     Toggle("Enable Tilt", isOn: $settings.tiltEnabled)
+                    Toggle("Invert Tilt", isOn: $settings.tiltInverted)
                     LabeledContent("Sensitivity") {
                         Slider(value: $settings.tiltSensitivity, in: 0.1...5.0)
                     }
@@ -121,12 +134,14 @@ struct SettingsView: View {
 
                 // Keywords
                 Section {
-                    ForEach(settings.keywordList, id: \.self) { kw in
-                        Text(kw)
+                    ForEach(settings.keywordList.indices, id: \.self) { i in
+                        TextField("Keyword", text: $settings.keywordList[i])
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
                     }
                     .onDelete { idx in settings.keywordList.remove(atOffsets: idx) }
                     Button("Add keyword…") {
-                        settings.keywordList.append("new keyword")
+                        settings.keywordList.append("")
                     }
                     .accessibilityHint("Double-tap to add a new voice keyword")
                 } header: {
@@ -145,15 +160,48 @@ struct SettingsView: View {
 
                 // Sound mappings
                 Section {
-                    ForEach(Array(settings.soundMappings.keys.sorted()), id: \.self) { sound in
+                    ForEach(settings.soundMappings.keys.sorted(), id: \.self) { sound in
                         HStack {
                             Text(sound)
                                 .foregroundStyle(theme.textPrimary)
                             Spacer()
-                            Text(settings.soundMappings[sound] ?? "")
-                                .foregroundStyle(theme.textSecondary)
+                            TextField("Action", text: Binding(
+                                get: { settings.soundMappings[sound] ?? "" },
+                                set: { settings.soundMappings[sound] = $0 }
+                            ))
+                            .multilineTextAlignment(.trailing)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(width: 140)
                         }
                     }
+                    .onDelete { idx in
+                        let keys = settings.soundMappings.keys.sorted()
+                        idx.forEach { settings.soundMappings.removeValue(forKey: keys[$0]) }
+                    }
+                    HStack {
+                        TextField("Sound", text: $newSoundName)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                        Spacer()
+                        TextField("Action", text: $newSoundAction)
+                            .multilineTextAlignment(.trailing)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                            .frame(width: 140)
+                    }
+                    .foregroundStyle(theme.textSecondary)
+                    Button("Add mapping…") {
+                        let key = newSoundName.trimmingCharacters(in: .whitespaces)
+                        let val = newSoundAction.trimmingCharacters(in: .whitespaces)
+                        guard !key.isEmpty, !val.isEmpty else { return }
+                        settings.soundMappings[key] = val
+                        newSoundName = ""
+                        newSoundAction = ""
+                    }
+                    .disabled(newSoundName.trimmingCharacters(in: .whitespaces).isEmpty ||
+                              newSoundAction.trimmingCharacters(in: .whitespaces).isEmpty)
                 } header: {
                     DASectionHeader(title: "Sound Mappings")
                 }

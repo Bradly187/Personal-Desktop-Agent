@@ -77,7 +77,7 @@ extension HeadTracker: ARSessionDelegate {
         guard let face = anchors.first(where: { $0 is ARFaceAnchor }) as? ARFaceAnchor else {
             return
         }
-        Task { @MainActor [weak self] in
+        DispatchQueue.main.async { [weak self] in
             self?.handleAnchor(face)
         }
     }

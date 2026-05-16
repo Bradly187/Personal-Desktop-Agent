@@ -1,4 +1,5 @@
 import SwiftUI
+import QuartzCore
 
 /// Multi-touch trackpad surface with click buttons below.
 ///
@@ -24,16 +25,19 @@ struct TrackpadView: View {
     @State private var isFullScreen = false
 
     var body: some View {
-        ZStack {
-            if isFullScreen {
-                fullScreenLayout
-                    .ignoresSafeArea(.all)
-            } else {
-                normalLayout
+        NavigationStack {
+            ZStack {
+                if isFullScreen {
+                    fullScreenLayout
+                        .ignoresSafeArea(.all)
+                } else {
+                    normalLayout
+                }
             }
+            .navigationTitle(isFullScreen ? "" : "Trackpad")
+            .navigationBarHidden(isFullScreen)
+            .toolbar(isFullScreen ? .hidden : .visible, for: .tabBar)
         }
-        .navigationTitle(isFullScreen ? "" : "Trackpad")
-        .navigationBarHidden(isFullScreen)
     }
 
     // MARK: — Normal layout (trackpad + buttons)
@@ -271,7 +275,10 @@ struct TrackpadGestureView: UIViewRepresentable {
         tap2.numberOfTouchesRequired = 2
         v.addGestureRecognizer(tap2)
 
-        tap1.require(toFail: tap2)
+        // No require(toFail:) — eliminates the ~300ms delay on single-finger taps.
+        // The coordinator handles the overlap: a 2-finger tap fires tap2 and we
+        // suppress the accompanying tap1 via a short debounce window.
+        tap2.delaysTouchesEnded = false
         return v
     }
 
@@ -288,6 +295,9 @@ struct TrackpadGestureView: UIViewRepresentable {
         let onEvent: (TrackpadEvent) -> Void
         weak var view: UIView?
         private var prevTranslation: CGPoint = .zero
+        /// Timestamp of last 2-finger tap — used to suppress the spurious 1-finger tap
+        /// that fires alongside it when require(toFail:) is removed.
+        private var lastTap2Time: CFTimeInterval = 0
 
         init(palmRadius: CGFloat, onEvent: @escaping (TrackpadEvent) -> Void) {
             self.palmRadius = palmRadius
@@ -325,11 +335,17 @@ struct TrackpadGestureView: UIViewRepresentable {
         }
 
         @objc func tap1(_ gr: UITapGestureRecognizer) {
-            if gr.state == .recognized { onEvent(.tap(fingers: 1)) }
+            guard gr.state == .recognized else { return }
+            // Suppress if a 2-finger tap just fired (within 100ms)
+            if CACurrentMediaTime() - lastTap2Time < 0.1 { return }
+            onEvent(.tap(fingers: 1))
         }
 
         @objc func tap2(_ gr: UITapGestureRecognizer) {
-            if gr.state == .recognized { onEvent(.tap(fingers: 2)) }
+            if gr.state == .recognized {
+                lastTap2Time = CACurrentMediaTime()
+                onEvent(.tap(fingers: 2))
+            }
         }
     }
 }

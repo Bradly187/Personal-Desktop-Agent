@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Amazon Polly TTS — spoken clarification for cloud-routed commands
 # ---------------------------------------------------------------------------
 
-_POLLY_VOICE = "Gregory"          # en-US Neural male; natural for a desktop assistant
+_POLLY_VOICE = "Danielle"         # en-US Generative female; also supports Long-form
 _POLLY_SAMPLE_RATE = 16_000       # 16 kHz PCM matches sounddevice default input rate
 _POLLY_MAX_CHARS = 3_000          # Polly hard limit for standard text input
 _POLLY_TIMEOUT_S = 5              # boto3 connect + read timeout
@@ -264,13 +264,18 @@ class CommandExecutor:
             return result
 
         # ------------------------------------------------------------------ #
-        # CLARIFY — prompt user; speak via Polly when routed through cloud
+        # CLARIFY — speak via Polly Bidirectional Streaming TTS (always)
         # ------------------------------------------------------------------ #
         if action == "CLARIFY":
             message = p.get("message", "Unclear command")
             spoken = False
-            if p.get("route") == "cloud":
-                spoken = _polly_speak(message)
+            try:
+                from polly_stream import get_client as _get_tts
+                spoken = _get_tts().speak_sync(message)
+            except Exception as _tts_exc:
+                log.debug("TTS speak failed, falling back to legacy Polly: %s", _tts_exc)
+                if p.get("route") == "cloud":
+                    spoken = _polly_speak(message)
             return {"clarify": True, "message": message, "spoken": spoken}
 
         # ================================================================== #

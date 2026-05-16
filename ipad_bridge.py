@@ -195,6 +195,13 @@ class IPadBridge:
         log.debug("Received [%s] id=%s", msg_type, msg_id)
 
         # ------------------------------------------------------------------ #
+        # Ping/pong — immediate echo for latency measurement
+        # ------------------------------------------------------------------ #
+        if msg_type == "ping":
+            await ws.send_json({"type": "pong", "id": msg_id, "t": msg.get("t", 0)})
+            return
+
+        # ------------------------------------------------------------------ #
         # Phase 1 message handlers
         # ------------------------------------------------------------------ #
         if msg_type == "touch_command":

@@ -19,7 +19,7 @@
     "ToolSearch":  "silent"
   },
 
-  "voice_id":      "Joanna",
+  "voice_id":      "Danielle",
   "record_s":      4.0,
   "timeout_action":"approve",
   "device":        "Realtek USB Audio",
