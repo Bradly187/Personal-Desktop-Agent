@@ -95,8 +95,8 @@ struct SettingsView: View {
                     LabeledContent("Sensitivity") {
                         Slider(value: $settings.tiltSensitivity, in: 0.1...5.0)
                     }
-                    LabeledContent("Dead Zone") {
-                        Slider(value: $settings.tiltDeadZone, in: 0.005...0.1)
+                    LabeledContent("Dead Zone: \(String(format: "%.1f°", settings.tiltDeadZone))") {
+                        Slider(value: $settings.tiltDeadZone, in: 0.5...5.0)
                     }
                     Button("Calibrate Neutral") {
                         sensorManager.tiltSensor.calibrate()

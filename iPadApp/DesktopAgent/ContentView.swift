@@ -45,8 +45,6 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .padding(.top, 72) // below activity bar
 
-            DwellToolbarContainer(settings: settings, ws: wsManager)
-
             ScreenshotOverlayView()
 
             // ── Custom tab bar with drag-to-switch ───────────────────────────
