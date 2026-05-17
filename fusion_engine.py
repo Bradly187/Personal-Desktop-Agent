@@ -149,6 +149,13 @@ class FusionEngine:
         self._tilt_accum_y: float = 0.0                           # sub-pixel accumulator Y
         self._head: Optional[tuple[float, float]] = None          # (pitch, yaw) degrees
 
+        # --- Tilt position (absolute positioning from iPad position-mapped mode) ---
+        self._tilt_position: Optional[tuple[float, float]] = None  # (x, y) normalized [0,1]
+        self._tilt_pos_ema_x: float = 0.5                          # EMA-smoothed position X
+        self._tilt_pos_ema_y: float = 0.5                          # EMA-smoothed position Y
+        self._tilt_pos_alpha: float = 0.4                          # EMA smoothing factor
+        self._tilt_pos_initialized: bool = False                   # first sample initializes EMA
+
         # --- Gaze state ---
         self._gaze_buf = _GazeBuffer(
             self._cfg.gaze_buffer_frames,
@@ -259,6 +266,10 @@ class FusionEngine:
 
     def on_tilt(self, rx: float, ry: float) -> None:
         self._tilt = (rx, ry)
+
+    def on_tilt_position(self, x: float, y: float) -> None:
+        """Receive absolute position from iPad tilt sensor (position-mapped mode)."""
+        self._tilt_position = (x, y)
 
     def on_head(self, pitch: float, yaw: float) -> None:
         self._head = (pitch, yaw)
@@ -485,9 +496,50 @@ class FusionEngine:
             return
 
         # Rule 6 — Tilt navigation (direct to pyautogui, no Command, no LLM)
+        # Position-mapped tilt_position takes priority over legacy velocity tilt.
         # In gaze-to-cursor mode, suppressed while gaze is active (prevents fighting).
         # When gaze is lost (not recent), tilt breaks through as an escape hatch —
         # clears EMA so gaze reinitialises fresh when it is reacquired.
+
+        # If both tilt_position and legacy tilt are present, use tilt_position and discard legacy
+        if self._tilt_position and self._tilt:
+            self._tilt = None
+
+        # Rule 6a — Absolute tilt position (position-mapped mode from iPad)
+        if self._tilt_position:
+            gaze_cursor_on = self._feature_toggles.get("gaze_cursor_mode", False)
+            if gaze_cursor_on and gaze_is_recent:
+                self._tilt_position = None  # gaze is driving — discard tilt position
+            else:
+                x, y = self._tilt_position
+                self._tilt_position = None
+
+                # Clear gaze EMA when tilt takes over (escape hatch)
+                if gaze_cursor_on:
+                    self._gaze_cursor_ema = None
+
+                # EMA smoothing
+                if not self._tilt_pos_initialized:
+                    self._tilt_pos_ema_x = x
+                    self._tilt_pos_ema_y = y
+                    self._tilt_pos_initialized = True
+                else:
+                    a = self._tilt_pos_alpha
+                    self._tilt_pos_ema_x = a * x + (1 - a) * self._tilt_pos_ema_x
+                    self._tilt_pos_ema_y = a * y + (1 - a) * self._tilt_pos_ema_y
+
+                # Convert to pixels
+                px_x = round(self._tilt_pos_ema_x * self._w)
+                px_y = round(self._tilt_pos_ema_y * self._h)
+
+                # Clamp to screen bounds
+                px_x = max(0, min(self._w - 1, px_x))
+                px_y = max(0, min(self._h - 1, px_y))
+
+                await asyncio.to_thread(pyautogui.moveTo, px_x, px_y, duration=0)
+                return
+
+        # Rule 6b — Legacy tilt navigation (velocity-based, no Command, no LLM)
         if self._tilt:
             gaze_cursor_on = self._feature_toggles.get("gaze_cursor_mode", False)
             if gaze_cursor_on and gaze_is_recent:

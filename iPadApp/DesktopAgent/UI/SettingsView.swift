@@ -4,6 +4,7 @@ struct SettingsView: View {
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var wsManager: WebSocketManager
     @EnvironmentObject var serviceDiscovery: ServiceDiscovery
+    @EnvironmentObject var sensorManager: SensorManager
 
     @Environment(\.appTheme) private var theme
 
@@ -83,13 +84,25 @@ struct SettingsView: View {
                 // Tilt
                 Section {
                     Toggle("Enable Tilt", isOn: $settings.tiltEnabled)
+                    Toggle("Position Mode", isOn: $settings.tiltPositionMode)
+                    Text("Maps tilt angle to absolute screen position. When off, uses legacy velocity mode.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
                     Toggle("Invert Tilt", isOn: $settings.tiltInverted)
+                    LabeledContent("Tilt Range: \(Int(settings.tiltRange))°") {
+                        Slider(value: $settings.tiltRange, in: 5...60, step: 1)
+                    }
                     LabeledContent("Sensitivity") {
                         Slider(value: $settings.tiltSensitivity, in: 0.1...5.0)
                     }
                     LabeledContent("Dead Zone") {
                         Slider(value: $settings.tiltDeadZone, in: 0.005...0.1)
                     }
+                    Button("Calibrate Neutral") {
+                        sensorManager.tiltSensor.calibrate()
+                    }
+                    .disabled(!settings.tiltEnabled)
+                    .accessibilityHint("Double-tap to set the current iPad orientation as the neutral center position")
                 } header: {
                     DASectionHeader(title: "Tilt Navigation")
                 }
