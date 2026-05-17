@@ -22,10 +22,10 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Select Xcode 16.3
-        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -72,6 +72,14 @@ jobs:
           # Stamp CI run number into the generated Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
 
+      - name: Install iOS platform
+        run: |
+          # Install the iOS 18.5 platform SDK on fresh runners. Xcode 16.4 ships with the
+          # iOS 18.5 SDK, and the macos-15-arm64 image already has the iOS 18.5 simulator
+          # (22F77) pre-installed — SDK and simulator build versions match, which fixes the
+          # actool CompileAssetCatalogVariant thinned error seen with Xcode 16.3 / iOS 18.4.
+          xcodebuild -downloadPlatform iOS || true
+
       - name: Build and archive
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
@@ -83,11 +91,13 @@ jobs:
             -destination 'generic/platform=iOS' \
             -configuration Release \
             -archivePath $RUNNER_TEMP/DesktopAgent.xcarchive \
+            -skipPackagePluginValidation \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_UUID" \
             PRODUCT_BUNDLE_IDENTIFIER=com.bradtarver.DesktopAgent \
+            ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT=NO \
             2>&1 | tee build.log
 
           if grep -q "ARCHIVE SUCCEEDED" build.log; then
@@ -166,7 +176,7 @@ jobs:
           fi
 
       - name: Upload IPA as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: DesktopAgent-signed
           path: ${{ runner.temp }}/export/DesktopAgent.ipa

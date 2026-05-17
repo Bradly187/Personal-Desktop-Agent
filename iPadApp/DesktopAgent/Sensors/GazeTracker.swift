@@ -5,12 +5,17 @@ import SwiftUI
 /// Streams gaze position from ARKit TrueDepth camera at the ARKit frame rate.
 /// On-device dwell timer fires gaze_dwell when gaze is stable for `dwellTimeout` seconds.
 /// Requires: front-facing TrueDepth camera (iPad Pro 2020+, iPad mini 6+, iPad Air 5+).
+///
+/// Uses SharedFaceSession — does NOT own its own ARSession. GazeTracker and HeadTracker
+/// share one face-tracking session to avoid the ARKit one-session-per-camera limitation.
 @MainActor
 final class GazeTracker: NSObject, ObservableObject {
 
-    private let session = ARSession()
+    private let sharedFaceSession: SharedFaceSession
     private weak var ws: WebSocketManager?
     private var settings: SettingsStore?
+
+    private static let consumerID = "GazeTracker"
 
     // Dwell state
     private var dwellStart: CFTimeInterval?
@@ -20,33 +25,39 @@ final class GazeTracker: NSObject, ObservableObject {
     // Ring animation progress (0…1)
     @Published var dwellProgress: Double = 0
 
-    init(ws: WebSocketManager, settings: SettingsStore) {
+    init(ws: WebSocketManager, settings: SettingsStore, sharedFaceSession: SharedFaceSession) {
         self.ws = ws
         self.settings = settings
+        self.sharedFaceSession = sharedFaceSession
         super.init()
     }
 
     // MARK: — Lifecycle
 
     func start() {
-        guard ARFaceTrackingConfiguration.isSupported else {
+        guard SharedFaceSession.isSupported else {
             print("GazeTracker: ARFaceTracking not supported on this device")
             return
         }
         guard let settings, settings.gazeEnabled else { return }
 
-        let config = ARFaceTrackingConfiguration()
-        config.isLightEstimationEnabled = false
-        session.delegate = self
-        session.run(config)
+        sharedFaceSession.addConsumer(Self.consumerID) { [weak self] anchor in
+            self?.handleAnchorUpdate(anchor)
+        }
     }
 
     func stop() {
-        session.pause()
+        sharedFaceSession.removeConsumer(Self.consumerID)
         dwellProgress = 0
     }
 
     // MARK: — Gaze extraction
+
+    private func handleAnchorUpdate(_ anchor: ARFaceAnchor) {
+        if let (point, conf) = extractGaze(from: anchor) {
+            handleGaze(point, conf: conf)
+        }
+    }
 
     private func extractGaze(from anchor: ARFaceAnchor) -> (CGPoint, Float)? {
         // ARKit provides leftEyeTransform and rightEyeTransform relative to face.
@@ -76,7 +87,7 @@ final class GazeTracker: NSObject, ObservableObject {
         let nx = CGFloat(min(max((hitX + 0.3) / 0.6, 0), 1))
         let ny = CGFloat(min(max(1 - (hitY + 0.3) / 0.6, 0), 1))
 
-        let conf = Float(anchor.blendShapes[.eyeBlinkLeft] ?? 0)
+        let conf = Float(truncating: anchor.blendShapes[.eyeBlinkLeft] ?? 0)
         let openness = 1 - conf   // higher when eye is open
 
         return (CGPoint(x: nx, y: ny), openness)
@@ -119,22 +130,6 @@ final class GazeTracker: NSObject, ObservableObject {
             lastStablePoint = point
             dwellStart = nil
             dwellProgress = 0
-        }
-    }
-}
-
-// MARK: — ARSessionDelegate
-
-extension GazeTracker: ARSessionDelegate {
-    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        guard let faceAnchor = anchors.first(where: { $0 is ARFaceAnchor }) as? ARFaceAnchor else {
-            return
-        }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if let (point, conf) = self.extractGaze(from: faceAnchor) {
-                self.handleGaze(point, conf: conf)
-            }
         }
     }
 }

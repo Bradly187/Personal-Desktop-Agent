@@ -65,6 +65,47 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(tiltInverted, forKey: "tiltInverted") }
     }
 
+    /// Maximum angular displacement (degrees) from neutral that maps to screen edge.
+    /// Clamped to [5, 60]. Default 25°.
+    @Published var tiltRange: Double {
+        didSet {
+            let clamped = max(5.0, min(60.0, tiltRange))
+            if clamped != tiltRange { tiltRange = clamped }
+            defaults.set(clamped, forKey: "tiltRange")
+        }
+    }
+
+    /// When true, tilt uses position-mapped mode (absolute screen coordinates).
+    /// When false, uses legacy velocity-based mode (rotation-rate deltas).
+    @Published var tiltPositionMode: Bool {
+        didSet { defaults.set(tiltPositionMode, forKey: "tiltPositionMode") }
+    }
+
+    // MARK: — Neutral Gravity Persistence
+
+    /// Persisted neutral gravity X component. Used to restore calibration across app restarts.
+    var neutralGravityX: Double {
+        get { defaults.double(forKey: "neutralGravityX") }
+        set { defaults.set(newValue, forKey: "neutralGravityX") }
+    }
+
+    /// Persisted neutral gravity Y component.
+    var neutralGravityY: Double {
+        get { defaults.double(forKey: "neutralGravityY") }
+        set { defaults.set(newValue, forKey: "neutralGravityY") }
+    }
+
+    /// Persisted neutral gravity Z component.
+    var neutralGravityZ: Double {
+        get { defaults.double(forKey: "neutralGravityZ") }
+        set { defaults.set(newValue, forKey: "neutralGravityZ") }
+    }
+
+    /// True when a neutral gravity calibration has been persisted (key exists in UserDefaults).
+    var hasPersistedNeutral: Bool {
+        defaults.object(forKey: "neutralGravityX") != nil
+    }
+
     // MARK: — Gaze / Dwell
     @Published var gazeEnabled: Bool {
         didSet { defaults.set(gazeEnabled, forKey: "gazeEnabled") }
@@ -234,9 +275,14 @@ final class SettingsStore: ObservableObject {
         serverHost = defaults.string(forKey: "serverHost") ?? "192.168.18.2"
         serverPort = defaults.integer(forKey: "serverPort").nonZero ?? 8765
         tiltSensitivity = defaults.double(forKey: "tiltSensitivity").nonZero ?? 1.0
-        tiltDeadZone = defaults.double(forKey: "tiltDeadZone").nonZero ?? 0.02
+        tiltDeadZone = defaults.double(forKey: "tiltDeadZone").nonZero ?? 1.5
         tiltEnabled = defaults.object(forKey: "tiltEnabled") as? Bool ?? true
         tiltInverted = defaults.object(forKey: "tiltInverted") as? Bool ?? false
+
+        // Position-mapping settings
+        let savedRange = defaults.double(forKey: "tiltRange")
+        tiltRange = savedRange > 0 ? max(5.0, min(60.0, savedRange)) : 25.0
+        tiltPositionMode = defaults.object(forKey: "tiltPositionMode") as? Bool ?? true
         gazeEnabled = defaults.object(forKey: "gazeEnabled") as? Bool ?? true
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 

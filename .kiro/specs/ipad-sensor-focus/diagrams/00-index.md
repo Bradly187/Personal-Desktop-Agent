@@ -16,7 +16,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 | 05 | [05-data-flow.md](05-data-flow.md) | iPad sensor data flows, WebSocket message schema, persistent storage |
 | 06 | [06-fusion-routing.md](06-fusion-routing.md) | 10-level fusion priority, 4-gate routing, action execution |
 | 07 | [07-bridge-architecture.md](07-bridge-architecture.md) | iPad↔Bridge↔MCP↔pyautogui stack overview |
-| 08 | [08-bridge-message-routing.md](08-bridge-message-routing.md) | Full message routing flowchart (13 types, 11 action verbs) |
+| 08 | [08-bridge-message-routing.md](08-bridge-message-routing.md) | Full message routing flowchart (14 types, 11 action verbs) |
 | 09 | [09-bridge-sequence.md](09-bridge-sequence.md) | Sequence diagram: touch_command and trackpad end-to-end |
 | 10 | [10-nemoclaw-system-architecture.md](10-nemoclaw-system-architecture.md) | Full pipeline with NemoClaw additions: Gate 0, NemotronInference, log field |
 | 11 | [11-nemoclaw-gate-flow.md](11-nemoclaw-gate-flow.md) | HybridCoordinator gate decision flowchart with gate_that_decided labels |

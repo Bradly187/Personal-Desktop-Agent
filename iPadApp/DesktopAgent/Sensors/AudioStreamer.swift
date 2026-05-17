@@ -10,6 +10,9 @@ import Foundation
 /// Uses SharedAudioSession for audio input — does NOT own its own AVAudioEngine.
 /// All three audio sensors (KeywordListener, SoundDetector, AudioStreamer) share
 /// the same engine via the fan-out tap pattern in SharedAudioSession.
+///
+/// Resampling runs on a dedicated serial queue to avoid blocking the audio render
+/// thread and to prevent data races on converter state.
 @MainActor
 final class AudioStreamer: ObservableObject {
 
@@ -25,9 +28,13 @@ final class AudioStreamer: ObservableObject {
     private let targetSampleRate: Double = 16000
     /// Buffer size in frames (50ms chunks at 16kHz = 800 frames)
     private let bufferFrames: AVAudioFrameCount = 800
-    /// Converter for resampling to 16kHz mono int16
+
+    /// Serial queue for resampling — keeps converter state off the render thread.
+    private let processQueue = DispatchQueue(label: "audio.streamer.process", qos: .userInteractive)
+
+    /// Converter for resampling to 16kHz mono int16 (accessed only from processQueue)
     private var converter: AVAudioConverter?
-    /// Output format for the converter (16kHz mono Int16)
+    /// Output format for the converter (16kHz mono Int16, immutable after start)
     private var outputFormat: AVAudioFormat?
 
     init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
@@ -59,10 +66,17 @@ final class AudioStreamer: ObservableObject {
             converter = AVAudioConverter(from: inputFormat, to: outFmt)
         }
 
+        // Capture converter and format for the closure (avoids accessing self on render thread)
+        let capturedConverter = converter
+        let capturedFormat = outFmt
+
         // Register with shared audio session and receive buffers via fan-out
         sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
-            guard let self, let outputFormat = self.outputFormat else { return }
-            self.processBuffer(buffer, outputFormat: outputFormat)
+            guard let self else { return }
+            // Dispatch resampling off the audio render thread
+            self.processQueue.async { [weak self] in
+                self?.processBuffer(buffer, converter: capturedConverter, outputFormat: capturedFormat)
+            }
         }
 
         isStreaming = true
@@ -76,9 +90,9 @@ final class AudioStreamer: ObservableObject {
         outputFormat = nil
     }
 
-    // MARK: — Processing
+    // MARK: — Processing (runs on processQueue)
 
-    private func processBuffer(_ buffer: AVAudioPCMBuffer, outputFormat: AVAudioFormat) {
+    private func processBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter?, outputFormat: AVAudioFormat) {
         let int16Data: Data
 
         if let converter {

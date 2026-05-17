@@ -3,11 +3,12 @@
 Listens on port 8765 for messages from the iPad app and dispatches them
 to FusionEngine, CommandExecutor, or directly to pyautogui.
 
-Message types — 13 total:
+Message types — 14 total:
   touch_command     →  CommandExecutor (action routing; priority 1)
   trackpad          →  direct pyautogui (mouse/scroll; no LLM)
   handwriting_image →  pix2tex OCR → handwriting_result reply
-  tilt              →  FusionEngine.on_tilt() (when wired)
+  tilt_position     →  FusionEngine.on_tilt_position() (absolute positioning)
+  tilt              →  FusionEngine.on_tilt() (legacy velocity mode)
   tilt_tap          →  FusionEngine.on_touch() (when wired)
   gaze              →  FusionEngine.on_gaze() (when wired)
   gaze_dwell        →  FusionEngine.on_gaze_dwell() (when wired)
@@ -241,6 +242,16 @@ class IPadBridge:
         # All sensor handlers are wrapped in try/except to prevent malformed
         # data from crashing the bridge.
         # ------------------------------------------------------------------ #
+        if msg_type == "tilt_position":
+            try:
+                if self._fusion:
+                    x = float(msg.get("x", 0.5))
+                    y = float(msg.get("y", 0.5))
+                    self._fusion.on_tilt_position(x, y)
+            except (ValueError, TypeError) as exc:
+                log.debug("Bad tilt_position data: %s", exc)
+            return
+
         if msg_type == "tilt":
             try:
                 if self._fusion:

@@ -44,8 +44,6 @@ final class WebSocketManager: ObservableObject {
     private var reconnectWorkItem: DispatchWorkItem?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
-    /// Timestamp of the last ping sent (monotonic, ms)
-    private var lastPingSentMs: Double = 0
 
     private let maxBackoffSeconds: Double = 5
     private var msgCounter: Int = 0
@@ -284,6 +282,10 @@ extension WebSocketManager {
 extension WebSocketManager {
     func sendTilt(rx: Double, ry: Double) {
         send(["type": "tilt", "rx": rx, "ry": ry])
+    }
+
+    func sendTiltPosition(x: Double, y: Double) {
+        send(["type": "tilt_position", "x": x, "y": y])
     }
 
     func sendGaze(x: Double, y: Double, confidence: Double) {

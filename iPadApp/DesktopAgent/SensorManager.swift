@@ -3,11 +3,12 @@ import Combine
 import CoreMotion
 import Foundation
 
-/// Centralized lifecycle controller for all 6 sensors.
+/// Centralized lifecycle controller for all 7 sensors.
 ///
 /// Observes SettingsStore `@Published` toggles via Combine and reactively
 /// starts/stops sensors when their toggle changes. Owns the SharedAudioSession
-/// used by the three audio sensors.
+/// used by the three audio sensors and the SharedFaceSession used by
+/// GazeTracker and HeadTracker.
 ///
 /// Hardware availability is checked before starting each sensor — unavailable
 /// sensors log a warning and remain stopped (no crash).
@@ -29,6 +30,7 @@ final class SensorManager: ObservableObject {
     // MARK: - Shared Dependencies
 
     private let sharedAudioSession: SharedAudioSession
+    private let sharedFaceSession: SharedFaceSession
     private let settings: SettingsStore
     private var cancellables = Set<AnyCancellable>()
 
@@ -56,6 +58,10 @@ final class SensorManager: ObservableObject {
         let audioSession = SharedAudioSession()
         self.sharedAudioSession = audioSession
 
+        // Create shared face-tracking session (GazeTracker + HeadTracker share one ARSession)
+        let faceSession = SharedFaceSession()
+        self.sharedFaceSession = faceSession
+
         // Check hardware availability before instantiating sensors
         let motionManager = CMMotionManager()
         self.isTiltAvailable = motionManager.isDeviceMotionAvailable
@@ -64,8 +70,8 @@ final class SensorManager: ObservableObject {
 
         // Instantiate all 7 sensors with shared dependencies
         self.tiltSensor = TiltSensor(ws: ws, settings: settings)
-        self.gazeTracker = GazeTracker(ws: ws, settings: settings)
-        self.headTracker = HeadTracker(ws: ws, settings: settings)
+        self.gazeTracker = GazeTracker(ws: ws, settings: settings, sharedFaceSession: faceSession)
+        self.headTracker = HeadTracker(ws: ws, settings: settings, sharedFaceSession: faceSession)
         self.keywordListener = KeywordListener(ws: ws, settings: settings, sharedAudioSession: audioSession)
         self.soundDetector = SoundDetector(ws: ws, settings: settings, sharedAudioSession: audioSession)
         self.audioStreamer = AudioStreamer(ws: ws, settings: settings, sharedAudioSession: audioSession)
@@ -399,7 +405,7 @@ final class SensorManager: ObservableObject {
 
 /// Represents the observable state of a single sensor for UI consumption.
 struct SensorState: Identifiable {
-    let id: String          // "tilt", "gaze", "head", "keyword", "sound", "audio"
+    let id: String          // "tilt", "gaze", "head", "keyword", "sound", "audio", "lidar"
     var isEnabled: Bool     // from SettingsStore toggle
     var isRunning: Bool     // actual runtime state
     var isAvailable: Bool   // hardware capability check

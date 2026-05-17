@@ -21,7 +21,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
 - `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090), `NemotronInference`
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app (37 Swift files): `SensorManager`, `SharedAudioSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
+- `iPadApp/DesktopAgent/` — SwiftUI app (38 Swift files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
 
 **Done (Phase 3):**
 - `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce
@@ -127,7 +127,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 | File | Purpose |
 |------|---------|
-| `ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 13 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
+| `ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 14 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
 | `command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
 | `mcp_server/desktop_mcp_server.py` | MCP stdio server; 14 tools; `SAFE_MODE` env var |
 | `mcp_server/tools/mouse.py` | move, click, double_click, scroll, drag |
@@ -202,7 +202,7 @@ used instead (4-second recording window, auto-approve on silence).
 
 ## WebSocket Protocol
 
-**iPad → PC (13 types):** `tilt`, `gaze`, `gaze_dwell`, `head_pose`, `keyword`, `sound_action`, `touch_command`, `trackpad`, `audio_stream`, `camera_frame`, `depth_frame`, `handwriting_image`, `tilt_tap`
+**iPad → PC (14 types):** `tilt`, `tilt_position`, `gaze`, `gaze_dwell`, `head_pose`, `keyword`, `sound_action`, `touch_command`, `trackpad`, `audio_stream`, `camera_frame`, `depth_frame`, `handwriting_image`, `tilt_tap`
 
 **PC → iPad (4 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image)
 
