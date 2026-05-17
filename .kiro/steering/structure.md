@@ -92,6 +92,8 @@ class Command:
 4. Register in `FusionEngine.tick()` at the appropriate priority level
 5. Document hardware cost and `pip install` in the class docstring
 6. **If the sensor uses ARKit face tracking**: register as a consumer on `SharedFaceSession` instead of creating a new `ARSession`. ARKit only supports one face-tracking session per device — GazeTracker and HeadTracker already share via this pattern. Call `sharedFaceSession.addConsumer(id, handler:)` in `start()` and `removeConsumer(id)` in `stop()`.
+   - **Threading**: The handler is called directly on the ARKit delegate thread (not main). Mark it `@Sendable`. If you need main-thread access, dispatch internally within your handler.
+   - **Error recovery**: `SharedFaceSession` auto-recovers from ARSession errors (up to 3 attempts, 1s delay). Subscribe to `onError` if your sensor needs to update UI state on failure. Observe `isRunning` (now `@Published`) for session state changes.
 
 ## Persistent Files
 
