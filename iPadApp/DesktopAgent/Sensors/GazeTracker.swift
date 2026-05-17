@@ -20,7 +20,6 @@ final class GazeTracker: NSObject, ObservableObject {
     // Dwell state
     private var dwellStart: CFTimeInterval?
     private var lastStablePoint: CGPoint?
-    private let stabilityThreshold: CGFloat = 0.04   // fraction of screen diagonal
 
     // Ring animation progress (0…1)
     @Published var dwellProgress: Double = 0
@@ -109,7 +108,7 @@ final class GazeTracker: NSObject, ObservableObject {
         }
 
         // Dwell detection
-        let threshold = CGFloat(stabilityThreshold)
+        let threshold = CGFloat(settings.gazeStabilityThreshold)
         if let last = lastStablePoint,
            abs(point.x - last.x) < threshold && abs(point.y - last.y) < threshold {
             // Gaze is stable

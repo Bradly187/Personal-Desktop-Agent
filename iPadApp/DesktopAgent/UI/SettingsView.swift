@@ -119,6 +119,15 @@ struct SettingsView: View {
                                     .offset(y: 18)
                             }
                     }
+                    LabeledContent("Stability (glasses ↑)") {
+                        Slider(value: $settings.gazeStabilityThreshold, in: 0.02...0.15)
+                            .overlay(alignment: .trailing) {
+                                Text(String(format: "%.2f", settings.gazeStabilityThreshold))
+                                    .font(DesignTokens.Typography.caption)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .offset(y: 18)
+                            }
+                    }
                 } header: {
                     DASectionHeader(title: "Gaze & Dwell")
                 }

@@ -114,6 +114,13 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(dwellTimeout, forKey: "dwellTimeout") }
     }
 
+    /// Gaze stability threshold — fraction of screen diagonal that gaze must stay within
+    /// for dwell to accumulate. Higher values = more forgiving (better for glasses).
+    /// Range: 0.02–0.15. Default: 0.04.
+    @Published var gazeStabilityThreshold: Double {
+        didSet { defaults.set(gazeStabilityThreshold, forKey: "gazeStabilityThreshold") }
+    }
+
     /// The currently active dwell action type. Persisted to UserDefaults.
     @Published var activeDwellAction: DwellActionType {
         didSet { defaults.set(activeDwellAction.rawValue, forKey: "activeDwellAction") }
@@ -285,6 +292,7 @@ final class SettingsStore: ObservableObject {
         tiltPositionMode = defaults.object(forKey: "tiltPositionMode") as? Bool ?? true
         gazeEnabled = defaults.object(forKey: "gazeEnabled") as? Bool ?? true
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
+        gazeStabilityThreshold = defaults.double(forKey: "gazeStabilityThreshold").nonZero ?? 0.04
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
            let action = DwellActionType(rawValue: savedAction) {
