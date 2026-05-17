@@ -28,11 +28,22 @@ struct ContentView: View {
                     Color.clear.frame(height: tabBarHeight)
                 }
 
-            // ── Existing overlays (keep same behaviour as before) ────────────
+            // ── Overlays ─────────────────────────────────────────────────────
             DAConnectionBanner()
                 .padding(.horizontal, DesignTokens.Spacing.lg)
                 .padding(.top, DesignTokens.Spacing.sm)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            // Sensor activity bar — shows running sensor icons
+            SensorActivityBar()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 44) // below connection banner
+
+            // Cursor conflict warning
+            CursorConflictBanner(settings: settings)
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 72) // below activity bar
 
             DwellToolbarContainer(settings: settings, ws: wsManager)
 
@@ -42,7 +53,7 @@ struct ContentView: View {
             customTabBar
         }
         .ignoresSafeArea(.keyboard)
-        // Fix #3: Use messageStream (PassthroughSubject) instead of @Published lastMessage
+        .commandToast() // Last-command floating toast
         .onReceive(wsManager.messageStream) { message in
             if case .screenshot(_, let imageBase64, let mime) = message {
                 screenshotStore.handleScreenshot(base64: imageBase64, mime: mime)

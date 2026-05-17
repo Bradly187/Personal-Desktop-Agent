@@ -37,6 +37,10 @@ final class WebSocketManager: ObservableObject {
     @Published private(set) var lastMessage: BridgeMessage?
     let messageStream = PassthroughSubject<BridgeMessage, Never>()
 
+    /// Feed of outgoing command descriptions for the activity toast.
+    /// Emits a human-readable string each time a notable command is sent.
+    let commandFeed = PassthroughSubject<String, Never>()
+
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
 
@@ -104,6 +108,7 @@ final class WebSocketManager: ObservableObject {
         if let text { payload["text"] = text }
         if !params.isEmpty { payload["params"] = params }
         send(payload)
+        commandFeed.send(text ?? action)
         return id
     }
 
@@ -311,11 +316,13 @@ extension WebSocketManager {
     func sendKeyword(word: String, confidence: Double) {
         msgCounter += 1
         send(["type": "keyword", "id": "kw-\(msgCounter)", "word": word, "confidence": confidence])
+        commandFeed.send("Keyword: \(word)")
     }
 
     func sendSoundAction(sound: String, confidence: Double) {
         msgCounter += 1
         send(["type": "sound_action", "id": "sa-\(msgCounter)", "sound": sound, "confidence": confidence])
+        commandFeed.send("Sound: \(sound)")
     }
 
     func sendTrackpadMove(dx: Int, dy: Int) {
@@ -325,15 +332,18 @@ extension WebSocketManager {
     func sendTrackpadTap(button: String = "left") {
         msgCounter += 1
         send(["type": "trackpad", "id": "tp-\(msgCounter)", "event": "tap", "button": button])
+        commandFeed.send("\(button == "left" ? "Left" : "Right") Click")
     }
 
     func sendTrackpadScroll(direction: String, clicks: Int = 3) {
         send(["type": "trackpad", "event": "scroll", "direction": direction, "clicks": clicks])
+        commandFeed.send("Scroll \(direction)")
     }
 
     func sendTiltTap() {
         msgCounter += 1
         send(["type": "tilt_tap", "id": "tt-\(msgCounter)"])
+        commandFeed.send("Tilt Tap")
     }
 
     func sendHandwritingImage(base64PNG: String) {

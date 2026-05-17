@@ -27,6 +27,10 @@ final class GazeTracker: NSObject, ObservableObject {
     private var smoothDx: Float = 0
     private var smoothDy: Float = 0
 
+    /// Calibration mode: when set, raw deltas are sent to this handler instead of WebSocket.
+    /// Used by GazeCalibrationSheet to measure eye movement range.
+    var calibrationHandler: ((Float, Float) -> Void)?
+
     init(ws: WebSocketManager, settings: SettingsStore, sharedFaceSession: SharedFaceSession) {
         self.ws = ws
         self.settings = settings
@@ -74,15 +78,19 @@ final class GazeTracker: NSObject, ObservableObject {
         }
 
         // Compute angular delta in the gaze direction
-        // X component = horizontal eye movement (left/right)
-        // Y component = vertical eye movement (up/down)
         let rawDx = gazeDir.x - prev.x
         let rawDy = gazeDir.y - prev.y
 
         prevGazeDir = gazeDir
 
+        // If calibration is active, send raw deltas there instead of normal processing
+        if let handler = calibrationHandler {
+            handler(rawDx, rawDy)
+            return
+        }
+
         // Apply smoothing (EMA) to reduce jitter
-        let alpha: Float = Float(settings.gazeStabilityThreshold) // reuse as smoothing factor
+        let alpha: Float = Float(settings.gazeStabilityThreshold)
         smoothDx = alpha * smoothDx + (1 - alpha) * rawDx
         smoothDy = alpha * smoothDy + (1 - alpha) * rawDy
 
@@ -91,7 +99,6 @@ final class GazeTracker: NSObject, ObservableObject {
         guard abs(smoothDx) > deadZone || abs(smoothDy) > deadZone else { return }
 
         // Scale to useful cursor movement range
-        // These deltas are in radians-ish units; scale up for cursor speed
         let sensitivity: Float = Float(settings.gazeSensitivity)
         let dx = Double(smoothDx * sensitivity)
         let dy = Double(smoothDy * sensitivity)

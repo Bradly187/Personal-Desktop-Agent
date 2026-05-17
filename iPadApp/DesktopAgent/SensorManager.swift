@@ -38,6 +38,9 @@ final class SensorManager: ObservableObject {
 
     @Published var sensorStates: [SensorState] = []
 
+    /// Timestamp of last activity per sensor — used by SensorActivityBar for pulse animations.
+    @Published var lastActivity: [String: Date] = [:]
+
     // MARK: - Hardware Availability (3.5)
 
     /// Whether device motion (accelerometer/gyroscope) is available for TiltSensor.

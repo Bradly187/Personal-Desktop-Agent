@@ -266,7 +266,10 @@ private struct SensorCard<Detail: View>: View {
 private struct TiltDetailView: View {
     @ObservedObject var sensor: TiltSensor
     @ObservedObject var settings: SettingsStore
+    @EnvironmentObject var sensorManager: SensorManager
     @Environment(\.appTheme) private var theme
+
+    @State private var showCalibration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
@@ -287,11 +290,14 @@ private struct TiltDetailView: View {
                 tiltIndicator
             }
 
-            Button("Recalibrate Neutral") {
-                sensor.calibrate()
+            Button("Calibrate Neutral Position…") {
+                showCalibration = true
             }
             .font(DesignTokens.Typography.caption)
             .foregroundStyle(theme.accent)
+            .sheet(isPresented: $showCalibration) {
+                TiltCalibrationSheet(sensorManager: sensorManager)
+            }
         }
     }
 
@@ -313,7 +319,11 @@ private struct TiltDetailView: View {
 }
 
 private struct GazeDetailView: View {
+    @EnvironmentObject var sensorManager: SensorManager
+    @EnvironmentObject var settings: SettingsStore
     @Environment(\.appTheme) private var theme
+
+    @State private var showCalibration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
@@ -329,6 +339,20 @@ private struct GazeDetailView: View {
                 Text("Increase Smoothing in Settings if using glasses.")
                     .font(DesignTokens.Typography.caption)
                     .foregroundStyle(theme.textSecondary)
+            }
+            Text("Sensitivity: \(Int(settings.gazeSensitivity))  Smoothing: \(String(format: "%.2f", settings.gazeStabilityThreshold))")
+                .font(DesignTokens.Typography.mono)
+                .foregroundStyle(theme.textPrimary)
+                .padding(.top, DesignTokens.Spacing.xs)
+
+            Button("Auto-Tune Sensitivity…") {
+                showCalibration = true
+            }
+            .font(DesignTokens.Typography.caption)
+            .foregroundStyle(theme.accent)
+            .padding(.top, DesignTokens.Spacing.xs)
+            .sheet(isPresented: $showCalibration) {
+                GazeCalibrationSheet(sensorManager: sensorManager, settings: settings)
             }
         }
     }
@@ -381,7 +405,11 @@ private struct KeywordDetailView: View {
 }
 
 private struct SoundDetailView: View {
+    @EnvironmentObject var wsManager: WebSocketManager
+    @EnvironmentObject var settings: SettingsStore
     @Environment(\.appTheme) private var theme
+
+    @State private var showTraining = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
@@ -394,6 +422,16 @@ private struct SoundDetailView: View {
             Text("200ms debounce between detections.")
                 .font(DesignTokens.Typography.caption)
                 .foregroundStyle(theme.textSecondary)
+
+            Button("Test Your Sounds…") {
+                showTraining = true
+            }
+            .font(DesignTokens.Typography.caption)
+            .foregroundStyle(theme.accent)
+            .padding(.top, DesignTokens.Spacing.xs)
+            .sheet(isPresented: $showTraining) {
+                SoundTrainingSheet(wsManager: wsManager, settings: settings)
+            }
         }
     }
 }
