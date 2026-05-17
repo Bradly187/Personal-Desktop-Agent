@@ -72,11 +72,6 @@ jobs:
           # Stamp CI run number into the generated Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
 
-      - name: Install simulator runtime
-        run: |
-          # Xcode 16.3 on macos-15 runners needs an iOS simulator runtime for asset catalog thinning
-          xcodebuild -downloadPlatform iOS || true
-
       - name: Build and archive
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
@@ -94,7 +89,7 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_UUID" \
             PRODUCT_BUNDLE_IDENTIFIER=com.bradtarver.DesktopAgent \
-            ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT=NO \
+            ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT=YES \
             2>&1 | tee build.log
 
           if grep -q "ARCHIVE SUCCEEDED" build.log; then
