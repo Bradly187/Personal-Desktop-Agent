@@ -22,7 +22,7 @@
 ## Task 3: Create SensorManager
 **Requirements**: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6
 
-- [x] 3.1 Create `iPadApp/DesktopAgent/SensorManager.swift` — instantiate all 6 sensors with shared dependencies
+- [x] 3.1 Create `iPadApp/DesktopAgent/SensorManager.swift` — instantiate all 7 sensors with shared dependencies (SharedAudioSession for audio trio, SharedFaceSession for GazeTracker + HeadTracker)
 - [x] 3.2 Implement `startAll()` — start sensors whose toggles are enabled and hardware is available
 - [x] 3.3 Implement `stopAll()` — stop all sensors and release resources
 - [x] 3.4 Implement Combine subscriptions to SettingsStore toggles (`tiltEnabled`, `gazeEnabled`, `headEnabled`, `audioStreamEnabled`, `keywordList`, `soundMappings`)

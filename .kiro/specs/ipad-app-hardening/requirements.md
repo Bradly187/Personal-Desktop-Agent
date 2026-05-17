@@ -3,11 +3,11 @@
 ## Requirement 1: Sensor Lifecycle Management
 
 ### Description
-A centralized `SensorManager` instantiates, starts, stops, and lifecycle-manages all five dead sensors (TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector) plus AudioStreamer, driven reactively by SettingsStore toggles.
+A centralized `SensorManager` instantiates, starts, stops, and lifecycle-manages all sensors (TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector, AudioStreamer, LiDARStreamer), driven reactively by SettingsStore toggles. GazeTracker and HeadTracker share a single `SharedFaceSession`; the three audio sensors share `SharedAudioSession`.
 
 ### Acceptance Criteria
 
-1.1 Given the app launches, when SensorManager is initialized, then all 6 sensors (TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector, AudioStreamer) are instantiated with references to WebSocketManager and SettingsStore.
+1.1 Given the app launches, when SensorManager is initialized, then all 7 sensors (TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector, AudioStreamer, LiDARStreamer) are instantiated with references to WebSocketManager and SettingsStore.
 
 1.2 Given a sensor's settings toggle changes from false to true, when the Combine publisher fires, then the corresponding sensor's `start()` method is called within the same run loop cycle.
 

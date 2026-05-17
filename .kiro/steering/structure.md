@@ -21,12 +21,13 @@ project/
 ├── continuous_trainer.py     # Background learning (thresholds, vocab, few-shot)
 ├── iPadApp/                  # Native Swift/SwiftUI Xcode project (iPadOS 17+)
 │   ├── Audio/                # SharedAudioSession — shared AVAudioEngine for all 3 audio sensors
-│   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector, AudioStreamer
+│   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, SharedFaceSession,
+│   │                         #   KeywordListener, SoundDetector, AudioStreamer
 │   ├── UI/                   # CommandPadView, TrackpadView, ScientificKeypadView, HandwritingCanvasView,
 │   │                         #   ScreenshotOverlayView, SettingsView
 │   ├── DesignSystem/         # DesignTokens, AppTheme, Components/ (DAButton, DACard, DAConnectionBanner, DASectionHeader)
 │   ├── Network/              # WebSocketManager, ServiceDiscovery (NWBrowser mDNS)
-│   ├── SensorManager.swift   # Lifecycle hub: starts/stops all 6 sensors, wires Combine toggles
+│   ├── SensorManager.swift   # Lifecycle hub: starts/stops all 7 sensors, owns SharedAudioSession + SharedFaceSession
 │   ├── ScreenshotStore.swift # Decodes screenshot messages, publishes to UI
 │   └── SettingsStore.swift   # UserDefaults persistence for all sensor preferences
 ├── ipad_bridge.py            # WebSocket server :8765, receives all iPad sensor streams
@@ -90,6 +91,7 @@ class Command:
 3. Expose data as one of: `GazePoint`, `HandFrame`, `RGBDFrame`, or `Command`
 4. Register in `FusionEngine.tick()` at the appropriate priority level
 5. Document hardware cost and `pip install` in the class docstring
+6. **If the sensor uses ARKit face tracking**: register as a consumer on `SharedFaceSession` instead of creating a new `ARSession`. ARKit only supports one face-tracking session per device — GazeTracker and HeadTracker already share via this pattern. Call `sharedFaceSession.addConsumer(id, handler:)` in `start()` and `removeConsumer(id)` in `stop()`.
 
 ## Persistent Files
 
