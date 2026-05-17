@@ -73,7 +73,7 @@ struct ContentView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .animation(.easeInOut(duration: 0.15), value: selectedTab) // Fix #13: reduced from 250ms
-            .onChange(of: selectedTab) { _ in
+            .onChange(of: selectedTab) {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
             // Fix #1: Parent-driven scroll disable for gesture-heavy tabs

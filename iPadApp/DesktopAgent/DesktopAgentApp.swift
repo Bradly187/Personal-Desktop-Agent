@@ -58,7 +58,7 @@ struct DesktopAgentApp: App {
         }
         // Fix #5: Reliable lifecycle handling via scenePhase.
         // .onDisappear is unreliable on iPad — scenePhase catches background/termination.
-        .onChange(of: scenePhase) { newPhase in
+        .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
                 // Stop all sensors and disconnect to save battery and prevent

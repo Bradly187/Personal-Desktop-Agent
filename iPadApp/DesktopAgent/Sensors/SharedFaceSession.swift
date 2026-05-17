@@ -39,11 +39,14 @@ final class SharedFaceSession: NSObject {
     // MARK: - Private
 
     private let session = ARSession()
-    private var consumers: [String: @Sendable (ARFaceAnchor) -> Void] = [:]
 
-    /// Lock protecting consumers dictionary for thread-safe access from ARKit delegate thread.
+    /// Lock protecting _unsafeConsumers for thread-safe access from ARKit delegate thread.
     /// Fix #7: Consumers are called from the delegate thread, so we need thread-safe access.
     private let consumersLock = NSLock()
+
+    /// Backing storage for consumers — accessed under consumersLock from any thread.
+    /// nonisolated(unsafe) opts out of actor isolation so the nonisolated delegate can read it.
+    nonisolated(unsafe) private var _unsafeConsumers: [String: @Sendable (ARFaceAnchor) -> Void] = [:]
 
     /// Fix #4: Recovery state
     private var recoveryTask: Task<Void, Never>?
@@ -66,7 +69,7 @@ final class SharedFaceSession: NSObject {
     ///             Must be Sendable. Dispatch to main internally if needed.
     func addConsumer(_ id: String, handler: @escaping @Sendable (ARFaceAnchor) -> Void) {
         consumersLock.lock()
-        consumers[id] = handler
+        _unsafeConsumers[id] = handler
         consumersLock.unlock()
 
         if !isRunning {
@@ -77,8 +80,8 @@ final class SharedFaceSession: NSObject {
     /// Removes a consumer. Pauses the session when the last consumer is removed.
     func removeConsumer(_ id: String) {
         consumersLock.lock()
-        consumers.removeValue(forKey: id)
-        let isEmpty = consumers.isEmpty
+        _unsafeConsumers.removeValue(forKey: id)
+        let isEmpty = _unsafeConsumers.isEmpty
         consumersLock.unlock()
 
         if isEmpty {
@@ -116,7 +119,7 @@ final class SharedFaceSession: NSObject {
         }
 
         consumersLock.lock()
-        let hasConsumers = !consumers.isEmpty
+        let hasConsumers = !_unsafeConsumers.isEmpty
         consumersLock.unlock()
 
         guard hasConsumers else { return }
@@ -147,7 +150,7 @@ extension SharedFaceSession: ARSessionDelegate {
         }
         // Thread-safe read of consumers
         consumersLock.lock()
-        let handlers = Array(consumers.values)
+        let handlers = Array(_unsafeConsumers.values)
         consumersLock.unlock()
 
         for handler in handlers {
