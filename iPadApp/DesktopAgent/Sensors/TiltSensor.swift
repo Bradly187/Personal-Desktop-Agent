@@ -6,7 +6,7 @@ import UIKit
 /// Dead-zone filtering prevents jitter while the device is resting.
 /// Accelerometer impulse detection fires tilt_tap on a sharp table-tap.
 @MainActor
-final class TiltSensor {
+final class TiltSensor: ObservableObject {
 
     private let motion = CMMotionManager()
     private weak var ws: WebSocketManager?

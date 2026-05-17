@@ -85,7 +85,7 @@ struct ContentView: View {
             // Non-swipeable utility tabs — direct switch
             switch selectedTab {
             case 4: SettingsView()
-            case 5: LiDARDebugView()
+            case 5: SensorDashboardView()
             default: SettingsView()
             }
         }
