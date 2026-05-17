@@ -4,40 +4,46 @@ import Foundation
 /// Streams head pitch/yaw deltas from ARKit at the ARKit frame rate.
 /// Sends delta angles (not absolute) so the PC can integrate them into cursor movement.
 /// Smoothing factor configurable via SettingsStore.
+///
+/// Uses SharedFaceSession — does NOT own its own ARSession. GazeTracker and HeadTracker
+/// share one face-tracking session to avoid the ARKit one-session-per-camera limitation.
 @MainActor
 final class HeadTracker: NSObject {
 
-    private let session = ARSession()
+    private let sharedFaceSession: SharedFaceSession
     private weak var ws: WebSocketManager?
     private var settings: SettingsStore?
+
+    private static let consumerID = "HeadTracker"
 
     private var prevPitch: Float = 0
     private var prevYaw: Float = 0
     private var isFirstFrame = true
 
-    init(ws: WebSocketManager, settings: SettingsStore) {
+    init(ws: WebSocketManager, settings: SettingsStore, sharedFaceSession: SharedFaceSession) {
         self.ws = ws
         self.settings = settings
+        self.sharedFaceSession = sharedFaceSession
         super.init()
     }
 
     // MARK: — Lifecycle
 
     func start() {
-        guard ARFaceTrackingConfiguration.isSupported else {
+        guard SharedFaceSession.isSupported else {
             print("HeadTracker: ARFaceTracking not supported")
             return
         }
         guard let settings, settings.headEnabled else { return }
 
-        let config = ARFaceTrackingConfiguration()
-        config.isLightEstimationEnabled = false
-        session.delegate = self
-        session.run(config)
+        isFirstFrame = true
+        sharedFaceSession.addConsumer(Self.consumerID) { [weak self] anchor in
+            self?.handleAnchor(anchor)
+        }
     }
 
     func stop() {
-        session.pause()
+        sharedFaceSession.removeConsumer(Self.consumerID)
         isFirstFrame = true
     }
 
@@ -67,18 +73,5 @@ final class HeadTracker: NSObject {
 
         let toDeg: Float = 180 / .pi
         ws?.sendHeadPose(pitch: Double(dPitch * toDeg), yaw: Double(dYaw * toDeg))
-    }
-}
-
-// MARK: — ARSessionDelegate
-
-extension HeadTracker: ARSessionDelegate {
-    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        guard let face = anchors.first(where: { $0 is ARFaceAnchor }) as? ARFaceAnchor else {
-            return
-        }
-        DispatchQueue.main.async { [weak self] in
-            self?.handleAnchor(face)
-        }
     }
 }

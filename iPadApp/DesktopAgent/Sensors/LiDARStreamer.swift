@@ -78,7 +78,7 @@ final class LiDARStreamer: NSObject, ObservableObject {
         config.frameSemantics = .smoothedSceneDepth
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
         isRunning = true
-        _fpsWindowStart = CACurrentMediaTime()
+        _t.fpsWindowStart = CACurrentMediaTime()
         print("LiDARStreamer: started (depth \(Int(1/depthInterval)) fps, camera \(Int(1/cameraInterval)) fps)")
     }
 
@@ -161,10 +161,8 @@ private extension LiDARStreamer {
 
         for row in 0..<h {
             let rowPtr = base.advanced(by: row * stride).bindMemory(to: Float32.self, capacity: w)
-            // Packed send bytes: w floats, no padding
-            withUnsafeBytes(of: Array(UnsafeBufferPointer(start: rowPtr, count: w))) {
-                depthBytes.append(contentsOf: $0)
-            }
+            // Packed send bytes: w floats, no row-stride padding
+            depthBytes.append(Data(bytes: rowPtr, count: w * MemoryLayout<Float32>.size))
             for col in 0..<w {
                 let d = rowPtr[col]
                 let i = (row * w + col) * 4

@@ -4,9 +4,12 @@ import Foundation
 
 /// Classifies mouth sounds (cluck, pop, hiss) from the microphone.
 /// Uses onset detection + spectral shape heuristics on AVAudioEngine FFT data.
-/// 500 ms debounce prevents duplicate fires.
+/// 200 ms debounce prevents duplicate fires.
 ///
 /// Uses SharedAudioSession for audio input — does NOT own its own AVAudioEngine.
+///
+/// Audio processing runs on a dedicated serial queue to avoid data races —
+/// the tap handler dispatches immediately off the audio render thread.
 @MainActor
 final class SoundDetector {
 
@@ -16,13 +19,17 @@ final class SoundDetector {
 
     private static let consumerID = "SoundDetector"
 
+    // FFT setup (immutable after init — safe to access from processQueue)
+    private let fftSize = 1024
+    private let fftSetup: FFTSetup?
+
+    /// Serial queue for audio analysis — keeps mutable state off the render thread.
+    private let processQueue = DispatchQueue(label: "sound.detector.process", qos: .userInteractive)
+
+    // Mutable state accessed ONLY from processQueue
+    private var prevMag: Float = 0
     private var lastFireTime: Date?
     private let debounceDuration: TimeInterval = 0.2
-
-    // FFT setup
-    private let fftSize = 1024
-    private var fftSetup: FFTSetup?
-    private var prevMag: Float = 0
 
     init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
@@ -39,7 +46,11 @@ final class SoundDetector {
 
     func start() {
         sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
-            self?.analyze(buffer: buffer)
+            guard let self else { return }
+            // Dispatch off the audio render thread immediately
+            self.processQueue.async { [weak self] in
+                self?.analyze(buffer: buffer)
+            }
         }
     }
 
@@ -47,7 +58,7 @@ final class SoundDetector {
         sharedAudioSession.removeConsumer(Self.consumerID)
     }
 
-    // MARK: — Sound classification
+    // MARK: — Sound classification (runs on processQueue)
 
     private func analyze(buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else { return }

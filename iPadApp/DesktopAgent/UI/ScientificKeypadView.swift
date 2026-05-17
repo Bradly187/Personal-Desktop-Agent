@@ -168,8 +168,8 @@ struct ScientificKeypadView: View {
         s = s.replacingOccurrences(of: "e", with: "2.71828182845905")
         s = s.replacingOccurrences(of: "^", with: "**")
 
-        guard let e = try? NSExpression(format: s),
-              let v = e.expressionValue(with: nil, context: nil) as? NSNumber else {
+        let e = NSExpression(format: s)
+        guard let v = e.expressionValue(with: nil, context: nil) as? NSNumber else {
             return nil
         }
         return v.doubleValue
