@@ -65,6 +65,9 @@ class FusionConfig:
     gaze_cursor_conf_min: float = 0.55       # minimum confidence to move cursor
     gaze_cursor_lost_timeout_s: float = 0.5  # hold position after gaze lost this long
 
+    # Tilt position (absolute-mapping mode)
+    tilt_pos_alpha: float = 0.4              # EMA smoothing factor (0=no smoothing, 1=instant)
+
     def __post_init__(self) -> None:
         if not (0.02 <= self.edge_scroll_zone_pct <= 0.20):
             raise ValueError(
@@ -153,7 +156,6 @@ class FusionEngine:
         self._tilt_position: Optional[tuple[float, float]] = None  # (x, y) normalized [0,1]
         self._tilt_pos_ema_x: float = 0.5                          # EMA-smoothed position X
         self._tilt_pos_ema_y: float = 0.5                          # EMA-smoothed position Y
-        self._tilt_pos_alpha: float = 0.4                          # EMA smoothing factor
         self._tilt_pos_initialized: bool = False                   # first sample initializes EMA
 
         # --- Gaze state ---
@@ -524,7 +526,7 @@ class FusionEngine:
                     self._tilt_pos_ema_y = y
                     self._tilt_pos_initialized = True
                 else:
-                    a = self._tilt_pos_alpha
+                    a = self._cfg.tilt_pos_alpha
                     self._tilt_pos_ema_x = a * x + (1 - a) * self._tilt_pos_ema_x
                     self._tilt_pos_ema_y = a * y + (1 - a) * self._tilt_pos_ema_y
 
