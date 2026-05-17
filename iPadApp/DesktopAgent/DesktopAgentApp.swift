@@ -29,24 +29,58 @@ struct DesktopAgentApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
                 .environment(\.appTheme, .default)
                 .environmentObject(wsManager)
                 .environmentObject(settings)
                 .environmentObject(sensorManager)
                 .environmentObject(screenshotStore)
                 .environmentObject(serviceDiscovery)
+        }
+        // Fix #5: Reliable lifecycle handling via scenePhase.
+        // .onDisappear is unreliable on iPad — scenePhase catches background/termination.
+        .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .background:
+                sensorManager.stopAll()
+                wsManager.disconnect()
+            case .active:
+                // Only auto-start if onboarding is complete
+                if UserDefaults.standard.bool(forKey: "onboardingComplete") {
+                    sensorManager.startAll()
+                    if wsManager.state == .disconnected {
+                        wsManager.connect()
+                    }
+                }
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
+        }
+    }
+}
+
+// MARK: - Root View (gates onboarding vs main app)
+
+struct RootView: View {
+    @EnvironmentObject var wsManager: WebSocketManager
+    @EnvironmentObject var settings: SettingsStore
+    @EnvironmentObject var sensorManager: SensorManager
+    @EnvironmentObject var serviceDiscovery: ServiceDiscovery
+
+    @State private var onboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
+
+    var body: some View {
+        if onboardingComplete {
+            ContentView()
                 .onAppear {
                     wsManager.settings = settings
                     wsManager.serviceDiscovery = serviceDiscovery
 
-                    // Determine if user has manually changed host from default
                     let defaultHost = "192.168.18.2"
                     serviceDiscovery.hasManualOverride = (settings.serverHost != defaultHost)
-
-                    // Start mDNS discovery
                     serviceDiscovery.startBrowsing()
-
                     sensorManager.startAll()
                     wsManager.connect()
                 }
@@ -55,28 +89,8 @@ struct DesktopAgentApp: App {
                     sensorManager.stopAll()
                     wsManager.disconnect()
                 }
-        }
-        // Fix #5: Reliable lifecycle handling via scenePhase.
-        // .onDisappear is unreliable on iPad — scenePhase catches background/termination.
-        .onChange(of: scenePhase) { _, newPhase in
-            switch newPhase {
-            case .background:
-                // Stop all sensors and disconnect to save battery and prevent
-                // ARSession/CMMotionManager/AVAudioEngine running in background.
-                sensorManager.stopAll()
-                wsManager.disconnect()
-            case .active:
-                // Resume sensors and reconnect when returning to foreground.
-                sensorManager.startAll()
-                if wsManager.state == .disconnected {
-                    wsManager.connect()
-                }
-            case .inactive:
-                // Transitional state (e.g., app switcher) — do nothing.
-                break
-            @unknown default:
-                break
-            }
+        } else {
+            OnboardingView(isComplete: $onboardingComplete)
         }
     }
 }
