@@ -30,8 +30,12 @@ enum BridgeMessage {
 final class WebSocketManager: ObservableObject {
 
     @Published private(set) var state: ConnectionState = .disconnected
-    @Published private(set) var lastMessage: BridgeMessage?
     @Published private(set) var latencyMs: Double = 0
+
+    // Fix #3: PassthroughSubject delivers every message to every subscriber (no single-slot loss).
+    // Keep @Published lastMessage for backward compat but add a subject that never drops.
+    @Published private(set) var lastMessage: BridgeMessage?
+    let messageStream = PassthroughSubject<BridgeMessage, Never>()
 
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
@@ -47,6 +51,9 @@ final class WebSocketManager: ObservableObject {
 
     private let maxBackoffSeconds: Double = 5
     private var msgCounter: Int = 0
+
+    // Fix #9: Serial send queue preserves message ordering for delta-based messages.
+    private let sendQueue = DispatchQueue(label: "ws.send.serial", qos: .userInitiated)
 
     // MARK: — Public API
 
@@ -69,9 +76,9 @@ final class WebSocketManager: ObservableObject {
 
     func send(_ payload: [String: Any]) {
         guard let task, state == .connected else { return }
-        // Serialize off the main thread for high-frequency sensor messages
+        // Fix #9: Serialize on a dedicated serial queue to guarantee ordering.
         let capturedTask = task
-        Task.detached(priority: .userInitiated) {
+        sendQueue.async {
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let text = String(data: data, encoding: .utf8) else { return }
             capturedTask.send(.string(text)) { error in
@@ -126,17 +133,13 @@ final class WebSocketManager: ObservableObject {
         self.task = wsTask
         wsTask.resume()
 
-        // 6.1: State must be .connecting after resume, NOT .connected
         state = .connecting
 
         receiveTask = Task { [weak self] in
             guard let self else { return }
             do {
-                // 6.2: Wait for first successful receive to confirm connection is truly alive
                 let firstMessage = try await wsTask.receive()
                 await MainActor.run {
-                    // 6.3: Only transition to .connected and reset reconnectAttempt
-                    // after first successful message receive
                     self.state = .connected
                     self.reconnectAttempt = 0
                     self._startPingTimer()
@@ -224,7 +227,9 @@ final class WebSocketManager: ObservableObject {
             parsed = .unknown(type: type, raw: json)
         }
 
+        // Fix #3: Emit on both the subject (guaranteed delivery) and @Published (backward compat)
         lastMessage = parsed
+        messageStream.send(parsed)
     }
 
     private func _handleDisconnect(error: Error?) {
@@ -234,8 +239,6 @@ final class WebSocketManager: ObservableObject {
         pingTask?.cancel()
         pingTask = nil
 
-        // 6.5: Always transition to .reconnecting on failure (not .disconnected)
-        // This ensures the UI shows reconnection state immediately
         reconnectAttempt += 1
         state = .reconnecting(attempt: reconnectAttempt)
 
@@ -258,7 +261,7 @@ final class WebSocketManager: ObservableObject {
         pingTask?.cancel()
         pingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000) // every 2 seconds
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled else { break }
                 guard let self else { break }
                 let nowMs = CACurrentMediaTime() * 1000

@@ -41,8 +41,12 @@ final class GazeTracker: NSObject, ObservableObject {
         }
         guard let settings, settings.gazeEnabled else { return }
 
+        // Fix #7: Handler is called on ARKit delegate thread (no main-thread hop in SharedFaceSession).
+        // Dispatch gaze processing to main since we update @Published dwellProgress.
         sharedFaceSession.addConsumer(Self.consumerID) { [weak self] anchor in
-            self?.handleAnchorUpdate(anchor)
+            Task { @MainActor [weak self] in
+                self?.handleAnchorUpdate(anchor)
+            }
         }
     }
 

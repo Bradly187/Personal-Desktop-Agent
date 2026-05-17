@@ -66,7 +66,16 @@ final class TiltSensor {
         }
 
         motion.deviceMotionUpdateInterval = 1.0 / 60.0
-        motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
+        // Fix #8: Use a dedicated background queue for motion callbacks.
+        // Trig computations and WebSocket sends no longer block the main thread at 60Hz.
+        // WebSocketManager.send() already dispatches to its own serial queue.
+        // Safety: maxConcurrentOperationCount = 1 ensures serial access to mutable state
+        // (lastSentX, lastSentY, stationaryStartTime, lockedCoords, prevAccelMag).
+        let motionQueue = OperationQueue()
+        motionQueue.name = "tilt.sensor.motion"
+        motionQueue.maxConcurrentOperationCount = 1
+        motionQueue.qualityOfService = .userInteractive
+        motion.startDeviceMotionUpdates(to: motionQueue) { [weak self] data, _ in
             guard let self, let data else { return }
             self.handle(data)
         }

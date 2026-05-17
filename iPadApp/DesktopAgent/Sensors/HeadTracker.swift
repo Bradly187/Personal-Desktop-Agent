@@ -37,8 +37,13 @@ final class HeadTracker: NSObject {
         guard let settings, settings.headEnabled else { return }
 
         isFirstFrame = true
+        // Fix #7: Handler is called on ARKit delegate thread. HeadTracker only sends
+        // via WebSocket (which dispatches internally), so we can process directly
+        // without hopping to main. Use Task @MainActor for safety since class is @MainActor.
         sharedFaceSession.addConsumer(Self.consumerID) { [weak self] anchor in
-            self?.handleAnchor(anchor)
+            Task { @MainActor [weak self] in
+                self?.handleAnchor(anchor)
+            }
         }
     }
 

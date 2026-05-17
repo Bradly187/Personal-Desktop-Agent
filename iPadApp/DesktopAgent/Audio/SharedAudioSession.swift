@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 
 /// Callback type for audio buffer distribution.
 /// Called on the audio render thread — keep processing minimal or dispatch.
@@ -20,6 +21,10 @@ typealias AudioTapHandler = (AVAudioPCMBuffer, AVAudioTime) -> Void
 ///
 /// Handles AVAudioSession interruptions (e.g., incoming FaceTime call) by pausing
 /// on interruption began and re-activating on interruption ended.
+///
+/// Fix #6: Uses os_unfair_lock instead of NSLock for the tap handler map.
+/// os_unfair_lock does not participate in priority donation, making it safe
+/// for the real-time audio render thread (no priority inversion).
 @MainActor
 final class SharedAudioSession {
 
@@ -43,9 +48,10 @@ final class SharedAudioSession {
     /// Set of consumer identifiers currently using the shared engine.
     private var activeConsumers: Set<String> = []
 
-    /// Registered tap handlers keyed by consumer ID. Protected by a lock for audio thread safety.
+    /// Registered tap handlers keyed by consumer ID.
+    /// Fix #6: Protected by os_unfair_lock for real-time audio thread safety.
     private var tapHandlers: [String: AudioTapHandler] = [:]
-    private let handlersLock = NSLock()
+    private var handlersLock = os_unfair_lock()
 
     /// Whether the shared tap is currently installed on inputNode.
     private var tapInstalled = false
@@ -95,9 +101,9 @@ final class SharedAudioSession {
     ///   - handler: Closure called on the audio render thread with each buffer.
     func addConsumer(_ id: String, handler: @escaping AudioTapHandler) {
         activeConsumers.insert(id)
-        handlersLock.lock()
+        os_unfair_lock_lock(&handlersLock)
         tapHandlers[id] = handler
-        handlersLock.unlock()
+        os_unfair_lock_unlock(&handlersLock)
 
         if !engine.isRunning {
             do {
@@ -122,9 +128,9 @@ final class SharedAudioSession {
     /// - Parameter id: The identifier previously passed to `addConsumer(_:handler:)`.
     func removeConsumer(_ id: String) {
         activeConsumers.remove(id)
-        handlersLock.lock()
+        os_unfair_lock_lock(&handlersLock)
         tapHandlers.removeValue(forKey: id)
-        handlersLock.unlock()
+        os_unfair_lock_unlock(&handlersLock)
 
         if activeConsumers.isEmpty {
             deactivate()
@@ -151,6 +157,7 @@ final class SharedAudioSession {
     // MARK: - Shared Tap Management
 
     /// Installs a single tap on inputNode bus 0 that fans out buffers to all registered handlers.
+    /// Fix #6: Uses os_unfair_lock for real-time-safe access to the handler map.
     private func _installSharedTapIfNeeded() {
         guard !tapInstalled else { return }
 
@@ -159,9 +166,9 @@ final class SharedAudioSession {
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, time in
             guard let self else { return }
-            self.handlersLock.lock()
-            let handlers = self.tapHandlers.values
-            self.handlersLock.unlock()
+            os_unfair_lock_lock(&self.handlersLock)
+            let handlers = Array(self.tapHandlers.values)
+            os_unfair_lock_unlock(&self.handlersLock)
 
             for handler in handlers {
                 handler(buffer, time)
@@ -204,7 +211,6 @@ final class SharedAudioSession {
         switch type {
         case .began:
             // System interrupted audio — engine is automatically paused by the system.
-            // We don't need to explicitly stop, but we note the state.
             print("SharedAudioSession: interruption began")
 
         case .ended:

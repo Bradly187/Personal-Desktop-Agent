@@ -8,6 +8,9 @@ struct DesktopAgentApp: App {
     @StateObject private var screenshotStore = ScreenshotStore()
     @StateObject private var serviceDiscovery = ServiceDiscovery()
 
+    // Fix #5: Track scene phase for proper background/foreground lifecycle
+    @Environment(\.scenePhase) private var scenePhase
+
     /// Syncs feature toggle changes to PC via WebSocket. Retained for app lifetime.
     private let featureToggleSyncer: FeatureToggleSyncer
 
@@ -52,6 +55,28 @@ struct DesktopAgentApp: App {
                     sensorManager.stopAll()
                     wsManager.disconnect()
                 }
+        }
+        // Fix #5: Reliable lifecycle handling via scenePhase.
+        // .onDisappear is unreliable on iPad — scenePhase catches background/termination.
+        .onChange(of: scenePhase) { newPhase in
+            switch newPhase {
+            case .background:
+                // Stop all sensors and disconnect to save battery and prevent
+                // ARSession/CMMotionManager/AVAudioEngine running in background.
+                sensorManager.stopAll()
+                wsManager.disconnect()
+            case .active:
+                // Resume sensors and reconnect when returning to foreground.
+                sensorManager.startAll()
+                if wsManager.state == .disconnected {
+                    wsManager.connect()
+                }
+            case .inactive:
+                // Transitional state (e.g., app switcher) — do nothing.
+                break
+            @unknown default:
+                break
+            }
         }
     }
 }
