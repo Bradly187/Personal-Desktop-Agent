@@ -12,7 +12,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–6 complete + touch-debug fix (2026-05-16)
+## Current Status — Phases 1–6 complete + tilt-position-mapping + SharedFaceSession (2026-05-17)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
@@ -21,7 +21,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
 - `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090), `NemotronInference`
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app (38 Swift files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
+- `iPadApp/DesktopAgent/` — SwiftUI app (33 Swift source files, 15 Swift test files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
 
 **Done (Phase 3):**
 - `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce
@@ -61,7 +61,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `DAConnectionBanner.swift` — added `.allowsHitTesting(isDisconnected)`; removed `.contentShape(Rectangle())`
 - Tests: `OverlayTouchInterceptionTests.swift` (bug condition geometry), `OverlayPreservationTests.swift` (17 preservation property tests)
 
-**Test suite (2026-05-16):** 198 pytest tests + 30 standalone integration scripts + 6 Swift XCTest files = 234 total
+**Test suite (2026-05-17):** 262 pytest tests + 30 standalone integration scripts + 15 Swift XCTest files = 307 total
 
 ## Run Commands
 

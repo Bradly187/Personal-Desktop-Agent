@@ -25,7 +25,7 @@
 - [x] 3.1 Create `iPadApp/DesktopAgent/SensorManager.swift` — instantiate all 7 sensors with shared dependencies (SharedAudioSession for audio trio, SharedFaceSession for GazeTracker + HeadTracker)
 - [x] 3.2 Implement `startAll()` — start sensors whose toggles are enabled and hardware is available
 - [x] 3.3 Implement `stopAll()` — stop all sensors and release resources
-- [x] 3.4 Implement Combine subscriptions to SettingsStore toggles (`tiltEnabled`, `gazeEnabled`, `headEnabled`, `audioStreamEnabled`, `keywordList`, `soundMappings`)
+- [x] 3.4 Implement Combine subscriptions to SettingsStore toggles (`tiltEnabled`, `gazeEnabled`, `headEnabled`, `audioStreamEnabled`, `keywordList`, `soundMappings`, `lidarEnabled`)
 - [x] 3.5 Add hardware availability checks before starting each sensor (CMMotionManager.isDeviceMotionAvailable, ARFaceTrackingConfiguration.isSupported)
 - [x] 3.6 Expose `@Published` sensor states for UI consumption
 

@@ -71,32 +71,53 @@ Xcode 16.3 on `macos-15` GitHub Actions runners requires an iOS simulator runtim
 
 ## Housekeeping Performed Today (2026-05-17)
 
-### Stale reference fixes
+### Round 1 (prior automated run — earlier today)
 
 | File | Issue | Fix |
 |------|-------|-----|
-| `CLAUDE.md` L24 | Missing `SharedFaceSession` in Swift file list; count said "37 Swift files" (now 38 with SharedFaceSession) | Added `SharedFaceSession`, updated count to 38 |
-| `CLAUDE.md` L130 | `routes 13 incoming message types` — stale after `tilt_position` was added yesterday | Changed to 14 |
-| `CLAUDE.md` L205 | `iPad → PC (13 types):` list missing `tilt_position` | Changed to 14, added `tilt_position` to list |
+| `CLAUDE.md` L24 | Swift file list missing `SharedFaceSession`; count said "37 Swift files" | Added `SharedFaceSession`, bumped count to 38 |
+| `CLAUDE.md` L130 | `routes 13 incoming message types` — stale after `tilt_position` added | Changed to 14 |
+| `CLAUDE.md` L205 | `iPad → PC (13 types):` list missing `tilt_position` | Changed to 14, added `tilt_position` |
 | `.kiro/steering/structure.md` L30 | `SensorManager.swift # Lifecycle hub: starts/stops all 6 sensors` | Updated to 7, added SharedFaceSession mention |
 
-### No code bugs found
+### Round 2 (this run)
 
-- All Python files parse cleanly (syntax-checked: `fusion_engine.py`, `ipad_bridge.py`, `chatterbox_tts.py`, `health_viz.py`, `polly_stream.py`, `command_executor.py`, `approval_hook.py`, `tests/test_prop_ema_smoothing.py`, `tests/test_prop_tilt_range_effect.py`)
-- `ScientificKeypadView.swift` diff removes `try?` from `NSExpression(format:)` — correct, since that initializer is non-throwing in Swift and `try?` was a no-op; actual nil-safety comes from the `guard let v = e.expressionValue(...)` check
-- `LiDARStreamer.swift` CRLF warning is cosmetic (Windows git config); not a bug
+| File | Issue | Fix |
+|------|-------|-----|
+| `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md` L19 | `(13 types, 11 action verbs)` — 13 was stale; `tilt_position` makes 14 | Changed to 14 |
+| `.kiro/specs/ipad-app-hardening/requirements.md` L10 | `all 6 sensors (... AudioStreamer)` — LiDAR added to SensorManager post-spec | Updated description to 7 sensors, added LiDARStreamer and SharedFaceSession note |
+| `.kiro/specs/ipad-app-hardening/tasks.md` L25 | `instantiate all 6 sensors` | Updated to 7 sensors with SharedAudioSession + SharedFaceSession mention |
+| `.kiro/specs/ipad-app-hardening/tasks.md` L28 | Combine subscriptions list missing `lidarEnabled` | Added `lidarEnabled` to subscription list |
+| `iPadApp/DesktopAgent/SensorManager.swift` L408 | `SensorState.id` comment listed 6 IDs, missing `"lidar"` | Added `"lidar"` to the comment |
+| `CLAUDE.md` L24 | `(38 Swift files)` — count was inaccurate; actual is 33 source files + 15 test files | Updated to `(33 Swift source files, 15 Swift test files)` |
+| `CLAUDE.md` L64 | Test suite count stale: `234 total (2026-05-16)` | Updated to `307 total (2026-05-17)`: 262 pytest + 30 integration + 15 Swift XCTest |
+| `CLAUDE.md` L15 | Status header still showed `2026-05-16` | Updated to reflect tilt-position-mapping + SharedFaceSession (2026-05-17) |
 
-### Design doc vs implementation gap (noted, not actioned)
+### Code review — no bugs found
 
-`design.md` lists `tilt_pos_enabled: bool` and `tilt_pos_alpha: float` as `FusionConfig` fields. In the actual implementation, `_tilt_pos_alpha` is an instance attribute hardcoded to `0.4` and there is no `tilt_pos_enabled` field — `tilt_position` is processed whenever present. This is a minor spec/implementation divergence that does not affect behaviour.
+- All 5 Python files syntax-checked clean: `fusion_engine.py`, `ipad_bridge.py`, `command_executor.py`, `approval_hook.py`, `chatterbox_tts.py`
+- `tests/test_prop_ema_smoothing.py`, `tests/test_prop_tilt_range_effect.py` — syntax clean
+- `SharedFaceSession.swift`: `@MainActor` class with `nonisolated` delegate methods + `DispatchQueue.main.async` fan-out — correct pattern for ARKit delegate thread model
+- `GazeTracker.swift` + `HeadTracker.swift`: Both use `sharedFaceSession.addConsumer/removeConsumer` correctly; consumer IDs are static string constants — no registration collision possible
+- `SensorManager.swift`: All 7 sensors started/stopped; Combine subscriptions for all 7 toggles; `SharedFaceSession` injected correctly
+- `AudioStreamer.swift`: `processQueue` captures `converter` + `outputFormat` at start time — avoids render-thread races correctly
+- `SoundDetector.swift`: `prevMag`, `lastFireTime` accessed only from `processQueue` — correct; `Task { @MainActor }` for WebSocket sends — correct
+- `LiDARStreamer.swift`: Row-packing fixed (`Data(bytes: rowPtr, ...)` per row); `_LiDARThrottle` `@unchecked Sendable` pattern correct for serial ARSessionDelegate
+- `lidar_receiver.py`: `is_fresh()` uses `_recv_mono` (monotonic) vs `time.monotonic()` — fix confirmed in place
+- `gesture_processor.py`: `pinch_z_delta_mm` rename confirmed throughout
+
+### Design doc / implementation gap (noted — user decision required)
+
+`design.md` for tilt-position-mapping lists `tilt_pos_enabled: bool` and `tilt_pos_alpha: float` as `FusionConfig` fields. In the actual implementation, `_tilt_pos_alpha` is an instance attribute hardcoded to `0.4` and `tilt_pos_enabled` does not exist — `tilt_position` messages are always processed when present. This is harmless but the spec and implementation diverge. If the user wants these configurable, `_tilt_pos_alpha` should move to `FusionConfig`.
 
 ### Open items (user decision required)
 
 | Item | Notes |
 |------|-------|
-| Working branch changes uncommitted | `SharedFaceSession.swift` (untracked) + 8 modified files should be committed when ready |
-| `tilt_pos_alpha` not in `FusionConfig` | Currently hardcoded 0.4; could be moved to FusionConfig to make it configurable |
-| Stale references in worktrees | `lucid-chatelet-524921` and `trusting-joliot-9dc592` worktrees have pre-`tilt_position` CLAUDE.md; these are isolated worktrees and do not affect the active branch |
+| Uncommitted working changes | `SharedFaceSession.swift` (untracked) + 8 modified files should be committed when ready |
+| `tilt_pos_alpha` not in `FusionConfig` | Currently hardcoded 0.4; spec listed it as configurable |
+| Stale worktrees | `lucid-chatelet-524921` and `trusting-joliot-9dc592` have pre-`tilt_position` CLAUDE.md and pre-SharedFaceSession SensorManager — isolated, do not affect active branch |
+| Diagram `08-bridge-message-routing.md` | Diagram contents inside the file may also reference 13 types; only the index was updated today |
 
 ---
 
