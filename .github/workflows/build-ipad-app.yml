@@ -72,6 +72,22 @@ jobs:
           # Stamp CI run number into the generated Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
 
+      - name: Register Xcode-bundled iOS simulator runtime
+        run: |
+          # actool's thinned asset catalog pass requires a simulator runtime whose build
+          # version exactly matches the SDK. xcodebuild -downloadPlatform iOS downloads the
+          # *latest* simulator (currently 18.5 = 22F77), which doesn't match SDK 22E235.
+          # The iOS simulator bundled inside Xcode.app is guaranteed to match the SDK, so
+          # we register it directly instead of downloading.
+          RUNTIME_PATH="/Applications/Xcode_16.3.app/Contents/Developer/Platforms/iPhoneOS.platform/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS.simruntime"
+          if [ -d "$RUNTIME_PATH" ]; then
+            xcrun simctl runtime add "$RUNTIME_PATH" 2>&1 || true
+            echo "Registered bundled iOS runtime"
+          else
+            echo "Bundled runtime not found — listing available runtimes for diagnosis:"
+            xcrun simctl list runtimes
+          fi
+
       - name: Build and archive
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
@@ -89,7 +105,7 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_UUID" \
             PRODUCT_BUNDLE_IDENTIFIER=com.bradtarver.DesktopAgent \
-            ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT=YES \
+            ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT=NO \
             2>&1 | tee build.log
 
           if grep -q "ARCHIVE SUCCEEDED" build.log; then
