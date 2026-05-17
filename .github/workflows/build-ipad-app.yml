@@ -72,19 +72,24 @@ jobs:
           # Stamp CI run number into the generated Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
 
-      - name: Register Xcode-bundled iOS simulator runtime
+      - name: Install iOS platform and register matching simulator runtime
         run: |
-          # actool's thinned asset catalog pass requires a simulator runtime whose build
-          # version exactly matches the SDK. xcodebuild -downloadPlatform iOS downloads the
-          # *latest* simulator (currently 18.5 = 22F77), which doesn't match SDK 22E235.
-          # The iOS simulator bundled inside Xcode.app is guaranteed to match the SDK, so
-          # we register it directly instead of downloading.
+          # Install the iOS 18.4 platform SDK — required for xcodebuild to resolve
+          # the generic/platform=iOS destination. Without this, fresh runners fail
+          # with "iOS 18.4 is not installed".
+          xcodebuild -downloadPlatform iOS || true
+
+          # actool's CompileAssetCatalogVariant thinned pass requires a simulator whose
+          # build version exactly matches the SDK (22E235 for Xcode 16.3 / iOS 18.4).
+          # xcodebuild -downloadPlatform iOS downloads the *latest* simulator (18.5 = 22F77),
+          # which doesn't satisfy the match. Register the simulator bundled inside Xcode.app
+          # instead — it is guaranteed to match the SDK version.
           RUNTIME_PATH="/Applications/Xcode_16.3.app/Contents/Developer/Platforms/iPhoneOS.platform/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS.simruntime"
           if [ -d "$RUNTIME_PATH" ]; then
             xcrun simctl runtime add "$RUNTIME_PATH" 2>&1 || true
-            echo "Registered bundled iOS runtime"
+            echo "Registered Xcode-bundled iOS runtime"
           else
-            echo "Bundled runtime not found — listing available runtimes for diagnosis:"
+            echo "Bundled runtime path not found — listing available runtimes for diagnosis:"
             xcrun simctl list runtimes
           fi
 
