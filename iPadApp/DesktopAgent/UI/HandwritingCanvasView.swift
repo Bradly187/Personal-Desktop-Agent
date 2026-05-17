@@ -35,7 +35,7 @@ struct HandwritingCanvasView: View {
             }
             .navigationTitle("Handwriting")
         }
-        .onReceive(wsManager.$lastMessage.compactMap { $0 }) { msg in
+        .onReceive(wsManager.messageStream) { msg in
             if case .handwritingResult(_, let latex, let unicode, let error) = msg {
                 vm.handleResult(latex: latex, unicode: unicode, error: error)
             }
@@ -217,8 +217,8 @@ struct PKCanvasRepresentable: UIViewRepresentable {
         canvas.isOpaque = true
         canvas.delegate = context.coordinator
 
-        // Provide a tool picker — deferred so it doesn't animate during the tab switch
-        let picker = PKToolPicker()
+        // Fix #10: Tool picker is retained by the Coordinator (not a local variable).
+        let picker = context.coordinator.toolPicker
         picker.addObserver(canvas)
         DispatchQueue.main.async {
             picker.setVisible(true, forFirstResponder: canvas)
@@ -238,6 +238,9 @@ struct PKCanvasRepresentable: UIViewRepresentable {
 
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         @Binding var drawing: PKDrawing
+        // Fix #10: Retain the tool picker for the lifetime of the canvas.
+        let toolPicker = PKToolPicker()
+
         init(drawing: Binding<PKDrawing>) { _drawing = drawing }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
