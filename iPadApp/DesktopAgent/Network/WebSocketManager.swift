@@ -295,6 +295,10 @@ extension WebSocketManager {
         send(["type": "gaze", "x": x, "y": y, "confidence": confidence])
     }
 
+    func sendGazeDelta(dx: Double, dy: Double) {
+        send(["type": "gaze_delta", "dx": dx, "dy": dy])
+    }
+
     func sendGazeDwell(x: Double, y: Double, actionType: DwellActionType) {
         msgCounter += 1
         send(["type": "gaze_dwell", "id": "gd-\(msgCounter)", "x": x, "y": y, "action_type": actionType.rawValue])

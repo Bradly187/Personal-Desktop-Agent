@@ -279,6 +279,16 @@ class IPadBridge:
                 log.debug("Bad gaze data: %s", exc)
             return
 
+        if msg_type == "gaze_delta":
+            try:
+                if self._fusion:
+                    dx = float(msg.get("dx", 0.0))
+                    dy = float(msg.get("dy", 0.0))
+                    self._fusion.on_gaze_delta(dx, dy)
+            except (ValueError, TypeError) as exc:
+                log.debug("Bad gaze_delta data: %s", exc)
+            return
+
         if msg_type == "gaze_dwell":
             try:
                 if self._fusion:

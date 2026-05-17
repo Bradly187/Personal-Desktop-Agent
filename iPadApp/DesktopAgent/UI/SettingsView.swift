@@ -110,16 +110,7 @@ struct SettingsView: View {
                 // Gaze
                 Section {
                     Toggle("Enable Gaze", isOn: $settings.gazeEnabled)
-                    LabeledContent("Dwell Timeout (s)") {
-                        Slider(value: $settings.dwellTimeout, in: 0.3...3.0)
-                            .overlay(alignment: .trailing) {
-                                Text(String(format: "%.1f", settings.dwellTimeout))
-                                    .font(DesignTokens.Typography.caption)
-                                    .foregroundStyle(theme.textSecondary)
-                                    .offset(y: 18)
-                            }
-                    }
-                    LabeledContent("Stability (glasses ↑)") {
+                    LabeledContent("Smoothing") {
                         Slider(value: $settings.gazeStabilityThreshold, in: 0.02...0.15)
                             .overlay(alignment: .trailing) {
                                 Text(String(format: "%.2f", settings.gazeStabilityThreshold))
@@ -128,8 +119,17 @@ struct SettingsView: View {
                                     .offset(y: 18)
                             }
                     }
+                    LabeledContent("Sensitivity") {
+                        Slider(value: $settings.gazeSensitivity, in: 50...500)
+                            .overlay(alignment: .trailing) {
+                                Text(String(format: "%.0f", settings.gazeSensitivity))
+                                    .font(DesignTokens.Typography.caption)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .offset(y: 18)
+                            }
+                    }
                 } header: {
-                    DASectionHeader(title: "Gaze & Dwell")
+                    DASectionHeader(title: "Gaze")
                 }
 
                 // Head

@@ -114,11 +114,18 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(dwellTimeout, forKey: "dwellTimeout") }
     }
 
-    /// Gaze stability threshold — fraction of screen diagonal that gaze must stay within
-    /// for dwell to accumulate. Higher values = more forgiving (better for glasses).
+    /// Gaze stability threshold — used as EMA smoothing factor for gaze deltas.
+    /// Higher values = more smoothing (less jitter, slower response).
     /// Range: 0.02–0.15. Default: 0.04.
     @Published var gazeStabilityThreshold: Double {
         didSet { defaults.set(gazeStabilityThreshold, forKey: "gazeStabilityThreshold") }
+    }
+
+    /// Gaze sensitivity — multiplier for gaze delta → cursor movement.
+    /// Higher values = faster cursor movement from eye movement.
+    /// Range: 50–500. Default: 200.
+    @Published var gazeSensitivity: Double {
+        didSet { defaults.set(gazeSensitivity, forKey: "gazeSensitivity") }
     }
 
     /// The currently active dwell action type. Persisted to UserDefaults.
@@ -293,6 +300,7 @@ final class SettingsStore: ObservableObject {
         gazeEnabled = defaults.object(forKey: "gazeEnabled") as? Bool ?? true
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
         gazeStabilityThreshold = defaults.double(forKey: "gazeStabilityThreshold").nonZero ?? 0.04
+        gazeSensitivity = defaults.double(forKey: "gazeSensitivity").nonZero ?? 200.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
            let action = DwellActionType(rawValue: savedAction) {

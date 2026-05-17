@@ -142,6 +142,7 @@ class FusionEngine:
         self._sound: Optional[Command] = None
         self._gaze_dwell: Optional[tuple[float, float]] = None   # norm (x, y)
         self._gaze_dwell_action_type: str = "left_click"         # action type for pending dwell
+        self._gaze_delta: Optional[tuple[float, float]] = None   # (dx, dy) pixels
         self._gesture: Optional[Command] = None
         self._voice_local: Optional[str] = None                  # keyword text
         self._voice: Optional[Command] = None
@@ -261,6 +262,14 @@ class FusionEngine:
 
     def on_gaze(self, x: float, y: float, conf: float) -> None:
         self._gaze_buf.update(x, y, conf)
+
+    def on_gaze_delta(self, dx: float, dy: float) -> None:
+        """Receive relative gaze movement deltas from iPad.
+
+        Moves the cursor by (dx, dy) pixels. This replaces absolute gaze
+        positioning — works regardless of iPad angle relative to monitors.
+        """
+        self._gaze_delta = (dx, dy)
 
     def on_gaze_dwell(self, x: float, y: float, action_type: str = "left_click") -> None:
         self._gaze_dwell = (x, y)
@@ -452,6 +461,13 @@ class FusionEngine:
                 # Pass 0.0 confidence to trigger the hold-at-last-position logic
                 if latest_gaze is not None:
                     await self._apply_gaze_cursor(latest_gaze.x, latest_gaze.y, 0.0)
+
+        # Gaze delta: relative cursor movement from eye direction changes
+        if self._gaze_delta:
+            dx, dy = self._gaze_delta
+            self._gaze_delta = None
+            if abs(dx) > 0.5 or abs(dy) > 0.5:  # skip sub-pixel noise
+                await asyncio.to_thread(pyautogui.moveRel, int(dx), int(dy), duration=0)
 
         # Gaze stability — used by Rules 4 & 5
         stable = self._gaze_buf.stable_centroid(self._diag)
