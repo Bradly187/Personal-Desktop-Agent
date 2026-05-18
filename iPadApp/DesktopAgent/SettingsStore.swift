@@ -24,6 +24,8 @@ enum DwellActionType: String, Codable, CaseIterable {
 }
 
 /// Persists all user-configurable sensor preferences to UserDefaults.
+/// Fix #23: @MainActor ensures all @Published mutations happen on the main thread.
+@MainActor
 final class SettingsStore: ObservableObject {
 
     // MARK: — Connection

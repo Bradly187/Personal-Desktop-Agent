@@ -30,6 +30,11 @@ final class KeywordListener: NSObject, ObservableObject {
     private var keywordCooldowns: [String: Date] = [:]
     private let keywordCooldownDuration: TimeInterval = 0.5
 
+    /// Fix #18: Backoff for restart loop prevention
+    private var consecutiveRestarts: Int = 0
+    private let maxConsecutiveRestarts = 5
+    private var lastRestartTime: Date?
+
     init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
         self.settings = settings
@@ -88,12 +93,40 @@ final class KeywordListener: NSObject, ObservableObject {
                     self._checkKeywords(in: result.bestTranscription.formattedString)
                 }
                 if error != nil || (result?.isFinal ?? false) {
-                    // Recognition ended (timeout or error) — restart seamlessly
+                    // Recognition ended (timeout or error) — restart with backoff
                     self.stop()
-                    self._startRecognition()
+                    self._restartWithBackoff()
                 }
             }
         }
+    }
+
+    /// Fix #18: Restart with exponential backoff to prevent infinite loop on persistent errors.
+    /// Resets backoff counter after 10s of stable operation.
+    private func _restartWithBackoff() {
+        let now = Date()
+
+        // Reset counter if last restart was >10s ago (stable operation)
+        if let last = lastRestartTime, now.timeIntervalSince(last) > 10.0 {
+            consecutiveRestarts = 0
+        }
+
+        consecutiveRestarts += 1
+        lastRestartTime = now
+
+        if consecutiveRestarts > maxConsecutiveRestarts {
+            print("KeywordListener: too many consecutive restarts (\(consecutiveRestarts)), backing off")
+            // Wait 5 seconds before trying again
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self else { return }
+                self.consecutiveRestarts = 0
+                self._startRecognition()
+            }
+            return
+        }
+
+        _startRecognition()
     }
 
     private func _checkKeywords(in transcript: String) {

@@ -42,7 +42,7 @@ final class LiDARStreamer: NSObject, ObservableObject {
 
     // MARK: - Private
 
-    private let ws: WebSocketManager
+    private weak var ws: WebSocketManager?
     private let session = ARSession()
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private let bgQueue = DispatchQueue(label: "lidar.streamer.bg", qos: .userInitiated)
@@ -86,6 +86,14 @@ final class LiDARStreamer: NSObject, ObservableObject {
         guard isRunning else { return }
         session.pause()
         isRunning = false
+        // Fix #22: Clear stale published state so UI doesn't show old frames after stop
+        latestCameraImage = nil
+        latestDepthImage = nil
+        depthFps = 0
+        cameraFps = 0
+        validPixelPct = 0
+        depthRangeMin = 0
+        depthRangeMax = 0
         print("LiDARStreamer: stopped")
     }
 }
@@ -217,8 +225,8 @@ private extension LiDARStreamer {
         let finalMax = maxD == -.infinity ? 0.0 : Double(maxD)
 
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            ws.sendDepthFrame(width: w, height: h,
+            guard let self, self.isRunning else { return }
+            ws?.sendDepthFrame(width: w, height: h,
                               depthB64: depthB64, confB64: confB64,
                               ts: ts * 1000)
             if let img = depthImage { latestDepthImage = img }
@@ -251,8 +259,8 @@ private extension LiDARStreamer {
         let imageB64 = jpeg.base64EncodedString()
 
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            ws.sendCameraFrame(width: targetW, height: targetH,
+            guard let self, self.isRunning else { return }
+            ws?.sendCameraFrame(width: targetW, height: targetH,
                                imageB64: imageB64, ts: ts * 1000)
             latestCameraImage = uiImg
         }

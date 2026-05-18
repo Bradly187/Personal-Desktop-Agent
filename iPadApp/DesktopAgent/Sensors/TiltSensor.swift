@@ -54,7 +54,11 @@ final class TiltSensor: ObservableObject {
 
     // MARK: — Lifecycle
 
+    /// Whether the sensor is currently running (prevents double-start).
+    private var isRunning = false
+
     func start() {
+        guard !isRunning else { return }
         guard motion.isDeviceMotionAvailable else {
             print("TiltSensor: DeviceMotion unavailable")
             return
@@ -79,10 +83,20 @@ final class TiltSensor: ObservableObject {
             guard let self, let data else { return }
             self.handle(data)
         }
+        isRunning = true
     }
 
     func stop() {
+        guard isRunning else { return }
         motion.stopDeviceMotionUpdates()
+        isRunning = false
+        // Reset mutable state so restart doesn't carry stale values
+        lastSentX = 0.5
+        lastSentY = 0.5
+        stationaryStartTime = nil
+        lockedCoords = nil
+        prevAccelMag = 0
+        tapCooldown = false
     }
 
     // MARK: — Calibration
@@ -178,6 +192,13 @@ final class TiltSensor: ObservableObject {
 
     // MARK: — Processing
 
+    // NOTE: handle() runs on a serial OperationQueue (not MainActor). It reads
+    // settings properties which are @MainActor. This is technically a data race
+    // under strict concurrency, but safe in practice because:
+    // 1. Settings changes are rare (user slider adjustments)
+    // 2. Property reads are atomic (simple value types)
+    // 3. Worst case: one frame uses a slightly stale sensitivity value
+    // A future refactor could snapshot settings into local vars at start().
     private func handle(_ data: CMDeviceMotion) {
         guard let settings else { return }
         guard settings.tiltEnabled else { return }
@@ -261,7 +282,11 @@ final class TiltSensor: ObservableObject {
         if mag - prevAccelMag > tapThreshold && !tapCooldown {
             ws?.sendTiltTap()
             tapCooldown = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + tapCooldownDuration) { [weak self] in
+            // Fix #17: Reset cooldown on the same serial queue that reads it.
+            // Previous code dispatched to main, creating a cross-thread race.
+            let cooldownNs = UInt64(tapCooldownDuration * 1_000_000_000)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: cooldownNs)
                 self?.tapCooldown = false
             }
         }

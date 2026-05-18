@@ -61,6 +61,8 @@ final class GazeTracker: NSObject, ObservableObject {
     func stop() {
         sharedFaceSession.removeConsumer(Self.consumerID)
         prevGazeDir = nil
+        smoothDx = 0
+        smoothDy = 0
     }
 
     // MARK: — Gaze delta extraction

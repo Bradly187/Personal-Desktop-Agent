@@ -75,6 +75,7 @@ final class WebSocketManager: ObservableObject {
         receiveTask?.cancel()
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
+        reconnectAttempt = 0  // Fix #21: Reset so next connect() starts fresh
         state = .disconnected
     }
 
@@ -243,6 +244,9 @@ final class WebSocketManager: ObservableObject {
         receiveTask = nil
         pingTask?.cancel()
         pingTask = nil
+
+        // Fix #21: Cancel any pending reconnect to prevent multiple timers firing
+        reconnectWorkItem?.cancel()
 
         reconnectAttempt += 1
         state = .reconnecting(attempt: reconnectAttempt)

@@ -223,6 +223,9 @@ final class SharedAudioSession {
 
             if shouldResume {
                 do {
+                    // Fix #20: The system may have removed the tap during interruption.
+                    // Reset tapInstalled so _installSharedTapIfNeeded() re-installs it.
+                    _removeSharedTap()
                     try activate()
                     print("SharedAudioSession: re-activated after interruption")
                 } catch {
