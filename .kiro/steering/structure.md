@@ -24,7 +24,13 @@ project/
 │   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, SharedFaceSession,
 │   │                         #   KeywordListener, SoundDetector, AudioStreamer
 │   ├── UI/                   # CommandPadView, TrackpadView, ScientificKeypadView, HandwritingCanvasView,
-│   │                         #   ScreenshotOverlayView, SettingsView
+│   │                         #   ScreenshotOverlayView, SettingsView, OnboardingView,
+│   │                         #   DwellActionToolbar, DwellToolbarContainer, LiDARDebugView,
+│   │                         #   CursorConflictBanner (amber warning when 2+ cursor sensors active; picker to choose one),
+│   │                         #   SensorDashboardView (unified 7-sensor status/toggle/detail panel),
+│   │                         #   SoundTrainingSheet (guided validation of cluck/pop/hiss detection),
+│   │                         #   TiltCalibrationSheet, GazeCalibrationSheet (guided gaze sensitivity auto-tune),
+│   │                         #   SensorActivityBar, CommandToast
 │   ├── DesignSystem/         # DesignTokens, AppTheme, Components/ (DAButton, DACard, DAConnectionBanner, DASectionHeader)
 │   ├── Network/              # WebSocketManager, ServiceDiscovery (NWBrowser mDNS)
 │   ├── SensorManager.swift   # Lifecycle hub: starts/stops all 7 sensors, owns SharedAudioSession + SharedFaceSession
@@ -65,7 +71,7 @@ class Command:
     text: str                    # Natural language action text
     whisper_logprob: float       # Transcription confidence (or 0.0)
     gesture_confidence: float    # Gesture confidence (or 1.0)
-    source: str                  # "touch" | "sound_action" | "gaze_dwell" | "multimodal" |
+    source: str                  # "touch" | "sound_action" | "gaze_delta" | "multimodal" |
                                  # "tilt" | "head_track" | "gesture" | "voice_local" | "voice"
     session_context: list[str]   # Last 20 successful commands
     _gaze_coords: tuple | None   # Screen (x, y) when gaze active
@@ -75,9 +81,9 @@ class Command:
 
 1. iPad touch command → immediate, bypasses LLM
 2. Sound action → mapped mouth sounds
-3. Gaze dwell click → resting gaze triggers click
-4. Gaze + voice "click" → click at gaze pixel
-5. Gaze + gesture POINT → click at gaze pixel
+3. Gaze delta cursor → relative eye movement drives cursor
+4. Gaze + voice "click" → click at current cursor position
+5. Gaze + gesture POINT → click at current cursor position
 6. Tilt navigation → cursor movement from iPad tilt
 7. Head tracking → coarse cursor from head pose
 8. Gesture alone → gesture command

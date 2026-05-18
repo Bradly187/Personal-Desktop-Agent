@@ -40,6 +40,18 @@ This starts a WebSocket server on `:8765` and advertises via mDNS. Open `http://
 python main.py --full
 ```
 
+Add `--viewer` to open a desktop window showing live iPad camera and LiDAR depth feeds:
+
+```bash
+python main.py --full --viewer
+```
+
+Or run the viewer standalone (useful for verifying iPad video/depth streaming):
+
+```bash
+python sensor_viewer.py
+```
+
 ### 5. Start the MCP server (for Claude integration)
 
 ```bash
@@ -64,9 +76,9 @@ iPad Sensors → WebSocket → ipad_bridge.py → FusionEngine (priority routing
 
 1. iPad touch command → immediate, bypasses LLM
 2. Sound action → mapped mouth sounds (cluck, pop, hiss)
-3. Gaze dwell click → resting gaze auto-clicks
-4. Gaze + voice "click" → click at gaze coordinates
-5. Gaze + gesture POINT → click at gaze coordinates
+3. Gaze delta cursor → eye movement drives cursor via relative deltas
+4. Gaze + voice "click" → click at current cursor position
+5. Gaze + gesture POINT → click at current cursor position
 6. Tilt navigation → iPad tilt moves cursor
 7. Head tracking → head pose moves cursor
 8. Gesture alone → hand gesture command
@@ -76,7 +88,7 @@ iPad Sensors → WebSocket → ipad_bridge.py → FusionEngine (priority routing
 ## Project Structure
 
 ```
-├── main.py                    # Unified entry point (--full, --measure-vram, --safe-mode)
+├── main.py                    # Unified entry point (--full, --viewer, --viewer-only, --measure-vram, --safe-mode)
 ├── ipad_bridge.py             # WebSocket server for iPad (:8765)
 ├── hybrid_coordinator.py      # 4-gate routing (local vs cloud)
 ├── fusion_engine.py           # Sensor priority + fusion
@@ -86,6 +98,7 @@ iPad Sensors → WebSocket → ipad_bridge.py → FusionEngine (priority routing
 ├── continuous_trainer.py      # Background learning (thresholds, vocab, few-shot)
 ├── domain_classifier.py       # Route to specialist models
 ├── model_router.py            # VRAM-aware model selection
+├── sensor_viewer.py           # Desktop viewer: camera + depth + overlays + snapshot (tkinter)
 ├── health_viz.py              # Cosmic nebula system health visualization (pygame-ce)
 ├── dev_agent.py               # Plan→execute→reflect for dev tasks
 ├── local_inference.py         # Ollama / vLLM / Nemotron backends
@@ -101,9 +114,19 @@ iPad Sensors → WebSocket → ipad_bridge.py → FusionEngine (priority routing
 
 The native app is built with Swift/SwiftUI targeting iPadOS 17+. It uses:
 - Core Motion (tilt navigation)
-- ARKit (gaze tracking, head pose)
+- ARKit (gaze tracking, head pose via `SharedFaceSession`)
 - Speech framework (on-device keywords)
 - AVFoundation (sound action detection, audio streaming)
+
+`SharedFaceSession` multiplexes a single ARKit face-tracking session across GazeTracker and HeadTracker. Consumer handlers run on the ARKit delegate thread (zero-hop, ~16ms latency savings) and must be `@Sendable`. The session auto-recovers from errors (3 attempts, 1s backoff).
+
+### Onboarding
+
+On first launch, a 7-step wizard guides setup: Welcome → PC Connection (mDNS auto-discovery or manual IP) → Hardware Detection (shows available sensors) → Cursor Control (pick tilt/gaze/head/trackpad) → Calibration (tilt neutral position) → Voice & Sound (keywords, mouth sounds, Whisper streaming) → Done. Persists `onboardingComplete` to UserDefaults so it only runs once. Re-run from Settings if needed.
+
+### Navigation
+
+Six tabs: Commands, Trackpad, Keypad, Write, Settings, Sensors. The first four (Commands through Write) support page-style swipe-to-switch — swipe left/right on the content area to slide between them. Settings and Sensors are tap-only (utility views). The tab bar also supports a horizontal drag gesture (60pt threshold) to switch between any tabs.
 
 ### Building
 
@@ -146,6 +169,41 @@ Thermal thresholds used for color mapping and error scoring:
 | 65–80 °C | Hot (amber/warning) |
 | > 90 °C | Critical (red, adds to error count) |
 
+## Sensor Viewer
+
+A desktop window (tkinter) that displays live iPad camera and LiDAR depth feeds side by side. Useful for verifying that video/depth streaming is working before relying on it for gesture or spatial input.
+
+- **Camera panel**: Decoded JPEG from iPad rear/front camera, with hand landmark skeleton overlay
+- **Depth panel**: LiDAR depth map colorized blue (near) → red (far); invalid pixels shown as dark grey; gaze cursor overlay when active
+- **Connection status**: Green (live), amber (stale >2s), grey (no data)
+- **FPS counters**: Per-panel, smoothed with EMA
+- **Depth hover readout**: Hover over the depth panel to see distance in metres at cursor position
+- **Freeze-frame**: Pause both feeds to inspect a frame (Space or Freeze checkbox)
+- **Snapshot**: Save current camera + depth frames as PNG to `snapshots/` (Ctrl+S or 📷 button)
+- **Always-on-top**: Pin the viewer above other windows (Ctrl+T or Pin checkbox)
+- **Aspect-ratio preserving resize**: Panels adapt to the actual frame dimensions from iPad
+
+The viewer runs in a daemon thread and doesn't block the asyncio event loop. Frames are delivered via thread-safe queues from `ipad_bridge.py`.
+
+```bash
+# Standalone (empty panels until iPad connects)
+python sensor_viewer.py
+
+# Integrated with full pipeline
+python main.py --full --viewer
+
+# Viewer-only (bridge + viewer, no inference pipeline)
+python main.py --viewer-only
+```
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| Space | Toggle freeze-frame |
+| Ctrl+T | Toggle always-on-top |
+| Ctrl+S | Save snapshot to `snapshots/` |
+
 ## Configuration
 
 - **Tilt sensitivity**: Scales rotation rate to cursor movement (default 1.0)
@@ -155,7 +213,9 @@ Thermal thresholds used for color mapping and error scoring:
 - **Gravity-compensated projection**: Tilt uses the device gravity vector to project rotation rate into a ground-aligned frame. This means "tilt right" always maps to horizontal cursor movement regardless of the angle the iPad is held at (e.g. flat on a lap vs. propped at 30°). No user configuration needed — it adapts automatically.
 - **Trackpad speed**: Adjustable in web client Settings tab
 - **Palm rejection radius**: Configurable per-session
-- **Gaze dwell duration**: Default 800ms, adapts via ContinuousTrainer
+- **Gaze sensitivity**: Scales gaze delta to cursor movement speed (default in SettingsStore). Can be auto-tuned via the Gaze Calibration sheet.
+- **Gaze smoothing**: EMA factor reuses `gazeStabilityThreshold` setting; suppresses jitter while preserving responsiveness. A dead zone (0.002) filters sub-threshold noise. Auto-tuned alongside sensitivity during calibration.
+- **Gaze calibration**: A guided 15-second flow (Settings → Gaze Calibration) that measures baseline jitter and directional eye range, then computes optimal sensitivity and smoothing values. Phases: look straight (3s baseline) → left/right/up/down (2s each) → auto-compute → accept or retry.
 - **Voice hotwords**: Auto-promoted from usage patterns
 
 ## Health-Aware Design

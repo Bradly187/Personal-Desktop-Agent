@@ -20,9 +20,9 @@ Higher priority inputs short-circuit lower ones. Respect this order in all routi
 
 1. iPad touch command → immediate execution, bypasses LLM
 2. Sound action → mapped mouth sounds (cluck, pop, hiss)
-3. Gaze dwell click → resting gaze auto-clicks after configured duration
-4. Gaze + voice "click" → click at gaze coordinates
-5. Gaze + gesture POINT → click at gaze coordinates
+3. Gaze delta cursor → relative eye movement drives cursor (no dwell)
+4. Gaze + voice "click" → click at current cursor position
+5. Gaze + gesture POINT → click at current cursor position
 6. Tilt navigation → iPad tilt moves cursor (Core Motion)
 7. Head tracking → head pose moves cursor (ARKit face anchor)
 8. Gesture alone → hand gesture via iPad camera + MediaPipe on PC
