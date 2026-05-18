@@ -144,6 +144,7 @@ jobs:
 
       - name: Upload to TestFlight
         if: ${{ github.event_name == 'push' || github.event.inputs.deploy_testflight == 'true' }}
+        continue-on-error: true  # Non-fatal: App Store may reject older SDK builds
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -170,6 +171,9 @@ jobs:
 
           if grep -q "No errors uploading" upload.log; then
             echo "✅ Upload succeeded! Build will appear in TestFlight shortly."
+          elif grep -q "SDK version issue" upload.log; then
+            echo "⚠️ TestFlight requires newer SDK. Build artifact is still available."
+            echo "   Update to Xcode 26 when macos-16 runners are available."
           else
             echo "⚠️ Upload may have failed. Check App Store Connect."
             cat upload.log

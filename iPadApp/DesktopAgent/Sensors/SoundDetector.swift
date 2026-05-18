@@ -56,11 +56,11 @@ final class SoundDetector {
 
     func stop() {
         sharedAudioSession.removeConsumer(Self.consumerID)
-        // Fix #19: Reset onset detection state so restart doesn't carry stale baseline
-        processQueue.async { [weak self] in
-            self?.prevMag = 0
-            self?.lastFireTime = nil
-        }
+        // Fix #19: Reset onset detection state so restart doesn't carry stale baseline.
+        // Safe to reset here since stop() runs on MainActor and processQueue won't
+        // receive new buffers after removeConsumer (the tap handler is removed).
+        prevMag = 0
+        lastFireTime = nil
     }
 
     // MARK: — Sound classification (runs on processQueue)
