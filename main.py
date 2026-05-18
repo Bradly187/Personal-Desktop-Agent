@@ -357,8 +357,18 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_gesture_processor(gesture)
     bridge.set_whisper_stream(whisper)
 
+    # Optional sensor viewer window
+    viewer = None
+    if args.viewer:
+        from sensor_viewer import SensorViewer
+        viewer = SensorViewer()
+        bridge.set_viewer(viewer)
+        viewer.start()
+
     shutdown = _ShutdownController()
     shutdown.register(fusion, gesture, whisper)
+    if viewer:
+        shutdown.register(viewer)
     shutdown.arm()
 
     # --- Start trainer and WhisperStream ---
@@ -393,6 +403,31 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Viewer-only mode (bridge + viewer, no inference)
+# ---------------------------------------------------------------------------
+
+async def _run_viewer_only(args: argparse.Namespace) -> None:
+    """Run just the bridge and sensor viewer — no LLM, no gesture, no whisper."""
+    from ipad_bridge import IPadBridge
+    from sensor_viewer import SensorViewer
+
+    log.info("Starting in viewer-only mode (no inference pipeline)")
+
+    viewer = SensorViewer(always_on_top=True)
+    viewer.start()
+
+    bridge = IPadBridge(port=args.port)
+    bridge.set_viewer(viewer)
+
+    try:
+        await bridge.run(no_mdns=args.no_mdns)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        viewer.stop()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -412,6 +447,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Skip the startup status table")
     p.add_argument("--measure-vram", action="store_true",
                    help="Load all models, print VRAM snapshot, and exit (task 1.2)")
+    p.add_argument("--viewer", action="store_true",
+                   help="Open a desktop window showing iPad camera + LiDAR feeds")
+    p.add_argument("--viewer-only", action="store_true",
+                   help="Run only the bridge + viewer (no inference pipeline)")
     return p.parse_args()
 
 
@@ -427,6 +466,11 @@ def main() -> None:
     # Task 4.2 — early exit path
     if args.measure_vram:
         _measure_vram()
+        return
+
+    # Viewer-only mode: bridge + viewer, no inference pipeline
+    if args.viewer_only:
+        asyncio.run(_run_viewer_only(args))
         return
 
     log.info("Personal Desktop Agent starting ...")

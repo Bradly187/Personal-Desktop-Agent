@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from fusion_engine import FusionEngine
     from gesture_processor import GestureProcessor
     from lidar_receiver import LiDARReceiver
+    from sensor_viewer import SensorViewer
     from whisper_stream import WhisperStream
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,7 @@ class IPadBridge:
         self._lidar: Optional["LiDARReceiver"] = None
         self._gesture: Optional["GestureProcessor"] = None
         self._whisper: Optional["WhisperStream"] = None
+        self._viewer: Optional["SensorViewer"] = None
 
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
@@ -122,6 +124,9 @@ class IPadBridge:
 
     def set_whisper_stream(self, whisper: "WhisperStream") -> None:
         self._whisper = whisper
+
+    def set_viewer(self, viewer: "SensorViewer") -> None:
+        self._viewer = viewer
 
     # ---------------------------------------------------------------------- #
     # Startup
@@ -275,6 +280,8 @@ class IPadBridge:
                     y = float(msg.get("y", 0.5))
                     conf = float(msg.get("confidence", 0.0))
                     self._fusion.on_gaze(x, y, conf)
+                    if self._viewer:
+                        self._viewer.on_gaze(x, y, conf)
             except (ValueError, TypeError) as exc:
                 log.debug("Bad gaze data: %s", exc)
             return
@@ -330,6 +337,8 @@ class IPadBridge:
                 self._lidar.on_depth_frame(msg)
             else:
                 log.debug("depth_frame received but LiDARReceiver not wired")
+            if self._viewer:
+                self._viewer.on_depth_frame(msg)
             return
 
         if msg_type == "camera_frame":
@@ -337,8 +346,13 @@ class IPadBridge:
                 gesture_cmd = self._gesture.on_camera_frame(msg)
                 if gesture_cmd and self._fusion:
                     self._fusion.on_gesture(gesture_cmd)
+                # Forward landmarks to viewer overlay
+                if self._viewer:
+                    self._viewer.on_hand_landmarks(self._gesture.latest_landmarks)
             else:
                 log.debug("camera_frame received but GestureProcessor not wired")
+            if self._viewer:
+                self._viewer.on_camera_frame(msg)
             return
 
         if msg_type == "audio_stream":

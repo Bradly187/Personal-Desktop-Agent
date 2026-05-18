@@ -188,6 +188,10 @@ class GestureProcessor:
         self._frame_count = 0
         self._available = _MP_AVAILABLE and _CV2_AVAILABLE
 
+        # Latest normalised hand landmarks for external consumers (SensorViewer)
+        # List of 21 (x, y) tuples in [0,1] space, or None when no hand detected.
+        self.latest_landmarks: Optional[list[tuple[float, float]]] = None
+
     def set_lidar(self, lidar: "LiDARReceiver") -> None:
         self._lidar = lidar
 
@@ -252,9 +256,13 @@ class GestureProcessor:
         result = hands.process(rgb)
 
         if not result.multi_hand_landmarks:
+            self.latest_landmarks = None
             return None
 
         lm = result.multi_hand_landmarks[0]
+
+        # Store normalised landmarks for external consumers (SensorViewer overlay)
+        self.latest_landmarks = [(lm.landmark[i].x, lm.landmark[i].y) for i in range(21)]
         hand_label = "Right"
         if result.multi_handedness:
             hand_label = result.multi_handedness[0].classification[0].label
