@@ -4,7 +4,7 @@ Multimodal accessibility desktop control for a single user with rheumatoid arthr
 
 ## What This Is
 
-The user controls a Windows desktop through voice, eye gaze, head pose, hand gesture, iPad tilt, mouth sounds, and direct touch — all mapped to a constrained 9-verb action vocabulary. Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
+The user controls a Windows desktop through voice, eye gaze, head pose, hand gesture, iPad tilt, mouth sounds, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
 
 - Full requirements (17): `.kiro/specs/ipad-sensor-focus/requirements.md`
 - Architecture diagrams (13): `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md`
@@ -17,11 +17,11 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
 **Done (Phase 2):**
-- `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz; enhanced gaze dwell (5 action types, drag state machine, edge scroll, gaze-to-cursor mode)
+- `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz; gaze delta cursor integration (relative eye movement → cursor), sound actions, tilt/head direct-to-pyautogui
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
 - `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090), `NemotronInference`
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app (33 Swift source files, 15 Swift test files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
+- `iPadApp/DesktopAgent/` — SwiftUI app (41 Swift source files, 15 Swift test files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`, `OnboardingView`, `SensorDashboardView`, `SensorActivityBar`, `GazeCalibrationSheet`, `TiltCalibrationSheet`, `SoundTrainingSheet`, `CursorConflictBanner`, `CommandToast`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
 
 **Done (Phase 3):**
 - `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce
@@ -56,6 +56,18 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `command_executor.py`: `sd.get_stream().active` lacked None guard → `AttributeError`; fixed to `sd.get_stream() and sd.get_stream().active`
 - `approval_config.json`: `"device"` narrowed from `"Realtek USB Audio"` (matched 3 devices, threw sounddevice exception → silent auto-approve) to `"Microphone (Realtek USB Audio)"`
 
+**Done (iPad UX + gaze refactor + sensor viewer — 2026-05-17):**
+- `sensor_viewer.py` — tkinter desktop window showing camera + LiDAR depth feeds in real time; hand landmark overlay from GestureProcessor; gaze cursor overlay on depth panel; freeze-frame (Space); snapshot to disk (Ctrl+S); always-on-top toggle; wired into `main.py --viewer`
+- `GazeTracker.swift` — refactored to delta-based cursor movement (removing dwell-click); configurable stability threshold for glasses users
+- `OnboardingView.swift` — first-run wizard (6 steps: welcome, tilt, gaze, voice, touch, summary)
+- `SensorDashboardView.swift` — all-sensor status dashboard (replaces LiDAR-only Sensors tab); per-sensor activity, conflict detection
+- `SensorActivityBar.swift` — compact horizontal sensor-activity indicator strip
+- `GazeCalibrationSheet.swift`, `TiltCalibrationSheet.swift`, `SoundTrainingSheet.swift` — per-sensor calibration UX
+- `CursorConflictBanner.swift` — banner shown when multiple cursor sources are active simultaneously
+- `CommandToast.swift` — transient action feedback toast
+- `ContentView.swift` — swipe-to-switch tabs; parent-driven scroll disable; custom tab bar always on top
+- CI: Xcode 16.4 + iOS 18.5 SDK on `macos-15`; `upload-artifact v7`; TestFlight upload made non-fatal (SDK version gate)
+
 **Done (Touch-debug fix — 2026-05-16):**
 - `DwellToolbarContainer.swift` — outer ZStack `.allowsHitTesting(false)` with toolbar `.allowsHitTesting(true)`; removed `.frame(maxWidth: .infinity)` in top/bottom modes; bottom mode uses VStack + `Color.clear.frame(height:56).allowsHitTesting(false)` spacer; floating mode `.contentShape(RoundedRectangle(...))` before `.gesture(DragGesture())`
 - `DAConnectionBanner.swift` — added `.allowsHitTesting(isDisconnected)`; removed `.contentShape(Rectangle())`
@@ -67,7 +79,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 
 ```bash
 # Full pipeline — bridge + FusionEngine + HybridCoordinator + ContinuousTrainer
-python main.py [--port 8765] [--no-mdns] [--debug] [--safe-mode]
+python main.py [--port 8765] [--no-mdns] [--debug] [--safe-mode] [--viewer] [--viewer-only]
 
 # Measure actual VRAM usage on RTX 5090 (loads all models, prints table, exits)
 python main.py --measure-vram
@@ -127,7 +139,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 | File | Purpose |
 |------|---------|
-| `ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 14 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
+| `ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 15 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
 | `command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
 | `mcp_server/desktop_mcp_server.py` | MCP stdio server; 14 tools; `SAFE_MODE` env var |
 | `mcp_server/tools/mouse.py` | move, click, double_click, scroll, drag |
@@ -144,7 +156,8 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `domain_classifier.py` | Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL |
 | `model_router.py` | VRAM-aware specialist model selection; domain-tuned prompts; Ollama inference |
 | `dev_agent.py` | Plan→execute→reflect agentic loop; 5 dev verbs; session context |
-| `main.py` | Unified entry point; `--measure-vram`; startup status table; Ctrl-C shutdown |
+| `main.py` | Unified entry point; `--measure-vram`; `--viewer`/`--viewer-only`; startup status table; Ctrl-C shutdown |
+| `sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
 | `whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
 | `db.py` | `AgentDB` (aiosqlite, 12 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval |
 | `migrate.py` | One-time migration from legacy trainer.db / routing_log.jsonl / benchmark_results.json to new DB layer; run once then delete |
@@ -202,7 +215,7 @@ used instead (4-second recording window, auto-approve on silence).
 
 ## WebSocket Protocol
 
-**iPad → PC (14 types):** `tilt`, `tilt_position`, `gaze`, `gaze_dwell`, `head_pose`, `keyword`, `sound_action`, `touch_command`, `trackpad`, `audio_stream`, `camera_frame`, `depth_frame`, `handwriting_image`, `tilt_tap`
+**iPad → PC (15 types):** `tilt`, `tilt_position`, `gaze`, `gaze_delta`, `gaze_dwell`, `head_pose`, `keyword`, `sound_action`, `touch_command`, `trackpad`, `audio_stream`, `camera_frame`, `depth_frame`, `handwriting_image`, `tilt_tap`
 
 **PC → iPad (4 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image)
 
@@ -212,7 +225,7 @@ used instead (4-second recording window, auto-approve on silence).
 
 1. iPad touch command — bypasses LLM entirely
 2. Sound action (mouth sounds via AVFoundation)
-3. Gaze dwell click
+3. Gaze delta cursor — relative eye movement drives cursor (no dwell)
 4. Gaze + voice "click"
 5. Gaze + gesture POINT
 6. Tilt navigation (Core Motion)

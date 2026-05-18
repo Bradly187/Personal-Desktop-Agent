@@ -3,7 +3,7 @@
 Listens on port 8765 for messages from the iPad app and dispatches them
 to FusionEngine, CommandExecutor, or directly to pyautogui.
 
-Message types — 14 total:
+Message types — 15 total:
   touch_command     →  CommandExecutor (action routing; priority 1)
   trackpad          →  direct pyautogui (mouse/scroll; no LLM)
   handwriting_image →  pix2tex OCR → handwriting_result reply
@@ -11,6 +11,7 @@ Message types — 14 total:
   tilt              →  FusionEngine.on_tilt() (legacy velocity mode)
   tilt_tap          →  FusionEngine.on_touch() (when wired)
   gaze              →  FusionEngine.on_gaze() (when wired)
+  gaze_delta        →  FusionEngine.on_gaze_delta() (relative eye movement → cursor)
   gaze_dwell        →  FusionEngine.on_gaze_dwell() (when wired)
   head_pose         →  FusionEngine.on_head() (when wired)
   keyword           →  FusionEngine.on_keyword() (when wired)
