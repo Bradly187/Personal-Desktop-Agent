@@ -29,17 +29,21 @@ struct ContentView: View {
                 }
 
             // ── Overlays ─────────────────────────────────────────────────────
+            // Fix #16: Overlays use VStack with Spacer pattern so their frames
+            // only cover the visible content area, not the full screen.
+            // The Spacer has hit testing disabled so touches pass through to content below.
             DAConnectionBanner()
                 .padding(.horizontal, DesignTokens.Spacing.lg)
                 .padding(.top, DesignTokens.Spacing.sm)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
-            // Sensor activity bar — shows running sensor icons
+            // Sensor activity bar — shows running sensor icons (non-interactive)
             SensorActivityBar()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .padding(.top, 44) // below connection banner
+                .allowsHitTesting(false)
 
-            // Cursor conflict warning
+            // Cursor conflict warning (interactive when visible)
             CursorConflictBanner(settings: settings)
                 .padding(.horizontal, DesignTokens.Spacing.lg)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -63,10 +67,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var activeView: some View {
-        if selectedTab < swipeableTabCount {
-            // TabView in page style — swipe left/right to slide between
-            // Commands, Trackpad, Keypad, Write.
-            // Fix #1: Overlay a scroll-disable bridge that the parent controls.
+        // Fix #15: Keep TabView alive across all tabs to prevent UIScrollView
+        // destruction/recreation when switching to Settings/Sensors and back.
+        // This fixes the PageScrollDisabler losing its cached reference.
+        ZStack {
             TabView(selection: $selectedTab) {
                 CommandPadView()
                     .tag(0)
@@ -81,21 +85,24 @@ struct ContentView: View {
                     .tag(3)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
-            .animation(.easeInOut(duration: 0.15), value: selectedTab) // Fix #13: reduced from 250ms
+            .animation(.easeInOut(duration: 0.15), value: selectedTab)
             .onChange(of: selectedTab) {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
-            // Fix #1: Parent-driven scroll disable for gesture-heavy tabs
             .overlay(
                 PageScrollDisabler(isDisabled: swipeDisabledTabs.contains(selectedTab))
                     .allowsHitTesting(false)
             )
-        } else {
-            // Non-swipeable utility tabs — direct switch
-            switch selectedTab {
-            case 4: SettingsView()
-            case 5: SensorDashboardView()
-            default: SettingsView()
+            .opacity(selectedTab < swipeableTabCount ? 1 : 0)
+            .allowsHitTesting(selectedTab < swipeableTabCount)
+
+            // Non-swipeable utility tabs — shown on top when active
+            if selectedTab >= swipeableTabCount {
+                switch selectedTab {
+                case 4: SettingsView()
+                case 5: SensorDashboardView()
+                default: SettingsView()
+                }
             }
         }
     }
@@ -126,14 +133,17 @@ struct ContentView: View {
                 .shadow(color: .black.opacity(0.15), radius: 6, x: 0, y: -2)
                 .ignoresSafeArea(edges: .bottom)
         )
-        .contentShape(Rectangle())
-        .gesture(tabBarDragGesture)
+        // Fix #14: simultaneousGesture lets button taps fire without waiting for
+        // drag failure. minimumDistance: 40 ensures slight finger jitter during
+        // taps (common with arthritis) doesn't accidentally trigger tab switching.
+        .simultaneousGesture(tabBarDragGesture)
     }
 
     /// Horizontal drag on the tab bar slides between tabs.
     /// Fix #2: Uses tabAtDragStart to prevent double-advance when page swipe also fires.
+    /// Fix #14: Raised minimumDistance to 40pt to prevent jittery taps from triggering drag.
     private var tabBarDragGesture: some Gesture {
-        DragGesture(minimumDistance: 20, coordinateSpace: .local)
+        DragGesture(minimumDistance: 40, coordinateSpace: .local)
             .onChanged { value in
                 if tabBarDragOffset == 0 {
                     tabAtDragStart = selectedTab
@@ -200,11 +210,13 @@ private final class PageScrollDisablerView: UIView {
     private weak var cachedScrollView: UIScrollView?
 
     func setScrollDisabled(_ disabled: Bool) {
+        // Validate cached reference is still in the hierarchy
         if let sv = cachedScrollView, sv.window != nil {
             sv.isScrollEnabled = !disabled
             return
         }
-        // Walk up to find the TabView's UIScrollView (it's a UICollectionView internally)
+        // Cache miss — walk up to find the TabView's UIScrollView
+        cachedScrollView = nil
         var current: UIView? = superview
         while let view = current {
             if let scrollView = view as? UIScrollView {
@@ -216,9 +228,14 @@ private final class PageScrollDisablerView: UIView {
         }
     }
 
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        // Invalidate cache when re-parented (e.g. TabView recreated)
+        cachedScrollView = nil
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        // Re-cache when view hierarchy changes
         cachedScrollView = nil
     }
 }
