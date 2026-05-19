@@ -168,11 +168,28 @@ struct ScientificKeypadView: View {
         s = s.replacingOccurrences(of: "e", with: "2.71828182845905")
         s = s.replacingOccurrences(of: "^", with: "**")
 
-        let e = NSExpression(format: s)
-        guard let v = e.expressionValue(with: nil, context: nil) as? NSNumber else {
+        // Guard: NSExpression raises ObjC exceptions on malformed input.
+        // Validate balanced parens and non-empty string before calling.
+        guard !s.isEmpty else { return nil }
+        let opens = s.filter { $0 == "(" }.count
+        let closes = s.filter { $0 == ")" }.count
+        guard opens == closes else { return nil }
+        // Must not end with an operator or open paren
+        let lastChar = s.last
+        guard lastChar != nil,
+              lastChar != "(",
+              lastChar != "+",
+              lastChar != "-",
+              lastChar != "*",
+              lastChar != "/" else { return nil }
+
+        // Use NSExpression — safe after the guards above
+        let nsExpr = NSExpression(format: s)
+        guard let v = nsExpr.expressionValue(with: nil, context: nil) as? NSNumber else {
             return nil
         }
-        return v.doubleValue
+        let d = v.doubleValue
+        return d.isFinite ? d : nil
     }
 
     private func formatNumber(_ n: Double) -> String {

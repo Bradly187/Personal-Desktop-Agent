@@ -41,6 +41,10 @@ final class WebSocketManager: ObservableObject {
     /// Emits a human-readable string each time a notable command is sent.
     let commandFeed = PassthroughSubject<String, Never>()
 
+    /// Feed of error messages from the PC bridge (ack errors, inference failures).
+    /// Emits a human-readable error string for display in the UI.
+    let errorFeed = PassthroughSubject<String, Never>()
+
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
 
@@ -231,6 +235,10 @@ final class WebSocketManager: ObservableObject {
                 status: json["status"] as? String ?? "ok",
                 error: json["error"] as? String
             )
+            // Surface inference/execution errors to the UI via errorFeed
+            if let errMsg = json["error"] as? String, !errMsg.isEmpty {
+                errorFeed.send(errMsg)
+            }
         case "status":
             let cursor = json["cursor"] as? [String: Int] ?? [:]
             parsed = .status(
@@ -269,6 +277,12 @@ final class WebSocketManager: ObservableObject {
 
         // Fix #21: Cancel any pending reconnect to prevent multiple timers firing
         reconnectWorkItem?.cancel()
+
+        // Reset drag state on disconnect — prevents isDragging stuck true
+        if settings?.isDragging == true {
+            settings?.isDragging = false
+            settings?.activeDwellAction = .leftClick
+        }
 
         reconnectAttempt += 1
         state = .reconnecting(attempt: reconnectAttempt)

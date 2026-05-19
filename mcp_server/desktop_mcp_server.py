@@ -29,7 +29,24 @@ from mcp.types import ImageContent, TextContent, Tool
 
 from tools import keyboard, mouse, screen, windows
 
+# Trust classifier — scans tool outputs for injection patterns before returning to LLM
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from mcp_trust_classifier import MCPTrustClassifier, RiskLevel
+    _trust_classifier = MCPTrustClassifier()
+except ImportError:
+    _trust_classifier = None
+
+try:
+    from audit_log import AuditLog
+    _audit_available = True
+except ImportError:
+    _audit_available = False
+
 SAFE_MODE = os.environ.get("SAFE_MODE", "0") == "1"
+
+# Audit log instance — initialized in main() if available
+_audit: "AuditLog | None" = None
 
 app = Server("desktop-agent")
 
@@ -232,7 +249,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent | ImageConte
     try:
         result = _dispatch(name, arguments)
     except Exception as exc:
+        if _audit:
+            await _audit.log_mcp_call(name, params=arguments, outcome=f"error: {exc}")
         return [TextContent(type="text", text=json.dumps({"error": str(exc)}, indent=2))]
+
+    # Log the MCP call to audit trail
+    if _audit:
+        outcome = "ok" if not (isinstance(result, dict) and "error" in result) else result.get("error", "unknown")
+        await _audit.log_mcp_call(name, params=arguments, outcome=str(outcome)[:200])
 
     # Return screenshots as native MCP image content so they render properly
     if isinstance(result, dict) and "image_base64" in result:
@@ -242,7 +266,36 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent | ImageConte
             mimeType="image/png",
         )]
 
-    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    result_text = json.dumps(result, indent=2)
+
+    # Trust classification — scan text results for injection patterns
+    if _trust_classifier and isinstance(result, dict):
+        # Only classify tools that return content from external sources
+        scannable = result.get("text", "") or result.get("matches", "") or ""
+        if isinstance(scannable, list):
+            scannable = " ".join(str(s) for s in scannable)
+        if scannable:
+            verdict = _trust_classifier.classify_sync(name, str(scannable))
+            if verdict.should_block:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "warning": "BLOCKED by trust classifier",
+                        "risk": verdict.risk.value,
+                        "flags": verdict.flags,
+                        "recommendation": "This tool output contains suspicious patterns. Review before acting on it.",
+                        "original_result": result,
+                    }, indent=2),
+                )]
+            elif verdict.should_warn:
+                result_text = json.dumps({
+                    "caution": "Trust classifier flagged this output",
+                    "risk": verdict.risk.value,
+                    "flags": verdict.flags,
+                    "result": result,
+                }, indent=2)
+
+    return [TextContent(type="text", text=result_text)]
 
 
 def _dispatch(name: str, args: dict) -> dict:
@@ -311,10 +364,21 @@ def _dispatch(name: str, args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def main():
+    global _audit
     mode = "SAFE MODE" if SAFE_MODE else "full control"
     print(f"Desktop Agent MCP server running ({mode})", file=sys.stderr)
+
+    # Initialize audit log for MCP tool call recording
+    if _audit_available:
+        from pathlib import Path
+        _audit = AuditLog()
+        await _audit.open(Path(__file__).parent.parent / "audit.db")
+
     async with stdio_server() as streams:
         await app.run(streams[0], streams[1], app.create_initialization_options())
+
+    if _audit:
+        await _audit.close()
 
 
 if __name__ == "__main__":
