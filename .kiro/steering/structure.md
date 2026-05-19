@@ -17,6 +17,9 @@ project/
 ├── hybrid_coordinator.py     # 4-gate routing engine (local vs cloud)
 ├── whisper_stream.py         # Audio from iPad mic → Silero VAD → Whisper → Command
 ├── gesture_processor.py       # iPad camera frames → MediaPipe Hands → Command
+├── audit_log.py               # Append-only security audit trail (audit.db, WAL mode)
+├── content_filter.py          # Regex-based secret/PII detection and redaction before API calls
+├── mcp_trust_classifier.py    # Taint analysis on MCP tool outputs (injection detection)
 ├── command_executor.py        # Command → mouse/keyboard execution
 ├── continuous_trainer.py     # Background learning (thresholds, vocab, few-shot)
 ├── iPadApp/                  # Native Swift/SwiftUI Xcode project (iPadOS 17+)
@@ -54,6 +57,7 @@ project/
 Input        → iPad (TrueDepth/LiDAR/mic/camera/touch/tilt/gaze/sound)
 Processing   → Whisper (CUDA) | YOLOv8 (CUDA) | MediaPipe (CPU) | iPad on-device
 Intelligence → Claude via MCP (Ollama local / AWS Bedrock fallback)
+Security     → ContentFilter (secret/PII redaction) | MCPTrustClassifier (injection detection) | AuditLog
 Coordinator  → HybridCoordinator (4-gate routing)
 Execution    → MCP Server (desktop_mcp_server.py) → pyautogui / Win32 API
 Learning     → ContinuousTrainer (adapts while running)
@@ -108,6 +112,7 @@ All persistence goes through `db.py`. Legacy flat files are superseded by AgentD
 | Store | Writer | Reader |
 |-------|--------|--------|
 | `agent.db` (SQLite / AgentDB) | All pipeline components | ContinuousTrainer, HybridCoordinator, ModelRouter |
+| `audit.db` (SQLite / AuditLog) | AuditLog (append-only, WAL) | Dashboards, debugging queries |
 | `analytics.duckdb` (AnalyticsDB) | BenchmarkModels | AnalyticsDB OLAP queries |
 
 Legacy files (`routing_log.jsonl`, `hotwords.txt`, `gesture_calibration.json`, `few_shot_memory.db`) are migrated by `migrate.py` — delete after running once.
