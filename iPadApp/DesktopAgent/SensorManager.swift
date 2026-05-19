@@ -244,7 +244,7 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Tilt settings changes — update snapshot on running sensor
+        // Tilt settings changes — debounced to avoid thrash during slider drag
         Publishers.CombineLatest4(
             settings.$tiltSensitivity.removeDuplicates(),
             settings.$tiltDeadZone.removeDuplicates(),
@@ -252,6 +252,7 @@ final class SensorManager: ObservableObject {
             settings.$tiltInverted.removeDuplicates()
         )
         .dropFirst()
+        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
         .sink { [weak self] _ in
             self?.tiltSensor.updateSettings()
         }
@@ -280,13 +281,14 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Gaze settings changes — update snapshot on running sensor
+        // Gaze settings changes — debounced to avoid thrash during slider drag
         Publishers.CombineLatest3(
             settings.$gazeSensitivity.removeDuplicates(),
             settings.$gazeSaccadeEnterThreshold.removeDuplicates(),
             settings.$gazeSaccadeExitThreshold.removeDuplicates()
         )
         .dropFirst()
+        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
         .sink { [weak self] _ in
             self?.gazeTracker.updateSettings()
         }
@@ -324,13 +326,15 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Keyword list — non-empty means enabled
+        // Keyword list — non-empty means enabled; debounce to avoid restart thrash during editing
         settings.$keywordList
             .removeDuplicates()
             .dropFirst()
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] keywords in
                 guard let self else { return }
-                let enabled = !keywords.isEmpty
+                let nonEmpty = keywords.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                let enabled = !nonEmpty.isEmpty
                 self._updateState(id: "keyword", isEnabled: enabled)
                 if enabled {
                     // Restart to pick up new keyword list

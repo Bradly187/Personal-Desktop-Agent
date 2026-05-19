@@ -1,3 +1,4 @@
+import ARKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -10,6 +11,7 @@ struct SettingsView: View {
 
     @State private var newSoundName = ""
     @State private var newSoundAction = ""
+    @State private var newKeyword = ""
 
     var body: some View {
         NavigationStack {
@@ -109,7 +111,13 @@ struct SettingsView: View {
 
                 // Gaze
                 Section {
+                    if !ARFaceTrackingConfiguration.isSupported {
+                        Label("Gaze tracking requires TrueDepth camera (iPad Pro or iPhone X+)", systemImage: "exclamationmark.triangle.fill")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(.orange)
+                    }
                     Toggle("Enable Gaze", isOn: $settings.gazeEnabled)
+                        .disabled(!ARFaceTrackingConfiguration.isSupported)
                     LabeledContent("Smoothing") {
                         Slider(value: $settings.gazeStabilityThreshold, in: 0.02...0.15)
                             .overlay(alignment: .trailing) {
@@ -119,6 +127,7 @@ struct SettingsView: View {
                                     .offset(y: 18)
                             }
                     }
+                    .disabled(!ARFaceTrackingConfiguration.isSupported)
                     LabeledContent("Sensitivity") {
                         Slider(value: $settings.gazeSensitivity, in: 50...500)
                             .overlay(alignment: .trailing) {
@@ -128,16 +137,24 @@ struct SettingsView: View {
                                     .offset(y: 18)
                             }
                     }
+                    .disabled(!ARFaceTrackingConfiguration.isSupported)
                 } header: {
                     DASectionHeader(title: "Gaze")
                 }
 
                 // Head
                 Section {
+                    if !ARFaceTrackingConfiguration.isSupported {
+                        Label("Head tracking requires TrueDepth camera (iPad Pro or iPhone X+)", systemImage: "exclamationmark.triangle.fill")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(.orange)
+                    }
                     Toggle("Enable Head Tracking", isOn: $settings.headEnabled)
+                        .disabled(!ARFaceTrackingConfiguration.isSupported)
                     LabeledContent("Smoothing") {
                         Slider(value: $settings.headSmoothingFactor, in: 0.05...1.0)
                     }
+                    .disabled(!ARFaceTrackingConfiguration.isSupported)
                 } header: {
                     DASectionHeader(title: "Head Tracking")
                 }
@@ -157,15 +174,22 @@ struct SettingsView: View {
                 // Keywords
                 Section {
                     ForEach(settings.keywordList.indices, id: \.self) { i in
-                        TextField("Keyword", text: $settings.keywordList[i])
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                        Text(settings.keywordList[i])
+                            .foregroundStyle(theme.textPrimary)
                     }
                     .onDelete { idx in settings.keywordList.remove(atOffsets: idx) }
-                    Button("Add keyword…") {
-                        settings.keywordList.append("")
+                    HStack {
+                        TextField("New keyword", text: $newKeyword)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button("Add") {
+                            let trimmed = newKeyword.trimmingCharacters(in: .whitespaces)
+                            guard !trimmed.isEmpty else { return }
+                            settings.keywordList.append(trimmed)
+                            newKeyword = ""
+                        }
+                        .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
-                    .accessibilityHint("Double-tap to add a new voice keyword")
                 } header: {
                     DASectionHeader(title: "Voice Keywords")
                 }

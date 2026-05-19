@@ -141,7 +141,8 @@ final class KeywordListener: NSObject, ObservableObject {
 
         let now = Date()
         for keyword in settings.keywordList {
-            let kw = keyword.lowercased()
+            let kw = keyword.lowercased().trimmingCharacters(in: .whitespaces)
+            guard !kw.isEmpty else { continue }
             if newContent.contains(kw) {
                 // Check per-keyword cooldown
                 if let lastFire = keywordCooldowns[kw],
