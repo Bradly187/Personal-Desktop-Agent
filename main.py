@@ -347,6 +347,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     coordinator = HybridCoordinator(
         local=local, config=cfg, trainer=trainer,
         agent_db=agent_db, session_id=session_id,
+        content_filter=content_filter, audit_log=audit,
     )
     dev_agent = DevAgent(
         router=router, coordinator=coordinator, trainer=trainer,

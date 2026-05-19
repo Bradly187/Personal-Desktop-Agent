@@ -46,6 +46,8 @@ from local_inference import LocalInference, OllamaInference, _build_prompt, _SYS
 
 if TYPE_CHECKING:
     from agentcore_fallback.client import AgentCoreFallbackClient
+    from audit_log import AuditLog
+    from content_filter import ContentFilter
     from continuous_trainer import ContinuousTrainer
     from db import AgentDB
     from dev_agent import DevAgent
@@ -349,6 +351,8 @@ class HybridCoordinator:
         agentcore_client: Optional["AgentCoreFallbackClient"] = None,
         agent_db: Optional["AgentDB"] = None,
         session_id: int = -1,
+        content_filter: Optional["ContentFilter"] = None,
+        audit_log: Optional["AuditLog"] = None,
     ) -> None:
         self._local = local or OllamaInference()
         self._cfg = config or CoordinatorConfig()
@@ -359,6 +363,8 @@ class HybridCoordinator:
         self._dev_agent = dev_agent
         self._agent_db = agent_db
         self._session_id = session_id
+        self._content_filter = content_filter
+        self._audit = audit_log
         self._latency_ema: Optional[float] = None
 
         # Gate 3 VRAM cache — avoid calling pynvml on every command
@@ -626,7 +632,25 @@ class HybridCoordinator:
         return action_str
 
     async def _run_cloud(self, cmd: Command) -> str:
-        """Route to cloud: prefer AgentCore fallback agent, fall back to raw Bedrock."""
+        """Route to cloud: prefer AgentCore fallback agent, fall back to raw Bedrock.
+
+        Content filter scrubs secrets/PII from the command text before
+        transmitting to external APIs. Findings are logged to the audit trail.
+        """
+        # Scrub secrets before sending to external API
+        if self._content_filter:
+            clean_text, findings = await self._content_filter.scrub(cmd.text)
+            if findings:
+                log.info("ContentFilter: redacted %d secret(s) before cloud call", len(findings))
+                cmd = Command(
+                    text=clean_text,
+                    whisper_logprob=cmd.whisper_logprob,
+                    gesture_confidence=cmd.gesture_confidence,
+                    source=cmd.source,
+                    session_context=cmd.session_context,
+                    _gaze_coords=cmd.gaze_coords,
+                )
+
         if self._agentcore:
             try:
                 action = await self._agentcore.resolve(cmd)
