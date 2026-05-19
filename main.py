@@ -129,7 +129,7 @@ def _measure_vram() -> None:
 # Task 4.4 — Startup status table
 # ---------------------------------------------------------------------------
 
-def _print_startup_table(port: int, safe_mode: bool) -> None:
+def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> None:
     """Print a table of which PC-side services are available."""
     rows: list[tuple[str, str, str]] = []
 
@@ -214,7 +214,7 @@ def _print_startup_table(port: int, safe_mode: bool) -> None:
         print(f"  [{marker}] {name:<{w_name - 4}}  {status:<{w_status}}  {note}")
 
     print()
-    print(f"  Bridge: ws://0.0.0.0:{port}/ws")
+    print(f"  Bridge: ws://{host}:{port}/ws")
     print()
 
 
@@ -351,7 +351,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     whisper = WhisperStream()
     whisper.set_fusion_engine(fusion)
 
-    bridge = IPadBridge(port=args.port)
+    bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
     bridge.set_gesture_processor(gesture)
@@ -382,7 +382,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Print startup table (task 4.4) ---
     if not args.quiet:
-        _print_startup_table(args.port, args.safe_mode)
+        _print_startup_table(args.port, args.safe_mode, host=args.host)
 
     # --- Run bridge + fusion concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
@@ -416,7 +416,7 @@ async def _run_viewer_only(args: argparse.Namespace) -> None:
     viewer = SensorViewer(always_on_top=True)
     viewer.start()
 
-    bridge = IPadBridge(port=args.port)
+    bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_viewer(viewer)
 
     try:
@@ -437,6 +437,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--port", type=int, default=8765,
                    help="WebSocket port (default: 8765)")
+    p.add_argument("--host", type=str, default="0.0.0.0",
+                   help="Bind address (default: 0.0.0.0; use 10.99.0.1 for WireGuard-only)")
     p.add_argument("--no-mdns", action="store_true",
                    help="Disable mDNS/Bonjour service advertisement")
     p.add_argument("--debug", action="store_true",

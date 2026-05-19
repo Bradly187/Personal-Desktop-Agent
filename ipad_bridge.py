@@ -3,13 +3,17 @@
 Listens on port 8765 for messages from the iPad app and dispatches them
 to FusionEngine, CommandExecutor, or directly to pyautogui.
 
-Message types — 15 total:
+Message types — 19 total:
   touch_command     →  CommandExecutor (action routing; priority 1)
   trackpad          →  direct pyautogui (mouse/scroll; no LLM)
   handwriting_image →  pix2tex OCR → handwriting_result reply
   tilt_position     →  FusionEngine.on_tilt_position() (absolute positioning)
   tilt              →  FusionEngine.on_tilt() (legacy velocity mode)
   tilt_tap          →  FusionEngine.on_touch() (when wired)
+  tilt_ratchet      →  FusionEngine.on_tilt_ratchet() (re-center neutral point)
+  sensor_switch     →  FusionEngine.on_sensor_switch() (mutual-exclusion toggle)
+  cursor_pause      →  FusionEngine.on_cursor_pause() (quick-pause all cursor sensors)
+  cursor_resume     →  FusionEngine.on_cursor_resume() (resume cursor sensors)
   gaze              →  FusionEngine.on_gaze() (when wired)
   gaze_delta        →  FusionEngine.on_gaze_delta() (relative eye movement → cursor)
   gaze_dwell        →  FusionEngine.on_gaze_dwell() (when wired)
@@ -87,8 +91,9 @@ class IPadBridge:
         "gaze_dwell_drag", "edge_scroll", "gaze_cursor_mode",
     }
 
-    def __init__(self, port: int = 8765):
+    def __init__(self, port: int = 8765, host: str = "0.0.0.0"):
         self.port = port
+        self.host = host
 
         # Screen dimensions (resolved lazily at start)
         self._screen_w: int = 1920
@@ -699,11 +704,11 @@ class IPadBridge:
 
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", self.port, reuse_address=True)
+        site = web.TCPSite(runner, self.host, self.port, reuse_address=True)
         await site.start()
 
-        log.info("Bridge listening on :%d  (ws://0.0.0.0:%d/ws)", self.port, self.port)
-        log.info("Web client: http://0.0.0.0:%d/", self.port)
+        log.info("Bridge listening on %s:%d  (ws://%s:%d/ws)", self.host, self.port, self.host, self.port)
+        log.info("Web client: http://%s:%d/", self.host, self.port)
         self._print_qr()
 
         try:
@@ -741,11 +746,14 @@ class IPadBridge:
 
     def _print_qr(self) -> None:
         """Print connection info to the terminal (QR code if qrcode installed)."""
-        hostname = socket.gethostname()
-        try:
-            local_ip = socket.gethostbyname(hostname)
-        except Exception:
-            local_ip = "localhost"
+        if self.host != "0.0.0.0":
+            local_ip = self.host
+        else:
+            hostname = socket.gethostname()
+            try:
+                local_ip = socket.gethostbyname(hostname)
+            except Exception:
+                local_ip = "localhost"
         url = f"ws://{local_ip}:{self.port}/ws"
         print(f"\n  Connect iPad to:  {url}\n")
         try:

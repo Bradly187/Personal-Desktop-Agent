@@ -12,7 +12,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–6 complete + tilt-position-mapping + SharedFaceSession (2026-05-17)
+## Current Status — Phases 1–6 complete + sensor-refinement + async perf (2026-05-18)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
@@ -79,7 +79,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 
 ```bash
 # Full pipeline — bridge + FusionEngine + HybridCoordinator + ContinuousTrainer
-python main.py [--port 8765] [--no-mdns] [--debug] [--safe-mode] [--viewer] [--viewer-only]
+python main.py [--port 8765] [--host 0.0.0.0] [--no-mdns] [--debug] [--safe-mode] [--viewer] [--viewer-only]
 
 # Measure actual VRAM usage on RTX 5090 (loads all models, prints table, exits)
 python main.py --measure-vram

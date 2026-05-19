@@ -1098,10 +1098,7 @@ class FusionEngine:
 
     async def _emit(self, cmd: Command) -> None:
         if self._coordinator:
-            # Fire-and-forget: don't block the 60Hz tick loop waiting for LLM inference.
-            # If an inference task is already in flight, skip this emission to prevent
-            # unbounded task accumulation. Touch/sound/dwell commands are fast (no LLM)
-            # so they complete quickly and don't cause stacking.
+            # Fire-and-forget: prevents 200-600ms LLM inference from blocking the 60Hz tick loop.
             asyncio.create_task(self._coordinator.route(cmd))
         else:
             log.warning("FusionEngine: no coordinator set — dropping %r", cmd)

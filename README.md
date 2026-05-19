@@ -32,7 +32,13 @@ ollama pull deepseek-r1:8b       # optional: math/reasoning
 python ipad_bridge.py
 ```
 
-This starts a WebSocket server on `:8765` and advertises via mDNS. Open `http://<PC-IP>:8765/` on your iPad in Safari for the web client, or build the native Swift app.
+This starts a WebSocket server on `0.0.0.0:8765` (all interfaces) and advertises via mDNS. Open `http://<PC-IP>:8765/` on your iPad in Safari for the web client, or build the native Swift app.
+
+To bind to a specific interface or change the port, pass arguments to `IPadBridge`:
+
+```python
+bridge = IPadBridge(port=9000, host="192.168.1.50")
+```
 
 ### 4. Start the full pipeline (voice + gesture + coordinator)
 
