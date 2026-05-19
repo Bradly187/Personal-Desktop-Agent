@@ -74,9 +74,13 @@ private struct CommandButtonView: View {
     }
 
     private func sendCommand() {
-        flash = true
-        withAnimation(.easeOut(duration: 0.2)) {
-            flash = false
+        withAnimation(.easeOut(duration: 0.15)) {
+            flash = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            withAnimation(.easeOut(duration: 0.2)) {
+                flash = false
+            }
         }
 
         var params: [String: Any] = [:]
