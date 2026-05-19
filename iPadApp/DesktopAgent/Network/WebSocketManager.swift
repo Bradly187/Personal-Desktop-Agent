@@ -304,8 +304,8 @@ extension WebSocketManager {
         send(["type": "gaze", "x": x, "y": y, "confidence": confidence])
     }
 
-    func sendGazeDelta(dx: Double, dy: Double) {
-        send(["type": "gaze_delta", "dx": dx, "dy": dy])
+    func sendGazeDelta(dx: Double, dy: Double, confidence: Double = 1.0, saccade: Bool = false) {
+        send(["type": "gaze_delta", "dx": dx, "dy": dy, "conf": confidence, "saccade": saccade])
     }
 
     func sendGazeDwell(x: Double, y: Double, actionType: DwellActionType) {
@@ -315,6 +315,26 @@ extension WebSocketManager {
 
     func sendHeadPose(pitch: Double, yaw: Double) {
         send(["type": "head_pose", "pitch": pitch, "yaw": yaw])
+    }
+
+    func sendRatchet() {
+        send(["type": "tilt_ratchet", "ts": CACurrentMediaTime()])
+    }
+
+    func sendSensorSwitch(from fromSensor: String?, to toSensor: String) {
+        var msg: [String: Any] = ["type": "sensor_switch", "to": toSensor, "ts": CACurrentMediaTime()]
+        if let from = fromSensor {
+            msg["from"] = from
+        }
+        send(msg)
+    }
+
+    func sendCursorPause() {
+        send(["type": "cursor_pause", "ts": CACurrentMediaTime()])
+    }
+
+    func sendCursorResume() {
+        send(["type": "cursor_resume", "ts": CACurrentMediaTime()])
     }
 
     func sendKeyword(word: String, confidence: Double) {

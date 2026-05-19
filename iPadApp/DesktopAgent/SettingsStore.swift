@@ -130,6 +130,25 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(gazeSensitivity, forKey: "gazeSensitivity") }
     }
 
+    // MARK: — Gaze 1-Euro Filter Parameters
+    @Published var gazeFilterMinCutoff: Double {
+        didSet { defaults.set(gazeFilterMinCutoff, forKey: "gazeFilterMinCutoff") }
+    }
+    @Published var gazeFilterBeta: Double {
+        didSet { defaults.set(gazeFilterBeta, forKey: "gazeFilterBeta") }
+    }
+    @Published var gazeFilterDCutoff: Double {
+        didSet { defaults.set(gazeFilterDCutoff, forKey: "gazeFilterDCutoff") }
+    }
+
+    // MARK: — Gaze Saccade Detection
+    @Published var gazeSaccadeEnterThreshold: Double {
+        didSet { defaults.set(gazeSaccadeEnterThreshold, forKey: "gazeSaccadeEnterThreshold") }
+    }
+    @Published var gazeSaccadeExitThreshold: Double {
+        didSet { defaults.set(gazeSaccadeExitThreshold, forKey: "gazeSaccadeExitThreshold") }
+    }
+
     /// The currently active dwell action type. Persisted to UserDefaults.
     @Published var activeDwellAction: DwellActionType {
         didSet { defaults.set(activeDwellAction.rawValue, forKey: "activeDwellAction") }
@@ -208,6 +227,23 @@ final class SettingsStore: ObservableObject {
     }
     @Published var headSmoothingFactor: Double {
         didSet { defaults.set(headSmoothingFactor, forKey: "headSmoothingFactor") }
+    }
+
+    // MARK: — Head 1-Euro Filter Parameters
+    @Published var headFilterMinCutoff: Double {
+        didSet { defaults.set(headFilterMinCutoff, forKey: "headFilterMinCutoff") }
+    }
+    @Published var headFilterBeta: Double {
+        didSet { defaults.set(headFilterBeta, forKey: "headFilterBeta") }
+    }
+    @Published var headFilterDCutoff: Double {
+        didSet { defaults.set(headFilterDCutoff, forKey: "headFilterDCutoff") }
+    }
+
+    // MARK: — Cursor Sensor Selection (mutual exclusion)
+    /// Which cursor-driving sensor is currently active: "tilt", "gaze", or "head".
+    @Published var activeCursorSensor: String {
+        didSet { defaults.set(activeCursorSensor, forKey: "activeCursorSensor") }
     }
 
     // MARK: — Trackpad
@@ -303,6 +339,11 @@ final class SettingsStore: ObservableObject {
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
         gazeStabilityThreshold = defaults.double(forKey: "gazeStabilityThreshold").nonZero ?? 0.04
         gazeSensitivity = defaults.double(forKey: "gazeSensitivity").nonZero ?? 200.0
+        gazeFilterMinCutoff = defaults.double(forKey: "gazeFilterMinCutoff").nonZero ?? 1.5
+        gazeFilterBeta = defaults.double(forKey: "gazeFilterBeta").nonZero ?? 0.01
+        gazeFilterDCutoff = defaults.double(forKey: "gazeFilterDCutoff").nonZero ?? 1.0
+        gazeSaccadeEnterThreshold = defaults.double(forKey: "gazeSaccadeEnterThreshold").nonZero ?? 100.0
+        gazeSaccadeExitThreshold = defaults.double(forKey: "gazeSaccadeExitThreshold").nonZero ?? 50.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
            let action = DwellActionType(rawValue: savedAction) {
@@ -327,6 +368,10 @@ final class SettingsStore: ObservableObject {
 
         headEnabled = defaults.object(forKey: "headEnabled") as? Bool ?? false
         headSmoothingFactor = defaults.double(forKey: "headSmoothingFactor").nonZero ?? 0.3
+        headFilterMinCutoff = defaults.double(forKey: "headFilterMinCutoff").nonZero ?? 1.2
+        headFilterBeta = defaults.double(forKey: "headFilterBeta").nonZero ?? 0.008
+        headFilterDCutoff = defaults.double(forKey: "headFilterDCutoff").nonZero ?? 1.0
+        activeCursorSensor = defaults.string(forKey: "activeCursorSensor") ?? "tilt"
         trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 2.0
         palmRejectRadius = defaults.double(forKey: "palmRejectRadius").nonZero ?? 25.0
         keywordList = defaults.stringArray(forKey: "keywordList") ?? ["click", "scroll", "open"]

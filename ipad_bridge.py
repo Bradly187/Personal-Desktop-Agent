@@ -274,6 +274,28 @@ class IPadBridge:
                 self._fusion.on_touch(cmd)
             return
 
+        if msg_type == "tilt_ratchet":
+            if self._fusion:
+                self._fusion.on_tilt_ratchet()
+            return
+
+        if msg_type == "sensor_switch":
+            if self._fusion:
+                from_sensor = msg.get("from")
+                to_sensor = msg.get("to", "tilt")
+                self._fusion.on_sensor_switch(from_sensor, to_sensor)
+            return
+
+        if msg_type == "cursor_pause":
+            if self._fusion:
+                self._fusion.on_cursor_pause()
+            return
+
+        if msg_type == "cursor_resume":
+            if self._fusion:
+                self._fusion.on_cursor_resume()
+            return
+
         if msg_type == "gaze":
             try:
                 if self._fusion:
@@ -292,7 +314,9 @@ class IPadBridge:
                 if self._fusion:
                     dx = float(msg.get("dx", 0.0))
                     dy = float(msg.get("dy", 0.0))
-                    self._fusion.on_gaze_delta(dx, dy)
+                    conf = float(msg.get("conf", 1.0))
+                    saccade = bool(msg.get("saccade", False))
+                    self._fusion.on_gaze_delta(dx, dy, conf=conf, saccade=saccade)
             except (ValueError, TypeError) as exc:
                 log.debug("Bad gaze_delta data: %s", exc)
             return

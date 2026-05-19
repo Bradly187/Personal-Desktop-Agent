@@ -130,6 +130,79 @@ final class TiltSensor: ObservableObject {
         generator.impactOccurred()
     }
 
+    // MARK: — Ratcheting (re-center without cursor jump)
+
+    /// Timestamp of the last ratchet action, used for 500ms debounce.
+    private var lastRatchetTime: Date?
+
+    /// Pending delayed ratchet (when device is moving at trigger time).
+    private var delayedRatchetTask: Task<Void, Never>?
+
+    /// Re-centers the tilt neutral point without moving the cursor.
+    /// Analogous to lifting and replacing a mouse — the cursor stays put while
+    /// the physical reference point resets.
+    ///
+    /// - If device angular velocity > 0.5 rad/s: delays capture up to 300ms
+    ///   until motion settles, then captures.
+    /// - Debounced: ignores triggers within 500ms of last ratchet.
+    /// - Sends `tilt_ratchet` to PC so FusionEngine holds cursor position.
+    func ratchet() {
+        // Debounce: ignore if within 500ms of last ratchet
+        if let last = lastRatchetTime, Date().timeIntervalSince(last) < 0.5 {
+            return
+        }
+
+        guard let data = motion.deviceMotion else { return }
+        let rot = data.rotationRate
+        let angVel = max(abs(rot.x), abs(rot.y), abs(rot.z))
+
+        if angVel > 0.5 {
+            // Device is moving — schedule delayed capture (up to 300ms)
+            delayedRatchetTask?.cancel()
+            delayedRatchetTask = Task { [weak self] in
+                // Poll at ~30ms intervals until motion settles or 300ms elapses
+                let deadline = Date().addingTimeInterval(0.3)
+                while Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 30_000_000)  // 30ms
+                    guard let self, let data = self.motion.deviceMotion else { return }
+                    let rot = data.rotationRate
+                    let vel = max(abs(rot.x), abs(rot.y), abs(rot.z))
+                    if vel <= 0.5 {
+                        await self.executeRatchet(gravity: data.gravity)
+                        return
+                    }
+                }
+                // 300ms elapsed without settling — capture anyway
+                guard let self, let data = self.motion.deviceMotion else { return }
+                await self.executeRatchet(gravity: data.gravity)
+            }
+        } else {
+            // Device is still — capture immediately
+            executeRatchet(gravity: data.gravity)
+        }
+    }
+
+    /// Performs the actual ratchet: captures gravity, notifies PC, provides feedback.
+    private func executeRatchet(gravity g: CMAcceleration) {
+        neutralGravity = SIMD3(g.x, g.y, g.z)
+
+        // Persist to SettingsStore
+        if let s = settings {
+            s.neutralGravityX = g.x
+            s.neutralGravityY = g.y
+            s.neutralGravityZ = g.z
+        }
+
+        lastRatchetTime = Date()
+
+        // Notify PC to hold cursor at current position
+        ws?.sendRatchet()
+
+        // Light haptic feedback — subtle confirmation (SVT-safe)
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.impactOccurred()
+    }
+
     // MARK: — Position Computation
 
     /// Computes normalized screen coordinates from the given gravity vector.

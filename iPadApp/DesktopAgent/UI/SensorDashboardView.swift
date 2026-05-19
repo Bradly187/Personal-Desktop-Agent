@@ -28,6 +28,10 @@ struct SensorDashboardView: View {
                     connectionHeader
                         .padding(.horizontal, DesignTokens.Spacing.lg)
 
+                    // Cursor control section (sensor picker, ratchet, pause)
+                    CursorControlSection()
+                        .padding(.horizontal, DesignTokens.Spacing.lg)
+
                     // Sensor cards
                     ForEach(sensorManager.sensorStates) { state in
                         SensorCard(
@@ -512,5 +516,206 @@ private struct LiDARDetailView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(theme.textSecondary)
         }
+    }
+}
+
+// MARK: - Cursor Control Section
+
+/// Top-level cursor control panel showing:
+/// - Active cursor sensor picker (segmented: tilt / gaze / head)
+/// - Ratchet button (re-center tilt without cursor jump)
+/// - Pause indicator (shows when cursor sensors are paused)
+///
+/// Design constraints:
+/// - Large touch targets (80pt min) for JIA accessibility
+/// - No startling transitions (SVT-safe)
+/// - Clear, predictable state indicators (bipolar-friendly)
+private struct CursorControlSection: View {
+    @EnvironmentObject var settings: SettingsStore
+    @EnvironmentObject var sensorManager: SensorManager
+    @EnvironmentObject var wsManager: WebSocketManager
+    @Environment(\.appTheme) private var theme
+
+    @State private var isPaused = false
+    @State private var showRatchetConfirmation = false
+
+    var body: some View {
+        VStack(spacing: DesignTokens.Spacing.md) {
+            // Section header
+            HStack {
+                Image(systemName: "cursorarrow.motionlines")
+                    .foregroundStyle(theme.accent)
+                Text("Cursor Control")
+                    .font(DesignTokens.Typography.body.weight(.semibold))
+                    .foregroundStyle(theme.textPrimary)
+                Spacer()
+                // Pause indicator
+                if isPaused {
+                    HStack(spacing: 4) {
+                        Image(systemName: "pause.circle.fill")
+                            .foregroundStyle(theme.warning)
+                        Text("Paused")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(theme.warning)
+                    }
+                }
+            }
+
+            // Cursor sensor picker (segmented control)
+            cursorSensorPicker
+
+            // Action buttons row
+            HStack(spacing: DesignTokens.Spacing.md) {
+                // Ratchet button (large touch target)
+                ratchetButton
+
+                // Pause/Resume button
+                pauseButton
+            }
+        }
+        .padding(DesignTokens.Spacing.lg)
+        .background(theme.surfaceSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+    }
+
+    // MARK: - Cursor Sensor Picker
+
+    private var cursorSensorPicker: some View {
+        VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
+            Text("Active Cursor Sensor")
+                .font(DesignTokens.Typography.caption)
+                .foregroundStyle(theme.textSecondary)
+
+            HStack(spacing: 0) {
+                sensorPickerButton(label: "Tilt", icon: "ipad.landscape", sensor: "tilt")
+                sensorPickerButton(label: "Gaze", icon: "eye", sensor: "gaze")
+                sensorPickerButton(label: "Head", icon: "face.smiling", sensor: "head")
+            }
+            .background(theme.surfacePrimary)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
+        }
+    }
+
+    private func sensorPickerButton(label: String, icon: String, sensor: String) -> some View {
+        let isActive = settings.activeCursorSensor == sensor
+        return Button {
+            selectCursorSensor(sensor)
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 16))
+                Text(label)
+                    .font(DesignTokens.Typography.caption)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 56)
+            .foregroundStyle(isActive ? theme.accent : theme.textSecondary)
+            .background(isActive ? theme.accent.opacity(0.15) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(label) cursor sensor")
+        .accessibilityAddTraits(isActive ? .isSelected : [])
+    }
+
+    // MARK: - Ratchet Button
+
+    private var ratchetButton: some View {
+        Button {
+            triggerRatchet()
+        } label: {
+            VStack(spacing: DesignTokens.Spacing.sm) {
+                Image(systemName: showRatchetConfirmation ? "checkmark.circle" : "arrow.counterclockwise")
+                    .font(.system(size: DesignTokens.Size.iconSize))
+                    .foregroundStyle(showRatchetConfirmation ? theme.connected : theme.accent)
+                Text("Re-center")
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textPrimary)
+            }
+            .frame(minWidth: DesignTokens.Size.touchTargetMin,
+                   minHeight: DesignTokens.Size.touchTargetMin)
+            .background(theme.surfacePrimary)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Re-center tilt")
+        .accessibilityHint("Resets tilt neutral point without moving cursor")
+        .disabled(settings.activeCursorSensor != "tilt")
+        .opacity(settings.activeCursorSensor == "tilt" ? 1.0 : 0.4)
+    }
+
+    // MARK: - Pause Button
+
+    private var pauseButton: some View {
+        Button {
+            togglePause()
+        } label: {
+            VStack(spacing: DesignTokens.Spacing.sm) {
+                Image(systemName: isPaused ? "play.circle" : "pause.circle")
+                    .font(.system(size: DesignTokens.Size.iconSize))
+                    .foregroundStyle(isPaused ? theme.connected : theme.accent)
+                Text(isPaused ? "Resume" : "Pause")
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textPrimary)
+            }
+            .frame(minWidth: DesignTokens.Size.touchTargetMin,
+                   minHeight: DesignTokens.Size.touchTargetMin)
+            .background(isPaused ? theme.warning.opacity(0.1) : theme.surfacePrimary)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isPaused ? "Resume cursor" : "Pause cursor")
+        .accessibilityHint(isPaused ? "Resumes cursor movement from current position" : "Freezes cursor in place")
+    }
+
+    // MARK: - Actions
+
+    private func selectCursorSensor(_ sensor: String) {
+        guard sensor != settings.activeCursorSensor else { return }
+
+        let fromSensor = settings.activeCursorSensor
+        settings.activeCursorSensor = sensor
+
+        // Disable old cursor sensor, enable new one
+        switch fromSensor {
+        case "tilt": settings.tiltEnabled = false
+        case "gaze": settings.gazeEnabled = false
+        case "head": settings.headEnabled = false
+        default: break
+        }
+        switch sensor {
+        case "tilt": settings.tiltEnabled = true
+        case "gaze": settings.gazeEnabled = true
+        case "head": settings.headEnabled = true
+        default: break
+        }
+
+        // Notify PC for 200ms cursor hold
+        wsManager.sendSensorSwitch(from: fromSensor, to: sensor)
+    }
+
+    private func triggerRatchet() {
+        sensorManager.tiltSensor.ratchet()
+
+        // Brief visual confirmation (200-400ms, no sound — SVT-safe)
+        showRatchetConfirmation = true
+        Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)  // 300ms
+            showRatchetConfirmation = false
+        }
+    }
+
+    private func togglePause() {
+        isPaused.toggle()
+        if isPaused {
+            wsManager.sendCursorPause()
+        } else {
+            wsManager.sendCursorResume()
+        }
+        // Light haptic — subtle confirmation (SVT-safe)
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.impactOccurred()
     }
 }

@@ -30,11 +30,143 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Deque, Optional
 
 from command_executor import Command
+from gyro_bias_calibrator import GyroBiasCalibrator
+from one_euro_filter import OneEuroFilter
 
 if TYPE_CHECKING:
     from hybrid_coordinator import HybridCoordinator
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Signal processing utility functions
+# ---------------------------------------------------------------------------
+
+def dead_zone_ramp(magnitude: float, inner: float, outer: float) -> float:
+    """Smooth ramp from 0 at inner threshold to full magnitude at outer threshold.
+
+    Uses cubic Hermite interpolation (smoothstep) for C1 continuity:
+    zero first-derivative at both boundaries.
+
+    Args:
+        magnitude: Absolute input value (must be >= 0).
+        inner: Inner threshold — below this, output is 0.
+        outer: Outer threshold — above this, output equals magnitude.
+
+    Returns:
+        Ramped output value in [0, magnitude].
+    """
+    if magnitude <= inner:
+        return 0.0
+    if magnitude >= outer:
+        return magnitude
+    # Normalized position within ramp [0, 1]
+    t = (magnitude - inner) / (outer - inner)
+    # Smoothstep: 3t² - 2t³ (zero derivative at t=0 and t=1)
+    s = t * t * (3.0 - 2.0 * t)
+    return s * magnitude
+
+
+def power_curve(value: float, exponent: float, sensitivity: float = 1.0) -> float:
+    """Non-linear transfer function with sign preservation.
+
+    output = sign(value) * |value|^exponent * sensitivity
+
+    Args:
+        value: Input value (can be negative).
+        exponent: Power exponent (>= 1.0 for super-linear at extremes).
+        sensitivity: Multiplier applied after the power function.
+
+    Returns:
+        Transformed value with preserved sign.
+    """
+    if value == 0.0:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    return sign * (abs(value) ** exponent) * sensitivity
+
+
+def head_acceleration_curve(
+    velocity_deg_s: float,
+    exponent: float = 1.8,
+    tremor_threshold: float = 1.0,
+    tick_hz: float = 60.0,
+) -> float:
+    """Map head angular velocity to cursor pixels/tick using a 3-zone model.
+
+    Zone 1: |v| < tremor_threshold → 0 (tremor suppression)
+    Zone 2-3: sign(v) * (|v| - tremor_threshold)^exponent / tick_hz
+
+    Subtracting tremor_threshold ensures continuity at the zone 1→2 boundary
+    (output starts at 0 when crossing the threshold).
+
+    Args:
+        velocity_deg_s: Head angular velocity in degrees/second.
+        exponent: Power curve exponent (default 1.8).
+        tremor_threshold: Below this velocity, output is zero (default 1.0 °/s).
+        tick_hz: Tick rate for per-tick displacement (default 60.0).
+
+    Returns:
+        Cursor displacement in pixels/tick (before sensitivity multiplier).
+    """
+    if abs(velocity_deg_s) < tremor_threshold:
+        return 0.0
+    sign = 1.0 if velocity_deg_s > 0 else -1.0
+    effective = abs(velocity_deg_s) - tremor_threshold
+    return sign * (effective ** exponent) / tick_hz
+
+
+class HeadStationaryLock:
+    """Hysteresis-based cursor lock for head tracking.
+
+    Locks cursor when head is still (below lock_threshold for lock_delay seconds).
+    Unlocks when head moves above unlock_threshold.
+    The hysteresis gap prevents rapid lock/unlock cycling at the boundary.
+    """
+
+    def __init__(
+        self,
+        lock_threshold: float = 0.5,
+        unlock_threshold: float = 1.5,
+        lock_delay: float = 0.2,
+    ) -> None:
+        self.lock_threshold = lock_threshold
+        self.unlock_threshold = unlock_threshold
+        self.lock_delay = lock_delay
+        self.locked = False
+        self._still_since: float | None = None
+
+    def reset(self) -> None:
+        """Reset lock state."""
+        self.locked = False
+        self._still_since = None
+
+    def update(self, velocity_deg_s: float, now: float) -> bool:
+        """Update lock state. Returns True if cursor should be locked.
+
+        Args:
+            velocity_deg_s: Magnitude of head angular velocity (°/s).
+            now: Monotonic timestamp.
+
+        Returns:
+            True if cursor should be locked (no movement output).
+        """
+        if self.locked:
+            if abs(velocity_deg_s) > self.unlock_threshold:
+                self.locked = False
+                self._still_since = None
+            return self.locked
+
+        if abs(velocity_deg_s) < self.lock_threshold:
+            if self._still_since is None:
+                self._still_since = now
+            elif now - self._still_since >= self.lock_delay:
+                self.locked = True
+        else:
+            self._still_since = None
+
+        return self.locked
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +199,41 @@ class FusionConfig:
 
     # Tilt position (absolute-mapping mode)
     tilt_pos_alpha: float = 0.4              # EMA smoothing factor (0=no smoothing, 1=instant)
+
+    # 1-Euro filter — tilt velocity mode
+    tilt_vel_min_cutoff: float = 1.0         # Hz — minimum cutoff (jitter reduction at rest)
+    tilt_vel_beta: float = 0.007             # speed coefficient (responsiveness to fast moves)
+    tilt_vel_d_cutoff: float = 1.0           # Hz — derivative cutoff
+
+    # 1-Euro filter — tilt position mode
+    tilt_pos_min_cutoff: float = 0.5         # Hz — lower cutoff for position stability
+    tilt_pos_beta: float = 0.004             # lower beta for smoother position tracking
+    tilt_pos_d_cutoff: float = 1.0           # Hz — derivative cutoff
+
+    # Power curve exponents
+    tilt_vel_exponent: float = 2.0           # [1.0, 4.0] — quadratic for velocity
+    tilt_pos_exponent: float = 1.5           # [1.0, 3.0] — sub-linear center, super-linear edges
+
+    # Dead zone ramp (tilt velocity)
+    dead_zone_inner: float = 0.05            # rad/s — below this: zero output
+    dead_zone_ramp_mult: float = 1.5         # outer = inner + inner * mult → 0.125 rad/s
+
+    # Head acceleration curve
+    head_accel_exponent: float = 1.8         # [1.0, 3.0] — power curve for head velocity
+    head_tremor_threshold: float = 1.0       # °/s — below this: zero output (tremor suppression)
+    head_lock_threshold: float = 0.5         # °/s — lock cursor when below this for lock_delay
+    head_unlock_threshold: float = 1.5       # °/s — unlock cursor when above this
+    head_lock_delay: float = 0.2             # seconds of stillness before locking
+
+    # Gaze fixation/confidence (PC-side thresholds)
+    gaze_fixation_enter: float = 5.0         # °/s — enter fixation slowdown below this
+    gaze_fixation_exit: float = 20.0         # °/s — exit fixation above this
+    gaze_fixation_duration: float = 0.1      # seconds below threshold to activate
+    gaze_fixation_slowdown: float = 0.5      # multiplier during fixation (50% speed)
+    gaze_conf_freeze_threshold: float = 0.3  # freeze cursor below this confidence
+    gaze_conf_freeze_duration: float = 0.5   # seconds below threshold to freeze
+    gaze_conf_resume_threshold: float = 0.6  # resume above this confidence
+    gaze_conf_resume_duration: float = 0.2   # seconds above threshold to resume
 
     def __post_init__(self) -> None:
         if not (0.02 <= self.edge_scroll_zone_pct <= 0.20):
@@ -143,21 +310,70 @@ class FusionEngine:
         self._gaze_dwell: Optional[tuple[float, float]] = None   # norm (x, y)
         self._gaze_dwell_action_type: str = "left_click"         # action type for pending dwell
         self._gaze_delta: Optional[tuple[float, float]] = None   # (dx, dy) pixels
+        self._gaze_delta_conf: float = 1.0                       # tracking confidence
+        self._gaze_delta_saccade: bool = False                   # saccade flag from iPad
+
+        # --- Gaze fixation/confidence state (PC-side) ---
+        self._gaze_fixation_active: bool = False
+        self._gaze_fixation_start: float | None = None           # when velocity first dropped below threshold
+        self._gaze_fixation_exit_start: float | None = None      # when velocity first rose above exit threshold
+        self._gaze_conf_frozen: bool = False
+        self._gaze_conf_low_start: float | None = None           # when confidence first dropped below freeze threshold
+        self._gaze_conf_high_start: float | None = None          # when confidence first rose above resume threshold
+        self._gaze_prev_dx: float = 0.0                          # previous frame dx for velocity estimation
+        self._gaze_prev_dy: float = 0.0                          # previous frame dy for velocity estimation
         self._gesture: Optional[Command] = None
         self._voice_local: Optional[str] = None                  # keyword text
         self._voice: Optional[Command] = None
         self._tilt: Optional[tuple[float, float]] = None          # (rx, ry) rad/s
-        self._tilt_ema_x: float = 0.0                             # EMA-smoothed tilt X
-        self._tilt_ema_y: float = 0.0                             # EMA-smoothed tilt Y
+        self._tilt_filter_x: OneEuroFilter = OneEuroFilter(       # 1-Euro filter for tilt velocity X
+            min_cutoff=self._cfg.tilt_vel_min_cutoff,
+            beta=self._cfg.tilt_vel_beta,
+            d_cutoff=self._cfg.tilt_vel_d_cutoff,
+        )
+        self._tilt_filter_y: OneEuroFilter = OneEuroFilter(       # 1-Euro filter for tilt velocity Y
+            min_cutoff=self._cfg.tilt_vel_min_cutoff,
+            beta=self._cfg.tilt_vel_beta,
+            d_cutoff=self._cfg.tilt_vel_d_cutoff,
+        )
+        self._tilt_bias_cal: GyroBiasCalibrator = GyroBiasCalibrator()  # gyro bias calibration
         self._tilt_accum_x: float = 0.0                           # sub-pixel accumulator X
         self._tilt_accum_y: float = 0.0                           # sub-pixel accumulator Y
         self._head: Optional[tuple[float, float]] = None          # (pitch, yaw) degrees
 
+        # --- Head stationary lock (hysteresis-based cursor freeze) ---
+        self._head_lock = HeadStationaryLock(
+            lock_threshold=self._cfg.head_lock_threshold,
+            unlock_threshold=self._cfg.head_unlock_threshold,
+            lock_delay=self._cfg.head_lock_delay,
+        )
+
         # --- Tilt position (absolute positioning from iPad position-mapped mode) ---
         self._tilt_position: Optional[tuple[float, float]] = None  # (x, y) normalized [0,1]
-        self._tilt_pos_ema_x: float = 0.5                          # EMA-smoothed position X
-        self._tilt_pos_ema_y: float = 0.5                          # EMA-smoothed position Y
-        self._tilt_pos_initialized: bool = False                   # first sample initializes EMA
+        self._tilt_pos_filter_x: OneEuroFilter = OneEuroFilter(    # 1-Euro filter for position X
+            min_cutoff=self._cfg.tilt_pos_min_cutoff,
+            beta=self._cfg.tilt_pos_beta,
+            d_cutoff=self._cfg.tilt_pos_d_cutoff,
+        )
+        self._tilt_pos_filter_y: OneEuroFilter = OneEuroFilter(    # 1-Euro filter for position Y
+            min_cutoff=self._cfg.tilt_pos_min_cutoff,
+            beta=self._cfg.tilt_pos_beta,
+            d_cutoff=self._cfg.tilt_pos_d_cutoff,
+        )
+
+        # --- Ratchet state (tilt position re-centering) ---
+        self._ratchet_active: bool = False
+        self._ratchet_held_pos: Optional[tuple[int, int]] = None   # pixel position to hold
+
+        # --- Sensor switch hold (mutual exclusion) ---
+        self._switch_hold_until: float = 0.0                       # monotonic time until which cursor data is discarded
+
+        # --- Cursor pause state ---
+        self._cursor_paused: bool = False
+        self._cursor_pause_time: float | None = None
+        self._cursor_pause_last_toggle: float = 0.0
+        self._cursor_pause_auto_resume_s: float = 60.0
+        self._cursor_pause_debounce_s: float = 0.5
 
         # --- Gaze state ---
         self._gaze_buf = _GazeBuffer(
@@ -263,13 +479,21 @@ class FusionEngine:
     def on_gaze(self, x: float, y: float, conf: float) -> None:
         self._gaze_buf.update(x, y, conf)
 
-    def on_gaze_delta(self, dx: float, dy: float) -> None:
+    def on_gaze_delta(self, dx: float, dy: float, conf: float = 1.0, saccade: bool = False) -> None:
         """Receive relative gaze movement deltas from iPad.
 
         Moves the cursor by (dx, dy) pixels. This replaces absolute gaze
         positioning — works regardless of iPad angle relative to monitors.
+
+        Args:
+            dx: Horizontal cursor displacement (pixels).
+            dy: Vertical cursor displacement (pixels).
+            conf: Tracking confidence [0.0, 1.0]. Used for fixation slowdown.
+            saccade: True if iPad detected a saccade (output already suppressed).
         """
         self._gaze_delta = (dx, dy)
+        self._gaze_delta_conf = conf
+        self._gaze_delta_saccade = saccade
 
     def on_gaze_dwell(self, x: float, y: float, action_type: str = "left_click") -> None:
         self._gaze_dwell = (x, y)
@@ -281,6 +505,87 @@ class FusionEngine:
     def on_tilt_position(self, x: float, y: float) -> None:
         """Receive absolute position from iPad tilt sensor (position-mapped mode)."""
         self._tilt_position = (x, y)
+
+    def on_tilt_ratchet(self) -> None:
+        """Handle ratchet trigger from iPad — hold cursor at current position.
+
+        The cursor stays frozen until the next tilt input exceeds the dead zone
+        from the new neutral point. The iPad has already captured the new neutral
+        gravity vector; this just tells the PC to hold position.
+        """
+        import pyautogui
+        # Record current cursor position as the held position
+        pos = pyautogui.position()
+        self._ratchet_held_pos = (pos.x, pos.y)
+        self._ratchet_active = True
+        # Reset tilt position filter so it starts fresh from the new neutral
+        self._tilt_pos_filter_x.reset()
+        self._tilt_pos_filter_y.reset()
+        log.info("Ratchet activated — holding cursor at (%d, %d)", pos.x, pos.y)
+
+    def on_sensor_switch(self, from_sensor: str | None, to_sensor: str) -> None:
+        """Handle cursor sensor switch — hold cursor for 200ms to prevent jump.
+
+        Called when iPad SensorManager switches between tilt/gaze/head.
+        Discards all cursor-sensor data during the hold window.
+        """
+        self._switch_hold_until = time.monotonic() + 0.2
+        # Reset filter state for the new sensor
+        if to_sensor == "tilt":
+            self._tilt_pos_filter_x.reset()
+            self._tilt_pos_filter_y.reset()
+            self._tilt_filter_x.reset()
+            self._tilt_filter_y.reset()
+            self._tilt_bias_cal.reset()
+            self._tilt_accum_x = 0.0
+            self._tilt_accum_y = 0.0
+        elif to_sensor == "head":
+            self._head_lock.reset()
+        # Gaze filters are on iPad side — no PC state to reset
+        log.info("Sensor switch: %s → %s (200ms hold)", from_sensor, to_sensor)
+
+    def on_cursor_pause(self) -> None:
+        """Pause all cursor sensors — cursor stays at current position.
+
+        Debounced: ignores triggers within 500ms of last toggle.
+        """
+        now = time.monotonic()
+        if now - self._cursor_pause_last_toggle < self._cursor_pause_debounce_s:
+            return
+        self._cursor_pause_last_toggle = now
+
+        if not self._cursor_paused:
+            self._cursor_paused = True
+            self._cursor_pause_time = now
+            # Reset accumulators so no drift builds up
+            self._tilt_accum_x = 0.0
+            self._tilt_accum_y = 0.0
+            log.info("Cursor paused")
+
+    def on_cursor_resume(self) -> None:
+        """Resume cursor sensors — re-zero from current physical state.
+
+        Debounced: ignores triggers within 500ms of last toggle.
+        """
+        now = time.monotonic()
+        if now - self._cursor_pause_last_toggle < self._cursor_pause_debounce_s:
+            return
+        self._cursor_pause_last_toggle = now
+
+        if self._cursor_paused:
+            self._cursor_paused = False
+            self._cursor_pause_time = None
+            # Re-zero: reset all sensor filters so cursor doesn't jump
+            self._tilt_pos_filter_x.reset()
+            self._tilt_pos_filter_y.reset()
+            self._tilt_filter_x.reset()
+            self._tilt_filter_y.reset()
+            self._tilt_accum_x = 0.0
+            self._tilt_accum_y = 0.0
+            self._head_lock.reset()
+            self._gaze_fixation_active = False
+            self._gaze_conf_frozen = False
+            log.info("Cursor resumed (sensors re-zeroed)")
 
     def on_head(self, pitch: float, yaw: float) -> None:
         self._head = (pitch, yaw)
@@ -324,13 +629,23 @@ class FusionEngine:
                 await self._emit(auto_release_cmd)
                 return
 
-        # Rule 1 — Touch (bypass all gates)
+        # --- Cursor pause: auto-resume after timeout ---
+        if self._cursor_paused and self._cursor_pause_time:
+            if tick_start - self._cursor_pause_time > self._cursor_pause_auto_resume_s:
+                log.warning("Cursor pause auto-resume after %.0fs", self._cursor_pause_auto_resume_s)
+                self.on_cursor_resume()
+
+        # --- Sensor switch hold: discard cursor data during 200ms window ---
+        # Touch and sound still pass through (they bypass all gates).
+        switch_hold_active = tick_start < self._switch_hold_until
+
+        # Rule 1 — Touch (bypass all gates, even during pause/switch hold)
         if self._touch:
             cmd, self._touch = self._touch, None
             await self._emit(cmd)
             return
 
-        # Rule 2 — Sound action (bypass all gates)
+        # Rule 2 — Sound action (bypass all gates, even during pause)
         if self._sound:
             cmd, self._sound = self._sound, None
             await self._emit(cmd)
@@ -463,11 +778,73 @@ class FusionEngine:
                     await self._apply_gaze_cursor(latest_gaze.x, latest_gaze.y, 0.0)
 
         # Gaze delta: relative cursor movement from eye direction changes
+        # Includes fixation slowdown and confidence freeze (Req 15).
         if self._gaze_delta:
             dx, dy = self._gaze_delta
+            conf = self._gaze_delta_conf
             self._gaze_delta = None
-            if abs(dx) > 0.5 or abs(dy) > 0.5:  # skip sub-pixel noise
-                await asyncio.to_thread(pyautogui.moveRel, int(dx), int(dy), duration=0)
+
+            now = time.monotonic()
+
+            # --- Confidence freeze: freeze cursor when confidence is too low ---
+            if not self._gaze_conf_frozen:
+                if conf < self._cfg.gaze_conf_freeze_threshold:
+                    if self._gaze_conf_low_start is None:
+                        self._gaze_conf_low_start = now
+                    elif now - self._gaze_conf_low_start >= self._cfg.gaze_conf_freeze_duration:
+                        self._gaze_conf_frozen = True
+                        self._gaze_conf_low_start = None
+                        self._gaze_conf_high_start = None
+                else:
+                    self._gaze_conf_low_start = None
+            else:
+                # Frozen — check if confidence recovered enough to resume
+                if conf >= self._cfg.gaze_conf_resume_threshold:
+                    if self._gaze_conf_high_start is None:
+                        self._gaze_conf_high_start = now
+                    elif now - self._gaze_conf_high_start >= self._cfg.gaze_conf_resume_duration:
+                        self._gaze_conf_frozen = False
+                        self._gaze_conf_high_start = None
+                        self._gaze_conf_low_start = None
+                else:
+                    self._gaze_conf_high_start = None
+
+            # If frozen, discard gaze data entirely
+            if self._gaze_conf_frozen:
+                pass  # cursor stays at last position
+            elif abs(dx) > 0.01 or abs(dy) > 0.01:
+                # --- Fixation slowdown: reduce speed during fixation ---
+                # Estimate gaze velocity from delta magnitude (already in pixels)
+                # Convert to approximate °/s: pixels / sensitivity ≈ radians, * 180/π * 60fps
+                gaze_vel_approx = math.hypot(dx, dy)  # pixel-space velocity proxy
+
+                if not self._gaze_fixation_active:
+                    if gaze_vel_approx < self._cfg.gaze_fixation_enter:
+                        if self._gaze_fixation_start is None:
+                            self._gaze_fixation_start = now
+                        elif now - self._gaze_fixation_start >= self._cfg.gaze_fixation_duration:
+                            self._gaze_fixation_active = True
+                            self._gaze_fixation_start = None
+                    else:
+                        self._gaze_fixation_start = None
+                else:
+                    # Active fixation — check exit condition
+                    if gaze_vel_approx > self._cfg.gaze_fixation_exit:
+                        if self._gaze_fixation_exit_start is None:
+                            self._gaze_fixation_exit_start = now
+                        elif now - self._gaze_fixation_exit_start >= 0.03:  # 30ms sustained
+                            self._gaze_fixation_active = False
+                            self._gaze_fixation_exit_start = None
+                    else:
+                        self._gaze_fixation_exit_start = None
+
+                # Apply fixation slowdown multiplier
+                speed_mult = self._cfg.gaze_fixation_slowdown if self._gaze_fixation_active else 1.0
+                final_dx = dx * speed_mult
+                final_dy = dy * speed_mult
+
+                if abs(final_dx) > 0.5 or abs(final_dy) > 0.5:
+                    await asyncio.to_thread(pyautogui.moveRel, int(final_dx), int(final_dy), duration=0)
 
         # Gaze stability — used by Rules 4 & 5
         stable = self._gaze_buf.stable_centroid(self._diag)
@@ -513,6 +890,22 @@ class FusionEngine:
             await self._emit(cmd)
             return
 
+        # --- Pause / Switch hold guard for cursor-driving sensors ---
+        # When paused or during sensor switch, discard all cursor sensor data
+        # (tilt, head, gaze delta) without accumulating state.
+        if self._cursor_paused or switch_hold_active:
+            # Consume and discard cursor sensor inputs
+            self._tilt_position = None
+            self._tilt = None
+            self._head = None
+            if self._gaze_delta:
+                self._gaze_delta = None
+            # Reset accumulators to prevent drift buildup
+            self._tilt_accum_x = 0.0
+            self._tilt_accum_y = 0.0
+            # Still allow voice/gesture rules below to fire
+            # (they don't move the cursor directly)
+
         # Rule 6 — Tilt navigation (direct to pyautogui, no Command, no LLM)
         # Position-mapped tilt_position takes priority over legacy velocity tilt.
         # In gaze-to-cursor mode, suppressed while gaze is active (prevents fighting).
@@ -536,19 +929,46 @@ class FusionEngine:
                 if gaze_cursor_on:
                     self._gaze_cursor_ema = None
 
-                # EMA smoothing
-                if not self._tilt_pos_initialized:
-                    self._tilt_pos_ema_x = x
-                    self._tilt_pos_ema_y = y
-                    self._tilt_pos_initialized = True
-                else:
-                    a = self._cfg.tilt_pos_alpha
-                    self._tilt_pos_ema_x = a * x + (1 - a) * self._tilt_pos_ema_x
-                    self._tilt_pos_ema_y = a * y + (1 - a) * self._tilt_pos_ema_y
+                now = time.monotonic()
+
+                # 1-Euro filter (per-axis adaptive smoothing)
+                filtered_x = self._tilt_pos_filter_x(x, timestamp=now)
+                filtered_y = self._tilt_pos_filter_y(y, timestamp=now)
+
+                # Ratchet: hold cursor until displacement exceeds dead zone
+                if self._ratchet_active:
+                    # Check if displacement from center (new neutral) exceeds threshold
+                    # Dead zone in position mode: 2° / tilt_range mapped to normalized units
+                    dead_zone_norm = 2.0 / (self._cfg.tilt_pos_alpha * 60.0) if hasattr(self._cfg, 'tilt_pos_alpha') else 0.08
+                    # Simple check: displacement from center > threshold
+                    disp = math.hypot(filtered_x - 0.5, filtered_y - 0.5)
+                    if disp < 0.04:  # ~2° at 25° range
+                        # Still within dead zone — hold cursor
+                        if self._ratchet_held_pos:
+                            await asyncio.to_thread(
+                                pyautogui.moveTo,
+                                self._ratchet_held_pos[0],
+                                self._ratchet_held_pos[1],
+                                duration=0,
+                            )
+                        return
+                    else:
+                        # Exceeded dead zone — deactivate ratchet, resume normal
+                        self._ratchet_active = False
+                        self._ratchet_held_pos = None
+                        log.info("Ratchet deactivated — tilt exceeded dead zone")
+
+                # Power curve on displacement from center (per-axis)
+                dx = filtered_x - 0.5
+                dy = filtered_y - 0.5
+                exp = self._cfg.tilt_pos_exponent
+                # Normalize to [-1, 1], apply power curve, denormalize back to [0, 1]
+                curved_x = 0.5 + power_curve(dx / 0.5, exp) * 0.5 if dx != 0.0 else 0.5
+                curved_y = 0.5 + power_curve(dy / 0.5, exp) * 0.5 if dy != 0.0 else 0.5
 
                 # Convert to pixels
-                px_x = round(self._tilt_pos_ema_x * self._w)
-                px_y = round(self._tilt_pos_ema_y * self._h)
+                px_x = round(curved_x * self._w)
+                px_y = round(curved_y * self._h)
 
                 # Clamp to screen bounds
                 px_x = max(0, min(self._w - 1, px_x))
@@ -565,23 +985,48 @@ class FusionEngine:
             else:
                 rx, ry = self._tilt
                 self._tilt = None
-                dz = self._cfg.tilt_dead_zone
 
-                # Apply dead zone — zero out values below threshold
-                rx = rx if abs(rx) > dz else 0.0
-                ry = ry if abs(ry) > dz else 0.0
+                now = time.monotonic()
 
-                # EMA smoothing (α=0.3 balances responsiveness vs jitter)
-                alpha = 0.3
-                self._tilt_ema_x = alpha * rx + (1 - alpha) * self._tilt_ema_x
-                self._tilt_ema_y = alpha * ry + (1 - alpha) * self._tilt_ema_y
+                # 1. Feed raw values to bias calibrator (state machine update)
+                self._tilt_bias_cal.update(rx, ry, now=now)
+
+                # 2. Subtract estimated gyro bias
+                bias_x, bias_y = self._tilt_bias_cal.get_current_bias(now=now)
+                rx -= bias_x
+                ry -= bias_y
+
+                # 3. Check uncalibrated suppression
+                if self._tilt_bias_cal.should_suppress(rx, ry):
+                    return
+
+                # 4. 1-Euro adaptive filter (per-axis)
+                rx = self._tilt_filter_x(rx, timestamp=now)
+                ry = self._tilt_filter_y(ry, timestamp=now)
+
+                # 5. Dead zone ramp (smoothstep transition)
+                inner = self._cfg.dead_zone_inner
+                outer = inner + inner * self._cfg.dead_zone_ramp_mult
+                rx_mag = abs(rx)
+                ry_mag = abs(ry)
+                rx_ramped = dead_zone_ramp(rx_mag, inner, outer)
+                ry_ramped = dead_zone_ramp(ry_mag, inner, outer)
+                # Restore sign
+                rx_ramped = rx_ramped if rx >= 0 else -rx_ramped
+                ry_ramped = ry_ramped if ry >= 0 else -ry_ramped
+
+                # 6. Power curve transfer function
+                sensitivity = self._cfg.tilt_sensitivity
+                exp = self._cfg.tilt_vel_exponent
+                cursor_dx = power_curve(rx_ramped, exp, sensitivity)
+                cursor_dy = power_curve(ry_ramped, exp, sensitivity)
 
                 # rx = rotationRate.x: rotation around X-axis → vertical cursor
                 #   positive rx (tilt top away) → cursor moves up (negative dy)
                 # ry = rotationRate.y: rotation around Y-axis → horizontal cursor
                 #   tilt right (negative ry) → cursor moves right (positive dx)
-                self._tilt_accum_x += -self._tilt_ema_y * self._cfg.tilt_sensitivity
-                self._tilt_accum_y += -self._tilt_ema_x * self._cfg.tilt_sensitivity
+                self._tilt_accum_x += -cursor_dy  # ry → horizontal
+                self._tilt_accum_y += -cursor_dx  # rx → vertical
 
                 # Only move when we've accumulated at least 1 pixel
                 dx = int(self._tilt_accum_x)
@@ -596,6 +1041,7 @@ class FusionEngine:
                 return
 
         # Rule 7 — Head tracking (direct to pyautogui, no Command, no LLM)
+        # Uses 3-zone acceleration curve + stationary lock with hysteresis.
         # Same escape-hatch logic as Rule 6.
         if self._head:
             gaze_cursor_on = self._feature_toggles.get("gaze_cursor_mode", False)
@@ -604,8 +1050,28 @@ class FusionEngine:
             else:
                 pitch, yaw = self._head
                 self._head = None
-                dx = int(yaw * self._cfg.head_sensitivity)
-                dy = int(-pitch * self._cfg.head_sensitivity)
+                now = time.monotonic()
+
+                # Compute velocity magnitude for stationary lock
+                velocity_mag = math.hypot(pitch, yaw)
+
+                # Stationary lock: freeze cursor when head is still
+                if self._head_lock.update(velocity_mag, now):
+                    return  # locked — no cursor movement
+
+                # 3-zone acceleration curve (per-axis)
+                # Tremor suppression + power curve with configurable exponent
+                exp = self._cfg.head_accel_exponent
+                tremor = self._cfg.head_tremor_threshold
+                tick_hz = self._cfg.tick_hz
+
+                accel_pitch = head_acceleration_curve(pitch, exp, tremor, tick_hz)
+                accel_yaw = head_acceleration_curve(yaw, exp, tremor, tick_hz)
+
+                # Apply sensitivity multiplier
+                dx = int(accel_yaw * self._cfg.head_sensitivity)
+                dy = int(accel_pitch * self._cfg.head_sensitivity)
+
                 if dx or dy:
                     if gaze_cursor_on:
                         self._gaze_cursor_ema = None
