@@ -102,6 +102,9 @@ iPad Sensors → WebSocket → ipad_bridge.py → FusionEngine (priority routing
 ├── whisper_stream.py          # Silero VAD → faster-whisper GPU
 ├── gesture_processor.py       # MediaPipe Hands → gesture commands
 ├── continuous_trainer.py      # Background learning (thresholds, vocab, few-shot)
+├── audit_log.py               # Append-only security audit trail (SQLite WAL)
+├── mcp_trust_classifier.py    # Taint analysis for MCP tool outputs (injection detection)
+├── content_filter.py          # Secrets/PII redaction before API transmission
 ├── domain_classifier.py       # Route to specialist models
 ├── model_router.py            # VRAM-aware model selection
 ├── sensor_viewer.py           # Desktop viewer: camera + depth + overlays + snapshot (tkinter)
@@ -223,6 +226,68 @@ python main.py --viewer-only
 - **Gaze smoothing**: EMA factor reuses `gazeStabilityThreshold` setting; suppresses jitter while preserving responsiveness. A dead zone (0.002) filters sub-threshold noise. Auto-tuned alongside sensitivity during calibration.
 - **Gaze calibration**: A guided 15-second flow (Settings → Gaze Calibration) that measures baseline jitter and directional eye range, then computes optimal sensitivity and smoothing values. Phases: look straight (3s baseline) → left/right/up/down (2s each) → auto-compute → accept or retry.
 - **Voice hotwords**: Auto-promoted from usage patterns
+
+## Audit Log
+
+An append-only security audit trail stored in `audit.db` (separate from `agent.db`). Records shell executions, API calls, file access, MCP tool invocations, security events, approval decisions, and session lifecycle events.
+
+- SQLite WAL mode for concurrent reads during writes
+- Triggers enforce append-only — no UPDATE or DELETE allowed on `audit_events`
+- Async interface (`aiosqlite`) consistent with the AgentDB pattern
+- Gracefully disabled if `aiosqlite` is not installed
+
+```python
+from audit_log import AuditLog
+
+audit = AuditLog()
+await audit.open("audit.db")
+await audit.log_mcp_call("mouse_click", params={"x": 100, "y": 200})
+await audit.log_security_event("PII detected in prompt", severity="warning")
+await audit.log_shell_exec("notepad.exe", outcome="success")
+await audit.close()
+```
+
+Event types: `shell_exec`, `api_call`, `file_access`, `mcp_call`, `security_event`, `approval`, `session_lifecycle`.
+
+## MCP Trust Classifier
+
+Taint analysis layer that scans all MCP tool outputs before they enter the next LLM reasoning step. Detects prompt injection, command injection, data exfiltration, and privilege escalation patterns embedded in untrusted data (email content, document text, web pages, file contents).
+
+Risk levels:
+- **HIGH** → block execution, require human approval
+- **MEDIUM** → log warning, proceed with caution flag
+- **LOW** → pass through, log for audit trail
+
+```python
+from mcp_trust_classifier import MCPTrustClassifier, RiskLevel
+
+tc = MCPTrustClassifier(audit_log=audit)
+verdict = await tc.classify(tool_name="read_email", result=email_body)
+if verdict.should_block:
+    # Require human approval before proceeding
+    pass
+```
+
+Detection categories: `prompt_injection` (role reassignment, delimiter injection, roleplay triggers), `command_injection` (shell metacharacters, subshell execution), `data_exfil` (encoded URL parameters, known exfil endpoints), `priv_escalation` (sudo requests, dangerous permission changes).
+
+A synchronous `classify_sync()` method is available for non-async contexts (skips audit logging).
+
+## Content Filter
+
+Regex-based secrets and PII scanner that redacts sensitive data before text is sent to external APIs. Integrates with `AuditLog` to record security events when secrets are detected.
+
+Detected patterns include AWS keys, Anthropic/OpenAI/GitHub tokens, private keys, database connection strings, SSNs, and credit card numbers. The filter does not block execution — it redacts and logs, leaving the caller to decide whether to proceed.
+
+```python
+from content_filter import ContentFilter
+
+cf = ContentFilter(audit_log=audit)
+clean_text, findings = await cf.scrub(prompt_text)
+# clean_text has secrets replaced with [REDACTED:pattern_name]
+# findings list contains metadata (never the full secret)
+```
+
+A synchronous `scrub_sync()` method is available for non-async contexts (skips audit logging).
 
 ## Health-Aware Design
 
