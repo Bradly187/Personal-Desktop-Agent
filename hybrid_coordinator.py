@@ -329,6 +329,17 @@ _SKIP_GATE1_SOURCES = {"voice_local"}
 
 
 class HybridCoordinator:
+    # Class-level DomainClassifier — stateless keyword scorer, no need to
+    # re-instantiate per route() call.
+    _domain_classifier = None
+
+    @classmethod
+    def _get_domain_classifier(cls):
+        if cls._domain_classifier is None:
+            from domain_classifier import DomainClassifier
+            cls._domain_classifier = DomainClassifier()
+        return cls._domain_classifier
+
     def __init__(
         self,
         local: LocalInference | None = None,
@@ -349,6 +360,10 @@ class HybridCoordinator:
         self._agent_db = agent_db
         self._session_id = session_id
         self._latency_ema: Optional[float] = None
+
+        # Gate 3 VRAM cache — avoid calling pynvml on every command
+        self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
+        self._vram_cache_ttl: float = 2.0  # seconds
 
         # Lazy-init AgentCore client if enabled but not provided
         if self._agentcore is None and self._cfg.agentcore_enabled:
@@ -378,8 +393,7 @@ class HybridCoordinator:
         """
         # --- Dev-agent pre-gate: intercept non-command domains ---
         if self._dev_agent:
-            from domain_classifier import DomainClassifier
-            domain = DomainClassifier().classify(cmd.text)
+            domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
                 agent_result = await self._dev_agent.handle(cmd.text)
@@ -546,7 +560,18 @@ class HybridCoordinator:
         return token_count <= self._cfg.max_local_tokens
 
     def _gate3(self) -> bool:
-        """Gate 3 — VRAM. True = pass."""
+        """Gate 3 — VRAM. True = pass.
+
+        Caches the result for 2 seconds to avoid calling pynvml (synchronous
+        CUDA API) on every command. VRAM doesn't change fast enough to need
+        per-command granularity.
+        """
+        now = time.monotonic()
+        if self._vram_cache is not None:
+            cached_result, cached_time = self._vram_cache
+            if now - cached_time < self._vram_cache_ttl:
+                return cached_result
+
         try:
             import pynvml as nvml
             nvml.nvmlInit()
@@ -554,10 +579,13 @@ class HybridCoordinator:
             info = nvml.nvmlDeviceGetMemoryInfo(handle)
             free_gb = info.free / (1024 ** 3)
             nvml.nvmlShutdown()
-            return free_gb >= self._cfg.vram_free_min_gb
+            result = free_gb >= self._cfg.vram_free_min_gb
         except Exception as exc:
             log.debug("Gate 3 NVML error (assuming pass): %s", exc)
-            return True  # if we can't check, don't penalise local
+            result = True  # if we can't check, don't penalise local
+
+        self._vram_cache = (result, now)
+        return result
 
     def _gate4(self) -> bool:
         """Gate 4 — Latency EMA. True = pass."""
@@ -577,7 +605,9 @@ class HybridCoordinator:
         t0 = time.monotonic()
         action_str = await self._local.infer(cmd, few_shot_examples=examples)
         latency_ms = (time.monotonic() - t0) * 1000
-        self._update_ema(latency_ms)
+        # NOTE: Do NOT call _update_ema here — route()'s finally block already
+        # updates EMA with the total route latency (which includes inference).
+        # Calling it here too would double-count inference time in Gate 4's EMA.
         if self._agent_db and self._agent_db.available:
             status = self._local.get_status()
             error = action_str if action_str.startswith("CLARIFY inference") else None
