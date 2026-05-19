@@ -3,53 +3,108 @@ import Foundation
 
 /// Streams head pitch/yaw deltas from ARKit at the ARKit frame rate.
 /// Sends delta angles (not absolute) so the PC can integrate them into cursor movement.
-/// Smoothing factor configurable via SettingsStore.
+///
+/// Uses 1-Euro adaptive filter (replaces fixed EMA smoothing factor) for
+/// jitter reduction at rest and minimal latency during fast head movements.
+///
+/// Uses SharedFaceSession — does NOT own its own ARSession. GazeTracker and HeadTracker
+/// share one face-tracking session to avoid the ARKit one-session-per-camera limitation.
+///
+/// Fix: Signal processing runs on a dedicated serial queue (not MainActor) to eliminate
+/// the ~8-16ms latency from Task { @MainActor } hops.
 @MainActor
 final class HeadTracker: NSObject {
 
-    private let session = ARSession()
+    private let sharedFaceSession: SharedFaceSession
     private weak var ws: WebSocketManager?
     private var settings: SettingsStore?
 
-    private var prevPitch: Float = 0
-    private var prevYaw: Float = 0
-    private var isFirstFrame = true
+    private static let consumerID = "HeadTracker"
 
-    init(ws: WebSocketManager, settings: SettingsStore) {
+    /// Serial processing queue — all head math runs here, off MainActor.
+    private let processQueue = DispatchQueue(label: "head.tracker.process", qos: .userInteractive)
+
+    // All mutable processing state accessed ONLY from processQueue.
+    nonisolated(unsafe) private var prevPitch: Float = 0
+    nonisolated(unsafe) private var prevYaw: Float = 0
+    nonisolated(unsafe) private var isFirstFrame = true
+    nonisolated(unsafe) private var filterPitch: OneEuroFilter
+    nonisolated(unsafe) private var filterYaw: OneEuroFilter
+
+    /// Snapshotted setting — captured at start() to avoid cross-isolation reads.
+    nonisolated(unsafe) private var headEnabled: Bool = false
+
+    init(ws: WebSocketManager, settings: SettingsStore, sharedFaceSession: SharedFaceSession) {
         self.ws = ws
         self.settings = settings
+        self.sharedFaceSession = sharedFaceSession
+
+        // Initialize 1-Euro filters with head-appropriate parameters
+        filterPitch = OneEuroFilter(
+            minCutoff: settings.headFilterMinCutoff,
+            beta: settings.headFilterBeta,
+            dCutoff: settings.headFilterDCutoff
+        )
+        filterYaw = OneEuroFilter(
+            minCutoff: settings.headFilterMinCutoff,
+            beta: settings.headFilterBeta,
+            dCutoff: settings.headFilterDCutoff
+        )
+
         super.init()
     }
 
     // MARK: — Lifecycle
 
     func start() {
-        guard ARFaceTrackingConfiguration.isSupported else {
+        guard SharedFaceSession.isSupported else {
             print("HeadTracker: ARFaceTracking not supported")
             return
         }
         guard let settings, settings.headEnabled else { return }
 
-        let config = ARFaceTrackingConfiguration()
-        config.isLightEstimationEnabled = false
-        session.delegate = self
-        session.run(config)
+        // Snapshot settings for processQueue
+        headEnabled = settings.headEnabled
+
+        isFirstFrame = true
+        filterPitch.reset()
+        filterYaw.reset()
+
+        sharedFaceSession.addConsumer(Self.consumerID) { [weak self] anchor in
+            guard let self else { return }
+            // Dispatch to dedicated serial queue — no MainActor hop
+            self.processQueue.async { [weak self] in
+                self?.handleAnchor(anchor)
+            }
+        }
     }
 
     func stop() {
-        session.pause()
-        isFirstFrame = true
+        sharedFaceSession.removeConsumer(Self.consumerID)
+        processQueue.async { [weak self] in
+            self?.isFirstFrame = true
+            self?.filterPitch.reset()
+            self?.filterYaw.reset()
+        }
     }
 
-    // MARK: — Euler angle extraction
+    /// Update snapshotted settings when user changes them. Call from MainActor.
+    func updateSettings() {
+        guard let settings else { return }
+        let enabled = settings.headEnabled
+        processQueue.async { [weak self] in
+            self?.headEnabled = enabled
+        }
+    }
+
+    // MARK: — Euler angle extraction (runs on processQueue)
 
     private func handleAnchor(_ anchor: ARFaceAnchor) {
-        guard let settings, settings.headEnabled else { return }
+        guard headEnabled else { return }
 
-        // Extract Euler angles from the face anchor's transform
         let m = anchor.transform
-        let pitch = asin(-m.columns.2.y)           // rotation around X
-        let yaw   = atan2(m.columns.2.x, m.columns.2.z)  // rotation around Y
+        let pitch = asin(-m.columns.2.y)
+        let yaw   = atan2(m.columns.2.x, m.columns.2.z)
 
         if isFirstFrame {
             prevPitch = pitch
@@ -58,27 +113,24 @@ final class HeadTracker: NSObject {
             return
         }
 
-        let α = Float(settings.headSmoothingFactor)
-        let dPitch = α * (pitch - prevPitch)
-        let dYaw   = α * (yaw   - prevYaw)
+        // Compute raw deltas (radians)
+        let rawDPitch = pitch - prevPitch
+        let rawDYaw = yaw - prevYaw
 
         prevPitch = pitch
-        prevYaw   = yaw
+        prevYaw = yaw
 
-        let toDeg: Float = 180 / .pi
-        ws?.sendHeadPose(pitch: Double(dPitch * toDeg), yaw: Double(dYaw * toDeg))
-    }
-}
+        // Apply 1-Euro adaptive filter (per-axis)
+        let now = CACurrentMediaTime()
+        let filteredDPitch = filterPitch.filter(Double(rawDPitch), timestamp: now)
+        let filteredDYaw = filterYaw.filter(Double(rawDYaw), timestamp: now)
 
-// MARK: — ARSessionDelegate
+        // Convert to degrees for the PC side
+        let toDeg = 180.0 / Double.pi
+        let pitchDeg = filteredDPitch * toDeg
+        let yawDeg = filteredDYaw * toDeg
 
-extension HeadTracker: ARSessionDelegate {
-    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        guard let face = anchors.first(where: { $0 is ARFaceAnchor }) as? ARFaceAnchor else {
-            return
-        }
-        Task { @MainActor [weak self] in
-            self?.handleAnchor(face)
-        }
+        // WebSocketManager.send() dispatches to its own serial sendQueue — safe from here
+        ws?.sendHeadPose(pitch: pitchDeg, yaw: yawDeg)
     }
 }

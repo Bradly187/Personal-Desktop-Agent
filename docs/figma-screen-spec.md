@@ -566,6 +566,10 @@ Frame: SliderRow  w=fill, h=72
 | Tap Tab 3 | Any screen | Keypad |
 | Tap Tab 4 | Any screen | Handwriting |
 | Tap Tab 5 | Any screen | Settings |
+| Swipe left | CommandPad/Trackpad/Keypad | Next tab (page-style) |
+| Swipe right | Trackpad/Keypad/Handwriting | Previous tab (page-style) |
+| Drag left on tab bar | Any screen | Next tab |
+| Drag right on tab bar | Any screen | Previous tab |
 | Tap "Fullscreen" | Trackpad | Trackpad-Fullscreen |
 | Tap "↙" | Trackpad-Fullscreen | Trackpad |
 | Tap "Recognise" | Handwriting | Handwriting (recognizing overlay variant) |
@@ -580,6 +584,8 @@ Frame: SliderRow  w=fill, h=72
 - All corner radii are consistent across matched component types: buttons=10pt, cards=12pt, banners=0pt (full-width)
 - The trackpad surface has a subtle inner shadow: `inset 0 1px 3px rgba(0,0,0,0.06)` to communicate it's a touch zone
 - The tab bar uses a `0.5pt top border` (surface/tertiary) as the only separator — no shadow
+- The tab bar supports a horizontal drag gesture (60pt threshold) to switch tabs in either direction
+- The first 4 tabs (Commands, Trackpad, Keypad, Write) use `.tabViewStyle(.page)` for swipe-to-switch; Settings and Sensors are tap-only
 - All form rows use `h=56pt` minimum for accessibility (matches iOS 44pt touch target minimum + padding)
 - Status banner must sit above the NavigationStack (not inside it) — it's always visible
 - Keypad `display-mono/32` text right-aligns and truncates from the left when the expression is long (SwiftUI `ScrollView(.horizontal)`)

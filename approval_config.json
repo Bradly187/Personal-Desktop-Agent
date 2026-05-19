@@ -1,0 +1,34 @@
+{
+  "_comment": "Per-tool voice approval policy for approval_hook.py.",
+  "_values": "'approve' = Polly speaks + wait for yes/no | 'silent' = pass through immediately",
+
+  "tools": {
+    "Edit":        "approve",
+    "Write":       "approve",
+    "Bash":        "approve",
+    "PowerShell":  "approve",
+    "Agent":       "approve",
+    "computer":    "approve",
+
+    "Read":        "silent",
+    "Glob":        "silent",
+    "Grep":        "silent",
+    "WebSearch":   "silent",
+    "WebFetch":    "silent",
+    "TodoWrite":   "silent",
+    "ToolSearch":  "silent"
+  },
+
+  "tts_backend":              "polly",
+  "chatterbox_exaggeration":  0.5,
+  "chatterbox_cfg_weight":    0.5,
+  "chatterbox_voice_ref":     null,
+
+  "voice_id":      "Danielle",
+  "record_s":      4.0,
+  "timeout_action":"approve",
+  "device":        "Microphone (Realtek USB Audio)",
+
+  "_note_timeout": "If no voice detected within record_s seconds, timeout_action applies: 'approve' = proceed, 'reject' = block",
+  "_note_device":  "Set 'device' to a substring of your microphone name to override the OS default (run: python -c \"import sounddevice; print(sounddevice.query_devices())\" to list devices). null = use OS default input device."
+}

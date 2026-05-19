@@ -1,0 +1,142 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Bug Condition** - Overlay Non-Interactive Areas Intercept Touches
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior - it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate overlay views swallow touches in non-interactive regions
+  - **Scoped PBT Approach**: Scope the property to concrete failing cases:
+    - Touch at tab bar Y-coordinate (within 56pt bottom padding of DwellToolbarContainer in bottom mode)
+    - Touch within `.frame(maxWidth: .infinity)` area but outside visible toolbar buttons
+    - Touch in DAConnectionBanner area while connection is active (button disabled but hit-testing)
+    - Touch near floating toolbar where DragGesture extends beyond visible bounds
+  - Write a SwiftUI test (ViewInspector or XCUITest) that verifies:
+    - `isBugCondition(touch)`: touch.point IS WITHIN overlayFrame AND touch.point IS NOT WITHIN visibleInteractiveArea AND touch.intendedTarget IS tabBar OR tabContent
+    - For each bug condition input, assert the touch passes through to the underlying view (tabBar or tabContent)
+  - Test cases from design:
+    - Tab bar tap blocked by bottom toolbar 56pt padding area (DwellToolbarContainer bottom mode)
+    - Content tap blocked by toolbar full-width `.frame(maxWidth: .infinity)` frame
+    - Navigation area tap blocked by DAConnectionBanner `.contentShape(Rectangle())` when connected
+    - Trackpad gesture blocked by floating toolbar DragGesture scope extending beyond visible bounds
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct - it proves the bug exists by showing touches are intercepted)
+  - Document counterexamples found:
+    - Touches at tab bar coordinates consumed by 56pt padding area
+    - Touches in full-width frame consumed by toolbar background RoundedRectangle
+    - Touches on banner when connected consumed by disabled Button with `.contentShape(Rectangle())`
+    - Drags near floating toolbar captured by DragGesture instead of TrackpadView
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Interactive Overlay Elements Continue to Receive Touches
+  - **IMPORTANT**: Follow observation-first methodology
+  - **Step 1 — Observe behavior on UNFIXED code for non-buggy inputs** (cases where touch IS on a visible interactive element):
+    - Observe: Tapping dwell action buttons (left-click, right-click, double-click, drag, scroll) selects that action
+    - Observe: Dragging floating toolbar repositions it and persists offset to UserDefaults
+    - Observe: Tapping "Reconnect" on DAConnectionBanner when disconnected triggers WebSocket reconnection
+    - Observe: ScreenshotOverlayView shows full-screen and dismisses on tap
+    - Observe: TrackpadView pan, tap, two-finger scroll gestures send commands via WebSocket
+    - Observe: CommandPadView grid buttons fire actions
+    - Observe: One-shot dwell mode resets to leftClick after firing
+    - Observe: ScientificKeypadView button presses register and send via WebSocket
+  - **Step 2 — Write property-based tests capturing observed behavior patterns**:
+    - Property: For all touch events where touch.point IS WITHIN a visible interactive element, the element receives and handles the touch
+    - Property: For all dwell action button taps, the selected action updates and syncs via WebSocket
+    - Property: For all drag gestures starting within the visible floating toolbar bounds, the toolbar repositions
+    - Property: For all taps on reconnect button when `isDisconnected == true`, reconnection triggers
+  - **Step 3 — Verify tests pass on UNFIXED code**:
+    - All interactive elements must continue to receive touches on current (unfixed) code
+    - This confirms the baseline behavior we need to preserve
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14_
+
+- [x] 3. Fix for overlay views intercepting touches in non-interactive regions
+
+  - [x] 3.1 Fix DwellToolbarContainer top/bottom mode hit area (remove full-width frame interception)
+    - Remove `.frame(maxWidth: .infinity)` from `toolbarView` in `toolbarPositioned` for top/bottom cases
+    - Let `DwellActionToolbar` define its own intrinsic width
+    - Apply `.contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))` to constrain hit area to visible background bounds only
+    - _Bug_Condition: isBugCondition(touch) where touch.point is within full-width frame but outside visible toolbar buttons_
+    - _Expected_Behavior: Touches outside visible toolbar shape pass through to tab content_
+    - _Preservation: Toolbar buttons continue to receive taps and select dwell actions_
+    - _Requirements: 2.1, 2.4, 3.1_
+
+  - [x] 3.2 Fix DwellToolbarContainer bottom padding overlap with tab bar
+    - Add `.allowsHitTesting(false)` to the 56pt bottom padding area in bottom mode
+    - Separate the interactive toolbar from non-interactive spacing so padding does not participate in hit-testing
+    - Ensure the padding/spacer structure explicitly disables hit-testing on the non-interactive region
+    - _Bug_Condition: isBugCondition(touch) where touch.point is within 56pt bottom padding overlapping tab bar_
+    - _Expected_Behavior: Tab bar taps register immediately without interference from toolbar padding_
+    - _Preservation: Toolbar position in bottom mode unchanged; buttons still accessible_
+    - _Requirements: 2.2, 3.8_
+
+  - [x] 3.3 Fix DwellToolbarContainer floating mode DragGesture scope
+    - Apply `.contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))` before the `.gesture(DragGesture())` modifier
+    - Ensure DragGesture only captures drags starting within the visible toolbar bounds
+    - Touches outside visible floating toolbar bounds pass through to TrackpadView
+    - _Bug_Condition: isBugCondition(touch) where drag starts near but outside visible floating toolbar_
+    - _Expected_Behavior: Drags outside toolbar bounds reach TrackpadView pan gesture recognizer_
+    - _Preservation: Dragging within visible toolbar bounds still repositions and persists offset_
+    - _Requirements: 2.5, 3.2, 3.5_
+
+  - [x] 3.4 Fix DwellToolbarContainer outer ZStack non-interactive space
+    - Add `.allowsHitTesting(false)` to the outer ZStack's non-interactive space
+    - Ensure empty space in the alignment-based ZStack does not intercept touches
+    - Only the toolbar content itself should participate in hit-testing
+    - _Bug_Condition: isBugCondition(touch) where touch.point is in ZStack empty space_
+    - _Expected_Behavior: All touches in ZStack empty space pass through to tab content immediately_
+    - _Preservation: ZStack alignment and toolbar positioning unchanged_
+    - _Requirements: 2.4, 3.6_
+
+  - [x] 3.5 Fix DAConnectionBanner hit-testing when connected
+    - Add `.allowsHitTesting(isDisconnected)` to the Button or its container in DAConnectionBanner
+    - When connection is active (not disconnected), entire banner passes touches through
+    - Only when disconnected does the banner intercept touches for the reconnect action
+    - _Bug_Condition: isBugCondition(touch) where touch.point is in banner area AND isDisconnected == false_
+    - _Expected_Behavior: Touches pass through banner to underlying navigation/content when connected_
+    - _Preservation: Reconnect button still receives taps when isDisconnected == true_
+    - _Requirements: 2.3, 3.3_
+
+  - [x] 3.6 Remove `.contentShape(Rectangle())` from DAConnectionBanner
+    - Remove the `.contentShape(Rectangle())` modifier that forces entire frame to be tappable
+    - Let natural button content define the tap area, or conditionally apply only when disconnected
+    - This prevents the full-width rectangle from intercepting touches when the button is disabled
+    - _Bug_Condition: isBugCondition(touch) where .contentShape(Rectangle()) makes disabled button hit-testable_
+    - _Expected_Behavior: Banner hit area matches visible interactive content only_
+    - _Preservation: Reconnect button tap area adequate when disconnected_
+    - _Requirements: 2.3, 3.3_
+
+  - [x] 3.7 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Overlay Non-Interactive Areas Pass Through Touches
+    - **IMPORTANT**: Re-run the SAME test from task 1 - do NOT write a new test
+    - The test from task 1 encodes the expected behavior (touches pass through non-interactive overlay areas)
+    - When this test passes, it confirms the expected behavior is satisfied
+    - Run bug condition exploration test from step 1
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed — touches now pass through)
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
+
+  - [x] 3.8 Verify preservation tests still pass
+    - **Property 2: Preservation** - Interactive Overlay Elements Continue to Receive Touches
+    - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
+    - Run preservation property tests from step 2
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions — all interactive elements still work)
+    - Confirm all tests still pass after fix (no regressions):
+      - Dwell action button taps still select actions
+      - Floating toolbar drag still repositions
+      - Reconnect button still triggers when disconnected
+      - Screenshot overlay still shows/dismisses
+      - TrackpadView gestures still work
+      - CommandPadView buttons still fire
+      - ScientificKeypadView buttons still register
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14_
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Run full test suite (bug condition + preservation + any existing unit/UI tests)
+  - Verify no regressions in tab switching, content interaction, or overlay functionality
+  - Confirm touch passthrough works for all toolbar positions (top, bottom, floating)
+  - Confirm DAConnectionBanner hit-testing toggles correctly with connection state changes
+  - Ensure all tests pass, ask the user if questions arise

@@ -26,7 +26,12 @@ import asyncio
 import base64
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+# Shared approval gate directory — approval_hook.py writes "pending",
+# WhisperStream responds with the transcript in "response".
+_APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +109,9 @@ class WhisperStream:
         min_speech_s: float = 0.3,         # minimum duration worth transcribing
         max_buffer_s: float = 30.0,        # force-transcribe after this long
         poll_interval_s: float = 0.15,     # background loop cadence
+        # Phase 6: preserve audio bytes so Gate 1 can re-transcribe via
+        # Amazon Transcribe when whisper_logprob is below the Gate 1 threshold.
+        preserve_audio: bool = True,
     ) -> None:
         self._model_size = model_size
         self._device = device
@@ -114,6 +122,7 @@ class WhisperStream:
         self._max_buffer_s = max_buffer_s
         self._poll_s = poll_interval_s
 
+        self._preserve_audio = preserve_audio
         self._model: Optional[WhisperModel] = None
         self._fusion: Optional["FusionEngine"] = None
         self._hotwords: list[str] = []
@@ -121,8 +130,11 @@ class WhisperStream:
         # Audio buffer — float32 samples accumulated from audio_stream chunks.
         # Written by on_audio_chunk() from the event loop; read by the background
         # task. Both run in the same asyncio thread so no locking is needed.
-        self._buffer: Optional["np.ndarray"] = None
-        self._buffer_start_ts: float = 0.0   # monotonic time of first sample
+        #
+        # Uses a list accumulator (_buffer_chunks) for O(1) appends per chunk.
+        # Concatenated into a single ndarray only at transcription time.
+        self._buffer_chunks: list["np.ndarray"] = []
+        self._buffer_start_ts: float | None = None  # monotonic time of first sample
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -173,7 +185,8 @@ class WhisperStream:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        self._buffer = None
+        self._buffer_chunks = []
+        self._buffer_start_ts = None
         self.available = False
         log.info("WhisperStream: stopped")
 
@@ -186,6 +199,10 @@ class WhisperStream:
 
         Called synchronously from the asyncio event loop; must be fast.
         Auto-detects float32 vs int16 from bytes-per-frame ratio.
+
+        Uses a list accumulator instead of np.concatenate per call to avoid
+        O(n) reallocation on every chunk (100ms intervals, up to 30s = 480k samples).
+        The list is concatenated once at transcription time.
         """
         if not self.available or not _NUMPY_AVAILABLE:
             return
@@ -201,11 +218,9 @@ class WhisperStream:
                 # Unknown format — try float32 anyway
                 chunk = np.frombuffer(raw, dtype=np.float32)
 
-            if self._buffer is None:
-                self._buffer = chunk
+            self._buffer_chunks.append(chunk)
+            if self._buffer_start_ts is None:
                 self._buffer_start_ts = time.monotonic()
-            else:
-                self._buffer = np.concatenate([self._buffer, chunk])
         except Exception as exc:
             log.debug("WhisperStream.on_audio_chunk decode error: %s", exc)
 
@@ -222,10 +237,11 @@ class WhisperStream:
                 log.error("WhisperStream loop error: %s", exc)
 
     async def _maybe_transcribe(self) -> None:
-        buf = self._buffer
-        if buf is None or len(buf) == 0:
+        if not self._buffer_chunks:
             return
 
+        # Concatenate once (O(n) total, not O(n) per chunk)
+        buf = np.concatenate(self._buffer_chunks)
         duration = len(buf) / self.SAMPLE_RATE
 
         # Too short to be speech
@@ -243,8 +259,8 @@ class WhisperStream:
         # Claim the buffer — clear before awaiting so new chunks go into a
         # fresh buffer while transcription runs on the old one
         audio = buf
-        self._buffer = None
-        self._buffer_start_ts = 0.0
+        self._buffer_chunks = []
+        self._buffer_start_ts = None
 
         log.debug("WhisperStream: transcribing %.1f s of audio (force=%s)", duration, force)
         await asyncio.to_thread(self._transcribe, audio)
@@ -288,11 +304,36 @@ class WhisperStream:
         log.info("WhisperStream: %r (logprob=%.2f)", text, avg_logprob)
 
         from command_executor import Command
+        params: dict = {}
+        if self._preserve_audio:
+            # Gate 1 re-transcription: HybridCoordinator._retranscribe() uses
+            # these bytes when amazon-transcribe is installed and logprob is low.
+            params["audio_bytes"] = audio.astype("int16").tobytes()
+            params["sample_rate"] = self.SAMPLE_RATE
+
+        # ---------------------------------------------------------------------------
+        # Approval gate intercept — check before forwarding to FusionEngine.
+        # approval_hook.py (Claude Code PreToolUse) writes a "pending" signal file
+        # when waiting for a yes/no from the user. If we see it, write the
+        # transcript as the approval response and suppress it from the pipeline so
+        # "yes" / "no" never reaches the desktop action pipeline.
+        # ---------------------------------------------------------------------------
+        _approval_pending = _APPROVAL_DIR / "pending"
+        _approval_response = _APPROVAL_DIR / "response"
+        if _approval_pending.exists():
+            try:
+                _approval_response.write_text(text, encoding="utf-8")
+                log.info("WhisperStream: approval response → %r", text)
+            except Exception as exc:
+                log.warning("WhisperStream: could not write approval response: %s", exc)
+            return  # consumed by approval gate — do NOT forward to FusionEngine
+
         cmd = Command(
             text=text,
             action="DICTATE",   # placeholder — HybridCoordinator will reclassify
             source="voice",
             whisper_logprob=avg_logprob,
+            params=params,
         )
         # on_voice() is thread-safe (just sets self._voice = cmd)
         self._fusion.on_voice(cmd)
@@ -302,7 +343,8 @@ class WhisperStream:
     # ---------------------------------------------------------------------- #
 
     def get_status(self) -> dict:
-        buf_s = (len(self._buffer) / self.SAMPLE_RATE) if self._buffer is not None else 0.0
+        buf_samples = sum(len(c) for c in self._buffer_chunks)
+        buf_s = buf_samples / self.SAMPLE_RATE if buf_samples > 0 else 0.0
         return {
             "available": self.available,
             "model": self._model_size,

@@ -7,28 +7,47 @@ import Foundation
 /// Audio format: 16-bit signed integer PCM, 16 kHz mono.
 /// Messages sent as `audio_stream` type with base64-encoded samples.
 ///
-/// This runs independently of KeywordListener — both can use the mic
-/// simultaneously via AVAudioEngine's tap mechanism (separate taps on
-/// different buses or shared engine with multiple taps).
+/// Uses SharedAudioSession for audio input — does NOT own its own AVAudioEngine.
+/// All three audio sensors (KeywordListener, SoundDetector, AudioStreamer) share
+/// the same engine via the fan-out tap pattern in SharedAudioSession.
+///
+/// Resampling runs on a dedicated serial queue to avoid blocking the audio render
+/// thread and to prevent data races on converter state.
 @MainActor
 final class AudioStreamer: ObservableObject {
 
     @Published var isStreaming = false
+    /// Surfaces persistent conversion failures to SensorManager/UI.
+    @Published var lastError: String?
 
-    private let engine = AVAudioEngine()
+    private let sharedAudioSession: SharedAudioSession
     private weak var ws: WebSocketManager?
     private var settings: SettingsStore?
+
+    private static let consumerID = "AudioStreamer"
 
     /// Target sample rate for Whisper (16 kHz)
     private let targetSampleRate: Double = 16000
     /// Buffer size in frames (50ms chunks at 16kHz = 800 frames)
     private let bufferFrames: AVAudioFrameCount = 800
-    /// Converter for resampling to 16kHz mono int16
-    private var converter: AVAudioConverter?
 
-    init(ws: WebSocketManager, settings: SettingsStore) {
+    /// Serial queue for resampling — keeps converter state off the render thread.
+    private let processQueue = DispatchQueue(label: "audio.streamer.process", qos: .userInteractive)
+
+    /// Converter for resampling to 16kHz mono int16 (accessed only from processQueue)
+    private var converter: AVAudioConverter?
+    /// Output format for the converter (16kHz mono Int16, immutable after start)
+    private var outputFormat: AVAudioFormat?
+
+    /// Consecutive conversion errors — tracked on processQueue.
+    /// After 10 consecutive failures, stops streaming and surfaces error.
+    nonisolated(unsafe) private var consecutiveErrors: Int = 0
+    private let maxConsecutiveErrors = 10
+
+    init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
         self.settings = settings
+        self.sharedAudioSession = sharedAudioSession
     }
 
     // MARK: — Lifecycle
@@ -36,49 +55,53 @@ final class AudioStreamer: ObservableObject {
     func start() {
         guard !isStreaming else { return }
 
-        do {
-            let inputNode = engine.inputNode
-            let inputFormat = inputNode.outputFormat(forBus: 0)
-
-            // Target format: 16kHz mono Int16
-            guard let outputFormat = AVAudioFormat(
-                commonFormat: .pcmFormatInt16,
-                sampleRate: targetSampleRate,
-                channels: 1,
-                interleaved: true
-            ) else {
-                print("AudioStreamer: failed to create output format")
-                return
-            }
-
-            // Create converter if sample rates differ
-            if inputFormat.sampleRate != targetSampleRate || inputFormat.channelCount != 1 {
-                converter = AVAudioConverter(from: inputFormat, to: outputFormat)
-            }
-
-            inputNode.installTap(onBus: 0, bufferSize: bufferFrames, format: inputFormat) {
-                [weak self] buffer, _ in
-                self?.processBuffer(buffer, outputFormat: outputFormat)
-            }
-
-            try engine.start()
-            isStreaming = true
-        } catch {
-            print("AudioStreamer: engine start failed: \(error)")
+        // Target format: 16kHz mono Int16
+        guard let outFmt = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: true
+        ) else {
+            print("AudioStreamer: failed to create output format")
+            return
         }
+        outputFormat = outFmt
+        lastError = nil
+        consecutiveErrors = 0
+
+        // Create converter if sample rates differ from the shared engine's input format
+        let inputFormat = sharedAudioSession.inputFormat
+        if inputFormat.sampleRate != targetSampleRate || inputFormat.channelCount != 1 {
+            converter = AVAudioConverter(from: inputFormat, to: outFmt)
+        }
+
+        // Capture converter and format for the closure (avoids accessing self on render thread)
+        let capturedConverter = converter
+        let capturedFormat = outFmt
+
+        // Register with shared audio session and receive buffers via fan-out
+        sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
+            guard let self else { return }
+            // Dispatch resampling off the audio render thread
+            self.processQueue.async { [weak self] in
+                self?.processBuffer(buffer, converter: capturedConverter, outputFormat: capturedFormat)
+            }
+        }
+
+        isStreaming = true
     }
 
     func stop() {
         guard isStreaming else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        sharedAudioSession.removeConsumer(Self.consumerID)
         isStreaming = false
         converter = nil
+        outputFormat = nil
     }
 
-    // MARK: — Processing
+    // MARK: — Processing (runs on processQueue)
 
-    private func processBuffer(_ buffer: AVAudioPCMBuffer, outputFormat: AVAudioFormat) {
+    private func processBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter?, outputFormat: AVAudioFormat) {
         let int16Data: Data
 
         if let converter {
@@ -104,13 +127,24 @@ final class AudioStreamer: ObservableObject {
             }
 
             if let error {
-                print("AudioStreamer: conversion error: \(error)")
+                consecutiveErrors += 1
+                if consecutiveErrors >= maxConsecutiveErrors {
+                    let msg = "Audio conversion failed \(consecutiveErrors) times: \(error.localizedDescription)"
+                    print("AudioStreamer: \(msg)")
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.lastError = msg
+                        self.stop()
+                    }
+                }
                 return
             }
 
+            consecutiveErrors = 0
             int16Data = dataFromInt16Buffer(outputBuffer)
         } else {
             // Already in correct format
+            consecutiveErrors = 0
             int16Data = dataFromInt16Buffer(buffer)
         }
 

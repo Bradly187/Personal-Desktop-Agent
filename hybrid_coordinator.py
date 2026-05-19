@@ -24,7 +24,7 @@ Gate 3 — VRAM:  vram_free_gb ≥ vram_free_min_gb  (via pynvml)
 Gate 4 — Latency EMA:  latency_ema_ms ≤ latency_budget_ms
   fail → AWS Bedrock
 
-After inference: log outcome to routing_log.jsonl, call CommandExecutor.execute().
+After inference: log outcome to agent.db (AgentDB), call CommandExecutor.execute().
 Each log entry includes `gate_that_decided`: which gate was the decisive routing
 factor ("bypass", "gate0_privacy", "gate2_complexity", "gate3_vram",
 "gate4_latency", "all_pass", "discard").
@@ -41,7 +41,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from command_executor import Command, CommandExecutor
-from local_inference import LocalInference, OllamaInference, _build_prompt
+from dataclasses import replace as _dc_replace
+from local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from agentcore_fallback.client import AgentCoreFallbackClient
@@ -50,6 +51,20 @@ if TYPE_CHECKING:
     from dev_agent import DevAgent
 
 log = logging.getLogger(__name__)
+
+# Cloud system prompt — mirrors local _SYSTEM_PROMPT but adds misrecognition
+# guidance specific to voice+accessibility input.  Kept separate so we can
+# tune cloud behaviour independently of the local LLM prompt.
+_CLOUD_SYSTEM_PROMPT = (
+    _SYSTEM_PROMPT
+    + "\n\nAdditional guidance for cloud disambiguation:\n"
+    "- Common voice misrecognitions to correct automatically:\n"
+    '  "clothes"→CLOSE  "scroll done"→SCROLL down  "hot key"→HOTKEY\n'
+    '  "oh pen"→OPEN  "clique"→CLICK  "tight"→TYPE\n'
+    "- For multi-step commands (\"close then open\"): execute the FIRST action "
+    "and emit CLARIFY for the remaining steps.\n"
+    "- For gesture-source commands: POINT→CLICK FIST→CLOSE PALM→SCROLL up."
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -88,14 +103,17 @@ class CoordinatorConfig:
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
     # AWS Bedrock (cloud fallback — raw API, used when AgentCore unavailable)
-    bedrock_model_id: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
+    # Model: Claude Haiku 4.5 cross-region inference profile (verified 2026-05-15).
+    # Claude 3.5 Haiku is now marked Legacy and requires explicit model access re-grant.
+    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     bedrock_region: str = "us-east-1"
 
-    # AgentCore fallback (preferred cloud path when deployed)
-    agentcore_enabled: bool = True
+    # AgentCore fallback (preferred cloud path — set True after `bedrock-agentcore deploy`)
+    # Disabled by default: raw Bedrock is the active cloud path until AgentCore is deployed.
+    agentcore_enabled: bool = False
     agentcore_dev_url: str = "http://localhost:8080/invocations"
     agentcore_deployed_url: str | None = None
-    agentcore_use_dev: bool = True  # True = local dev server, False = deployed
+    agentcore_use_dev: bool = False  # False = use deployed_url; True = localhost dev server
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +144,20 @@ class _CloudInference:
             log.error("CloudInference unavailable: %s", exc)
             return f"CLARIFY cloud unavailable: {exc}"
 
-        prompt = _build_prompt(cmd)
+        # Build few-shot context string for the user message
+        context_lines = ""
+        if cmd.session_context:
+            joined = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
+            context_lines = f"\n\nRecent commands:\n{joined}"
+
+        user_content = f"Command: {cmd.text}{context_lines}"
+
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 64,
             "temperature": 0.0,
-            "messages": [{"role": "user", "content": prompt}],
+            "system": _CLOUD_SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_content}],
         }
 
         t0 = time.monotonic()
@@ -157,15 +183,138 @@ class _CloudInference:
 # Amazon Transcribe re-transcription (Gate 1 voice fallback)
 # ---------------------------------------------------------------------------
 
-async def _retranscribe(cmd: Command) -> Command:
-    """Stub: re-transcribe audio via Amazon Transcribe.
+# Phonetic vocabulary corrections for the most common voice misrecognitions.
+# Applied as a fast first pass before (optionally) calling Amazon Transcribe.
+# Keyed on lowercased word/phrase, mapped to the correct desktop-control word.
+_VOICE_CORRECTIONS: dict[str, str] = {
+    "clothes":     "close",
+    "clothe":      "close",
+    "scroll done": "scroll down",
+    "clique":      "click",
+    "tight":       "type",
+    "oh pen":      "open",
+    "oh pen up":   "open up",
+    "hot key":     "hotkey",
+    "screen shot": "screenshot",
+}
 
-    In production this would send cmd.params.get('audio_bytes') to the
-    Transcribe streaming API and return a new Command with updated text
-    and logprob.  For now we return the command unchanged so routing
-    continues to Gate 2 (best-effort).
+
+def _apply_vocabulary_corrections(text: str) -> tuple[str, bool]:
+    """Replace known voice misrecognitions with the intended desktop-control word.
+
+    Returns (corrected_text, changed).  Checks multi-word phrases first so
+    'scroll done' beats 'done' matching nothing.
     """
-    log.debug("Transcribe fallback invoked for %r (stub — passing through)", cmd.text)
+    lower = text.lower()
+    # Longest-phrase-first so "scroll done" beats a single-word match
+    for wrong, right in sorted(_VOICE_CORRECTIONS.items(), key=lambda kv: -len(kv[0])):
+        if wrong in lower:
+            corrected = lower.replace(wrong, right)
+            # Restore original capitalisation pattern (title-case first word)
+            parts = corrected.split()
+            if parts:
+                parts[0] = parts[0].capitalize()
+            return " ".join(parts), True
+    return text, False
+
+
+async def _retranscribe(cmd: Command) -> Command:
+    """Attempt to improve a low-confidence voice transcript before Gate 2.
+
+    Two-stage approach:
+      1. Vocabulary correction — instant, no network, fixes the 6 deterministic
+         misrecognitions documented in the cloud system prompt.
+      2. Amazon Transcribe streaming — tried when `amazon-transcribe` is installed
+         AND audio bytes were preserved in cmd.params['audio_bytes'].  Falls back
+         gracefully (returns corrected or original cmd) on any error or timeout.
+
+    To enable Transcribe streaming:
+        pip install amazon-transcribe
+    Audio bytes are preserved automatically by WhisperStream when
+    `preserve_audio=True` (default True from Phase 6 onwards).
+    """
+    # --- Stage 1: deterministic vocabulary correction (always runs) ----------
+    corrected_text, changed = _apply_vocabulary_corrections(cmd.text)
+    if changed:
+        log.info(
+            "Gate 1 vocab correction: %r → %r", cmd.text, corrected_text
+        )
+        cmd = _dc_replace(cmd, text=corrected_text, whisper_logprob=0.0)
+
+    # --- Stage 2: Amazon Transcribe streaming (optional) --------------------
+    audio_bytes: bytes | None = cmd.params.get("audio_bytes")
+    sample_rate: int = cmd.params.get("sample_rate", 16_000)
+
+    if not audio_bytes:
+        log.debug(
+            "Gate 1 Transcribe: no audio bytes in cmd.params — skipping "
+            "(WhisperStream.preserve_audio must be True)"
+        )
+        return cmd
+
+    try:
+        from amazon_transcribe.client import TranscribeStreamingClient  # type: ignore
+        from amazon_transcribe.handlers import TranscriptResultStreamHandler  # type: ignore
+        from amazon_transcribe.model import TranscriptEvent  # type: ignore
+    except ImportError:
+        log.debug("Gate 1 Transcribe: amazon-transcribe not installed — using vocab correction only")
+        return cmd
+
+    class _ResultHandler(TranscriptResultStreamHandler):
+        def __init__(self, stream):
+            super().__init__(stream)
+            self.transcript = ""
+            self.confidence = 0.0
+
+        async def handle_transcript_event(self, event: TranscriptEvent):
+            for result in event.transcript.results:
+                if not result.is_partial and result.alternatives:
+                    alt = result.alternatives[0]
+                    self.transcript = alt.transcript
+                    items = getattr(alt, "items", []) or []
+                    confs = [
+                        getattr(i, "confidence", 1.0)
+                        for i in items
+                        if getattr(i, "confidence", None) is not None
+                    ]
+                    self.confidence = sum(confs) / len(confs) if confs else 0.8
+
+    try:
+        t_client = TranscribeStreamingClient(region="us-east-1")
+
+        async def _audio_gen():
+            chunk = 3200  # 100 ms of 16 kHz int16
+            for i in range(0, len(audio_bytes), chunk):
+                yield audio_bytes[i: i + chunk]
+
+        stream = await t_client.start_stream_transcription(
+            language_code="en-US",
+            media_sample_rate_hz=sample_rate,
+            media_encoding="pcm",
+        )
+
+        handler = _ResultHandler(stream.output_stream)
+        await asyncio.wait_for(
+            asyncio.gather(stream.input_stream.send_audio_event(audio_chunk=audio_bytes),
+                           stream.input_stream.end_stream(),
+                           handler.handle_events()),
+            timeout=3.0,
+        )
+
+        if handler.transcript and handler.transcript.lower() != cmd.text.lower():
+            log.info(
+                "Gate 1 Transcribe: %r → %r (conf=%.2f)",
+                cmd.text, handler.transcript, handler.confidence,
+            )
+            from dataclasses import replace as dc_replace
+            logprob_equiv = -max(0.0, 1.0 - handler.confidence)
+            cmd = _dc_replace(cmd, text=handler.transcript, whisper_logprob=logprob_equiv)
+
+    except asyncio.TimeoutError:
+        log.warning("Gate 1 Transcribe: timed out after 3s — using vocab-corrected text")
+    except Exception as exc:
+        log.warning("Gate 1 Transcribe: error — %s (using vocab-corrected text)", exc)
+
     return cmd
 
 
@@ -180,6 +329,17 @@ _SKIP_GATE1_SOURCES = {"voice_local"}
 
 
 class HybridCoordinator:
+    # Class-level DomainClassifier — stateless keyword scorer, no need to
+    # re-instantiate per route() call.
+    _domain_classifier = None
+
+    @classmethod
+    def _get_domain_classifier(cls):
+        if cls._domain_classifier is None:
+            from domain_classifier import DomainClassifier
+            cls._domain_classifier = DomainClassifier()
+        return cls._domain_classifier
+
     def __init__(
         self,
         local: LocalInference | None = None,
@@ -200,6 +360,10 @@ class HybridCoordinator:
         self._agent_db = agent_db
         self._session_id = session_id
         self._latency_ema: Optional[float] = None
+
+        # Gate 3 VRAM cache — avoid calling pynvml on every command
+        self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
+        self._vram_cache_ttl: float = 2.0  # seconds
 
         # Lazy-init AgentCore client if enabled but not provided
         if self._agentcore is None and self._cfg.agentcore_enabled:
@@ -229,8 +393,7 @@ class HybridCoordinator:
         """
         # --- Dev-agent pre-gate: intercept non-command domains ---
         if self._dev_agent:
-            from domain_classifier import DomainClassifier
-            domain = DomainClassifier().classify(cmd.text)
+            domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
                 agent_result = await self._dev_agent.handle(cmd.text)
@@ -286,8 +449,25 @@ class HybridCoordinator:
                 action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
 
             # --- Execute the action ----------------------------------------
-            result = await self._execute_action(action_str, cmd)
+            result = await self._execute_action(action_str, cmd, route_label=route_label)
             success = result.get("status") == "ok"
+
+            # Persist to DB now so command_id is valid before trainer uses it
+            latency_ms = (time.monotonic() - t0) * 1000
+            if self._agent_db and self._agent_db.available:
+                try:
+                    command_id = await self._agent_db.insert_command(
+                        session_id=self._session_id,
+                        cmd=cmd,
+                        action=action_str,
+                        route=route_label,
+                        gate_that_decided=gate_that_decided,
+                        latency_ms=latency_ms,
+                        success=success,
+                        error_msg=error_msg,
+                    )
+                except Exception as db_exc:
+                    log.warning("AgentDB.insert_command failed: %s", db_exc)
 
             # Record successful local executions for few-shot learning
             if (self._trainer and route_label == "local" and success):
@@ -303,20 +483,6 @@ class HybridCoordinator:
         finally:
             latency_ms = (time.monotonic() - t0) * 1000
             self._update_ema(latency_ms)
-            if self._agent_db and self._agent_db.available:
-                try:
-                    command_id = await self._agent_db.insert_command(
-                        session_id=self._session_id,
-                        cmd=cmd,
-                        action=action_str,
-                        route=route_label,
-                        gate_that_decided=gate_that_decided,
-                        latency_ms=latency_ms,
-                        success=success,
-                        error_msg=error_msg,
-                    )
-                except Exception as db_exc:
-                    log.warning("AgentDB.insert_command failed: %s", db_exc)
 
         return result
 
@@ -394,7 +560,18 @@ class HybridCoordinator:
         return token_count <= self._cfg.max_local_tokens
 
     def _gate3(self) -> bool:
-        """Gate 3 — VRAM. True = pass."""
+        """Gate 3 — VRAM. True = pass.
+
+        Caches the result for 2 seconds to avoid calling pynvml (synchronous
+        CUDA API) on every command. VRAM doesn't change fast enough to need
+        per-command granularity.
+        """
+        now = time.monotonic()
+        if self._vram_cache is not None:
+            cached_result, cached_time = self._vram_cache
+            if now - cached_time < self._vram_cache_ttl:
+                return cached_result
+
         try:
             import pynvml as nvml
             nvml.nvmlInit()
@@ -402,10 +579,13 @@ class HybridCoordinator:
             info = nvml.nvmlDeviceGetMemoryInfo(handle)
             free_gb = info.free / (1024 ** 3)
             nvml.nvmlShutdown()
-            return free_gb >= self._cfg.vram_free_min_gb
+            result = free_gb >= self._cfg.vram_free_min_gb
         except Exception as exc:
             log.debug("Gate 3 NVML error (assuming pass): %s", exc)
-            return True  # if we can't check, don't penalise local
+            result = True  # if we can't check, don't penalise local
+
+        self._vram_cache = (result, now)
+        return result
 
     def _gate4(self) -> bool:
         """Gate 4 — Latency EMA. True = pass."""
@@ -425,7 +605,9 @@ class HybridCoordinator:
         t0 = time.monotonic()
         action_str = await self._local.infer(cmd, few_shot_examples=examples)
         latency_ms = (time.monotonic() - t0) * 1000
-        self._update_ema(latency_ms)
+        # NOTE: Do NOT call _update_ema here — route()'s finally block already
+        # updates EMA with the total route latency (which includes inference).
+        # Calling it here too would double-count inference time in Gate 4's EMA.
         if self._agent_db and self._agent_db.available:
             status = self._local.get_status()
             error = action_str if action_str.startswith("CLARIFY inference") else None
@@ -460,7 +642,9 @@ class HybridCoordinator:
     # Action execution
     # ---------------------------------------------------------------------- #
 
-    async def _execute_action(self, action_str: str, cmd: Command) -> dict:
+    async def _execute_action(
+        self, action_str: str, cmd: Command, route_label: str = "local"
+    ) -> dict:
         """Parse the LLM's action string and execute it via CommandExecutor."""
         if not action_str:
             return {"status": "error", "error": "empty action string"}
@@ -469,7 +653,11 @@ class HybridCoordinator:
         verb = parts[0].upper()
         target = parts[1] if len(parts) > 1 else ""
 
-        # Build an execution Command from the parsed action string
+        params = self._parse_params(verb, target, cmd)
+        # CLARIFY from a cloud route should speak via Polly TTS
+        if route_label == "cloud":
+            params["route"] = "cloud"
+
         exec_cmd = Command(
             text=target or cmd.text,
             action=verb,
@@ -478,7 +666,7 @@ class HybridCoordinator:
             gesture_confidence=cmd.gesture_confidence,
             session_context=cmd.session_context,
             gaze_coords=cmd.gaze_coords,
-            params=self._parse_params(verb, target, cmd),
+            params=params,
         )
 
         return await self._executor.execute(exec_cmd)

@@ -21,7 +21,7 @@ A large batch of Phase 2 components were built, completing the core Python pipel
 | `ContentView.swift` | Tab container: CommandPad, Trackpad, Keypad, Handwriting, Settings |
 | `Network/WebSocketManager.swift` | URLSessionWebSocketTask; exponential backoff reconnect; `ConnectionState` enum |
 | `Sensors/TiltSensor.swift` | CMMotionManager 60 Hz; dead-zone filter; `tilt_tap` impulse detection |
-| `Sensors/GazeTracker.swift` | ARFaceTrackingConfiguration; gaze stream + on-device dwell timer |
+| `Sensors/GazeTracker.swift` | ARFaceTrackingConfiguration; gaze delta stream (relative eye movement → cursor) |
 | `Sensors/HeadTracker.swift` | ARFaceAnchor pitch/yaw delta; configurable smoothing |
 | `Sensors/KeywordListener.swift` | SFSpeechAudioBufferRecognitionRequest; keyword list from SettingsStore |
 | `Sensors/SoundDetector.swift` | AVAudioEngine FFT; cluck/pop/hiss pattern classifiers; 500 ms debounce |

@@ -53,6 +53,18 @@ async def start_test_bridge() -> tuple[IPadBridge, asyncio.Task]:
 # Test cases
 # ---------------------------------------------------------------------------
 
+async def recv_ack(ws, timeout: float = 5.0) -> dict:
+    """Read messages, skipping type:status broadcasts, until we get the ack."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        msg = await asyncio.wait_for(ws.receive_json(), timeout=remaining)
+        if msg.get("type") != "status":
+            return msg
+
+
 async def test_scroll_down_e2e(mock_scroll: MagicMock) -> tuple[bool, str]:
     """Send touch_command SCROLL down → verify mouse_scroll called correctly."""
     async with aiohttp.ClientSession() as session:
@@ -65,8 +77,8 @@ async def test_scroll_down_e2e(mock_scroll: MagicMock) -> tuple[bool, str]:
                 "params": {"direction": "down", "amount": 3},
             })
 
-            # Wait for ack
-            resp = await asyncio.wait_for(ws.receive_json(), timeout=5.0)
+            # Wait for ack (skip welcome status broadcast)
+            resp = await recv_ack(ws)
 
             if resp.get("status") != "ok":
                 return False, f"Expected status 'ok', got: {resp}"
@@ -101,7 +113,7 @@ async def test_scroll_up_e2e(mock_scroll: MagicMock) -> tuple[bool, str]:
                 "params": {"direction": "up", "amount": 5},
             })
 
-            resp = await asyncio.wait_for(ws.receive_json(), timeout=5.0)
+            resp = await recv_ack(ws)
 
             if resp.get("status") != "ok":
                 return False, f"Expected status 'ok', got: {resp}"
@@ -134,7 +146,7 @@ async def test_scroll_default_params(mock_scroll: MagicMock) -> tuple[bool, str]
                 "text": "scroll down",
             })
 
-            resp = await asyncio.wait_for(ws.receive_json(), timeout=5.0)
+            resp = await recv_ack(ws)
 
             if resp.get("status") != "ok":
                 return False, f"Expected status 'ok', got: {resp}"
@@ -166,7 +178,7 @@ async def test_touch_click_e2e(mock_click: MagicMock) -> tuple[bool, str]:
                 "params": {"x": 500, "y": 300, "button": "left"},
             })
 
-            resp = await asyncio.wait_for(ws.receive_json(), timeout=5.0)
+            resp = await recv_ack(ws)
 
             if resp.get("status") != "ok":
                 return False, f"Expected status 'ok', got: {resp}"

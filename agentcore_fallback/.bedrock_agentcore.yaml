@@ -8,10 +8,18 @@ agents:
     runtime_type: PYTHON_3_10
     platform: linux/amd64
     source_path: src
+    # DEPLOYMENT STATUS (2026-05-15):
+    # bedrock-agentcore 1.9.0 ships without bedrock_agentcore.cli, so the CLI
+    # deploy command fails. Options when ready to deploy:
+    #   a) Downgrade: uv add "bedrock-agentcore<1.9.0" and retry CLI
+    #   b) SDK: use boto3 bedrock-agentcore-control.CreateAgentRuntime with
+    #      codeConfiguration (requires S3 zip) + CreateAgentRuntimeEndpoint
+    #   c) AWS console: upload src/ as zip in Bedrock AgentCore console
+    # Raw Bedrock (Tier 2) is active in the meantime - see hybrid_coordinator.py
     aws:
       execution_role: null
       execution_role_auto_create: true
-      account: null
+      account: "567877624345"
       region: us-east-1
       ecr_repository: null
       ecr_auto_create: false

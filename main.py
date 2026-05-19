@@ -9,7 +9,7 @@ Usage:
     python main.py --safe-mode           # set SAFE_MODE=1 for MCP server
 
 Ctrl-C triggers graceful shutdown (task 4.3):
-  saves gesture_calibration.json, flushes routing_log.jsonl, stops all components.
+  flushes agent.db writes, stops all components.
 
 Startup status table (task 4.4) is printed before the bridge starts.
 """
@@ -129,7 +129,7 @@ def _measure_vram() -> None:
 # Task 4.4 — Startup status table
 # ---------------------------------------------------------------------------
 
-def _print_startup_table(port: int, safe_mode: bool) -> None:
+def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> None:
     """Print a table of which PC-side services are available."""
     rows: list[tuple[str, str, str]] = []
 
@@ -214,7 +214,7 @@ def _print_startup_table(port: int, safe_mode: bool) -> None:
         print(f"  [{marker}] {name:<{w_name - 4}}  {status:<{w_status}}  {note}")
 
     print()
-    print(f"  Bridge: ws://0.0.0.0:{port}/ws")
+    print(f"  Bridge: ws://{host}:{port}/ws")
     print()
 
 
@@ -351,14 +351,24 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     whisper = WhisperStream()
     whisper.set_fusion_engine(fusion)
 
-    bridge = IPadBridge(port=args.port)
+    bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
     bridge.set_gesture_processor(gesture)
     bridge.set_whisper_stream(whisper)
 
+    # Optional sensor viewer window
+    viewer = None
+    if args.viewer:
+        from sensor_viewer import SensorViewer
+        viewer = SensorViewer()
+        bridge.set_viewer(viewer)
+        viewer.start()
+
     shutdown = _ShutdownController()
     shutdown.register(fusion, gesture, whisper)
+    if viewer:
+        shutdown.register(viewer)
     shutdown.arm()
 
     # --- Start trainer and WhisperStream ---
@@ -372,7 +382,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Print startup table (task 4.4) ---
     if not args.quiet:
-        _print_startup_table(args.port, args.safe_mode)
+        _print_startup_table(args.port, args.safe_mode, host=args.host)
 
     # --- Run bridge + fusion concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
@@ -393,6 +403,31 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Viewer-only mode (bridge + viewer, no inference)
+# ---------------------------------------------------------------------------
+
+async def _run_viewer_only(args: argparse.Namespace) -> None:
+    """Run just the bridge and sensor viewer — no LLM, no gesture, no whisper."""
+    from ipad_bridge import IPadBridge
+    from sensor_viewer import SensorViewer
+
+    log.info("Starting in viewer-only mode (no inference pipeline)")
+
+    viewer = SensorViewer(always_on_top=True)
+    viewer.start()
+
+    bridge = IPadBridge(port=args.port, host=args.host)
+    bridge.set_viewer(viewer)
+
+    try:
+        await bridge.run(no_mdns=args.no_mdns)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        viewer.stop()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -402,6 +437,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--port", type=int, default=8765,
                    help="WebSocket port (default: 8765)")
+    p.add_argument("--host", type=str, default="0.0.0.0",
+                   help="Bind address (default: 0.0.0.0; use 10.99.0.1 for WireGuard-only)")
     p.add_argument("--no-mdns", action="store_true",
                    help="Disable mDNS/Bonjour service advertisement")
     p.add_argument("--debug", action="store_true",
@@ -412,6 +449,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Skip the startup status table")
     p.add_argument("--measure-vram", action="store_true",
                    help="Load all models, print VRAM snapshot, and exit (task 1.2)")
+    p.add_argument("--viewer", action="store_true",
+                   help="Open a desktop window showing iPad camera + LiDAR feeds")
+    p.add_argument("--viewer-only", action="store_true",
+                   help="Run only the bridge + viewer (no inference pipeline)")
     return p.parse_args()
 
 
@@ -427,6 +468,11 @@ def main() -> None:
     # Task 4.2 — early exit path
     if args.measure_vram:
         _measure_vram()
+        return
+
+    # Viewer-only mode: bridge + viewer, no inference pipeline
+    if args.viewer_only:
+        asyncio.run(_run_viewer_only(args))
         return
 
     log.info("Personal Desktop Agent starting ...")

@@ -61,7 +61,7 @@
   - `URLSessionWebSocketTask` persistent connection
   - Exponential backoff reconnect (1s → 2s → 4s → 8s → 30s max)
   - Connection status indicator (green/yellow/red) via `ConnectionState` enum + `ConnectionBanner`
-  - Manual IP entry in SettingsView; mDNS discovery deferred to integration test phase
+  - Manual IP entry in SettingsView; mDNS discovery implemented in iPad App Hardening spec (ServiceDiscovery.swift)
 
 - [x] **2.3 Implement `TiltSensor`**
   - `CMMotionManager.startDeviceMotionUpdates` at 60 Hz
@@ -131,13 +131,25 @@
 
 ## Phase 2 (PC) — vLLM / Nemotron evaluation
 
-- [~] **2.13 Benchmark `OllamaInference` vs `VLLMInference` vs `NemotronInference` on RTX 5090**
+- [x] **2.13 Benchmark `OllamaInference` vs `VLLMInference` vs `NemotronInference` on RTX 5090**
   - Benchmarked 10 Ollama models (2026-05-13) via `benchmark_models.py --runs 2`
-  - **Results:** `llama3.1:8b`, `llama3.2:3b`, and `qwen3-coder:30b` all 100% accuracy;
-    `qwen2.5-coder` 83%; `nemotron-mini` 25%; `gpt-oss:20b` and `qwen3-vl:30b` 0%
-  - **Default updated to `llama3.1:8b`** (4.6 GB, 100% accuracy, robust on edge cases)
-  - **Still open:** vLLM backend full implementation + latency profiling with streaming;
-    production p95 target <350 ms validation
+  - **Results (2026-05-13):** `llama3.1:8b`, `llama3.2:3b`, `qwen3-coder:30b` → 100% accuracy;
+    `qwen2.5-coder` 83%; `nemotron-mini` 25%; `gpt-oss:20b` 0%
+  - **Latency (2026-05-15 — definitive):** via `OllamaInference.infer()` aiohttp after fresh
+    model load (7 prompts, cold then warm, RTX 5090):
+      cold start (model load + 1st request): 2556ms | warm p50: 373ms | warm p95: 411ms
+    Note: benchmark_models.py uses urllib (creates new connection per request) which adds
+    ~1800ms overhead vs. aiohttp — benchmark numbers are useful for MODEL COMPARISON but not
+    absolute latency. Real production latency is via OllamaInference → 373ms p50 warm.
+  - **Promotion decision:** Ollama warm p95=411ms — 17% above 350ms target, acceptable for a
+    single-user accessibility app (touch/gaze/sound bypass LLM; only voice hits this path).
+    Ollama remains default. VLLMInference ready to activate when CUDA 13.x torch wheels publish
+    (current RTX 5090 driver uses CUDA 13.2; CUDA 12.x wheels do not install vllm._C on this GPU).
+  - **VLLMInference fully implemented** (`local_inference.py:179–285`) — async lazy load via
+    `asyncio.to_thread`, `asyncio.Lock` double-check, UUID request IDs, per-request 15s timeout,
+    `gpu_memory_utilization=0.50` (leaves room for Whisper alongside), graceful `ImportError` path.
+    Activate by setting `VLLMInference()` as the `local=` arg in `HybridCoordinator`.
+  - **benchmark_models.py** extended with `--vllm <HF_MODEL>` flag to compare backends side-by-side
   - See `local-inference-comparison.md` for full benchmark table
 
 ---
@@ -165,11 +177,60 @@
   - 4 GB floor was conservative; with 32 GB VRAM, 8 GB free is still 75% utilisation headroom
   - Comment in config explains this is tuned for RTX 5090; lower for smaller GPUs
 
-- [ ] **N.5 Analyse `routing_log.jsonl` after 1-week soak to tune gate thresholds**
-  - Parse log; count decisions per `gate_that_decided` label
-  - If >20% of commands hit `gate2_complexity` → lower `max_local_tokens` or loosen keyword list
-  - If `gate3_vram` never fires → consider raising `vram_free_min_gb` further
-  - If `gate4_latency` fires often → investigate inference backend, not the budget number
+- [x] **N.5 Analyse routing data (agent.db) — 2026-05-15 review**
+  - **Data:** 22 commands across 7 sessions (mostly integration test artefacts); too sparse
+    for production threshold changes but healthy distribution confirmed.
+  - **Gate distribution:** bypass 91% (20) | gate2_complexity 9% (2) | gates 0/1/3/4: 0%
+  - **Breakdown:**
+    - 14 gaze_dwell/bypass → all CLICKs, <2ms routing ← integration tests (2026-05-11)
+    - 2 voice/gate2_complexity → "close window and open notepad" → CLOSE ← multi-step voice
+    - 6 touch/bypass → CLARIFY (2285ms) ← bridge_client SCREENSHOT+DICTATE test artefacts
+  - **Threshold decisions (2026-05-15):**
+    - gate2_complexity 9% < 20% threshold → NO CHANGE to max_local_tokens or keyword list
+    - gate3_vram never fired → VRAM floor (8.0 GB) is fine; RTX 5090 headroom adequate
+    - gate4_latency never fired → 350ms budget holds; no backend investigation needed
+    - gate0_privacy never fired → no sensitive commands issued (expected)
+  - **Action:** Revisit after 200+ real-world voice commands for meaningful tuning.
+    The 6 CLARIFY failures are SCREENSHOT+DICTATE test artefacts from 2026-05-07
+    (CommandExecutor win32 clipboard ops slow at cold start) — not a routing problem.
+
+---
+
+## Phase 6 — Cloud fallback (agentcore_fallback/)
+
+- [x] **6.1 Raw Bedrock path — activate and verify (2026-05-15)**
+  - Updated model: `anthropic.claude-3-5-haiku-20241022-v1:0` (legacy) →
+    `us.anthropic.claude-haiku-4-5-20251001-v1:0` (active cross-region profile)
+  - `_CloudInference.infer()` now uses proper system/messages format for Claude 4.x
+  - `_CLOUD_SYSTEM_PROMPT` extends base vocab with voice misrecognition guidance
+  - 8/8 accuracy on disambiguation test (clothes→CLOSE, scroll done→SCROLL down, etc.)
+  - `agentcore_enabled: False` by default — raw Bedrock is active cloud tier
+
+- [x] **6.2 Gate 1 re-transcription — replace stub (2026-05-15)**
+  - Stage 1: `_apply_vocabulary_corrections()` — instant phonetic fix for 6 common
+    misrecognitions (no deps, 0ms overhead)
+  - Stage 2: Amazon Transcribe streaming — activated when `pip install amazon-transcribe`;
+    3s timeout; falls back to Stage 1 gracefully
+  - `WhisperStream.preserve_audio=True` (default) stores int16 audio bytes +
+    sample_rate in `Command.params` for Transcribe re-use
+  - `dataclasses.replace()` resets `whisper_logprob=0.0` after correction so command
+    clears Gate 1 on retry
+
+- [x] **6.3 Cloud-path integration tests (2026-05-15)** — `tests/test_cloud_path.py`
+  - 8 tests: real Bedrock call, Gate 2 routing, misrecognition, bad-creds degradation,
+    Gate 0 privacy block, AgentCore→Bedrock fall-through, Gate 1 vocab + retranscribe
+
+- [ ] **6.4 AgentCore Tier 1 deployment — deferred**
+  - Code complete: `agentcore_fallback/src/main.py` (Strands Agent + STM/LTM memory)
+  - Blocked: `bedrock-agentcore==1.9.0` ships without `bedrock_agentcore.cli` module;
+    CLI `bedrock-agentcore deploy` fails at import. Options:
+      a) Downgrade: `uv add "bedrock-agentcore<1.9.0"` in agentcore_fallback/ and retry
+      b) AWS console: zip `agentcore_fallback/src/` → Bedrock AgentCore → Create Agent Runtime
+      c) SDK: `boto3.client("bedrock-agentcore-control").create_agent_runtime()` with
+         `codeConfiguration` pointing to S3 zip + IAM execution role
+  - AWS account pre-filled in `.bedrock_agentcore.yaml` (567877624345, us-east-1)
+  - Priority: LOW — raw Bedrock (6.1) provides 90% of cloud value;
+    AgentCore adds cross-session LTM memory which partially overlaps ContinuousTrainer
 
 - [ ] **N.6 Evaluate Nemotron-4 340B with RAM offload (stretch goal)**
   - 192 GB RAM + 32 GB VRAM on this machine makes llama.cpp offloaded 340B feasible

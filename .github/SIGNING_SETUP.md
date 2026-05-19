@@ -46,7 +46,7 @@ $env:OPENSSL_CONF = "C:\Program Files\Git\usr\ssl\openssl.cnf"
 
 1. Go to [Profiles](https://developer.apple.com/account/resources/profiles/list)
 2. Click **+** → **App Store Connect** (under Distribution)
-3. Select App ID: `com.bradtarber.DesktopAgent`
+3. Select App ID: `com.bradtarver.DesktopAgent`
 4. Select the distribution certificate you just created
 5. Name it: `DesktopAgent AppStore`
 6. Download the `.mobileprovision` file

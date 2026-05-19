@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Combine
+import QuartzCore
 
 // MARK: — Connection state
 
@@ -29,18 +30,36 @@ enum BridgeMessage {
 final class WebSocketManager: ObservableObject {
 
     @Published private(set) var state: ConnectionState = .disconnected
+    @Published private(set) var latencyMs: Double = 0
+
+    // Fix #3: PassthroughSubject delivers every message to every subscriber (no single-slot loss).
+    // Keep @Published lastMessage for backward compat but add a subject that never drops.
     @Published private(set) var lastMessage: BridgeMessage?
+    let messageStream = PassthroughSubject<BridgeMessage, Never>()
+
+    /// Feed of outgoing command descriptions for the activity toast.
+    /// Emits a human-readable string each time a notable command is sent.
+    let commandFeed = PassthroughSubject<String, Never>()
 
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
+
+    // mDNS service discovery — injected at runtime
+    var serviceDiscovery: ServiceDiscovery?
 
     private var task: URLSessionWebSocketTask?
     private var reconnectAttempt = 0
     private var reconnectWorkItem: DispatchWorkItem?
     private var receiveTask: Task<Void, Never>?
+    private var pingTask: Task<Void, Never>?
+    private var connectionTimeoutTask: Task<Void, Never>?
 
-    private let maxBackoffSeconds: Double = 30
+    private let maxBackoffSeconds: Double = 5
+    private let connectionTimeoutSeconds: Double = 10
     private var msgCounter: Int = 0
+
+    // Fix #9: Serial send queue preserves message ordering for delta-based messages.
+    private let sendQueue = DispatchQueue(label: "ws.send.serial", qos: .userInitiated)
 
     // MARK: — Public API
 
@@ -53,20 +72,29 @@ final class WebSocketManager: ObservableObject {
     func disconnect() {
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = nil
+        pingTask?.cancel()
+        pingTask = nil
         receiveTask?.cancel()
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
+        reconnectAttempt = 0  // Fix #21: Reset so next connect() starts fresh
         state = .disconnected
     }
 
     func send(_ payload: [String: Any]) {
         guard let task, state == .connected else { return }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let text = String(data: data, encoding: .utf8) else { return }
-        task.send(.string(text)) { [weak self] error in
-            if let error {
-                Task { @MainActor [weak self] in
-                    self?._handleDisconnect(error: error)
+        // Fix #9: Serialize on a dedicated serial queue to guarantee ordering.
+        let capturedTask = task
+        sendQueue.async {
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            capturedTask.send(.string(text)) { error in
+                if let error {
+                    Task { @MainActor [weak self] in
+                        self?._handleDisconnect(error: error)
+                    }
                 }
             }
         }
@@ -85,38 +113,71 @@ final class WebSocketManager: ObservableObject {
         if let text { payload["text"] = text }
         if !params.isEmpty { payload["params"] = params }
         send(payload)
+        commandFeed.send(text ?? action)
         return id
     }
 
     // MARK: — Connection internals
 
-    private func _connect() {
-        let url: URL
-        if let settings {
-            url = settings.wsURL
-        } else {
-            url = URL(string: "ws://192.168.1.100:8765/ws")!
+    /// Determines the WebSocket URL to connect to.
+    /// Priority: mDNS discovered endpoint (if no manual override) > manual settings > fallback default.
+    private func resolveConnectionURL() -> URL {
+        // If mDNS discovered a host and user hasn't manually overridden, use discovered endpoint
+        if let discovery = serviceDiscovery,
+           !discovery.hasManualOverride,
+           let host = discovery.discoveredHost,
+           let port = discovery.discoveredPort {
+            if let url = URL(string: "ws://\(host):\(port)/ws") {
+                return url
+            }
         }
+        // Fall back to manual settings or default
+        return settings?.wsURLOrDefault ?? URL(string: "ws://192.168.18.2:8765/ws")!
+    }
+
+    private func _connect() {
+        let url = resolveConnectionURL()
 
         let session = URLSession(configuration: .default)
         let wsTask = session.webSocketTask(with: url)
         self.task = wsTask
         wsTask.resume()
 
+        state = .connecting
+
+        // Connection timeout: if no message received within 10s, treat as failed
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(10_000_000_000))
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            // If still connecting (no message received), trigger disconnect/reconnect
+            if self.state == .connecting {
+                print("[WebSocketManager] Connection timeout after \(self.connectionTimeoutSeconds)s")
+                wsTask.cancel(with: .abnormalClosure, reason: nil)
+                self._handleDisconnect(error: URLError(.timedOut))
+            }
+        }
+
         receiveTask = Task { [weak self] in
             guard let self else { return }
             do {
-                // URLSessionWebSocketTask doesn't have a connected callback,
-                // so we optimistically mark connected and let errors roll back.
+                let firstMessage = try await wsTask.receive()
                 await MainActor.run {
+                    self.connectionTimeoutTask?.cancel()
+                    self.connectionTimeoutTask = nil
                     self.state = .connected
                     self.reconnectAttempt = 0
+                    self._startPingTimer()
                 }
+                self._handleReceived(message: firstMessage)
                 try await self._receiveLoop(task: wsTask)
             } catch {
                 print("[WebSocketManager] Connection error: \(error.localizedDescription)")
                 print("[WebSocketManager] URL was: \(url)")
                 await MainActor.run {
+                    self.connectionTimeoutTask?.cancel()
+                    self.connectionTimeoutTask = nil
                     self._handleDisconnect(error: error)
                 }
             }
@@ -126,16 +187,20 @@ final class WebSocketManager: ObservableObject {
     private func _receiveLoop(task: URLSessionWebSocketTask) async throws {
         while !Task.isCancelled {
             let message = try await task.receive()
-            switch message {
-            case .string(let text):
+            _handleReceived(message: message)
+        }
+    }
+
+    private func _handleReceived(message: URLSessionWebSocketTask.Message) {
+        switch message {
+        case .string(let text):
+            _handle(text: text)
+        case .data(let data):
+            if let text = String(data: data, encoding: .utf8) {
                 _handle(text: text)
-            case .data(let data):
-                if let text = String(data: data, encoding: .utf8) {
-                    _handle(text: text)
-                }
-            @unknown default:
-                break
             }
+        @unknown default:
+            break
         }
     }
 
@@ -145,6 +210,17 @@ final class WebSocketManager: ObservableObject {
         else { return }
 
         let type = json["type"] as? String ?? ""
+
+        // Handle pong for latency measurement — don't propagate to lastMessage
+        if type == "pong" {
+            let sentMs = json["t"] as? Double ?? 0
+            let nowMs = CACurrentMediaTime() * 1000
+            Task { @MainActor in
+                self.latencyMs = nowMs - sentMs
+            }
+            return
+        }
+
         let id = json["id"] as? String
 
         let parsed: BridgeMessage
@@ -179,17 +255,25 @@ final class WebSocketManager: ObservableObject {
             parsed = .unknown(type: type, raw: json)
         }
 
+        // Fix #3: Emit on both the subject (guaranteed delivery) and @Published (backward compat)
         lastMessage = parsed
+        messageStream.send(parsed)
     }
 
     private func _handleDisconnect(error: Error?) {
         task = nil
         receiveTask?.cancel()
         receiveTask = nil
+        pingTask?.cancel()
+        pingTask = nil
 
-        let delay = min(pow(2.0, Double(reconnectAttempt)), maxBackoffSeconds)
+        // Fix #21: Cancel any pending reconnect to prevent multiple timers firing
+        reconnectWorkItem?.cancel()
+
         reconnectAttempt += 1
-        state = reconnectAttempt == 1 ? .disconnected : .reconnecting(attempt: reconnectAttempt)
+        state = .reconnecting(attempt: reconnectAttempt)
+
+        let delay = min(pow(2.0, Double(reconnectAttempt - 1)), maxBackoffSeconds)
 
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
@@ -201,6 +285,30 @@ final class WebSocketManager: ObservableObject {
         reconnectWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
+
+    // MARK: — Latency Ping
+
+    private func _startPingTimer() {
+        pingTask?.cancel()
+        pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { break }
+                guard let self else { break }
+                let nowMs = CACurrentMediaTime() * 1000
+                self.send(["type": "ping", "t": nowMs])
+            }
+        }
+    }
+}
+
+// MARK: — Dwell action helpers
+
+extension WebSocketManager {
+    /// Sends a `set_dwell_action` message to the PC bridge, informing it of the new active action type.
+    func sendSetDwellAction(_ action: DwellActionType) {
+        send(["type": "set_dwell_action", "action_type": action.rawValue])
+    }
 }
 
 // MARK: — Sensor message helpers
@@ -210,27 +318,57 @@ extension WebSocketManager {
         send(["type": "tilt", "rx": rx, "ry": ry])
     }
 
+    func sendTiltPosition(x: Double, y: Double) {
+        send(["type": "tilt_position", "x": x, "y": y])
+    }
+
     func sendGaze(x: Double, y: Double, confidence: Double) {
         send(["type": "gaze", "x": x, "y": y, "confidence": confidence])
     }
 
-    func sendGazeDwell(x: Double, y: Double) {
+    func sendGazeDelta(dx: Double, dy: Double, confidence: Double = 1.0, saccade: Bool = false) {
+        send(["type": "gaze_delta", "dx": dx, "dy": dy, "conf": confidence, "saccade": saccade])
+    }
+
+    func sendGazeDwell(x: Double, y: Double, actionType: DwellActionType) {
         msgCounter += 1
-        send(["type": "gaze_dwell", "id": "gd-\(msgCounter)", "x": x, "y": y])
+        send(["type": "gaze_dwell", "id": "gd-\(msgCounter)", "x": x, "y": y, "action_type": actionType.rawValue])
     }
 
     func sendHeadPose(pitch: Double, yaw: Double) {
         send(["type": "head_pose", "pitch": pitch, "yaw": yaw])
     }
 
+    func sendRatchet() {
+        send(["type": "tilt_ratchet", "ts": CACurrentMediaTime()])
+    }
+
+    func sendSensorSwitch(from fromSensor: String?, to toSensor: String) {
+        var msg: [String: Any] = ["type": "sensor_switch", "to": toSensor, "ts": CACurrentMediaTime()]
+        if let from = fromSensor {
+            msg["from"] = from
+        }
+        send(msg)
+    }
+
+    func sendCursorPause() {
+        send(["type": "cursor_pause", "ts": CACurrentMediaTime()])
+    }
+
+    func sendCursorResume() {
+        send(["type": "cursor_resume", "ts": CACurrentMediaTime()])
+    }
+
     func sendKeyword(word: String, confidence: Double) {
         msgCounter += 1
         send(["type": "keyword", "id": "kw-\(msgCounter)", "word": word, "confidence": confidence])
+        commandFeed.send("Keyword: \(word)")
     }
 
     func sendSoundAction(sound: String, confidence: Double) {
         msgCounter += 1
         send(["type": "sound_action", "id": "sa-\(msgCounter)", "sound": sound, "confidence": confidence])
+        commandFeed.send("Sound: \(sound)")
     }
 
     func sendTrackpadMove(dx: Int, dy: Int) {
@@ -240,15 +378,18 @@ extension WebSocketManager {
     func sendTrackpadTap(button: String = "left") {
         msgCounter += 1
         send(["type": "trackpad", "id": "tp-\(msgCounter)", "event": "tap", "button": button])
+        commandFeed.send("\(button == "left" ? "Left" : "Right") Click")
     }
 
     func sendTrackpadScroll(direction: String, clicks: Int = 3) {
         send(["type": "trackpad", "event": "scroll", "direction": direction, "clicks": clicks])
+        commandFeed.send("Scroll \(direction)")
     }
 
     func sendTiltTap() {
         msgCounter += 1
         send(["type": "tilt_tap", "id": "tt-\(msgCounter)"])
+        commandFeed.send("Tilt Tap")
     }
 
     func sendHandwritingImage(base64PNG: String) {
@@ -258,5 +399,26 @@ extension WebSocketManager {
 
     func sendAudioStream(samplesBase64: String, frames: Int) {
         send(["type": "audio_stream", "samples": samplesBase64, "frames": frames])
+    }
+
+    func sendDepthFrame(width: Int, height: Int, depthB64: String, confB64: String, ts: Double) {
+        send([
+            "type": "depth_frame",
+            "ts": ts,
+            "width": width,
+            "height": height,
+            "depth_b64": depthB64,
+            "conf_b64": confB64,
+        ])
+    }
+
+    func sendCameraFrame(width: Int, height: Int, imageB64: String, ts: Double) {
+        send([
+            "type": "camera_frame",
+            "ts": ts,
+            "width": width,
+            "height": height,
+            "image_b64": imageB64,
+        ])
     }
 }

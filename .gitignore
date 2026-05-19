@@ -16,12 +16,22 @@ build/
 *.swp
 *.swo
 
+# Node.js
+node_modules/
+
 # Large binaries — do not commit
 *.zip
 *.tar.gz
 files/
 files.zip
 codemagic.yaml
+
+# Runtime logs and test artefacts — generated locally, never commit
+bridge.log
+bridge_err.log
+*.log
+test_results.txt
+_archive/
 
 # Runtime data — databases and legacy flat files (all replaced by agent.db / analytics.duckdb)
 agent.db
@@ -55,3 +65,11 @@ docs/cert_base64.txt
 docs/profile_base64.txt
 docs/*.mobileprovision
 docs/*.p8
+
+# Sensitive account files — NEVER commit these
+docs/Apple Account Recovery_Key.txt
+
+# Photos / screenshots — binary blobs, not useful in git history
+docs/*.jpeg
+docs/*.jpg
+docs/*.png

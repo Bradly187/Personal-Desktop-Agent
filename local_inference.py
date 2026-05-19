@@ -86,6 +86,23 @@ class LocalInference(ABC):
                 from ContinuousTrainer; injected into the prompt when provided.
         """
 
+    async def infer_stream(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ):
+        """Stream inference tokens as they arrive (AsyncIterator[str]).
+
+        Default implementation buffers the full response and yields it as a
+        single token — safe for backends that don't support streaming.
+        Override in subclasses (e.g. OllamaInference) for true token-by-token.
+
+        Used by TTS paths (CLARIFY questions, DevAgent EXPLAIN responses) where
+        starting audio synthesis before the full response is ready reduces latency.
+        """
+        result = await self.infer(cmd, few_shot_examples)
+        yield result
+
     @abstractmethod
     def get_status(self) -> dict:
         """Return a status dict: {'backend': str, 'available': bool, ...}."""
@@ -163,6 +180,69 @@ class OllamaInference(LocalInference):
             log.error("OllamaInference failed: %s", exc)
             return f"CLARIFY inference error: {exc}"
 
+    async def infer_stream(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ):
+        """Stream tokens from Ollama as they arrive (true token-by-token).
+
+        Uses Ollama's native streaming API (stream=True) so each token is
+        yielded as soon as it's generated. Used by TTS paths (CLARIFY, EXPLAIN)
+        to start audio synthesis before the full response is ready.
+
+        num_predict is raised to 512 for conversational responses vs the 64
+        used in the command-classification path (infer).
+        """
+        try:
+            import aiohttp
+        except ImportError:
+            yield "CLARIFY aiohttp not installed"
+            return
+
+        prompt = _build_prompt(cmd, few_shot_examples)
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,                                 # token-by-token
+            "options": {"temperature": 0.0, "num_predict": 512},
+        }
+
+        t0 = time.monotonic()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.host}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60.0),
+                ) as resp:
+                    if resp.status != 200:
+                        yield f"CLARIFY Ollama HTTP {resp.status}"
+                        return
+                    async for raw_line in resp.content:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = __import__("json").loads(line)
+                        except Exception:
+                            continue
+                        token = chunk.get("response", "")
+                        if token:
+                            yield token
+                        if chunk.get("done"):
+                            latency_ms = (time.monotonic() - t0) * 1000
+                            log.info(
+                                "OllamaInference.stream: %r complete (%.0f ms)",
+                                cmd.text[:40], latency_ms,
+                            )
+                            self._available = True
+                            return
+        except Exception as exc:
+            self._available = False
+            log.error("OllamaInference.stream failed: %s", exc)
+            yield f"CLARIFY inference error: {exc}"
+
     def get_status(self) -> dict:
         return {
             "backend": "ollama",
@@ -173,66 +253,135 @@ class OllamaInference(LocalInference):
 
 
 # ---------------------------------------------------------------------------
-# VLLMInference — Phase 2 production backend (stub)
+# VLLMInference — Phase 2 production backend (task 2.13)
 # ---------------------------------------------------------------------------
 
 class VLLMInference(LocalInference):
-    """vLLM AsyncLLMEngine backend. ~280 ms on RTX 5090.
+    """vLLM AsyncLLMEngine backend for RTX 5090.
 
-    Task 2.13: benchmark against OllamaInference and promote to default
-    if p95 < 350 ms and setup is stable.
+    Uses the same llama3.1:8b family as the Ollama baseline so accuracy is
+    comparable. Requires ~8 GB VRAM; safe alongside Whisper (~19 GB free on
+    RTX 5090 after baseline + Whisper load).
 
-    Install: pip install vllm
+    Install:
+        pip install vllm
+        # HF weights download on first load (auto, ~5 GB):
+        # meta-llama/Meta-Llama-3.1-8B-Instruct requires HF token:
+        #   huggingface-cli login
+
+    Promotion criterion (task 2.13): promote to default when
+        p95 latency < 350 ms  AND  accuracy >= 100%  on the 12-prompt suite.
+
+    Benchmarked Ollama baseline (llama3.1:8b, RTX 5090, 2026-05-15):
+        see analytics.duckdb — compare with VLLMInference run under same suite.
     """
 
-    def __init__(self, model: str = "meta-llama/Llama-3.1-70B-Instruct") -> None:
-        self.model = model
-        self._engine: Any = None
+    _INFER_TIMEOUT_S: float = 15.0   # hard cap per request
+    _GPU_UTIL: float = 0.50           # conservative: leave room for Whisper
+    _MAX_MODEL_LEN: int = 4096
 
-    def _load(self) -> None:
+    def __init__(
+        self,
+        model: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        gpu_memory_utilization: float | None = None,
+    ) -> None:
+        self.model = model
+        self._gpu_util = gpu_memory_utilization or self._GPU_UTIL
+        self._engine: Any = None
+        self._load_error: str | None = None
+        self._load_lock = asyncio.Lock()
+
+    # ---------------------------------------------------------------------- #
+    # Engine lifecycle
+    # ---------------------------------------------------------------------- #
+
+    async def _ensure_loaded(self) -> None:
+        """Lazily load the engine the first time inference is requested."""
         if self._engine is not None:
             return
+        async with self._load_lock:
+            if self._engine is not None:  # double-checked inside lock
+                return
+            try:
+                self._engine = await asyncio.to_thread(self._blocking_load)
+                self._load_error = None
+                log.info("VLLMInference: engine ready — %s", self.model)
+            except Exception as exc:
+                self._load_error = str(exc)
+                log.error("VLLMInference: load failed — %s", exc)
+                raise
+
+    def _blocking_load(self) -> Any:
+        """Synchronous engine construction (runs in a thread pool)."""
         try:
             from vllm import AsyncLLMEngine, AsyncEngineArgs
-            args = AsyncEngineArgs(
-                model=self.model,
-                gpu_memory_utilization=0.85,
-                max_model_len=4096,
-                dtype="float16",
-            )
-            self._engine = AsyncLLMEngine.from_engine_args(args)
-            log.info("VLLMInference: engine loaded for %s", self.model)
         except ImportError:
-            raise RuntimeError("vllm not installed — run: pip install vllm")
+            raise RuntimeError(
+                "vllm not installed. Run: pip install vllm\n"
+                "  Then: huggingface-cli login  (for gated Meta models)"
+            )
+        args = AsyncEngineArgs(
+            model=self.model,
+            gpu_memory_utilization=self._gpu_util,
+            max_model_len=self._MAX_MODEL_LEN,
+            dtype="float16",
+            trust_remote_code=False,
+        )
+        return AsyncLLMEngine.from_engine_args(args)
+
+    # ---------------------------------------------------------------------- #
+    # Inference
+    # ---------------------------------------------------------------------- #
 
     async def infer(
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
     ) -> str:
+        import uuid
         try:
-            self._load()
-        except RuntimeError as exc:
-            return f"CLARIFY {exc}"
+            await self._ensure_loaded()
+        except Exception as exc:
+            return f"CLARIFY vllm unavailable: {exc}"
 
-        from vllm import SamplingParams
+        try:
+            from vllm import SamplingParams
+        except ImportError:
+            return "CLARIFY vllm not installed"
+
         prompt = _build_prompt(cmd, few_shot_examples)
-        params = SamplingParams(temperature=0.0, max_tokens=64)
+        params = SamplingParams(temperature=0.0, max_tokens=64, stop=["\n"])
+        request_id = str(uuid.uuid4())
 
         t0 = time.monotonic()
-        results = []
-        async for output in self._engine.generate(prompt, params, request_id=str(id(cmd))):
-            results = output.outputs
+        try:
+            final_output = None
+            async for output in self._engine.generate(prompt, params, request_id=request_id):
+                final_output = output
+        except Exception as exc:
+            log.error("VLLMInference.generate failed: %s", exc)
+            return f"CLARIFY inference error: {exc}"
+
         latency_ms = (time.monotonic() - t0) * 1000
-        action = results[0].text.strip().splitlines()[0].strip() if results else "CLARIFY no output"
+
+        if final_output is None or not final_output.outputs:
+            return "CLARIFY no output from vllm"
+
+        action = final_output.outputs[0].text.strip().splitlines()[0].strip()
         log.info("VLLMInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
         return action
+
+    # ---------------------------------------------------------------------- #
+    # Status
+    # ---------------------------------------------------------------------- #
 
     def get_status(self) -> dict:
         return {
             "backend": "vllm",
             "model": self.model,
             "available": self._engine is not None,
+            "load_error": self._load_error,
+            "gpu_memory_utilization": self._gpu_util,
         }
 
 

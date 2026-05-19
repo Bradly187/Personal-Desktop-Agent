@@ -2,8 +2,11 @@ import SwiftUI
 
 /// Scientific calculator keypad for entering math expressions and symbols.
 /// Evaluates expressions on-device (NSExpression) and sends via DICTATE.
+/// All key buttons use DesignTokens.Size.touchTargetCompact (64pt) minimum.
 struct ScientificKeypadView: View {
     @EnvironmentObject var wsManager: WebSocketManager
+
+    @Environment(\.appTheme) private var theme
 
     @State private var expression = ""
     @State private var preview = ""
@@ -13,56 +16,57 @@ struct ScientificKeypadView: View {
     // MARK: — Layout
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Display
-            displayPanel
-            Divider()
-            // Mode toggle
-            Picker("Mode", selection: $isScientific) {
-                Text("Basic").tag(false)
-                Text("Scientific").tag(true)
+        NavigationStack {
+            VStack(spacing: 0) {
+                // Display
+                displayPanel
+                Divider()
+                // Mode toggle
+                Picker("Mode", selection: $isScientific) {
+                    Text("Basic").tag(false)
+                    Text("Scientific").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+                .padding(.vertical, DesignTokens.Spacing.sm)
+                // Keys
+                keyGrid
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 6)
-            // Keys
-            keyGrid
+            .navigationTitle("Keypad")
         }
-        .navigationTitle("Keypad")
     }
 
     private var displayPanel: some View {
-        VStack(alignment: .trailing, spacing: 4) {
+        VStack(alignment: .trailing, spacing: DesignTokens.Spacing.xs) {
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(expression.isEmpty ? "0" : expression)
                     .font(.system(size: 32, weight: .light, design: .monospaced))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(theme.textPrimary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             Text(preview)
-                .font(.system(size: 16, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(DesignTokens.Typography.mono)
+                .foregroundStyle(theme.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .lineLimit(1)
         }
-        .padding()
+        .padding(DesignTokens.Spacing.lg)
         .frame(minHeight: 90, alignment: .bottomTrailing)
     }
 
     private var keyGrid: some View {
-        let keys: [[KeyDef]
-        ] = isScientific ? scientificKeys : basicKeys
-        return VStack(spacing: 6) {
+        let keys: [[KeyDef]] = isScientific ? scientificKeys : basicKeys
+        return VStack(spacing: DesignTokens.Spacing.sm) {
             ForEach(keys.indices, id: \.self) { row in
-                HStack(spacing: 6) {
+                HStack(spacing: DesignTokens.Spacing.sm) {
                     ForEach(keys[row]) { key in
                         KeyButton(key: key) { tap(key) }
                     }
                 }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 12)
+        .padding(.horizontal, DesignTokens.Spacing.sm)
+        .padding(.bottom, DesignTokens.Spacing.md)
     }
 
     // MARK: — Key definitions
@@ -164,8 +168,8 @@ struct ScientificKeypadView: View {
         s = s.replacingOccurrences(of: "e", with: "2.71828182845905")
         s = s.replacingOccurrences(of: "^", with: "**")
 
-        guard let e = try? NSExpression(format: s),
-              let v = e.expressionValue(with: nil, context: nil) as? NSNumber else {
+        let e = NSExpression(format: s)
+        guard let v = e.expressionValue(with: nil, context: nil) as? NSNumber else {
             return nil
         }
         return v.doubleValue
@@ -241,22 +245,28 @@ enum KeyDef: Identifiable {
     }
 }
 
-// MARK: — Key button view
+// MARK: — Key button view (DesignTokens.Size.touchTargetCompact = 64pt minimum)
 
 private struct KeyButton: View {
     let key: KeyDef
     let action: () -> Void
 
+    @Environment(\.appTheme) private var theme
+
     var body: some View {
         Button(action: action) {
             Text(key.label)
                 .font(.system(size: 18, weight: .medium, design: .rounded))
-                .frame(minWidth: 64, maxWidth: key.isWide ? .infinity : nil, minHeight: 64)
-                .background(key.accent ? Color.accentColor : Color(.secondarySystemGroupedBackground))
-                .foregroundStyle(key.accent ? .white : .primary)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(key.accent ? .white : theme.textPrimary)
+                .frame(minWidth: DesignTokens.Size.touchTargetCompact,
+                       maxWidth: key.isWide ? .infinity : nil,
+                       minHeight: DesignTokens.Size.touchTargetCompact)
+                .background(key.accent ? theme.accent : theme.surfaceSecondary)
+                .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(key.label)
+        .accessibilityHint("Double-tap to enter \(key.label)")
     }
 }

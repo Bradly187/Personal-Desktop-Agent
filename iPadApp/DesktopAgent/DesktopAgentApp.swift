@@ -1,62 +1,96 @@
 import SwiftUI
-import Combine
 
 @main
 struct DesktopAgentApp: App {
-    @StateObject private var wsManager = WebSocketManager()
-    @StateObject private var settings = SettingsStore()
-    @StateObject private var audioStreamer = AudioStreamerController()
+    @StateObject private var wsManager: WebSocketManager
+    @StateObject private var settings: SettingsStore
+    @StateObject private var sensorManager: SensorManager
+    @StateObject private var screenshotStore = ScreenshotStore()
+    @StateObject private var serviceDiscovery = ServiceDiscovery()
+
+    // Fix #5: Track scene phase for proper background/foreground lifecycle
+    @Environment(\.scenePhase) private var scenePhase
+
+    /// Syncs feature toggle changes to PC via WebSocket. Retained for app lifetime.
+    private let featureToggleSyncer: FeatureToggleSyncer
+
+    /// Syncs dwell action type changes to PC via WebSocket. Retained for app lifetime.
+    private let dwellActionSyncer: DwellActionSyncer
+
+    init() {
+        let ws = WebSocketManager()
+        let s = SettingsStore()
+        _wsManager = StateObject(wrappedValue: ws)
+        _settings = StateObject(wrappedValue: s)
+        _sensorManager = StateObject(wrappedValue: SensorManager(ws: ws, settings: s))
+        featureToggleSyncer = FeatureToggleSyncer(settings: s, ws: ws)
+        dwellActionSyncer = DwellActionSyncer(settings: s, ws: ws)
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(\.appTheme, .default)
                 .environmentObject(wsManager)
                 .environmentObject(settings)
-                .environmentObject(audioStreamer)
-                .onAppear {
-                    wsManager.settings = settings
-                    audioStreamer.wire(ws: wsManager, settings: settings)
-                    wsManager.connect()
-                }
-                .onDisappear {
-                    audioStreamer.stop()
-                    wsManager.disconnect()
-                }
-                .onReceive(settings.$audioStreamEnabled) { enabled in
-                    if enabled {
-                        audioStreamer.start()
-                    } else {
-                        audioStreamer.stop()
+                .environmentObject(sensorManager)
+                .environmentObject(screenshotStore)
+                .environmentObject(serviceDiscovery)
+        }
+        // Fix #5: Reliable lifecycle handling via scenePhase.
+        // .onDisappear is unreliable on iPad — scenePhase catches background/termination.
+        .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .background:
+                sensorManager.stopAll()
+                wsManager.disconnect()
+            case .active:
+                // Only auto-start if onboarding is complete
+                if UserDefaults.standard.bool(forKey: "onboardingComplete") {
+                    sensorManager.startAll()
+                    if wsManager.state == .disconnected {
+                        wsManager.connect()
                     }
                 }
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
         }
     }
 }
 
-/// Thin controller that owns the AudioStreamer and exposes observable state.
-/// Separated from AudioStreamer to allow lazy initialization after wsManager is ready.
-@MainActor
-final class AudioStreamerController: ObservableObject {
-    @Published var isStreaming = false
+// MARK: - Root View (gates onboarding vs main app)
 
-    private var streamer: AudioStreamer?
-    private var cancellable: AnyCancellable?
+struct RootView: View {
+    @EnvironmentObject var wsManager: WebSocketManager
+    @EnvironmentObject var settings: SettingsStore
+    @EnvironmentObject var sensorManager: SensorManager
+    @EnvironmentObject var serviceDiscovery: ServiceDiscovery
 
-    func wire(ws: WebSocketManager, settings: SettingsStore) {
-        streamer = AudioStreamer(ws: ws, settings: settings)
-        // Observe streamer's isStreaming state
-        cancellable = streamer?.$isStreaming
-            .receive(on: RunLoop.main)
-            .sink { [weak self] value in
-                self?.isStreaming = value
-            }
-    }
+    @State private var onboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
 
-    func start() {
-        streamer?.start()
-    }
+    var body: some View {
+        if onboardingComplete {
+            ContentView()
+                .onAppear {
+                    wsManager.settings = settings
+                    wsManager.serviceDiscovery = serviceDiscovery
 
-    func stop() {
-        streamer?.stop()
+                    let defaultHost = "192.168.18.2"
+                    serviceDiscovery.hasManualOverride = (settings.serverHost != defaultHost)
+                    serviceDiscovery.startBrowsing()
+                    sensorManager.startAll()
+                    wsManager.connect()
+                }
+                .onDisappear {
+                    serviceDiscovery.stopBrowsing()
+                    sensorManager.stopAll()
+                    wsManager.disconnect()
+                }
+        } else {
+            OnboardingView(isComplete: $onboardingComplete)
+        }
     }
 }

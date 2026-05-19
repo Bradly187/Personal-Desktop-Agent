@@ -3,13 +3,19 @@
 Listens on port 8765 for messages from the iPad app and dispatches them
 to FusionEngine, CommandExecutor, or directly to pyautogui.
 
-Message types — 13 total:
+Message types — 19 total:
   touch_command     →  CommandExecutor (action routing; priority 1)
   trackpad          →  direct pyautogui (mouse/scroll; no LLM)
   handwriting_image →  pix2tex OCR → handwriting_result reply
-  tilt              →  FusionEngine.on_tilt() (when wired)
+  tilt_position     →  FusionEngine.on_tilt_position() (absolute positioning)
+  tilt              →  FusionEngine.on_tilt() (legacy velocity mode)
   tilt_tap          →  FusionEngine.on_touch() (when wired)
+  tilt_ratchet      →  FusionEngine.on_tilt_ratchet() (re-center neutral point)
+  sensor_switch     →  FusionEngine.on_sensor_switch() (mutual-exclusion toggle)
+  cursor_pause      →  FusionEngine.on_cursor_pause() (quick-pause all cursor sensors)
+  cursor_resume     →  FusionEngine.on_cursor_resume() (resume cursor sensors)
   gaze              →  FusionEngine.on_gaze() (when wired)
+  gaze_delta        →  FusionEngine.on_gaze_delta() (relative eye movement → cursor)
   gaze_dwell        →  FusionEngine.on_gaze_dwell() (when wired)
   head_pose         →  FusionEngine.on_head() (when wired)
   keyword           →  FusionEngine.on_keyword() (when wired)
@@ -53,6 +59,7 @@ if TYPE_CHECKING:
     from fusion_engine import FusionEngine
     from gesture_processor import GestureProcessor
     from lidar_receiver import LiDARReceiver
+    from sensor_viewer import SensorViewer
     from whisper_stream import WhisperStream
 
 # ---------------------------------------------------------------------------
@@ -73,12 +80,27 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 class IPadBridge:
-    def __init__(self, port: int = 8765):
+    # Valid dwell action types for set_dwell_action messages
+    VALID_DWELL_ACTIONS: set[str] = {
+        "left_click", "right_click", "double_click", "drag_start", "drag_end"
+    }
+
+    # Valid feature names for set_feature_toggle messages
+    VALID_FEATURES: set[str] = {
+        "gaze_dwell_click", "gaze_dwell_right_click", "gaze_dwell_double_click",
+        "gaze_dwell_drag", "edge_scroll", "gaze_cursor_mode",
+    }
+
+    def __init__(self, port: int = 8765, host: str = "0.0.0.0"):
         self.port = port
+        self.host = host
 
         # Screen dimensions (resolved lazily at start)
         self._screen_w: int = 1920
         self._screen_h: int = 1080
+
+        # Active dwell action type (default: left_click)
+        self._active_dwell_action: str = "left_click"
 
         # Direct executor for Phase 1 touch/trackpad commands
         self._executor = CommandExecutor()
@@ -88,6 +110,7 @@ class IPadBridge:
         self._lidar: Optional["LiDARReceiver"] = None
         self._gesture: Optional["GestureProcessor"] = None
         self._whisper: Optional["WhisperStream"] = None
+        self._viewer: Optional["SensorViewer"] = None
 
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
@@ -107,6 +130,9 @@ class IPadBridge:
 
     def set_whisper_stream(self, whisper: "WhisperStream") -> None:
         self._whisper = whisper
+
+    def set_viewer(self, viewer: "SensorViewer") -> None:
+        self._viewer = viewer
 
     # ---------------------------------------------------------------------- #
     # Startup
@@ -131,6 +157,19 @@ class IPadBridge:
         peer = request.remote
         log.info("Client connected: %s", peer)
         self._clients.add(ws)
+
+        # Send welcome message so the iPad client confirms the connection is alive
+        # (WebSocketManager waits for first receive before transitioning to .connected)
+        try:
+            await ws.send_json({
+                "type": "status",
+                "active_window": None,
+                "cursor": {"x": 0, "y": 0},
+                "active_dwell_action": self._active_dwell_action,
+                "ts": time.time(),
+            })
+        except Exception as exc:
+            log.debug("Failed to send welcome: %s", exc)
 
         try:
             async for msg in ws:
@@ -168,6 +207,13 @@ class IPadBridge:
         log.debug("Received [%s] id=%s", msg_type, msg_id)
 
         # ------------------------------------------------------------------ #
+        # Ping/pong — immediate echo for latency measurement
+        # ------------------------------------------------------------------ #
+        if msg_type == "ping":
+            await ws.send_json({"type": "pong", "id": msg_id, "t": msg.get("t", 0)})
+            return
+
+        # ------------------------------------------------------------------ #
         # Phase 1 message handlers
         # ------------------------------------------------------------------ #
         if msg_type == "touch_command":
@@ -191,11 +237,32 @@ class IPadBridge:
             return
 
         # ------------------------------------------------------------------ #
+        # Dwell action selection — updates active dwell action type
+        # ------------------------------------------------------------------ #
+        if msg_type == "set_dwell_action":
+            await self._handle_set_dwell_action(ws, msg)
+            return
+
+        if msg_type == "set_feature_toggle":
+            await self._handle_set_feature_toggle(ws, msg)
+            return
+
+        # ------------------------------------------------------------------ #
         # Sensor streams — dispatched to FusionEngine / Phase 3 components
         # No ack sent for high-frequency streams (tilt, gaze, head_pose).
         # All sensor handlers are wrapped in try/except to prevent malformed
         # data from crashing the bridge.
         # ------------------------------------------------------------------ #
+        if msg_type == "tilt_position":
+            try:
+                if self._fusion:
+                    x = float(msg.get("x", 0.5))
+                    y = float(msg.get("y", 0.5))
+                    self._fusion.on_tilt_position(x, y)
+            except (ValueError, TypeError) as exc:
+                log.debug("Bad tilt_position data: %s", exc)
+            return
+
         if msg_type == "tilt":
             try:
                 if self._fusion:
@@ -212,6 +279,28 @@ class IPadBridge:
                 self._fusion.on_touch(cmd)
             return
 
+        if msg_type == "tilt_ratchet":
+            if self._fusion:
+                self._fusion.on_tilt_ratchet()
+            return
+
+        if msg_type == "sensor_switch":
+            if self._fusion:
+                from_sensor = msg.get("from")
+                to_sensor = msg.get("to", "tilt")
+                self._fusion.on_sensor_switch(from_sensor, to_sensor)
+            return
+
+        if msg_type == "cursor_pause":
+            if self._fusion:
+                self._fusion.on_cursor_pause()
+            return
+
+        if msg_type == "cursor_resume":
+            if self._fusion:
+                self._fusion.on_cursor_resume()
+            return
+
         if msg_type == "gaze":
             try:
                 if self._fusion:
@@ -219,8 +308,22 @@ class IPadBridge:
                     y = float(msg.get("y", 0.5))
                     conf = float(msg.get("confidence", 0.0))
                     self._fusion.on_gaze(x, y, conf)
+                    if self._viewer:
+                        self._viewer.on_gaze(x, y, conf)
             except (ValueError, TypeError) as exc:
                 log.debug("Bad gaze data: %s", exc)
+            return
+
+        if msg_type == "gaze_delta":
+            try:
+                if self._fusion:
+                    dx = float(msg.get("dx", 0.0))
+                    dy = float(msg.get("dy", 0.0))
+                    conf = float(msg.get("conf", 1.0))
+                    saccade = bool(msg.get("saccade", False))
+                    self._fusion.on_gaze_delta(dx, dy, conf=conf, saccade=saccade)
+            except (ValueError, TypeError) as exc:
+                log.debug("Bad gaze_delta data: %s", exc)
             return
 
         if msg_type == "gaze_dwell":
@@ -228,7 +331,9 @@ class IPadBridge:
                 if self._fusion:
                     x = float(msg.get("x", 0.5))
                     y = float(msg.get("y", 0.5))
-                    self._fusion.on_gaze_dwell(x, y)
+                    # Use action_type from message, fall back to stored active dwell action
+                    action_type = msg.get("action_type") or self._active_dwell_action
+                    self._fusion.on_gaze_dwell(x, y, action_type)
             except (ValueError, TypeError) as exc:
                 log.debug("Bad gaze_dwell data: %s", exc)
             return
@@ -262,6 +367,8 @@ class IPadBridge:
                 self._lidar.on_depth_frame(msg)
             else:
                 log.debug("depth_frame received but LiDARReceiver not wired")
+            if self._viewer:
+                self._viewer.on_depth_frame(msg)
             return
 
         if msg_type == "camera_frame":
@@ -269,8 +376,13 @@ class IPadBridge:
                 gesture_cmd = self._gesture.on_camera_frame(msg)
                 if gesture_cmd and self._fusion:
                     self._fusion.on_gesture(gesture_cmd)
+                # Forward landmarks to viewer overlay
+                if self._viewer:
+                    self._viewer.on_hand_landmarks(self._gesture.latest_landmarks)
             else:
                 log.debug("camera_frame received but GestureProcessor not wired")
+            if self._viewer:
+                self._viewer.on_camera_frame(msg)
             return
 
         if msg_type == "audio_stream":
@@ -393,6 +505,87 @@ class IPadBridge:
         await self._send_handwriting_result(ws, msg_id, result)
 
     # ---------------------------------------------------------------------- #
+    # set_dwell_action — updates active dwell action type
+    # ---------------------------------------------------------------------- #
+
+    async def _handle_set_dwell_action(
+        self, ws: web.WebSocketResponse, msg: dict
+    ) -> None:
+        """Handle set_dwell_action message. Validates action_type and updates state."""
+        msg_id = msg.get("id")
+        action_type = msg.get("action_type")
+
+        if action_type not in self.VALID_DWELL_ACTIONS:
+            error_msg = (
+                f"invalid action_type: {action_type!r}; "
+                f"must be one of {sorted(self.VALID_DWELL_ACTIONS)}"
+            )
+            log.warning("set_dwell_action rejected: %s", error_msg)
+            payload: dict = {"type": "ack", "status": "error", "error": error_msg}
+            if msg_id is not None:
+                payload["id"] = msg_id
+            try:
+                await ws.send_json(payload)
+            except Exception as exc:
+                log.debug("Failed to send error ack: %s", exc)
+            return
+
+        self._active_dwell_action = action_type
+        log.info("Active dwell action set to: %s", action_type)
+
+        payload = {"type": "ack", "status": "ok", "action_type": action_type}
+        if msg_id is not None:
+            payload["id"] = msg_id
+        try:
+            await ws.send_json(payload)
+        except Exception as exc:
+            log.debug("Failed to send ack: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # set_feature_toggle — update feature enabled/disabled state
+    # ---------------------------------------------------------------------- #
+
+    async def _handle_set_feature_toggle(self, ws: web.WebSocketResponse, msg: dict) -> None:
+        """Handle set_feature_toggle messages. Validates feature name and forwards to FusionEngine."""
+        msg_id = msg.get("id")
+        feature = msg.get("feature")
+        enabled = msg.get("enabled")
+
+        # Validate feature name
+        if feature not in self.VALID_FEATURES:
+            payload: dict = {
+                "type": "ack",
+                "id": msg_id,
+                "status": "error",
+                "error": f"unknown feature: {feature!r}",
+            }
+            try:
+                await ws.send_json(payload)
+            except Exception as exc:
+                log.debug("Failed to send ack: %s", exc)
+            return
+
+        # Coerce enabled to bool
+        enabled = bool(enabled)
+
+        # Forward to FusionEngine
+        if self._fusion:
+            self._fusion.set_feature_toggle(feature, enabled)
+
+        # Respond with success ack
+        payload = {
+            "type": "ack",
+            "id": msg_id,
+            "status": "ok",
+            "feature": feature,
+            "enabled": enabled,
+        }
+        try:
+            await ws.send_json(payload)
+        except Exception as exc:
+            log.debug("Failed to send ack: %s", exc)
+
+    # ---------------------------------------------------------------------- #
     # Response helpers
     # ---------------------------------------------------------------------- #
 
@@ -511,11 +704,11 @@ class IPadBridge:
 
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", self.port, reuse_address=True)
+        site = web.TCPSite(runner, self.host, self.port, reuse_address=True)
         await site.start()
 
-        log.info("Bridge listening on :%d  (ws://0.0.0.0:%d/ws)", self.port, self.port)
-        log.info("Web client: http://0.0.0.0:%d/", self.port)
+        log.info("Bridge listening on %s:%d  (ws://%s:%d/ws)", self.host, self.port, self.host, self.port)
+        log.info("Web client: http://%s:%d/", self.host, self.port)
         self._print_qr()
 
         try:
@@ -553,11 +746,14 @@ class IPadBridge:
 
     def _print_qr(self) -> None:
         """Print connection info to the terminal (QR code if qrcode installed)."""
-        hostname = socket.gethostname()
-        try:
-            local_ip = socket.gethostbyname(hostname)
-        except Exception:
-            local_ip = "localhost"
+        if self.host != "0.0.0.0":
+            local_ip = self.host
+        else:
+            hostname = socket.gethostname()
+            try:
+                local_ip = socket.gethostbyname(hostname)
+            except Exception:
+                local_ip = "localhost"
         url = f"ws://{local_ip}:{self.port}/ws"
         print(f"\n  Connect iPad to:  {url}\n")
         try:

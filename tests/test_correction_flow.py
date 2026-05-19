@@ -13,12 +13,15 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from command_executor import Command
 from agentcore_fallback.client import AgentCoreFallbackClient, FallbackConfig
 
 
+@pytest.mark.asyncio
 async def test_client_resolve_payload():
     """Verify the client builds the correct payload for disambiguation."""
     cmd = Command(
@@ -76,6 +79,7 @@ async def test_client_resolve_payload():
     print("✓ test_client_resolve_payload passed")
 
 
+@pytest.mark.asyncio
 async def test_client_correction_payload():
     """Verify the client builds the correct payload for corrections."""
     config = FallbackConfig(dev_url="http://localhost:8090/invocations")
@@ -125,6 +129,7 @@ async def test_client_correction_payload():
     print("✓ test_client_correction_payload passed")
 
 
+@pytest.mark.asyncio
 async def test_coordinator_correct_method():
     """Verify HybridCoordinator.correct() calls the trainer."""
     from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
@@ -156,11 +161,14 @@ async def test_coordinator_correct_method():
     print("✓ test_coordinator_correct_method passed")
 
 
+@pytest.mark.asyncio
 async def test_trainer_record_correction_fires_agentcore():
     """Verify ContinuousTrainer.record_correction() fires the AgentCore task."""
     from continuous_trainer import ContinuousTrainer
 
-    trainer = ContinuousTrainer()
+    mock_db = AsyncMock()
+    mock_db.available = False
+    trainer = ContinuousTrainer(agent_db=mock_db)
     # Don't start (no DB) — just test the AgentCore forwarding path
 
     cmd = Command(

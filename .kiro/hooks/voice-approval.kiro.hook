@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "enabled": true,
+  "name": "Voice Approval Gate",
+  "description": "Before executing any destructive spec task (file edits, test runs, deploy), announce the action via Amazon Polly TTS and wait for voice approval. Uses approval_hook.py which speaks via Polly and listens for a yes/no response. Auto-approves after 6 seconds of silence.",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Before proceeding with any file edits, shell commands, or other actions in this session: run the voice approval gate by executing `E:\\Personal_Desktop_Agent\\.venv\\Scripts\\python.exe E:\\Personal_Desktop_Agent\\approval_hook.py` and piping it the JSON description of the action you are about to take, using the format {\"tool_name\": \"<verb>\", \"tool_input\": {\"description\": \"<what you are about to do>\"}}. Wait for exit code 0 (approved) before proceeding. If exit code 2, stop and report that the user rejected the action via voice. This gate applies to all Edit, Write, Bash, PowerShell, and Agent actions in this session."
+  }
+}

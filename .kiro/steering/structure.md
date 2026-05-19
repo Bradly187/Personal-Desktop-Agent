@@ -20,9 +20,21 @@ project/
 ├── command_executor.py        # Command → mouse/keyboard execution
 ├── continuous_trainer.py     # Background learning (thresholds, vocab, few-shot)
 ├── iPadApp/                  # Native Swift/SwiftUI Xcode project (iPadOS 17+)
-│   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector
-│   ├── UI/                   # CommandPadView, TrackpadView, SettingsView
-│   ├── Network/              # WebSocketManager (URLSession, Bonjour/mDNS discovery)
+│   ├── Audio/                # SharedAudioSession — shared AVAudioEngine for all 3 audio sensors
+│   ├── Sensors/              # TiltSensor, GazeTracker, HeadTracker, SharedFaceSession,
+│   │                         #   KeywordListener, SoundDetector, AudioStreamer
+│   ├── UI/                   # CommandPadView, TrackpadView, ScientificKeypadView, HandwritingCanvasView,
+│   │                         #   ScreenshotOverlayView, SettingsView, OnboardingView,
+│   │                         #   DwellActionToolbar, DwellToolbarContainer, LiDARDebugView,
+│   │                         #   CursorConflictBanner (amber warning when 2+ cursor sensors active; picker to choose one),
+│   │                         #   SensorDashboardView (unified 7-sensor status/toggle/detail panel),
+│   │                         #   SoundTrainingSheet (guided validation of cluck/pop/hiss detection),
+│   │                         #   TiltCalibrationSheet, GazeCalibrationSheet (guided gaze sensitivity auto-tune),
+│   │                         #   SensorActivityBar, CommandToast
+│   ├── DesignSystem/         # DesignTokens, AppTheme, Components/ (DAButton, DACard, DAConnectionBanner, DASectionHeader)
+│   ├── Network/              # WebSocketManager, ServiceDiscovery (NWBrowser mDNS)
+│   ├── SensorManager.swift   # Lifecycle hub: starts/stops all 7 sensors, owns SharedAudioSession + SharedFaceSession
+│   ├── ScreenshotStore.swift # Decodes screenshot messages, publishes to UI
 │   └── SettingsStore.swift   # UserDefaults persistence for all sensor preferences
 ├── ipad_bridge.py            # WebSocket server :8765, receives all iPad sensor streams
 │                             # dispatches to FusionEngine/WhisperStream/GestureProcessor
@@ -59,7 +71,7 @@ class Command:
     text: str                    # Natural language action text
     whisper_logprob: float       # Transcription confidence (or 0.0)
     gesture_confidence: float    # Gesture confidence (or 1.0)
-    source: str                  # "touch" | "sound_action" | "gaze_dwell" | "multimodal" |
+    source: str                  # "touch" | "sound_action" | "gaze_delta" | "multimodal" |
                                  # "tilt" | "head_track" | "gesture" | "voice_local" | "voice"
     session_context: list[str]   # Last 20 successful commands
     _gaze_coords: tuple | None   # Screen (x, y) when gaze active
@@ -69,9 +81,9 @@ class Command:
 
 1. iPad touch command → immediate, bypasses LLM
 2. Sound action → mapped mouth sounds
-3. Gaze dwell click → resting gaze triggers click
-4. Gaze + voice "click" → click at gaze pixel
-5. Gaze + gesture POINT → click at gaze pixel
+3. Gaze delta cursor → relative eye movement drives cursor
+4. Gaze + voice "click" → click at current cursor position
+5. Gaze + gesture POINT → click at current cursor position
 6. Tilt navigation → cursor movement from iPad tilt
 7. Head tracking → coarse cursor from head pose
 8. Gesture alone → gesture command
@@ -85,12 +97,17 @@ class Command:
 3. Expose data as one of: `GazePoint`, `HandFrame`, `RGBDFrame`, or `Command`
 4. Register in `FusionEngine.tick()` at the appropriate priority level
 5. Document hardware cost and `pip install` in the class docstring
+6. **If the sensor uses ARKit face tracking**: register as a consumer on `SharedFaceSession` instead of creating a new `ARSession`. ARKit only supports one face-tracking session per device — GazeTracker and HeadTracker already share via this pattern. Call `sharedFaceSession.addConsumer(id, handler:)` in `start()` and `removeConsumer(id)` in `stop()`.
+   - **Threading**: The handler is called directly on the ARKit delegate thread (not main). Mark it `@Sendable`. If you need main-thread access, dispatch internally within your handler.
+   - **Error recovery**: `SharedFaceSession` auto-recovers from ARSession errors (up to 3 attempts, 1s delay). Subscribe to `onError` if your sensor needs to update UI state on failure. Observe `isRunning` (now `@Published`) for session state changes.
 
 ## Persistent Files
 
-| File | Writer | Reader |
-|------|--------|--------|
-| routing_log.jsonl | OutcomeLogger | ThresholdTuner, VocabBuilder |
-| hotwords.txt | VocabularyBuilder | WhisperTranscriber |
-| gesture_calibration.json | GestureCalibrator | GestureCalibrator (startup) |
-| few_shot_memory.db | FewShotMemory | PromptAugmenter |
+All persistence goes through `db.py`. Legacy flat files are superseded by AgentDB.
+
+| Store | Writer | Reader |
+|-------|--------|--------|
+| `agent.db` (SQLite / AgentDB) | All pipeline components | ContinuousTrainer, HybridCoordinator, ModelRouter |
+| `analytics.duckdb` (AnalyticsDB) | BenchmarkModels | AnalyticsDB OLAP queries |
+
+Legacy files (`routing_log.jsonl`, `hotwords.txt`, `gesture_calibration.json`, `few_shot_memory.db`) are migrated by `migrate.py` — delete after running once.

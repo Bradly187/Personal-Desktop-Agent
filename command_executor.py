@@ -31,6 +31,81 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Amazon Polly TTS — spoken clarification for cloud-routed commands
+# ---------------------------------------------------------------------------
+
+_POLLY_VOICE = "Danielle"         # en-US Generative female; also supports Long-form
+_POLLY_SAMPLE_RATE = 16_000       # 16 kHz PCM matches sounddevice default input rate
+_POLLY_MAX_CHARS = 3_000          # Polly hard limit for standard text input
+_POLLY_TIMEOUT_S = 5              # boto3 connect + read timeout
+
+
+def _polly_speak(message: str) -> bool:
+    """Speak a clarification message via Amazon Polly Neural TTS.
+
+    Called from _dispatch() which already runs in asyncio.to_thread, so
+    this function is safe to block.
+
+    Returns True if audio played successfully; False on any error
+    (missing credentials, network timeout, sounddevice failure, etc.).
+    All exceptions are caught internally — never raises.
+    """
+    if not message:
+        return False
+
+    if len(message) > _POLLY_MAX_CHARS:
+        message = message[:_POLLY_MAX_CHARS]
+
+    try:
+        import boto3
+        from botocore.config import Config
+        import numpy as np
+        import sounddevice as sd
+    except ImportError as exc:
+        log.debug("Polly TTS: dependency missing (%s) — install boto3, numpy, sounddevice", exc)
+        return False
+
+    try:
+        cfg = Config(connect_timeout=_POLLY_TIMEOUT_S, read_timeout=_POLLY_TIMEOUT_S)
+        polly = boto3.client("polly", region_name="us-east-1", config=cfg)
+
+        resp = polly.synthesize_speech(
+            Text=message,
+            OutputFormat="pcm",
+            SampleRate=str(_POLLY_SAMPLE_RATE),
+            VoiceId=_POLLY_VOICE,
+            Engine="neural",
+            LanguageCode="en-US",
+        )
+
+        audio_bytes: bytes = resp["AudioStream"].read()
+        if not audio_bytes:
+            log.warning("Polly TTS: empty audio stream returned")
+            return False
+
+        audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        duration_s = len(audio) / _POLLY_SAMPLE_RATE
+        timeout_s = duration_s + _POLLY_TIMEOUT_S  # audio duration + network buffer
+
+        sd.play(audio, samplerate=_POLLY_SAMPLE_RATE)
+        deadline = time.monotonic() + timeout_s
+        while sd.get_stream() and sd.get_stream().active:
+            if time.monotonic() > deadline:
+                sd.stop()
+                log.warning("Polly TTS: playback timed out after %.1fs", timeout_s)
+                return False
+            time.sleep(0.05)
+
+        log.info("Polly TTS: spoke %d chars (%.1fs) via voice=%s",
+                 len(message), duration_s, _POLLY_VOICE)
+        return True
+
+    except Exception as exc:
+        log.warning("Polly TTS failed: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Universal DTO (mirrors the spec's Command dataclass)
 # ---------------------------------------------------------------------------
 
@@ -189,10 +264,19 @@ class CommandExecutor:
             return result
 
         # ------------------------------------------------------------------ #
-        # CLARIFY — nothing to execute; caller should prompt user
+        # CLARIFY — speak via Polly Bidirectional Streaming TTS (always)
         # ------------------------------------------------------------------ #
         if action == "CLARIFY":
-            return {"clarify": True, "message": p.get("message", "Unclear command")}
+            message = p.get("message", "Unclear command")
+            spoken = False
+            try:
+                from polly_stream import get_client as _get_tts
+                spoken = _get_tts().speak_sync(message)
+            except Exception as _tts_exc:
+                log.debug("TTS speak failed, falling back to legacy Polly: %s", _tts_exc)
+                if p.get("route") == "cloud":
+                    spoken = _polly_speak(message)
+            return {"clarify": True, "message": message, "spoken": spoken}
 
         # ================================================================== #
         # Dev-agent extended verbs
@@ -238,8 +322,9 @@ class CommandExecutor:
         # params: {query: str}
         # ------------------------------------------------------------------ #
         if action == "SEARCH_WEB":
+            from urllib.parse import urlencode
             query = p.get("query", cmd.text)
-            url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+            url = "https://www.google.com/search?" + urlencode({"q": query})
             webbrowser.open(url)
             return {"opened": url}
 

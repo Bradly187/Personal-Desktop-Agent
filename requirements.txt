@@ -3,10 +3,15 @@
 #
 # Install all:  pip install -r requirements.txt
 #
+# vLLM installed (0.21.0) but requires CUDA PyTorch + CUDA 12.x wheels to activate.
+# RTX 5090 uses CUDA 13.2; CUDA 13.x wheels not yet published — enable when available:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   pip install vllm  (reinstalls with CUDA torch, compiles vllm._C)
+#   Then: python -m huggingface_hub login  (for gated Meta models)
+#   Benchmark: python benchmark_models.py --vllm meta-llama/Meta-Llama-3.1-8B-Instruct
+#
 # Not-yet-installed (install separately when ready):
 #   ultralytics>=8.0.0         # YOLOv8-pose gesture recognition
-#   boto3>=1.34.0              # AWS Bedrock / Transcribe cloud fallback
-#   vllm>=0.4.0                # Phase 2 production LLM backend
 #   qrcode>=7.4.2              # Terminal QR code for iPad connection URL
 
 # ── Core bridge & MCP ────────────────────────────────────────────────────────
@@ -43,6 +48,11 @@ duckdb==1.5.2
 # ── Semantic few-shot retrieval (MiniLM embeddings in AgentDB) ────────────────
 sentence-transformers==5.4.1
 
+# ── Polly Bidirectional Streaming TTS (polly_stream.py) ──────────────────────
+# soundfile: OGG Vorbis decode for audio returned by the Node.js sidecar.
+# The libsndfile wheel for Windows includes OGG/Vorbis support out of the box.
+soundfile==0.13.1
+
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1
 
@@ -51,6 +61,11 @@ mediapipe==0.10.35
 
 # ── Audio capture (iPad audio_stream + local mic) ────────────────────────────
 sounddevice==0.5.5
+
+# ── Chatterbox local TTS (chatterbox_tts.py — RTX 5090, MIT licence) ─────────
+# Emotion exaggeration (0.25–2.0), paralinguistic tags, zero-shot voice cloning.
+# Models auto-download from HuggingFace on first call (~2 GB, cached).
+chatterbox-tts
 
 # ── AWS cloud fallback (Phase 6 — Bedrock, Transcribe, Polly) ────────────────
 boto3==1.38.28

@@ -207,6 +207,19 @@ class DevAgent:
         )
         self._results_log.append(result)
         await self._persist_run(result, command_id=None)
+
+        # Speak EXPLAIN responses via Polly Bidirectional Streaming TTS.
+        # The Node.js sidecar handles StartSpeechSynthesisStream internally, so
+        # even a complete-string POST benefits from the Generative engine and
+        # 24kHz audio quality. True token-by-token streaming to TTS would require
+        # ModelRouter.infer_stream() — a future enhancement.
+        if router_result.text and router_result.ok:
+            try:
+                from polly_stream import get_client as _get_tts
+                asyncio.create_task(_get_tts().speak(router_result.text))
+            except Exception as _tts_exc:
+                log.debug("DevAgent TTS failed: %s", _tts_exc)
+
         return result
 
     # ---------------------------------------------------------------------- #

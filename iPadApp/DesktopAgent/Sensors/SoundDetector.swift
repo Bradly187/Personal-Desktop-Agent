@@ -4,25 +4,37 @@ import Foundation
 
 /// Classifies mouth sounds (cluck, pop, hiss) from the microphone.
 /// Uses onset detection + spectral shape heuristics on AVAudioEngine FFT data.
-/// 500 ms debounce prevents duplicate fires.
+/// 200 ms debounce prevents duplicate fires.
+///
+/// Uses SharedAudioSession for audio input — does NOT own its own AVAudioEngine.
+///
+/// Audio processing runs on a dedicated serial queue to avoid data races —
+/// the tap handler dispatches immediately off the audio render thread.
 @MainActor
 final class SoundDetector {
 
-    private let engine = AVAudioEngine()
+    private let sharedAudioSession: SharedAudioSession
     private weak var ws: WebSocketManager?
     private var settings: SettingsStore?
 
-    private var lastFireTime: Date?
-    private let debounceDuration: TimeInterval = 0.5
+    private static let consumerID = "SoundDetector"
 
-    // FFT setup
+    // FFT setup (immutable after init — safe to access from processQueue)
     private let fftSize = 1024
-    private var fftSetup: FFTSetup?
-    private var prevMag: Float = 0
+    private let fftSetup: FFTSetup?
 
-    init(ws: WebSocketManager, settings: SettingsStore) {
+    /// Serial queue for audio analysis — keeps mutable state off the render thread.
+    private let processQueue = DispatchQueue(label: "sound.detector.process", qos: .userInteractive)
+
+    // Mutable state accessed ONLY from processQueue
+    private var prevMag: Float = 0
+    private var lastFireTime: Date?
+    private let debounceDuration: TimeInterval = 0.2
+
+    init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
         self.settings = settings
+        self.sharedAudioSession = sharedAudioSession
         fftSetup = vDSP_create_fftsetup(vDSP_Length(log2(Float(fftSize))), FFTRadix(FFT_RADIX2))
     }
 
@@ -33,26 +45,28 @@ final class SoundDetector {
     // MARK: — Lifecycle
 
     func start() {
-        do {
-            let input = engine.inputNode
-            let format = input.outputFormat(forBus: 0)
-            input.installTap(onBus: 0, bufferSize: AVAudioFrameCount(fftSize), format: format) {
-                [weak self] buffer, _ in
+        sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
+            guard let self else { return }
+            // Dispatch off the audio render thread immediately
+            self.processQueue.async { [weak self] in
                 self?.analyze(buffer: buffer)
             }
-            try engine.start()
-        } catch {
-            print("SoundDetector: engine start failed: \(error)")
         }
     }
 
     func stop() {
-        engine.stop()
+        sharedAudioSession.removeConsumer(Self.consumerID)
+        // Fix #19: Reset onset detection state so restart doesn't carry stale baseline.
+        // Safe to reset here since stop() runs on MainActor and processQueue won't
+        // receive new buffers after removeConsumer (the tap handler is removed).
+        prevMag = 0
+        lastFireTime = nil
     }
 
-    // MARK: — Sound classification
+    // MARK: — Sound classification (runs on processQueue)
 
     private func analyze(buffer: AVAudioPCMBuffer) {
+        guard let fftSetup else { return }  // Guard against nil FFT setup (memory pressure)
         guard let channelData = buffer.floatChannelData?[0] else { return }
         let frameCount = Int(buffer.frameLength)
         guard frameCount >= fftSize else { return }
@@ -79,7 +93,7 @@ final class SoundDetector {
                 channelData.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { ptr in
                     vDSP_ctoz(ptr, 2, &split, 1, vDSP_Length(fftSize / 2))
                 }
-                vDSP_fft_zrip(fftSetup!, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
+                vDSP_fft_zrip(fftSetup, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
 
                 magnitudes.withUnsafeMutableBufferPointer { magBuf in
                     vDSP_zvmags(&split, 1, magBuf.baseAddress!, 1, vDSP_Length(fftSize / 2))

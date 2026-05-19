@@ -80,12 +80,15 @@ classDiagram
         +SFSpeechRecognizer recognizer
         +[String] keywords
         +Double confidenceThreshold
+        -Int lastScannedLength
+        -[String:Date] keywordCooldowns
+        -TimeInterval keywordCooldownDuration
         +start() void
         +stop() void
         +onKeyword(handler) void
         +onUnmatched(audioBuffer) void
     }
-    note for KeywordListener "Speech Framework\nOn-device recognition\nStreams unmatched audio\nto PC for Whisper"
+    note for KeywordListener "Speech Framework\nOn-device recognition\nIncremental scan + 0.5s cooldown\nStreams unmatched audio\nto PC for Whisper"
 
     class SoundDetector {
         +AVAudioEngine engine

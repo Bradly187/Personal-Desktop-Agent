@@ -3,12 +3,12 @@ options:
   bundleIdPrefix: com.bradtarver
   deploymentTarget:
     iOS: "17.0"
-  xcodeVersion: "16.3"
+  xcodeVersion: "16.4"
   groupSortPosition: top
   createIntermediateGroups: true
 
 settings:
-  SWIFT_VERSION: "5.9"
+  SWIFT_VERSION: "5.10"
   PRODUCT_BUNDLE_IDENTIFIER: com.bradtarver.DesktopAgent
   TARGETED_DEVICE_FAMILY: "2"
   SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
@@ -33,6 +33,7 @@ targets:
         CFBundleDisplayName: Desktop Agent
         CFBundleVersion: "1"
         CFBundleShortVersionString: "1.0"
+        CFBundleIconName: AppIcon
         UILaunchStoryboardName: LaunchScreen
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations~ipad:

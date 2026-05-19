@@ -59,7 +59,8 @@ class LiDARReceiver:
         self._conf_min = conf_min
         self.latest_depth: Optional["np.ndarray"] = None   # float32 (H, W), NaN where masked
         self.latest_conf: Optional["np.ndarray"] = None    # uint8  (H, W)
-        self.latest_ts: float = 0.0
+        self.latest_ts: float = 0.0      # message timestamp (Unix ms from iPad)
+        self._recv_mono: float = 0.0     # local monotonic time of last received frame
         self._frame_count: int = 0
         self._available: bool = _NP_AVAILABLE
 
@@ -95,6 +96,7 @@ class LiDARReceiver:
         self.latest_depth = depth
         self.latest_conf = conf
         self.latest_ts = msg.get("ts", time.time())
+        self._recv_mono = time.monotonic()
         self._frame_count += 1
         log.debug(
             "LiDARReceiver: frame %d  valid=%.0f%%  range=%.2f–%.2f m",
@@ -111,8 +113,9 @@ class LiDARReceiver:
     def get_depth_at(self, nx: float, ny: float) -> Optional[float]:
         """Return depth in metres at normalised screen coordinates (0–1, 0–1).
 
-        Uses bilinear interpolation over the 4 nearest valid pixels.
-        Returns None when depth is unavailable or the region is masked.
+        Samples the 4 nearest pixels and returns an unweighted average of
+        whichever neighbours have valid (non-NaN) depth values.
+        Returns None when depth is unavailable or all neighbours are masked.
         """
         if self.latest_depth is None or not _NP_AVAILABLE:
             return None
@@ -136,7 +139,7 @@ class LiDARReceiver:
 
     def is_fresh(self, max_age_s: float = 0.5) -> bool:
         """Return True if a depth frame arrived within max_age_s seconds."""
-        return (time.monotonic() - self.latest_ts) < max_age_s
+        return (time.monotonic() - self._recv_mono) < max_age_s
 
     def get_status(self) -> dict:
         return {
