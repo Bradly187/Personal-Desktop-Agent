@@ -1,4 +1,5 @@
 import Foundation
+import QuartzCore
 
 /// 1-Euro adaptive low-pass filter (Casiez et al., 2012).
 ///
