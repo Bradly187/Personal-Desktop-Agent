@@ -296,6 +296,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from model_router import ModelRouter
     from dev_agent import DevAgent
     from whisper_stream import WhisperStream
+    from audit_log import AuditLog
+    from content_filter import ContentFilter
+    from mcp_trust_classifier import MCPTrustClassifier
 
     if args.safe_mode:
         os.environ["SAFE_MODE"] = "1"
@@ -311,6 +314,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     agent_db = AgentDB()
     await agent_db.open(Path("agent.db"))
 
+    # --- Open audit log (separate append-only DB) ---
+    audit = AuditLog()
+    await audit.open(Path("audit.db"))
+
+    # --- Initialize content filter and trust classifier ---
+    content_filter = ContentFilter(audit_log=audit)
+    trust_classifier = MCPTrustClassifier(audit_log=audit)
+
     git_hash: Optional[str] = None
     try:
         git_hash = subprocess.check_output(
@@ -324,6 +335,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     mode = "safe" if args.safe_mode else "normal"
     session_id = await agent_db.insert_session(mode=mode, git_hash=git_hash)
     log.info("Session %d started (mode=%s git=%s)", session_id, mode, git_hash or "unknown")
+    await audit.log_session_start(session_id)
 
     # --- Build components ---
     cfg = CoordinatorConfig()
@@ -400,6 +412,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             pass
 
     await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id)
+    await audit.log_session_stop(reason="normal")
+    await audit.close()
 
 
 # ---------------------------------------------------------------------------
