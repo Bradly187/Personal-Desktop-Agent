@@ -52,8 +52,10 @@ final class WebSocketManager: ObservableObject {
     private var reconnectWorkItem: DispatchWorkItem?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
+    private var connectionTimeoutTask: Task<Void, Never>?
 
     private let maxBackoffSeconds: Double = 5
+    private let connectionTimeoutSeconds: Double = 10
     private var msgCounter: Int = 0
 
     // Fix #9: Serial send queue preserves message ordering for delta-based messages.
@@ -70,6 +72,8 @@ final class WebSocketManager: ObservableObject {
     func disconnect() {
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = nil
         pingTask?.cancel()
         pingTask = nil
         receiveTask?.cancel()
@@ -141,11 +145,27 @@ final class WebSocketManager: ObservableObject {
 
         state = .connecting
 
+        // Connection timeout: if no message received within 10s, treat as failed
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(10_000_000_000))
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            // If still connecting (no message received), trigger disconnect/reconnect
+            if self.state == .connecting {
+                print("[WebSocketManager] Connection timeout after \(self.connectionTimeoutSeconds)s")
+                wsTask.cancel(with: .abnormalClosure, reason: nil)
+                self._handleDisconnect(error: URLError(.timedOut))
+            }
+        }
+
         receiveTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let firstMessage = try await wsTask.receive()
                 await MainActor.run {
+                    self.connectionTimeoutTask?.cancel()
+                    self.connectionTimeoutTask = nil
                     self.state = .connected
                     self.reconnectAttempt = 0
                     self._startPingTimer()
@@ -156,6 +176,8 @@ final class WebSocketManager: ObservableObject {
                 print("[WebSocketManager] Connection error: \(error.localizedDescription)")
                 print("[WebSocketManager] URL was: \(url)")
                 await MainActor.run {
+                    self.connectionTimeoutTask?.cancel()
+                    self.connectionTimeoutTask = nil
                     self._handleDisconnect(error: error)
                 }
             }

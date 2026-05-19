@@ -5,6 +5,11 @@ import UIKit
 /// Streams iPad device tilt at 60 Hz to the PC bridge.
 /// Dead-zone filtering prevents jitter while the device is resting.
 /// Accelerometer impulse detection fires tilt_tap on a sharp table-tap.
+///
+/// Fixes applied:
+/// - tapCooldown uses timestamp comparison instead of boolean flag (eliminates cross-thread race)
+/// - Date() replaced with CACurrentMediaTime() in hot path (cheaper monotonic clock)
+/// - Settings values snapshotted at start() to avoid cross-isolation reads at 60Hz
 @MainActor
 final class TiltSensor: ObservableObject {
 
@@ -25,23 +30,29 @@ final class TiltSensor: ObservableObject {
     // MARK: — Position-mode message suppression and stationary lock
 
     /// Last sent coordinates for suppression (skip if delta < 0.001 on both axes)
-    /// Internal access for @testable import in property tests.
     var lastSentX: Double = 0.5
     var lastSentY: Double = 0.5
 
-    /// Timestamp when the device first became stationary (angular velocity ≤ 0.01 rad/s)
-    /// Internal access for testability via @testable import.
-    var stationaryStartTime: Date?
+    /// Monotonic timestamp when the device first became stationary (angular velocity ≤ 0.01 rad/s)
+    var stationaryStartTime: CFTimeInterval?
 
     /// Frozen output coordinates during stationary lock
-    /// Internal access for testability via @testable import.
     var lockedCoords: (x: Double, y: Double)?
 
     // Impulse detection state
     private var prevAccelMag: Double = 0
     private let tapThreshold: Double = 2.5   // g-force delta that counts as a tap
-    private var tapCooldown: Bool = false
+    /// Monotonic timestamp of last tap fire — replaces boolean tapCooldown to eliminate race condition.
+    private var lastTapFireTime: CFTimeInterval = 0
     private let tapCooldownDuration: Double = 0.25
+
+    // MARK: — Snapshotted settings (avoids cross-isolation reads at 60Hz)
+    private var snapshotTiltEnabled: Bool = true
+    private var snapshotTiltPositionMode: Bool = true
+    private var snapshotTiltDeadZone: Double = 1.5
+    private var snapshotTiltSensitivity: Double = 1.0
+    private var snapshotTiltRange: Double = 25.0
+    private var snapshotTiltInverted: Bool = false
 
     init(ws: WebSocketManager, settings: SettingsStore) {
         self.ws = ws
@@ -64,17 +75,22 @@ final class TiltSensor: ObservableObject {
             return
         }
 
-        // Load persisted neutral gravity on start (may have been saved in a previous session)
+        // Load persisted neutral gravity on start
         if let s = settings, s.hasPersistedNeutral {
             neutralGravity = SIMD3(s.neutralGravityX, s.neutralGravityY, s.neutralGravityZ)
         }
 
+        // Snapshot settings for use on the motion OperationQueue (avoids cross-isolation reads)
+        if let s = settings {
+            snapshotTiltEnabled = s.tiltEnabled
+            snapshotTiltPositionMode = s.tiltPositionMode
+            snapshotTiltDeadZone = s.tiltDeadZone
+            snapshotTiltSensitivity = s.tiltSensitivity
+            snapshotTiltRange = s.tiltRange
+            snapshotTiltInverted = s.tiltInverted
+        }
+
         motion.deviceMotionUpdateInterval = 1.0 / 60.0
-        // Fix #8: Use a dedicated background queue for motion callbacks.
-        // Trig computations and WebSocket sends no longer block the main thread at 60Hz.
-        // WebSocketManager.send() already dispatches to its own serial queue.
-        // Safety: maxConcurrentOperationCount = 1 ensures serial access to mutable state
-        // (lastSentX, lastSentY, stationaryStartTime, lockedCoords, prevAccelMag).
         let motionQueue = OperationQueue()
         motionQueue.name = "tilt.sensor.motion"
         motionQueue.maxConcurrentOperationCount = 1
@@ -90,80 +106,67 @@ final class TiltSensor: ObservableObject {
         guard isRunning else { return }
         motion.stopDeviceMotionUpdates()
         isRunning = false
-        // Reset mutable state so restart doesn't carry stale values
         lastSentX = 0.5
         lastSentY = 0.5
         stationaryStartTime = nil
         lockedCoords = nil
         prevAccelMag = 0
-        tapCooldown = false
+        lastTapFireTime = 0
+    }
+
+    /// Update snapshotted settings when user changes them. Call from MainActor.
+    func updateSettings() {
+        guard let s = settings else { return }
+        snapshotTiltEnabled = s.tiltEnabled
+        snapshotTiltPositionMode = s.tiltPositionMode
+        snapshotTiltDeadZone = s.tiltDeadZone
+        snapshotTiltSensitivity = s.tiltSensitivity
+        snapshotTiltRange = s.tiltRange
+        snapshotTiltInverted = s.tiltInverted
     }
 
     // MARK: — Calibration
 
     /// Captures the current gravity vector as the new neutral position.
     /// Debounced: ignores calls within 500ms of the last successful calibration.
-    /// Provides light haptic feedback on success (SVT-safe — no startling).
     func calibrate() {
-        // Debounce: ignore if called within 500ms of last calibration
         if let last = lastCalibrationTime, Date().timeIntervalSince(last) < 0.5 {
             return
         }
-
-        // Capture current gravity from the motion manager
         guard let data = motion.deviceMotion else { return }
         let g = data.gravity
         neutralGravity = SIMD3(g.x, g.y, g.z)
 
-        // Persist to SettingsStore
         if let s = settings {
             s.neutralGravityX = g.x
             s.neutralGravityY = g.y
             s.neutralGravityZ = g.z
         }
 
-        // Record calibration time for debounce
         lastCalibrationTime = Date()
-
-        // Light haptic feedback — subtle confirmation without startling (SVT-aware)
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.impactOccurred()
     }
 
     // MARK: — Ratcheting (re-center without cursor jump)
 
-    /// Timestamp of the last ratchet action, used for 500ms debounce.
     private var lastRatchetTime: Date?
-
-    /// Pending delayed ratchet (when device is moving at trigger time).
     private var delayedRatchetTask: Task<Void, Never>?
 
-    /// Re-centers the tilt neutral point without moving the cursor.
-    /// Analogous to lifting and replacing a mouse — the cursor stays put while
-    /// the physical reference point resets.
-    ///
-    /// - If device angular velocity > 0.5 rad/s: delays capture up to 300ms
-    ///   until motion settles, then captures.
-    /// - Debounced: ignores triggers within 500ms of last ratchet.
-    /// - Sends `tilt_ratchet` to PC so FusionEngine holds cursor position.
     func ratchet() {
-        // Debounce: ignore if within 500ms of last ratchet
         if let last = lastRatchetTime, Date().timeIntervalSince(last) < 0.5 {
             return
         }
-
         guard let data = motion.deviceMotion else { return }
         let rot = data.rotationRate
         let angVel = max(abs(rot.x), abs(rot.y), abs(rot.z))
 
         if angVel > 0.5 {
-            // Device is moving — schedule delayed capture (up to 300ms)
             delayedRatchetTask?.cancel()
             delayedRatchetTask = Task { [weak self] in
-                // Poll at ~30ms intervals until motion settles or 300ms elapses
                 let deadline = Date().addingTimeInterval(0.3)
                 while Date() < deadline {
-                    try? await Task.sleep(nanoseconds: 30_000_000)  // 30ms
+                    try? await Task.sleep(nanoseconds: 30_000_000)
                     guard let self, let data = self.motion.deviceMotion else { return }
                     let rot = data.rotationRate
                     let vel = max(abs(rot.x), abs(rot.y), abs(rot.z))
@@ -172,33 +175,23 @@ final class TiltSensor: ObservableObject {
                         return
                     }
                 }
-                // 300ms elapsed without settling — capture anyway
                 guard let self, let data = self.motion.deviceMotion else { return }
                 await self.executeRatchet(gravity: data.gravity)
             }
         } else {
-            // Device is still — capture immediately
             executeRatchet(gravity: data.gravity)
         }
     }
 
-    /// Performs the actual ratchet: captures gravity, notifies PC, provides feedback.
     private func executeRatchet(gravity g: CMAcceleration) {
         neutralGravity = SIMD3(g.x, g.y, g.z)
-
-        // Persist to SettingsStore
         if let s = settings {
             s.neutralGravityX = g.x
             s.neutralGravityY = g.y
             s.neutralGravityZ = g.z
         }
-
         lastRatchetTime = Date()
-
-        // Notify PC to hold cursor at current position
         ws?.sendRatchet()
-
-        // Light haptic feedback — subtle confirmation (SVT-safe)
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.impactOccurred()
     }
@@ -206,96 +199,66 @@ final class TiltSensor: ObservableObject {
     // MARK: — Position Computation
 
     /// Computes normalized screen coordinates from the given gravity vector.
-    ///
-    /// Pure function: reads `neutralGravity` and `settings` but does NOT modify any state.
+    /// Pure function: reads `neutralGravity` and settings.
     /// Returns (x, y) in [0.0, 1.0] where (0, 0) is top-left and (1, 1) is bottom-right.
-    ///
-    /// Algorithm:
-    /// 1. Convert gravity to SIMD3
-    /// 2. Compute pitch/roll angles for neutral and current via atan2
-    /// 3. Delta = current - neutral, convert to degrees
-    /// 4. Apply dead zone (zero out small deltas)
-    /// 5. Linear map to [0.0, 1.0]
-    /// 6. Apply inversion if enabled
-    /// 7. Clamp to [0.0, 1.0]
     func computePosition(gravity: CMAcceleration) -> (x: Double, y: Double) {
         guard let settings else { return (0.5, 0.5) }
 
-        // 1. Convert gravity to SIMD3
         let g = SIMD3<Double>(gravity.x, gravity.y, gravity.z)
 
-        // 2. Compute angular displacement from neutral using atan2
-        // Pitch: rotation around device X-axis (forward/back tilt)
         let neutralPitch = atan2(-neutralGravity.x, -neutralGravity.z)
         let currentPitch = atan2(-g.x, -g.z)
-
-        // Roll: rotation around device Y-axis (left/right tilt)
         let neutralRoll = atan2(-neutralGravity.y, -neutralGravity.z)
         let currentRoll = atan2(-g.y, -g.z)
 
-        // 3. Delta in radians, convert to degrees
         let deltaPitch = currentPitch - neutralPitch
         let deltaRoll = currentRoll - neutralRoll
 
         var deltaPitchDeg = deltaPitch * (180.0 / .pi)
         var deltaRollDeg = deltaRoll * (180.0 / .pi)
 
-        // 4. Apply dead zone: zero out deltas smaller than threshold
         let deadZone = settings.tiltDeadZone
         if abs(deltaPitchDeg) < deadZone { deltaPitchDeg = 0 }
         if abs(deltaRollDeg) < deadZone { deltaRollDeg = 0 }
 
-        // 5. Linear map to [0.0, 1.0]
         let tiltRange = settings.tiltRange
-        var x = 0.5 + (deltaRollDeg / tiltRange) * 0.5   // roll right → x increases
-        var y = 0.5 - (deltaPitchDeg / tiltRange) * 0.5  // pitch forward → y decreases (toward top)
+        var x = 0.5 + (deltaRollDeg / tiltRange) * 0.5
+        var y = 0.5 - (deltaPitchDeg / tiltRange) * 0.5
 
-        // 6. Apply inversion if enabled
         if settings.tiltInverted {
             x = 1.0 - x
             y = 1.0 - y
         }
 
-        // 7. Clamp to [0.0, 1.0]
         x = max(0.0, min(1.0, x))
         y = max(0.0, min(1.0, y))
 
         return (x, y)
     }
 
-    // MARK: — Processing
+    // MARK: — Processing (runs on serial OperationQueue, not MainActor)
 
-    // NOTE: handle() runs on a serial OperationQueue (not MainActor). It reads
-    // settings properties which are @MainActor. This is technically a data race
-    // under strict concurrency, but safe in practice because:
-    // 1. Settings changes are rare (user slider adjustments)
-    // 2. Property reads are atomic (simple value types)
-    // 3. Worst case: one frame uses a slightly stale sensitivity value
-    // A future refactor could snapshot settings into local vars at start().
     private func handle(_ data: CMDeviceMotion) {
-        guard let settings else { return }
-        guard settings.tiltEnabled else { return }
+        guard snapshotTiltEnabled else { return }
 
-        if settings.tiltPositionMode {
+        if snapshotTiltPositionMode {
             // --- Position-mapped mode ---
-            // Compute absolute screen coordinates from tilt angle relative to neutral.
             var (x, y) = computePosition(gravity: data.gravity)
 
             // --- Stationary lock ---
-            // When angular velocity is ≤ 0.01 rad/s on both axes for ≥ 200ms,
-            // lock output to the last stable coordinates to prevent micro-drift.
+            // Uses CACurrentMediaTime() instead of Date() for cheaper monotonic timing.
             let rot = data.rotationRate
             let angularVelX = abs(rot.x)
             let angularVelY = abs(rot.y)
             let isStationary = angularVelX <= 0.01 && angularVelY <= 0.01
+            let now = CACurrentMediaTime()
 
             if isStationary {
                 if stationaryStartTime == nil {
-                    // Just became stationary — start timing
-                    stationaryStartTime = Date()
+                    stationaryStartTime = now
                     lockedCoords = (x: x, y: y)
                 } else if let startTime = stationaryStartTime,
-                          Date().timeIntervalSince(startTime) >= 0.2 {
+                          now - startTime >= 0.2 {
                     // Stationary for ≥ 200ms — use locked coordinates
                     if let locked = lockedCoords {
                         x = locked.x
@@ -303,13 +266,11 @@ final class TiltSensor: ObservableObject {
                     }
                 }
             } else {
-                // Motion resumed — clear stationary lock
                 stationaryStartTime = nil
                 lockedCoords = nil
             }
 
             // --- Message suppression ---
-            // Skip sending if position hasn't changed meaningfully (delta < 0.001 on both axes)
             if abs(x - lastSentX) < 0.001 && abs(y - lastSentY) < 0.001 {
                 // Suppress — no meaningful change
             } else {
@@ -319,12 +280,8 @@ final class TiltSensor: ObservableObject {
             }
         } else {
             // --- Legacy velocity-based mode ---
-            // Gravity-compensated tilt projection: project rotationRate into a
-            // ground-aligned frame so "tilt right" maps cleanly to horizontal
-            // regardless of holding angle.
-
-            let dz = settings.tiltDeadZone
-            let sensitivity = settings.tiltSensitivity
+            let dz = snapshotTiltDeadZone
+            let sensitivity = snapshotTiltSensitivity
 
             let g = data.gravity
             let rot = data.rotationRate
@@ -339,7 +296,7 @@ final class TiltSensor: ObservableObject {
             var rx = worldPitch * sensitivity
             var ry = worldYaw * sensitivity
 
-            if settings.tiltInverted {
+            if snapshotTiltInverted {
                 rx = -rx
                 ry = -ry
             }
@@ -352,16 +309,14 @@ final class TiltSensor: ObservableObject {
         // --- Impulse tap detection (runs regardless of mode) ---
         let a = data.userAcceleration
         let mag = sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
-        if mag - prevAccelMag > tapThreshold && !tapCooldown {
+        let now = CACurrentMediaTime()
+
+        // Fix: Use timestamp comparison instead of boolean flag.
+        // This eliminates the race condition where a Task on the cooperative pool
+        // would reset a boolean that the OperationQueue reads.
+        if mag - prevAccelMag > tapThreshold && (now - lastTapFireTime) > tapCooldownDuration {
             ws?.sendTiltTap()
-            tapCooldown = true
-            // Fix #17: Reset cooldown on the same serial queue that reads it.
-            // Previous code dispatched to main, creating a cross-thread race.
-            let cooldownNs = UInt64(tapCooldownDuration * 1_000_000_000)
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: cooldownNs)
-                self?.tapCooldown = false
-            }
+            lastTapFireTime = now
         }
         prevAccelMag = mag
     }

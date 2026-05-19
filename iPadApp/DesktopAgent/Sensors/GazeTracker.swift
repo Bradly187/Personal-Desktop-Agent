@@ -14,6 +14,10 @@ import SwiftUI
 /// 7. Send over WebSocket with confidence and saccade metadata
 ///
 /// Uses SharedFaceSession — does NOT own its own ARSession.
+///
+/// Fix: Signal processing runs on a dedicated serial queue (not MainActor) to eliminate
+/// the ~8-16ms latency from Task { @MainActor } hops. WebSocketManager.send() already
+/// dispatches to its own serial sendQueue, so calling it from processQueue is safe.
 @MainActor
 final class GazeTracker: NSObject, ObservableObject {
 
@@ -23,12 +27,18 @@ final class GazeTracker: NSObject, ObservableObject {
 
     private static let consumerID = "GazeTracker"
 
-    // Previous gaze direction for delta computation
-    private var prevGazeDir: simd_float3?
+    /// Serial processing queue — all gaze math runs here, off the ARKit delegate thread
+    /// and off MainActor. Eliminates the Task { @MainActor } hop latency (~8-16ms).
+    private let processQueue = DispatchQueue(label: "gaze.tracker.process", qos: .userInteractive)
 
-    // 1-Euro adaptive filters (per-axis) — replace EMA smoothing
-    private var filterDx: OneEuroFilter
-    private var filterDy: OneEuroFilter
+    // All mutable processing state is accessed ONLY from processQueue.
+    // nonisolated(unsafe) opts out of actor isolation for these fields.
+    nonisolated(unsafe) private var prevGazeDir: simd_float3?
+    nonisolated(unsafe) private var filterDx: OneEuroFilter
+    nonisolated(unsafe) private var filterDy: OneEuroFilter
+    nonisolated(unsafe) private var saccadeState: SaccadeState = .tracking
+    nonisolated(unsafe) private var saccadeExitStart: CFTimeInterval?
+    nonisolated(unsafe) private var consecutiveNilFrames: Int = 0
 
     // Saccade detection state machine
     private enum SaccadeState {
@@ -36,13 +46,17 @@ final class GazeTracker: NSObject, ObservableObject {
         case saccade        // Output suppressed (velocity > enter threshold)
         case rampIn(start: CFTimeInterval)  // Ramping from 0 to full over 50ms
     }
-    private var saccadeState: SaccadeState = .tracking
-    private var saccadeExitStart: CFTimeInterval?  // When velocity first dropped below exit threshold
     private static let saccadeRampDuration: Double = 0.05  // 50ms ramp-in after saccade
 
-    // Blink/tracking-loss detection: count consecutive nil frames
-    private var consecutiveNilFrames: Int = 0
+    // Blink/tracking-loss detection
     private static let maxNilBeforeReset: Int = 3  // Reset filter after 3 missed frames
+
+    /// Snapshotted settings values — captured at start() to avoid cross-isolation reads at 60Hz.
+    /// Updated via updateSettings() when user changes them.
+    nonisolated(unsafe) private var gazeEnabled: Bool = true
+    nonisolated(unsafe) private var gazeSensitivity: Double = 200.0
+    nonisolated(unsafe) private var saccadeEnterThreshold: Double = 100.0
+    nonisolated(unsafe) private var saccadeExitThreshold: Double = 50.0
 
     /// Calibration mode: when set, raw deltas are sent to this handler instead of WebSocket.
     /// Used by GazeCalibrationSheet to measure eye movement range.
@@ -77,6 +91,12 @@ final class GazeTracker: NSObject, ObservableObject {
         }
         guard let settings, settings.gazeEnabled else { return }
 
+        // Snapshot settings for use on processQueue (avoids cross-isolation reads)
+        gazeEnabled = settings.gazeEnabled
+        gazeSensitivity = settings.gazeSensitivity
+        saccadeEnterThreshold = settings.gazeSaccadeEnterThreshold
+        saccadeExitThreshold = settings.gazeSaccadeExitThreshold
+
         prevGazeDir = nil
         filterDx.reset()
         filterDy.reset()
@@ -85,7 +105,9 @@ final class GazeTracker: NSObject, ObservableObject {
         consecutiveNilFrames = 0
 
         sharedFaceSession.addConsumer(Self.consumerID) { [weak self] anchor in
-            Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Dispatch to dedicated serial queue — no MainActor hop, eliminates ~8-16ms latency
+            self.processQueue.async { [weak self] in
                 self?.handleAnchorUpdate(anchor)
             }
         }
@@ -93,18 +115,36 @@ final class GazeTracker: NSObject, ObservableObject {
 
     func stop() {
         sharedFaceSession.removeConsumer(Self.consumerID)
-        prevGazeDir = nil
-        filterDx.reset()
-        filterDy.reset()
-        saccadeState = .tracking
-        saccadeExitStart = nil
-        consecutiveNilFrames = 0
+        processQueue.async { [weak self] in
+            self?.prevGazeDir = nil
+            self?.filterDx.reset()
+            self?.filterDy.reset()
+            self?.saccadeState = .tracking
+            self?.saccadeExitStart = nil
+            self?.consecutiveNilFrames = 0
+        }
     }
 
-    // MARK: — Gaze delta extraction
+    /// Update snapshotted settings when user changes them. Call from MainActor.
+    func updateSettings() {
+        guard let settings else { return }
+        let enabled = settings.gazeEnabled
+        let sensitivity = settings.gazeSensitivity
+        let enter = settings.gazeSaccadeEnterThreshold
+        let exit = settings.gazeSaccadeExitThreshold
+        processQueue.async { [weak self] in
+            self?.gazeEnabled = enabled
+            self?.gazeSensitivity = sensitivity
+            self?.saccadeEnterThreshold = enter
+            self?.saccadeExitThreshold = exit
+        }
+    }
 
+    // MARK: — Gaze delta extraction (runs on processQueue)
+
+    /// Processes a face anchor update. Runs entirely on processQueue — no MainActor involvement.
     private func handleAnchorUpdate(_ anchor: ARFaceAnchor) {
-        guard let settings, settings.gazeEnabled else { return }
+        guard gazeEnabled else { return }
 
         let gazeDir = extractGazeDirection(from: anchor)
 
@@ -112,7 +152,6 @@ final class GazeTracker: NSObject, ObservableObject {
         guard let gazeDir else {
             consecutiveNilFrames += 1
             if consecutiveNilFrames >= Self.maxNilBeforeReset {
-                // Reset filters to prevent spurious delta from stale history on return
                 filterDx.reset()
                 filterDy.reset()
                 prevGazeDir = nil
@@ -122,7 +161,6 @@ final class GazeTracker: NSObject, ObservableObject {
         consecutiveNilFrames = 0
 
         guard let prev = prevGazeDir else {
-            // First frame — just store, no delta to send
             prevGazeDir = gazeDir
             return
         }
@@ -135,32 +173,31 @@ final class GazeTracker: NSObject, ObservableObject {
 
         // Axis correction: ARKit eye forward vector Y decreases when looking down,
         // but we need positive dy for downward gaze (cursor moves down).
-        // Horizontal axis is correct as-is (look right → positive dx).
         let correctedDx = rawDx
         let correctedDy = -rawDy
 
-        // If calibration is active, send raw deltas there instead of normal processing
-        if let handler = calibrationHandler {
-            handler(rawDx, rawDy)
+        // If calibration is active, send raw deltas to handler (dispatch to MainActor for UI)
+        if calibrationHandler != nil {
+            Task { @MainActor [weak self] in
+                self?.calibrationHandler?(rawDx, rawDy)
+            }
             return
         }
 
         let now = CACurrentMediaTime()
 
         // 1-Euro adaptive filter (per-axis)
-        // Replaces fixed EMA — adapts cutoff based on movement speed:
-        // strong smoothing during fixation, minimal lag during saccades.
         let filteredDx = filterDx.filter(Double(correctedDx), timestamp: now)
         let filteredDy = filterDy.filter(Double(correctedDy), timestamp: now)
 
         // Compute gaze velocity (degrees/second) for saccade detection
-        let frameRate: Double = 60.0  // ARKit nominal rate
+        let frameRate: Double = 60.0
         let velocityDegPerSec = sqrt(filteredDx * filteredDx + filteredDy * filteredDy)
             * (180.0 / .pi) * frameRate
 
-        // Saccade detection state machine
-        let saccadeEnter = settings.gazeSaccadeEnterThreshold  // default 100°/s
-        let saccadeExit = settings.gazeSaccadeExitThreshold    // default 50°/s
+        // Saccade detection state machine (uses snapshotted thresholds)
+        let saccadeEnter = saccadeEnterThreshold
+        let saccadeExit = saccadeExitThreshold
         var outputScale: Double = 1.0
         var isSaccade = false
 
@@ -180,7 +217,6 @@ final class GazeTracker: NSObject, ObservableObject {
                 if saccadeExitStart == nil {
                     saccadeExitStart = now
                 } else if now - saccadeExitStart! >= 0.03 {
-                    // Below exit threshold for 30ms — transition to ramp-in
                     saccadeState = .rampIn(start: now)
                     saccadeExitStart = nil
                 }
@@ -191,14 +227,11 @@ final class GazeTracker: NSObject, ObservableObject {
         case .rampIn(let rampStart):
             let elapsed = now - rampStart
             if elapsed >= Self.saccadeRampDuration {
-                // Ramp complete — back to normal tracking
                 saccadeState = .tracking
                 outputScale = 1.0
             } else {
-                // Linear ramp from 0 to 1 over 50ms
                 outputScale = elapsed / Self.saccadeRampDuration
             }
-            // If velocity spikes again during ramp, go back to saccade
             if velocityDegPerSec > saccadeEnter {
                 saccadeState = .saccade
                 saccadeExitStart = nil
@@ -207,35 +240,31 @@ final class GazeTracker: NSObject, ObservableObject {
             }
         }
 
-        // Confidence weighting: scale output by tracking confidence
-        // ARKit doesn't provide per-frame confidence for eye tracking directly,
-        // but we can use eye openness as a proxy (partially closed = lower confidence)
+        // Confidence weighting via eye openness proxy
         let blinkLeft = Float(truncating: anchor.blendShapes[.eyeBlinkLeft] ?? 0)
         let blinkRight = Float(truncating: anchor.blendShapes[.eyeBlinkRight] ?? 0)
         let avgBlink = Double((blinkLeft + blinkRight) / 2.0)
-        // Confidence: 1.0 when eyes fully open, decreasing as eyes close
         let confidence = max(0.0, min(1.0, 1.0 - avgBlink * 1.5))
 
         // Apply output scale (saccade suppression) and confidence weighting
         let scaledDx = filteredDx * outputScale * confidence
         let scaledDy = filteredDy * outputScale * confidence
 
-        // Scale to useful cursor movement range
-        let sensitivity = Double(settings.gazeSensitivity)
+        // Scale to useful cursor movement range (uses snapshotted sensitivity)
+        let sensitivity = gazeSensitivity
         let dx = scaledDx * sensitivity
         let dy = scaledDy * sensitivity
 
-        // No hard dead zone — the 1-Euro filter's adaptive cutoff handles fixation noise.
         // Only suppress truly zero output to avoid unnecessary WebSocket traffic.
         guard abs(dx) > 0.01 || abs(dy) > 0.01 else { return }
 
+        // WebSocketManager.send() dispatches to its own serial sendQueue — safe from here
         ws?.sendGazeDelta(dx: dx, dy: dy, confidence: confidence, saccade: isSaccade)
     }
 
     /// Extract the average gaze direction vector from both eyes.
     /// Returns nil if eyes are closed or data is unreliable.
     private func extractGazeDirection(from anchor: ARFaceAnchor) -> simd_float3? {
-        // Check eye openness — skip if blinking
         let blinkLeft = Float(truncating: anchor.blendShapes[.eyeBlinkLeft] ?? 0)
         let blinkRight = Float(truncating: anchor.blendShapes[.eyeBlinkRight] ?? 0)
         guard blinkLeft < 0.7 && blinkRight < 0.7 else { return nil }
@@ -243,7 +272,6 @@ final class GazeTracker: NSObject, ObservableObject {
         let leftEye = anchor.leftEyeTransform
         let rightEye = anchor.rightEyeTransform
 
-        // Look vector: -Z column of each eye transform (forward direction)
         let leftFwd = simd_float3(-leftEye.columns.2.x, -leftEye.columns.2.y, -leftEye.columns.2.z)
         let rightFwd = simd_float3(-rightEye.columns.2.x, -rightEye.columns.2.y, -rightEye.columns.2.z)
 

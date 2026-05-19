@@ -9,6 +9,9 @@ import Foundation
 ///
 /// Uses SharedFaceSession — does NOT own its own ARSession. GazeTracker and HeadTracker
 /// share one face-tracking session to avoid the ARKit one-session-per-camera limitation.
+///
+/// Fix: Signal processing runs on a dedicated serial queue (not MainActor) to eliminate
+/// the ~8-16ms latency from Task { @MainActor } hops.
 @MainActor
 final class HeadTracker: NSObject {
 
@@ -18,13 +21,18 @@ final class HeadTracker: NSObject {
 
     private static let consumerID = "HeadTracker"
 
-    private var prevPitch: Float = 0
-    private var prevYaw: Float = 0
-    private var isFirstFrame = true
+    /// Serial processing queue — all head math runs here, off MainActor.
+    private let processQueue = DispatchQueue(label: "head.tracker.process", qos: .userInteractive)
 
-    // 1-Euro adaptive filters (per-axis) — replace fixed EMA smoothing
-    private var filterPitch: OneEuroFilter
-    private var filterYaw: OneEuroFilter
+    // All mutable processing state accessed ONLY from processQueue.
+    nonisolated(unsafe) private var prevPitch: Float = 0
+    nonisolated(unsafe) private var prevYaw: Float = 0
+    nonisolated(unsafe) private var isFirstFrame = true
+    nonisolated(unsafe) private var filterPitch: OneEuroFilter
+    nonisolated(unsafe) private var filterYaw: OneEuroFilter
+
+    /// Snapshotted setting — captured at start() to avoid cross-isolation reads.
+    nonisolated(unsafe) private var headEnabled: Bool = false
 
     init(ws: WebSocketManager, settings: SettingsStore, sharedFaceSession: SharedFaceSession) {
         self.ws = ws
@@ -55,13 +63,17 @@ final class HeadTracker: NSObject {
         }
         guard let settings, settings.headEnabled else { return }
 
+        // Snapshot settings for processQueue
+        headEnabled = settings.headEnabled
+
         isFirstFrame = true
-        // Reset filters on start for fresh state (no stale values from previous session)
         filterPitch.reset()
         filterYaw.reset()
 
         sharedFaceSession.addConsumer(Self.consumerID) { [weak self] anchor in
-            Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Dispatch to dedicated serial queue — no MainActor hop
+            self.processQueue.async { [weak self] in
                 self?.handleAnchor(anchor)
             }
         }
@@ -69,20 +81,30 @@ final class HeadTracker: NSObject {
 
     func stop() {
         sharedFaceSession.removeConsumer(Self.consumerID)
-        isFirstFrame = true
-        filterPitch.reset()
-        filterYaw.reset()
+        processQueue.async { [weak self] in
+            self?.isFirstFrame = true
+            self?.filterPitch.reset()
+            self?.filterYaw.reset()
+        }
     }
 
-    // MARK: — Euler angle extraction
+    /// Update snapshotted settings when user changes them. Call from MainActor.
+    func updateSettings() {
+        guard let settings else { return }
+        let enabled = settings.headEnabled
+        processQueue.async { [weak self] in
+            self?.headEnabled = enabled
+        }
+    }
+
+    // MARK: — Euler angle extraction (runs on processQueue)
 
     private func handleAnchor(_ anchor: ARFaceAnchor) {
-        guard let settings, settings.headEnabled else { return }
+        guard headEnabled else { return }
 
-        // Extract Euler angles from the face anchor's transform
         let m = anchor.transform
-        let pitch = asin(-m.columns.2.y)           // rotation around X
-        let yaw   = atan2(m.columns.2.x, m.columns.2.z)  // rotation around Y
+        let pitch = asin(-m.columns.2.y)
+        let yaw   = atan2(m.columns.2.x, m.columns.2.z)
 
         if isFirstFrame {
             prevPitch = pitch
@@ -99,8 +121,6 @@ final class HeadTracker: NSObject {
         prevYaw = yaw
 
         // Apply 1-Euro adaptive filter (per-axis)
-        // The filter adapts: strong smoothing when head is still (jitter reduction),
-        // minimal lag when head moves fast (responsive tracking).
         let now = CACurrentMediaTime()
         let filteredDPitch = filterPitch.filter(Double(rawDPitch), timestamp: now)
         let filteredDYaw = filterYaw.filter(Double(rawDYaw), timestamp: now)
@@ -110,8 +130,7 @@ final class HeadTracker: NSObject {
         let pitchDeg = filteredDPitch * toDeg
         let yawDeg = filteredDYaw * toDeg
 
-        // Axis convention: positive pitch (chin to chest) → positive dy → cursor down
-        // This is sent as-is; the PC-side FusionEngine applies: dy = pitch * sensitivity
+        // WebSocketManager.send() dispatches to its own serial sendQueue — safe from here
         ws?.sendHeadPose(pitch: pitchDeg, yaw: yawDeg)
     }
 }

@@ -51,10 +51,12 @@ final class LiDARStreamer: NSObject, ObservableObject {
     private let cameraInterval: Double  // seconds between camera sends
 
     // Throttle state accessed only from the ARSessionDelegate serial callback.
-    // Wrapped in @unchecked Sendable so nonisolated delegate methods can mutate
-    // it without requiring nonisolated(unsafe) (Swift 5.10+). Safe because
-    // ARSessionDelegate fires serially — no concurrent mutations.
     private let _t = _LiDARThrottle()
+
+    // Auto-recovery state
+    private var recoveryTask: Task<Void, Never>?
+    private var recoveryAttempts = 0
+    private let maxRecoveryAttempts = 3
 
     // MARK: - Init
 
@@ -78,12 +80,15 @@ final class LiDARStreamer: NSObject, ObservableObject {
         config.frameSemantics = .smoothedSceneDepth
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
         isRunning = true
+        recoveryAttempts = 0
         _t.fpsWindowStart = CACurrentMediaTime()
         print("LiDARStreamer: started (depth \(Int(1/depthInterval)) fps, camera \(Int(1/cameraInterval)) fps)")
     }
 
     func stop() {
         guard isRunning else { return }
+        recoveryTask?.cancel()
+        recoveryTask = nil
         session.pause()
         isRunning = false
         // Fix #22: Clear stale published state so UI doesn't show old frames after stop
@@ -138,7 +143,33 @@ extension LiDARStreamer: ARSessionDelegate {
 
     nonisolated func session(_ session: ARSession, didFailWithError error: Error) {
         print("LiDARStreamer: ARSession error — \(error.localizedDescription)")
-        Task { @MainActor [weak self] in self?.isRunning = false }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.isRunning = false
+            self._attemptRecovery()
+        }
+    }
+}
+
+// MARK: - Auto-recovery
+
+private extension LiDARStreamer {
+    func _attemptRecovery() {
+        guard recoveryAttempts < maxRecoveryAttempts else {
+            print("LiDARStreamer: max recovery attempts (\(maxRecoveryAttempts)) reached, giving up")
+            return
+        }
+
+        recoveryAttempts += 1
+        let attempt = recoveryAttempts
+        print("LiDARStreamer: attempting recovery (\(attempt)/\(maxRecoveryAttempts)) in 2s")
+
+        recoveryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 second delay
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            self.start()
+        }
     }
 }
 
@@ -224,11 +255,15 @@ private extension LiDARStreamer {
         let finalMin = minD == .infinity  ? 0.0 : Double(minD)
         let finalMax = maxD == -.infinity ? 0.0 : Double(maxD)
 
+        // Send WebSocket message directly from bgQueue — WebSocketManager.send() is thread-safe
+        // (dispatches to its own serial sendQueue). No MainActor hop needed for the send.
+        ws?.sendDepthFrame(width: w, height: h,
+                          depthB64: depthB64, confB64: confB64,
+                          ts: ts * 1000)
+
+        // Only hop to MainActor for UI state updates
         Task { @MainActor [weak self] in
             guard let self, self.isRunning else { return }
-            ws?.sendDepthFrame(width: w, height: h,
-                              depthB64: depthB64, confB64: confB64,
-                              ts: ts * 1000)
             if let img = depthImage { latestDepthImage = img }
             validPixelPct = validPct
             depthRangeMin = finalMin
@@ -258,10 +293,13 @@ private extension LiDARStreamer {
         guard let jpeg = uiImg.jpegData(compressionQuality: 0.7) else { return }
         let imageB64 = jpeg.base64EncodedString()
 
+        // Send WebSocket message directly from bgQueue — thread-safe via sendQueue
+        ws?.sendCameraFrame(width: targetW, height: targetH,
+                           imageB64: imageB64, ts: ts * 1000)
+
+        // Only hop to MainActor for UI state
         Task { @MainActor [weak self] in
             guard let self, self.isRunning else { return }
-            ws?.sendCameraFrame(width: targetW, height: targetH,
-                               imageB64: imageB64, ts: ts * 1000)
             latestCameraImage = uiImg
         }
     }

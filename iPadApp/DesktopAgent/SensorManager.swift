@@ -244,6 +244,27 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Tilt settings changes — update snapshot on running sensor
+        Publishers.CombineLatest4(
+            settings.$tiltSensitivity.removeDuplicates(),
+            settings.$tiltDeadZone.removeDuplicates(),
+            settings.$tiltRange.removeDuplicates(),
+            settings.$tiltInverted.removeDuplicates()
+        )
+        .dropFirst()
+        .sink { [weak self] _ in
+            self?.tiltSensor.updateSettings()
+        }
+        .store(in: &cancellables)
+
+        settings.$tiltPositionMode
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.tiltSensor.updateSettings()
+            }
+            .store(in: &cancellables)
+
         // Gaze toggle
         settings.$gazeEnabled
             .removeDuplicates()
@@ -259,6 +280,18 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Gaze settings changes — update snapshot on running sensor
+        Publishers.CombineLatest3(
+            settings.$gazeSensitivity.removeDuplicates(),
+            settings.$gazeSaccadeEnterThreshold.removeDuplicates(),
+            settings.$gazeSaccadeExitThreshold.removeDuplicates()
+        )
+        .dropFirst()
+        .sink { [weak self] _ in
+            self?.gazeTracker.updateSettings()
+        }
+        .store(in: &cancellables)
+
         // Head toggle
         settings.$headEnabled
             .removeDuplicates()
@@ -271,6 +304,8 @@ final class SensorManager: ObservableObject {
                 } else {
                     self._stopHead()
                 }
+                // Also update snapshot so processQueue sees the new enabled state
+                self.headTracker.updateSettings()
             }
             .store(in: &cancellables)
 

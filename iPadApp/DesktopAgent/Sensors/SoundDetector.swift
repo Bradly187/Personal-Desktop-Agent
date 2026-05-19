@@ -66,6 +66,7 @@ final class SoundDetector {
     // MARK: — Sound classification (runs on processQueue)
 
     private func analyze(buffer: AVAudioPCMBuffer) {
+        guard let fftSetup else { return }  // Guard against nil FFT setup (memory pressure)
         guard let channelData = buffer.floatChannelData?[0] else { return }
         let frameCount = Int(buffer.frameLength)
         guard frameCount >= fftSize else { return }
@@ -92,7 +93,7 @@ final class SoundDetector {
                 channelData.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { ptr in
                     vDSP_ctoz(ptr, 2, &split, 1, vDSP_Length(fftSize / 2))
                 }
-                vDSP_fft_zrip(fftSetup!, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
+                vDSP_fft_zrip(fftSetup, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
 
                 magnitudes.withUnsafeMutableBufferPointer { magBuf in
                     vDSP_zvmags(&split, 1, magBuf.baseAddress!, 1, vDSP_Length(fftSize / 2))

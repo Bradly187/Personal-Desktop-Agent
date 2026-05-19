@@ -17,6 +17,8 @@ import Foundation
 final class AudioStreamer: ObservableObject {
 
     @Published var isStreaming = false
+    /// Surfaces persistent conversion failures to SensorManager/UI.
+    @Published var lastError: String?
 
     private let sharedAudioSession: SharedAudioSession
     private weak var ws: WebSocketManager?
@@ -36,6 +38,11 @@ final class AudioStreamer: ObservableObject {
     private var converter: AVAudioConverter?
     /// Output format for the converter (16kHz mono Int16, immutable after start)
     private var outputFormat: AVAudioFormat?
+
+    /// Consecutive conversion errors — tracked on processQueue.
+    /// After 10 consecutive failures, stops streaming and surfaces error.
+    nonisolated(unsafe) private var consecutiveErrors: Int = 0
+    private let maxConsecutiveErrors = 10
 
     init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
@@ -59,6 +66,8 @@ final class AudioStreamer: ObservableObject {
             return
         }
         outputFormat = outFmt
+        lastError = nil
+        consecutiveErrors = 0
 
         // Create converter if sample rates differ from the shared engine's input format
         let inputFormat = sharedAudioSession.inputFormat
@@ -118,13 +127,24 @@ final class AudioStreamer: ObservableObject {
             }
 
             if let error {
-                print("AudioStreamer: conversion error: \(error)")
+                consecutiveErrors += 1
+                if consecutiveErrors >= maxConsecutiveErrors {
+                    let msg = "Audio conversion failed \(consecutiveErrors) times: \(error.localizedDescription)"
+                    print("AudioStreamer: \(msg)")
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.lastError = msg
+                        self.stop()
+                    }
+                }
                 return
             }
 
+            consecutiveErrors = 0
             int16Data = dataFromInt16Buffer(outputBuffer)
         } else {
             // Already in correct format
+            consecutiveErrors = 0
             int16Data = dataFromInt16Buffer(buffer)
         }
 
