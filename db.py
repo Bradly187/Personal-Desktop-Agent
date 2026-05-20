@@ -231,6 +231,29 @@ CREATE TABLE IF NOT EXISTS gesture_calibration (
 );
 CREATE INDEX IF NOT EXISTS idx_gcon_gesture ON gesture_calibration(gesture, ts);
 
+-- Velocity samples for motion-gesture calibration (Minority Report gestures).
+-- velocity: normalised-coord/sec for swipes; m/s for push/pull.
+-- pain_day: 1 if BehavioralTwinState.pain_day_active at time of capture.
+CREATE TABLE IF NOT EXISTS gesture_velocity_samples (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         REAL    NOT NULL,
+    gesture    TEXT    NOT NULL,
+    velocity   REAL    NOT NULL,
+    pain_day   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_gvs_gesture_ts ON gesture_velocity_samples(gesture, ts);
+
+-- Adapted velocity floors (minimum velocity to classify as intentional).
+CREATE TABLE IF NOT EXISTS gesture_velocity_calibration (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               REAL    NOT NULL,
+    gesture          TEXT    NOT NULL,
+    velocity_floor   REAL    NOT NULL,
+    sample_count     INTEGER NOT NULL,
+    p10              REAL
+);
+CREATE INDEX IF NOT EXISTS idx_gvc_gesture ON gesture_velocity_calibration(gesture, ts);
+
 CREATE TABLE IF NOT EXISTS sensor_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     command_id  INTEGER REFERENCES commands(id),
@@ -753,6 +776,72 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.get_gesture_floor failed: %s", exc)
             return 0.60
+
+    # Gesture velocity calibration (Minority Report motion gestures)
+
+    async def record_gesture_velocity(
+        self, gesture: str, velocity: float, pain_day: bool = False
+    ) -> None:
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "INSERT INTO gesture_velocity_samples (ts, gesture, velocity, pain_day)"
+                " VALUES (?, ?, ?, ?)",
+                (time.time(), gesture, velocity, int(pain_day)),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.record_gesture_velocity failed: %s", exc)
+
+    async def get_recent_gesture_velocities(
+        self, gesture: str, limit: int = 500
+    ) -> list[float]:
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT velocity FROM gesture_velocity_samples"
+                " WHERE gesture = ? ORDER BY ts DESC LIMIT ?",
+                (gesture, limit),
+            ) as cur:
+                return [r["velocity"] for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_recent_gesture_velocities failed: %s", exc)
+            return []
+
+    async def update_gesture_velocity_calibration(
+        self, gesture: str, velocity_floor: float, sample_count: int, p10: float
+    ) -> None:
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "INSERT INTO gesture_velocity_calibration"
+                " (ts, gesture, velocity_floor, sample_count, p10)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (time.time(), gesture, velocity_floor, sample_count, p10),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.update_gesture_velocity_calibration failed: %s", exc)
+
+    async def get_gesture_velocity_floor(
+        self, gesture: str, default: float = 1.2
+    ) -> float:
+        if not self._conn:
+            return default
+        try:
+            async with self._conn.execute(
+                "SELECT velocity_floor FROM gesture_velocity_calibration"
+                " WHERE gesture = ? ORDER BY ts DESC LIMIT 1",
+                (gesture,),
+            ) as cur:
+                row = await cur.fetchone()
+                return row["velocity_floor"] if row else default
+        except Exception as exc:
+            log.warning("AgentDB.get_gesture_velocity_floor failed: %s", exc)
+            return default
 
     # ---------------------------------------------------------------------- #
     # Adaptation queries (used by ContinuousTrainer)

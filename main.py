@@ -350,7 +350,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     cfg = CoordinatorConfig()
     local = OllamaInference()
 
-    trainer = ContinuousTrainer(agent_db=agent_db, config=cfg, twin_state=twin_state)
+    # GestureProcessor created first so trainer can hold a reference for
+    # calibrated threshold push-back.
+    lidar = LiDARReceiver()
+    gesture = GestureProcessor()
+    gesture.set_lidar(lidar)
+
+    trainer = ContinuousTrainer(
+        agent_db=agent_db, config=cfg, twin_state=twin_state,
+        gesture_processor=gesture,          # receives calibrated velocity thresholds
+    )
 
     router = ModelRouter()
     coordinator = HybridCoordinator(
@@ -366,10 +375,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     coordinator.set_dev_agent(dev_agent)
     fusion = FusionEngine(screen_width=sw, screen_height=sh)
     fusion.set_coordinator(coordinator)
-
-    lidar = LiDARReceiver()
-    gesture = GestureProcessor()
-    gesture.set_lidar(lidar)
 
     whisper = WhisperStream()
     whisper.set_fusion_engine(fusion)

@@ -54,6 +54,7 @@ class ContinuousTrainer:
         gate1_relaxation_step: float = 0.05,
         config: Optional["CoordinatorConfig"] = None,
         twin_state: Optional["BehavioralTwinState"] = None,
+        gesture_processor=None,    # GestureProcessor — receives calibrated thresholds
     ) -> None:
         self._db = agent_db
         self._interval = adaptation_interval_s
@@ -62,6 +63,7 @@ class ContinuousTrainer:
         self._cloud_limit = cloud_escalation_limit
         self._failure_limit = local_failure_limit
         self._gate1_step = gate1_relaxation_step
+        self._gesture_proc = gesture_processor
         self._config = config
         self._twin = twin_state
 
@@ -110,7 +112,7 @@ class ContinuousTrainer:
         if self._twin:
             await self._twin.observe(cmd, action_str)
 
-        # Gesture confidence tracking
+        # Gesture confidence and velocity tracking
         if cmd.source == "gesture":
             gesture = cmd.params.get("gesture", "UNKNOWN")
             lidar_depth = cmd.params.get("lidar_depth_m")
@@ -119,6 +121,18 @@ class ContinuousTrainer:
                 lidar_depth_m=lidar_depth,
                 command_id=command_id,
             )
+
+        # Drain velocity samples queued by GestureProcessor
+        if self._gesture_proc is not None:
+            pain_day = False
+            if self._twin:
+                try:
+                    snap = await self._twin.get_snapshot()
+                    pain_day = snap.pain_day_active
+                except Exception:
+                    pass
+            for g_name, vel in self._gesture_proc.drain_velocity_samples():
+                await self._db.record_gesture_velocity(g_name, vel, pain_day=pain_day)
 
     async def get_few_shot_examples(
         self,
@@ -184,6 +198,7 @@ class ContinuousTrainer:
             self._adapt_gate1_threshold(entries, pain_day_active=snapshot.pain_day_active)
         await self._db.promote_hotwords(self._hotword_threshold)
         await self._update_gesture_calibration(pain_day_active=snapshot.pain_day_active)
+        await self._update_gesture_velocity_calibration(pain_day_active=snapshot.pain_day_active)
 
     def _adapt_gate1_threshold(self, entries: list[dict], pain_day_active: bool = False) -> None:
         """Requirement 14.3 — relax Gate 1 when cloud escalation is high."""
@@ -237,3 +252,57 @@ class ContinuousTrainer:
                     "Gesture %s confidence floor: %.3f → %.3f (%d samples)",
                     gesture, old_floor, floor, len(samples),
                 )
+
+    async def _update_gesture_velocity_calibration(
+        self, pain_day_active: bool = False
+    ) -> None:
+        """Adapt velocity thresholds from observed motion-gesture samples.
+
+        Mirrors the confidence-floor pattern:
+          velocity_floor = p10(observed_velocities) [- pain_day reduction]
+
+        On pain days, all floors are multiplied by PAIN_DAY_VELOCITY_FACTOR
+        (0.70) so slower, less-forceful gestures still register.
+
+        After calibration, pushes the updated thresholds directly into the
+        GestureProcessor instance so changes take effect immediately.
+        """
+        from gesture_processor import _PAIN_DAY_VELOCITY_FACTOR
+
+        motion_gestures = [
+            "PEACE_SWIPE_LEFT", "PEACE_SWIPE_RIGHT",
+            "PEACE_SWIPE_UP",   "PEACE_SWIPE_DOWN",
+            "OPEN_PUSH",  "OPEN_PULL",
+            "GRAB_SNAP_LEFT", "GRAB_SNAP_RIGHT",
+            "GRAB_NEXT_MONITOR", "GRAB_PREV_MONITOR",
+        ]
+
+        calibrated: dict[str, float] = {}
+        for gesture in motion_gestures:
+            samples = await self._db.get_recent_gesture_velocities(gesture, limit=500)
+            if len(samples) < self._gesture_min:
+                continue
+            samples_sorted = sorted(samples)
+            p10_idx = max(0, int(len(samples_sorted) * 0.10) - 1)
+            p10 = samples_sorted[p10_idx]
+            floor = max(0.1, p10)              # always at least 0.1 coords/s
+            old_floor = await self._db.get_gesture_velocity_floor(gesture)
+            await self._db.update_gesture_velocity_calibration(
+                gesture, floor, len(samples), p10
+            )
+            # Group swipes and push/pull under canonical keys for GestureProcessor
+            if "SWIPE" in gesture:
+                calibrated["SWIPE"] = min(calibrated.get("SWIPE", floor), floor)
+            elif "PUSH" in gesture or "PULL" in gesture or "SNAP" in gesture or "MONITOR" in gesture:
+                calibrated["PUSH"] = min(calibrated.get("PUSH", floor), floor)
+            if abs(floor - old_floor) > 0.05:
+                log.info(
+                    "Gesture %s velocity floor: %.2f → %.2f (%d samples)",
+                    gesture, old_floor, floor, len(samples),
+                )
+
+        # Push calibrated thresholds into GestureProcessor (takes effect immediately)
+        if calibrated and self._gesture_proc is not None:
+            self._gesture_proc.set_velocity_thresholds(
+                calibrated, pain_day_active=pain_day_active
+            )
