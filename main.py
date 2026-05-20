@@ -191,9 +191,21 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
         from sentence_transformers import SentenceTransformer  # noqa: F401
         return "OK", "MiniLM available (loads on first few-shot query)"
 
+    def _check_acoustic_profiler():
+        from acoustic_profiler import AcousticProfiler  # noqa: F401
+        return "OK", "acoustic profiler available"
+
+    def _check_uiautomation():
+        from ui_automation import UIAutomationProvider
+        p = UIAutomationProvider()
+        avail = p.is_available()
+        return ("OK", "UIA COM available") if avail else ("WARN", "UIA COM unavailable (comtypes?)")
+
     check("GPU / VRAM (pynvml)",            _check_pynvml)
     check("Ollama LLM server",              _check_ollama)
     check("Whisper (faster-whisper)",       _check_whisper)
+    check("Acoustic profiler",              _check_acoustic_profiler)
+    check("UIAutomation (Win32)",           _check_uiautomation)
     check("MiniLM (sentence-transformers)", _check_sentence_transformers)
     check("Screen OCR (tesseract)",         _check_tesseract)
     check("Handwriting OCR (pix2tex)",      _check_pix2tex)
@@ -249,7 +261,11 @@ class _ShutdownController:
         self._stop_event.set()
 
     async def wait_for_shutdown(self) -> None:
-        await self._stop_event.wait()
+        # Poll every 200ms so the Windows signal handler (set via signal.signal)
+        # gets a chance to run — asyncio's blocking wait() never yields back to
+        # the main thread on Windows, causing Ctrl-C to be swallowed.
+        while not self._stop_event.is_set():
+            await asyncio.sleep(0.2)
 
     async def shutdown(self, trainer=None, agent_db=None, session_id: int = -1, twin_state=None) -> None:
         log.info("Saving calibration and flushing logs ...")
@@ -376,14 +392,39 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion = FusionEngine(screen_width=sw, screen_height=sh)
     fusion.set_coordinator(coordinator)
 
+    from acoustic_profiler import AcousticProfiler
+    profiler = AcousticProfiler(agent_db=agent_db, session_id=session_id)
+    await profiler.load()
+
     whisper = WhisperStream()
     whisper.set_fusion_engine(fusion)
+    whisper.set_agent_db(agent_db, session_id=session_id)
+    whisper.set_acoustic_profiler(profiler)
+    coordinator.set_whisper_stream(whisper)
+    coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
+
+    # Wire profiler into twin state for voice clarity pain signal
+    if twin_state:
+        twin_state.set_acoustic_profiler(profiler)
 
     bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
     bridge.set_gesture_processor(gesture)
     bridge.set_whisper_stream(whisper)
+    bridge.set_coordinator(coordinator)  # needed for pain_day_override message
+
+    # Wire acoustic drift → bridge recalibration request (thread-safe)
+    _loop = asyncio.get_event_loop()
+    def _on_drift(drift):
+        asyncio.run_coroutine_threadsafe(
+            bridge.send_recalibration_request(
+                reason=drift.reason,
+                degradation_pct=drift.degradation_pct,
+            ),
+            _loop,
+        )
+    profiler.add_drift_callback(_on_drift)
 
     # Optional sensor viewer window
     viewer = None

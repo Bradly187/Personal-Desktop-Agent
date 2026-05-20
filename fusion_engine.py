@@ -303,6 +303,10 @@ class FusionEngine:
         self._h = screen_height
         self._diag = math.hypot(screen_width, screen_height)
         self._cfg = config or FusionConfig()
+        # Pain-day effective config — starts as alias of base config; replaced by
+        # apply_pain_day(True) without mutating _cfg so base can always be restored.
+        self._effective_cfg: FusionConfig = self._cfg
+        self._pain_day_active: bool = False
 
         # --- Input slots (cleared after consumption) ---
         self._touch: Optional[Command] = None
@@ -424,6 +428,56 @@ class FusionEngine:
         self._coordinator = coordinator
 
     # ---------------------------------------------------------------------- #
+    # Pain-day threshold adaptation
+    # ---------------------------------------------------------------------- #
+
+    def apply_pain_day(self, active: bool) -> None:
+        """Apply or remove pain-day sensor threshold relaxations.
+
+        Called by HybridCoordinator.route() once per command after reading
+        TwinSnapshot.pain_day_active.  Uses dataclasses.replace to derive
+        an adjusted FusionConfig without mutating self._cfg so the base
+        can always be restored.
+
+        Pain-day adjustments (all relax thresholds for tremor/fatigue):
+            head_tremor_threshold : 1.0 → 2.0 °/s   (ignores more micro-tremor)
+            head_lock_threshold   : 0.5 → 0.8 °/s   (locks cursor sooner)
+            gaze_stability_pct    : 0.04 → 0.07      (accepts less stable gaze)
+            dead_zone_inner       : 0.05 → 0.08 rad/s (larger tilt dead zone)
+            sound_cooldown_s      : 0.5 → 0.3 s      (faster mouth-sound retry)
+            gaze_conf_min         : 0.55 → 0.45       (accepts lower conf gaze)
+            gaze_cursor_conf_min  : 0.55 → 0.45
+        """
+        if active == self._pain_day_active:
+            return  # idempotent — no config object created on every tick
+
+        self._pain_day_active = active
+
+        if not active:
+            self._effective_cfg = self._cfg
+            # Restore HeadStationaryLock thresholds
+            self._head_lock.lock_threshold   = self._cfg.head_lock_threshold
+            self._head_lock.unlock_threshold = self._cfg.head_unlock_threshold
+            log.info("FusionEngine: pain-day thresholds restored to baseline")
+            return
+
+        from dataclasses import replace as _dc_replace
+        self._effective_cfg = _dc_replace(
+            self._cfg,
+            head_tremor_threshold=2.0,
+            head_lock_threshold=0.8,
+            gaze_stability_pct=0.07,
+            dead_zone_inner=0.08,
+            sound_cooldown_s=0.3,
+            gaze_conf_min=0.45,
+            gaze_cursor_conf_min=0.45,
+        )
+        # HeadStationaryLock reads thresholds directly — sync immediately
+        self._head_lock.lock_threshold   = 0.8
+        self._head_lock.unlock_threshold = self._cfg.head_unlock_threshold
+        log.info("FusionEngine: pain-day thresholds applied")
+
+    # ---------------------------------------------------------------------- #
     # Feature toggle management
     # ---------------------------------------------------------------------- #
 
@@ -466,7 +520,7 @@ class FusionEngine:
 
     def on_sound_action(self, sound: str, conf: float) -> None:
         now = time.monotonic()
-        if now - self._last_sound_ts < self._cfg.sound_cooldown_s:
+        if now - self._last_sound_ts < self._effective_cfg.sound_cooldown_s:
             return
         self._last_sound_ts = now
         self._sound = Command(
@@ -609,6 +663,11 @@ class FusionEngine:
         pyautogui.PAUSE = 0
 
         tick_start = time.monotonic()
+        cfg = self._effective_cfg  # pain-day-adjusted config alias for this tick
+
+        # Sync gaze buffer thresholds from effective config (changes on pain day)
+        self._gaze_buf._stability_pct = cfg.gaze_stability_pct
+        self._gaze_buf._conf_min      = cfg.gaze_conf_min
 
         # --- Drag safety timeout: auto-release if drag_start without drag_end for 30s ---
         if self._drag_active and self._drag_start_time is not None:
@@ -765,21 +824,27 @@ class FusionEngine:
                 self._edge_scroll_start = None
                 self._edge_scroll_direction = None
 
-        # Gaze-to-cursor: move cursor to smoothed gaze position
+        # Gaze-to-cursor: move cursor to smoothed gaze position.
+        # Capture return value — if True, suppress gaze-delta below to prevent
+        # double cursor movement (absolute moveTo then relative moveRel in same tick).
+        _gaze_cursor_moved = False
         if self._feature_toggles.get("gaze_cursor_mode", False):
             if gaze_is_recent:
-                await self._apply_gaze_cursor(
+                _gaze_cursor_moved = await self._apply_gaze_cursor(
                     latest_gaze.x, latest_gaze.y, self._gaze_buf._last_conf
                 )
             else:
                 # Gaze lost — _apply_gaze_cursor handles hold behavior via low confidence
-                # Pass 0.0 confidence to trigger the hold-at-last-position logic
                 if latest_gaze is not None:
-                    await self._apply_gaze_cursor(latest_gaze.x, latest_gaze.y, 0.0)
+                    _gaze_cursor_moved = await self._apply_gaze_cursor(
+                        latest_gaze.x, latest_gaze.y, 0.0
+                    )
 
         # Gaze delta: relative cursor movement from eye direction changes
         # Includes fixation slowdown and confidence freeze (Req 15).
-        if self._gaze_delta:
+        # BUG FIX: skip if gaze-to-cursor already fired a moveTo this tick —
+        # prevents absolute + relative compound displacement in the same frame.
+        if self._gaze_delta and not _gaze_cursor_moved:
             dx, dy = self._gaze_delta
             conf = self._gaze_delta_conf
             self._gaze_delta = None
@@ -788,10 +853,10 @@ class FusionEngine:
 
             # --- Confidence freeze: freeze cursor when confidence is too low ---
             if not self._gaze_conf_frozen:
-                if conf < self._cfg.gaze_conf_freeze_threshold:
+                if conf < cfg.gaze_conf_freeze_threshold:
                     if self._gaze_conf_low_start is None:
                         self._gaze_conf_low_start = now
-                    elif now - self._gaze_conf_low_start >= self._cfg.gaze_conf_freeze_duration:
+                    elif now - self._gaze_conf_low_start >= cfg.gaze_conf_freeze_duration:
                         self._gaze_conf_frozen = True
                         self._gaze_conf_low_start = None
                         self._gaze_conf_high_start = None
@@ -799,10 +864,10 @@ class FusionEngine:
                     self._gaze_conf_low_start = None
             else:
                 # Frozen — check if confidence recovered enough to resume
-                if conf >= self._cfg.gaze_conf_resume_threshold:
+                if conf >= cfg.gaze_conf_resume_threshold:
                     if self._gaze_conf_high_start is None:
                         self._gaze_conf_high_start = now
-                    elif now - self._gaze_conf_high_start >= self._cfg.gaze_conf_resume_duration:
+                    elif now - self._gaze_conf_high_start >= cfg.gaze_conf_resume_duration:
                         self._gaze_conf_frozen = False
                         self._gaze_conf_high_start = None
                         self._gaze_conf_low_start = None
@@ -819,17 +884,17 @@ class FusionEngine:
                 gaze_vel_approx = math.hypot(dx, dy)  # pixel-space velocity proxy
 
                 if not self._gaze_fixation_active:
-                    if gaze_vel_approx < self._cfg.gaze_fixation_enter:
+                    if gaze_vel_approx < cfg.gaze_fixation_enter:
                         if self._gaze_fixation_start is None:
                             self._gaze_fixation_start = now
-                        elif now - self._gaze_fixation_start >= self._cfg.gaze_fixation_duration:
+                        elif now - self._gaze_fixation_start >= cfg.gaze_fixation_duration:
                             self._gaze_fixation_active = True
                             self._gaze_fixation_start = None
                     else:
                         self._gaze_fixation_start = None
                 else:
                     # Active fixation — check exit condition
-                    if gaze_vel_approx > self._cfg.gaze_fixation_exit:
+                    if gaze_vel_approx > cfg.gaze_fixation_exit:
                         if self._gaze_fixation_exit_start is None:
                             self._gaze_fixation_exit_start = now
                         elif now - self._gaze_fixation_exit_start >= 0.03:  # 30ms sustained
@@ -839,14 +904,15 @@ class FusionEngine:
                         self._gaze_fixation_exit_start = None
 
                 # Apply fixation slowdown multiplier
-                speed_mult = self._cfg.gaze_fixation_slowdown if self._gaze_fixation_active else 1.0
+                speed_mult = cfg.gaze_fixation_slowdown if self._gaze_fixation_active else 1.0
                 final_dx = dx * speed_mult
                 final_dy = dy * speed_mult
 
                 if abs(final_dx) > 0.5 or abs(final_dy) > 0.5:
                     await asyncio.to_thread(pyautogui.moveRel, int(final_dx), int(final_dy), duration=0)
 
-        # Gaze stability — used by Rules 4 & 5
+        # Gaze stability — used by Rules 4 & 5.
+        # _gaze_buf thresholds already synced from _effective_cfg at tick start.
         stable = self._gaze_buf.stable_centroid(self._diag)
 
         # Rule 4 — Voice keyword "click":
@@ -875,7 +941,15 @@ class FusionEngine:
                     gaze_coords=(int(stable[0] * self._w), int(stable[1] * self._h)),
                 )
                 await self._emit(cmd)
-            # No EMA and no stable gaze — drop silently (don't fall through to DICTATE)
+            else:
+                # No gaze target available — inform user instead of silent drop.
+                # Still return here (don't fall through to DICTATE with text="click").
+                clarify_cmd = Command(
+                    text="no gaze target — where would you like to click?",
+                    action="CLARIFY",
+                    source="multimodal",
+                )
+                await self._emit(clarify_cmd)
             return
 
         # Rule 5 — Gaze stable + POINT gesture
@@ -961,7 +1035,7 @@ class FusionEngine:
                 # Power curve on displacement from center (per-axis)
                 dx = filtered_x - 0.5
                 dy = filtered_y - 0.5
-                exp = self._cfg.tilt_pos_exponent
+                exp = cfg.tilt_pos_exponent
                 # Normalize to [-1, 1], apply power curve, denormalize back to [0, 1]
                 curved_x = 0.5 + power_curve(dx / 0.5, exp) * 0.5 if dx != 0.0 else 0.5
                 curved_y = 0.5 + power_curve(dy / 0.5, exp) * 0.5 if dy != 0.0 else 0.5
@@ -996,49 +1070,53 @@ class FusionEngine:
                 rx -= bias_x
                 ry -= bias_y
 
-                # 3. Check uncalibrated suppression
-                if self._tilt_bias_cal.should_suppress(rx, ry):
-                    return
+                # 3. Check uncalibrated suppression — fall through to Rules 8–10 if suppressed
+                #    (previously: early return blocked voice/gesture while iPad was being held)
+                _tilt_suppressed = self._tilt_bias_cal.should_suppress(rx, ry)
 
-                # 4. 1-Euro adaptive filter (per-axis)
-                rx = self._tilt_filter_x(rx, timestamp=now)
-                ry = self._tilt_filter_y(ry, timestamp=now)
+                if not _tilt_suppressed:
+                    # 4. 1-Euro adaptive filter (per-axis)
+                    rx = self._tilt_filter_x(rx, timestamp=now)
+                    ry = self._tilt_filter_y(ry, timestamp=now)
 
-                # 5. Dead zone ramp (smoothstep transition)
-                inner = self._cfg.dead_zone_inner
-                outer = inner + inner * self._cfg.dead_zone_ramp_mult
-                rx_mag = abs(rx)
-                ry_mag = abs(ry)
-                rx_ramped = dead_zone_ramp(rx_mag, inner, outer)
-                ry_ramped = dead_zone_ramp(ry_mag, inner, outer)
-                # Restore sign
-                rx_ramped = rx_ramped if rx >= 0 else -rx_ramped
-                ry_ramped = ry_ramped if ry >= 0 else -ry_ramped
+                    # 5. Dead zone ramp (smoothstep transition)
+                    inner = self._effective_cfg.dead_zone_inner
+                    outer = inner + inner * self._effective_cfg.dead_zone_ramp_mult
+                    rx_mag = abs(rx)
+                    ry_mag = abs(ry)
+                    rx_ramped = dead_zone_ramp(rx_mag, inner, outer)
+                    ry_ramped = dead_zone_ramp(ry_mag, inner, outer)
+                    # Restore sign
+                    rx_ramped = rx_ramped if rx >= 0 else -rx_ramped
+                    ry_ramped = ry_ramped if ry >= 0 else -ry_ramped
 
-                # 6. Power curve transfer function
-                sensitivity = self._cfg.tilt_sensitivity
-                exp = self._cfg.tilt_vel_exponent
-                cursor_dx = power_curve(rx_ramped, exp, sensitivity)
-                cursor_dy = power_curve(ry_ramped, exp, sensitivity)
+                    # 6. Power curve transfer function
+                    sensitivity = self._effective_cfg.tilt_sensitivity
+                    exp = self._effective_cfg.tilt_vel_exponent
+                    cursor_dx = power_curve(rx_ramped, exp, sensitivity)
+                    cursor_dy = power_curve(ry_ramped, exp, sensitivity)
 
-                # rx = rotationRate.x: rotation around X-axis → vertical cursor
-                #   positive rx (tilt top away) → cursor moves up (negative dy)
-                # ry = rotationRate.y: rotation around Y-axis → horizontal cursor
-                #   tilt right (negative ry) → cursor moves right (positive dx)
-                self._tilt_accum_x += -cursor_dy  # ry → horizontal
-                self._tilt_accum_y += -cursor_dx  # rx → vertical
+                    # rx = rotationRate.x: rotation around X-axis → vertical cursor
+                    #   positive rx (tilt top away) → cursor moves up (negative dy)
+                    # ry = rotationRate.y: rotation around Y-axis → horizontal cursor
+                    #   tilt right (negative ry) → cursor moves right (positive dx)
+                    self._tilt_accum_x += -cursor_dy  # ry → horizontal
+                    self._tilt_accum_y += -cursor_dx  # rx → vertical
 
-                # Only move when we've accumulated at least 1 pixel
-                dx = int(self._tilt_accum_x)
-                dy = int(self._tilt_accum_y)
+                    # Only move when we've accumulated at least 1 pixel.
+                    # BUG FIX: return ONLY when pixels were produced — otherwise fall
+                    # through to Rules 8–10 so voice/gesture fire while tilt is sub-dead-zone.
+                    dx = int(self._tilt_accum_x)
+                    dy = int(self._tilt_accum_y)
 
-                if dx or dy:
-                    self._tilt_accum_x -= dx
-                    self._tilt_accum_y -= dy
-                    if gaze_cursor_on:
-                        self._gaze_cursor_ema = None
-                    await asyncio.to_thread(pyautogui.moveRel, dx, dy, duration=0)
-                return
+                    if dx or dy:
+                        self._tilt_accum_x -= dx
+                        self._tilt_accum_y -= dy
+                        if gaze_cursor_on:
+                            self._gaze_cursor_ema = None
+                        await asyncio.to_thread(pyautogui.moveRel, dx, dy, duration=0)
+                        return  # cursor moved — this tick is done
+                # Suppressed or sub-dead-zone: fall through to Rules 8–10
 
         # Rule 7 — Head tracking (direct to pyautogui, no Command, no LLM)
         # Uses 3-zone acceleration curve + stationary lock with hysteresis.
@@ -1061,22 +1139,26 @@ class FusionEngine:
 
                 # 3-zone acceleration curve (per-axis)
                 # Tremor suppression + power curve with configurable exponent
-                exp = self._cfg.head_accel_exponent
-                tremor = self._cfg.head_tremor_threshold
-                tick_hz = self._cfg.tick_hz
+                exp    = self._effective_cfg.head_accel_exponent
+                tremor = self._effective_cfg.head_tremor_threshold  # pain-day aware
+                tick_hz = self._effective_cfg.tick_hz
 
                 accel_pitch = head_acceleration_curve(pitch, exp, tremor, tick_hz)
                 accel_yaw = head_acceleration_curve(yaw, exp, tremor, tick_hz)
 
                 # Apply sensitivity multiplier
-                dx = int(accel_yaw * self._cfg.head_sensitivity)
-                dy = int(accel_pitch * self._cfg.head_sensitivity)
+                dx = int(accel_yaw * self._effective_cfg.head_sensitivity)
+                dy = int(accel_pitch * self._effective_cfg.head_sensitivity)
 
+                # BUG FIX: return ONLY when pixels were produced — otherwise fall
+                # through to Rules 8–10 so voice/gesture fire while head is below
+                # tremor threshold (e.g. user with low-level RA head tremor).
                 if dx or dy:
                     if gaze_cursor_on:
                         self._gaze_cursor_ema = None
                     await asyncio.to_thread(pyautogui.moveRel, dx, dy, duration=0)
-                return
+                    return  # cursor moved — this tick is done
+                # Sub-tremor or zero: fall through to Rules 8–10
 
         # Rule 8 — Gesture (full 4-gate)
         if self._gesture:
@@ -1209,7 +1291,7 @@ class FusionEngine:
     # Gaze-to-cursor
     # ---------------------------------------------------------------------- #
 
-    async def _apply_gaze_cursor(self, gaze_x: float, gaze_y: float, conf: float) -> None:
+    async def _apply_gaze_cursor(self, gaze_x: float, gaze_y: float, conf: float) -> bool:
         """Move cursor to smoothed gaze position when gaze-to-cursor mode is active.
 
         Applies EMA smoothing to raw gaze coordinates, clamps frame-to-frame
@@ -1220,27 +1302,31 @@ class FusionEngine:
             gaze_x: Normalized gaze x coordinate [0.0, 1.0]
             gaze_y: Normalized gaze y coordinate [0.0, 1.0]
             conf: Gaze tracking confidence [0.0, 1.0]
+
+        Returns:
+            True if cursor was actually moved (moveTo called), False if held.
+            Used by _tick() to suppress gaze-delta in the same frame.
         """
         import pyautogui
 
         now = time.monotonic()
 
         # --- Low confidence: hold at last position ---
-        if conf < self._cfg.gaze_cursor_conf_min:
+        if conf < self._effective_cfg.gaze_cursor_conf_min:
             # Check if gaze has been lost too long
             if (self._gaze_cursor_last_seen > 0.0
-                    and now - self._gaze_cursor_last_seen > self._cfg.gaze_cursor_lost_timeout_s):
+                    and now - self._gaze_cursor_last_seen > self._effective_cfg.gaze_cursor_lost_timeout_s):
                 log.warning(
                     "Gaze-to-cursor: gaze lost for %.1fs, holding cursor at last position",
                     now - self._gaze_cursor_last_seen,
                 )
-            return
+            return False  # held, not moved
 
         # --- Valid gaze: update last-seen timestamp ---
         self._gaze_cursor_last_seen = now
 
         # --- EMA smoothing ---
-        alpha = self._cfg.gaze_cursor_ema_alpha
+        alpha = self._effective_cfg.gaze_cursor_ema_alpha
         if self._gaze_cursor_ema is None:
             # First valid sample — initialize EMA directly
             ema_x, ema_y = gaze_x, gaze_y
@@ -1256,7 +1342,7 @@ class FusionEngine:
             dx = ema_x - prev_ema_x
             dy = ema_y - prev_ema_y
             displacement_px = math.hypot(dx * self._w, dy * self._h)
-            max_displacement_px = self._cfg.gaze_cursor_max_jump_pct * self._diag
+            max_displacement_px = self._effective_cfg.gaze_cursor_max_jump_pct * self._diag
 
             if displacement_px > max_displacement_px and displacement_px > 0:
                 scale = max_displacement_px / displacement_px
@@ -1276,8 +1362,10 @@ class FusionEngine:
         self._gaze_cursor_last = (px_x, px_y)
         try:
             pyautogui.moveTo(px_x, px_y, _pause=False)
+            return True   # cursor moved — caller suppresses gaze-delta this tick
         except Exception as exc:
             log.error("Gaze-to-cursor: pyautogui.moveTo failed: %s", exc)
+            return False  # movement failed — allow gaze-delta as fallback
 
     # ---------------------------------------------------------------------- #
     # Lifecycle

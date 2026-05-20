@@ -43,9 +43,9 @@ from typing import TYPE_CHECKING, Optional
 from command_executor import Command, CommandExecutor
 from dataclasses import replace as _dc_replace
 from local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
+from vision_grounder import VisionGrounder
 
 if TYPE_CHECKING:
-    from agentcore_fallback.client import AgentCoreFallbackClient
     from audit_log import AuditLog
     from behavioral_twin_state import BehavioralTwinState
     from content_filter import ContentFilter
@@ -194,6 +194,14 @@ _VOICE_CORRECTIONS: dict[str, str] = {
     "oh pen up":   "open up",
     "hot key":     "hotkey",
     "screen shot": "screenshot",
+    # App name phonetic corrections
+    "key row":     "kiro",
+    "key-row":     "kiro",
+    "keyrow":      "kiro",
+    "cairo":       "kiro",
+    "slap":        "slack",
+    "diskord":     "discord",
+    "dis cord":    "discord",
 }
 
 
@@ -356,17 +364,16 @@ class HybridCoordinator:
         config: CoordinatorConfig | None = None,
         trainer: Optional["ContinuousTrainer"] = None,
         dev_agent: Optional["DevAgent"] = None,
-        agentcore_client: Optional["AgentCoreFallbackClient"] = None,
         agent_db: Optional["AgentDB"] = None,
         session_id: int = -1,
         content_filter: Optional["ContentFilter"] = None,
         audit_log: Optional["AuditLog"] = None,
         twin_state: Optional["BehavioralTwinState"] = None,
+        whisper_stream=None,
     ) -> None:
         self._local = local or OllamaInference()
         self._cfg = config or CoordinatorConfig()
         self._cloud = _CloudInference(self._cfg.bedrock_model_id, self._cfg.bedrock_region)
-        self._agentcore = agentcore_client
         self._executor = CommandExecutor()
         self._trainer = trainer
         self._dev_agent = dev_agent
@@ -376,12 +383,15 @@ class HybridCoordinator:
         self._audit = audit_log
         self._twin = twin_state
         self._latency_ema: Optional[float] = None
+        self._grounder = VisionGrounder()
+        self._whisper = whisper_stream
+        self._fusion = None   # set via set_fusion_engine() after FusionEngine is created
+        self._pending_clarification: Optional[str] = None
+        self._lecture_mode: bool = False
 
         # Gate 3 VRAM cache — avoid calling pynvml on every command
         self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
         self._vram_cache_ttl: float = 2.0  # seconds
-
-        # AgentCore deployment deferred — raw Bedrock is the active cloud path.
 
     # ---------------------------------------------------------------------- #
     # Public entry point
@@ -389,6 +399,13 @@ class HybridCoordinator:
 
     def set_dev_agent(self, dev_agent: "DevAgent") -> None:
         self._dev_agent = dev_agent
+
+    def set_whisper_stream(self, whisper_stream) -> None:
+        self._whisper = whisper_stream
+
+    def set_fusion_engine(self, fusion_engine) -> None:
+        """Wire FusionEngine so pain-day thresholds propagate on each route()."""
+        self._fusion = fusion_engine
 
     async def route(self, cmd: Command) -> dict:
         """Route a Command through the gate decision tree and execute it.
@@ -410,6 +427,69 @@ class HybridCoordinator:
                     "response": agent_result.response_text,
                     "steps": len(agent_result.steps),
                 }
+
+        # System control commands — intercept before gate evaluation
+        if cmd.source in ("voice", "voice_local"):
+            _lower = cmd.text.lower().strip()
+
+            # Lecture mode
+            if _lower in ("start lecture mode", "lecture mode on", "begin lecture mode"):
+                self._lecture_mode = True
+                if self._whisper:
+                    self._whisper.set_lecture_mode(True)
+                log.info("Lecture mode ON")
+                return {"status": "ok", "action": "LECTURE_MODE", "enabled": True}
+            elif _lower in ("stop lecture mode", "lecture mode off", "end lecture mode"):
+                self._lecture_mode = False
+                if self._whisper:
+                    self._whisper.set_lecture_mode(False)
+                log.info("Lecture mode OFF")
+                return {"status": "ok", "action": "LECTURE_MODE", "enabled": False}
+
+            # Lecture notes search — "search my lecture notes for X"
+            elif "lecture notes" in _lower and (
+                _lower.startswith("search") or "search" in _lower
+            ):
+                # Extract query after "for" or "about"
+                for sep in ("for ", "about ", "on "):
+                    if sep in _lower:
+                        search_q = cmd.text[_lower.index(sep) + len(sep):].strip()
+                        break
+                else:
+                    search_q = cmd.text  # fallback: search whole phrase
+                if self._agent_db and self._agent_db.available and search_q:
+                    rows = await self._agent_db.search_lecture_notes(search_q, limit=10)
+                    if rows:
+                        summary = "\n".join(f"- {r['text']}" for r in rows[:5])
+                        log.info("Lecture notes search %r: %d results", search_q, len(rows))
+                        return {"status": "ok", "action": "LECTURE_SEARCH",
+                                "query": search_q, "results": len(rows),
+                                "preview": summary}
+                    else:
+                        return {"status": "ok", "action": "LECTURE_SEARCH",
+                                "query": search_q, "results": 0,
+                                "preview": "No lecture notes found for that query."}
+
+            # Manual pain day toggle
+            elif _lower in ("pain day on", "flare day on", "bad day"):
+                if self._twin:
+                    self._twin.set_manual_pain_day(True)
+                # Immediately loosen VAD for softer voice
+                if self._whisper and hasattr(self._whisper, '_profiler') \
+                        and self._whisper._profiler:
+                    vad = self._whisper._profiler.get_vad_threshold(pain_day=True)
+                    self._whisper._silence_thresh = vad
+                    log.info("Pain day ON — VAD relaxed to %.3f", vad)
+                return {"status": "ok", "action": "PAIN_DAY", "enabled": True}
+            elif _lower in ("pain day off", "flare day off", "feeling better"):
+                if self._twin:
+                    self._twin.set_manual_pain_day(False)
+                if self._whisper and hasattr(self._whisper, '_profiler') \
+                        and self._whisper._profiler:
+                    vad = self._whisper._profiler.get_vad_threshold(pain_day=False)
+                    self._whisper._silence_thresh = vad
+                    log.info("Pain day OFF — VAD restored to %.3f", vad)
+                return {"status": "ok", "action": "PAIN_DAY", "enabled": False}
 
         t0 = time.monotonic()
         route_label = "local"
@@ -437,9 +517,31 @@ class HybridCoordinator:
             else:
                 effective_cfg = self._cfg
 
+            # Propagate pain-day state to FusionEngine sensor thresholds
+            if self._fusion is not None:
+                self._fusion.apply_pain_day(snapshot.pain_day_active)
+
+            # Always apply vocabulary corrections before any gate evaluation
+            # so app-name phonetics ("key-row" → "kiro") reach the LLM fixed
+            # regardless of Whisper confidence level.
+            if cmd.source in ("voice", "voice_local"):
+                corrected_text, changed = _apply_vocabulary_corrections(cmd.text)
+                if changed:
+                    log.debug(
+                        "Pre-gate vocab correction: %r → %r", cmd.text, corrected_text
+                    )
+                    cmd = _dc_replace(cmd, text=corrected_text)
+
             # Populate session_context from twin state
             if self._twin and self._twin.is_ready:
                 cmd = _dc_replace(cmd, session_context=self._twin.get_session_context())
+
+            # Inject pending clarification so the LLM knows what "up" or "yes"
+            # is answering.  Prepended so it appears closest to the user turn.
+            if self._pending_clarification and cmd.source in ("voice", "voice_local"):
+                clarify_ctx = f"[PENDING CLARIFICATION: {self._pending_clarification}]"
+                ctx = [clarify_ctx] + list(cmd.session_context or [])
+                cmd = _dc_replace(cmd, session_context=ctx)
 
             # Temporarily apply effective_cfg for gate evaluation
             _original_cfg = self._cfg
@@ -504,6 +606,11 @@ class HybridCoordinator:
                 await self._trainer.record_success(
                     cmd, action_str, command_id=command_id
                 )
+
+            # Advance acoustic profiler command counter (seasonal drift check)
+            if self._whisper and hasattr(self._whisper, "_profiler") \
+                    and self._whisper._profiler:
+                self._whisper._profiler.on_any_command()
 
         except Exception as exc:
             log.error("HybridCoordinator.route error: %s", exc)
@@ -656,7 +763,7 @@ class HybridCoordinator:
         return action_str
 
     async def _run_cloud(self, cmd: Command) -> str:
-        """Route to cloud: prefer AgentCore fallback agent, fall back to raw Bedrock.
+        """Route to raw Bedrock Claude Haiku.
 
         Content filter scrubs secrets/PII from the command text before
         transmitting to external APIs. Findings are logged to the audit trail.
@@ -675,15 +782,6 @@ class HybridCoordinator:
                     _gaze_coords=cmd.gaze_coords,
                 )
 
-        if self._agentcore:
-            try:
-                action = await self._agentcore.resolve(cmd)
-                if not action.startswith("CLARIFY cloud"):
-                    return action
-                # AgentCore failed, fall through to raw Bedrock
-                log.warning("AgentCore fallback failed, trying raw Bedrock: %s", action)
-            except Exception as exc:
-                log.warning("AgentCore fallback exception, trying raw Bedrock: %s", exc)
         return await self._cloud.infer(cmd)
 
     # ---------------------------------------------------------------------- #
@@ -706,6 +804,17 @@ class HybridCoordinator:
         if route_label == "cloud":
             params["route"] = "cloud"
 
+        # Vision grounding: resolve named CLICK targets to pixel coords.
+        # Only runs when there's a named target and no coords already supplied
+        # (gaze_coords or explicit x/y from touch). Falls through silently on
+        # any failure — CommandExecutor's Tesseract + cursor fallback takes over.
+        grounded_coords = cmd.gaze_coords
+        if verb == "CLICK" and target and "x" not in params:
+            vision_coords = await self._ground_target(target)
+            if vision_coords:
+                params["x"], params["y"] = vision_coords
+                grounded_coords = vision_coords
+
         exec_cmd = Command(
             text=target or cmd.text,
             action=verb,
@@ -713,11 +822,60 @@ class HybridCoordinator:
             whisper_logprob=cmd.whisper_logprob,
             gesture_confidence=cmd.gesture_confidence,
             session_context=cmd.session_context,
-            gaze_coords=cmd.gaze_coords,
+            gaze_coords=grounded_coords,
             params=params,
         )
 
-        return await self._executor.execute(exec_cmd)
+        # Pre-suppress: flush buffer and block mic BEFORE TTS starts playing.
+        # This prevents Danielle's voice from accumulating in the WhisperStream
+        # buffer and being transcribed as a new command mid-playback.
+        if verb == "CLARIFY" and self._whisper is not None:
+            word_count = len((target or "").split())
+            # Generative TTS is ~0.45s/word; add 1s safety margin before + tail
+            pre_suppress_s = max(3.0, word_count * 0.45 + 1.0)
+            self._whisper.suppress(pre_suppress_s)
+            log.debug("Pre-CLARIFY mic suppressed for %.1fs", pre_suppress_s)
+
+        result = await self._executor.execute(exec_cmd)
+
+        # Post-action suppression:
+        #   CLARIFY  — long suppress covers TTS echo (already pre-suppressed too)
+        #   All else — short cooldown prevents app-startup sounds / utterance
+        #              tail from being transcribed as a second command.
+        if verb == "CLARIFY":
+            self._pending_clarification = target or "unclear command"
+            if self._whisper is not None:
+                self._whisper.suppress(1.5)
+                self._whisper.set_awaiting_clarification(True)
+                log.debug("Post-CLARIFY mic suppressed 1.5s; wake-phrase bypassed")
+        else:
+            self._pending_clarification = None
+            if self._whisper is not None:
+                self._whisper.set_awaiting_clarification(False)
+                if result.get("status") == "ok":
+                    self._whisper.suppress(0.8)
+                    log.debug("Post-action mic cooldown 0.8s (verb=%s)", verb)
+
+        return result
+
+    async def _ground_target(self, target: str) -> Optional[tuple[int, int]]:
+        """Screenshot the desktop and ask VisionGrounder to resolve the target."""
+        try:
+            # mcp_server/ is already in sys.path via command_executor import
+            from tools import screen as _screen
+            screenshot_result = await asyncio.to_thread(_screen.screenshot)
+            screenshot_b64: str = screenshot_result.get("image_base64", "")
+            if not screenshot_b64:
+                return None
+            result = await asyncio.to_thread(
+                self._grounder.ground, target, screenshot_b64
+            )
+            if result is None:
+                return None
+            return (result.x, result.y)
+        except Exception as exc:
+            log.warning("_ground_target failed for %r: %s", target, exc)
+            return None
 
     @staticmethod
     def _parse_params(verb: str, target: str, original: Command) -> dict:
@@ -782,10 +940,6 @@ class HybridCoordinator:
         the correct one (e.g. via iPad "undo + correct" flow or voice "no, I
         meant close").
 
-        This feeds both:
-        1. Local few-shot DB (immediate improvement for local inference)
-        2. AgentCore fallback memory (long-term cloud improvement)
-
         Args:
             cmd: The original Command that was misresolved.
             wrong_action: The action that was incorrectly executed.
@@ -801,18 +955,6 @@ class HybridCoordinator:
 
         if self._trainer:
             await self._trainer.record_correction(cmd, wrong_action, correct_action)
-        elif self._agentcore:
-            # No trainer but AgentCore is available — send directly
-            try:
-                from agentcore_fallback.client import AgentCoreFallbackClient
-                client = self._agentcore
-                await client.record_correction(
-                    original_text=cmd.text,
-                    wrong_action=wrong_action,
-                    correct_action=correct_action,
-                )
-            except Exception as exc:
-                log.warning("Direct AgentCore correction failed: %s", exc)
 
         return {
             "status": "ok",
