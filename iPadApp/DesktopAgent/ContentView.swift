@@ -43,11 +43,15 @@ struct ContentView: View {
                 .padding(.top, 44) // below connection banner
                 .allowsHitTesting(false)
 
-            // Cursor conflict warning (interactive when visible)
+            // Cursor conflict warning (interactive when visible, transparent to
+            // touches otherwise — activeCursorCount drives both the banner body
+            // and the hit-testing gate so they can never get out of sync).
+            let conflictActive = [settings.tiltEnabled, settings.gazeEnabled, settings.headEnabled].filter { $0 }.count >= 2
             CursorConflictBanner(settings: settings)
                 .padding(.horizontal, DesignTokens.Spacing.lg)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .padding(.top, 72) // below activity bar
+                .allowsHitTesting(conflictActive)
 
             ScreenshotOverlayView()
 

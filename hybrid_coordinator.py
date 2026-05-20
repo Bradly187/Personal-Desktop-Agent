@@ -47,6 +47,7 @@ from local_inference import LocalInference, OllamaInference, _build_prompt, _SYS
 if TYPE_CHECKING:
     from agentcore_fallback.client import AgentCoreFallbackClient
     from audit_log import AuditLog
+    from behavioral_twin_state import BehavioralTwinState
     from content_filter import ContentFilter
     from continuous_trainer import ContinuousTrainer
     from db import AgentDB
@@ -330,6 +331,18 @@ _BYPASS_SOURCES = {"touch", "sound_action", "gaze_dwell", "multimodal"}
 _SKIP_GATE1_SOURCES = {"voice_local"}
 
 
+def _apply_pain_day_adjustments(cfg, snapshot) -> "CoordinatorConfig":
+    """Return a modified config copy with pain-day threshold relaxations.
+    Does not mutate the original config.
+    """
+    from dataclasses import replace
+    return replace(
+        cfg,
+        whisper_logprob_min=cfg.whisper_logprob_min - 0.15,
+        gesture_confidence_min=cfg.gesture_confidence_min - 0.10,
+    )
+
+
 class HybridCoordinator:
     # Class-level DomainClassifier — stateless keyword scorer, no need to
     # re-instantiate per route() call.
@@ -353,6 +366,7 @@ class HybridCoordinator:
         session_id: int = -1,
         content_filter: Optional["ContentFilter"] = None,
         audit_log: Optional["AuditLog"] = None,
+        twin_state: Optional["BehavioralTwinState"] = None,
     ) -> None:
         self._local = local or OllamaInference()
         self._cfg = config or CoordinatorConfig()
@@ -365,6 +379,7 @@ class HybridCoordinator:
         self._session_id = session_id
         self._content_filter = content_filter
         self._audit = audit_log
+        self._twin = twin_state
         self._latency_ema: Optional[float] = None
 
         # Gate 3 VRAM cache — avoid calling pynvml on every command
@@ -423,36 +438,61 @@ class HybridCoordinator:
         try:
             source = cmd.source
 
-            # --- Gate 0 — Privacy (applies before bypass; forces local) ----
-            if not self._gate0(cmd):
-                log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
-                action_str = await self._run_local(cmd)
-                route_label = "local"
-                gate_that_decided = "gate0_privacy"
+            # --- Twin state snapshot and adjustments -----------------------
+            from behavioral_twin_state import _DEFAULT_SNAPSHOT
+            snapshot = _DEFAULT_SNAPSHOT
+            if self._twin:
+                try:
+                    snapshot = await self._twin.get_snapshot()
+                except Exception as exc:
+                    log.warning("BehavioralTwinState.get_snapshot failed: %s", exc)
 
-            # --- Bypass path -----------------------------------------------
-            elif source in _BYPASS_SOURCES:
-                action_str = await self._run_local(cmd)
-                route_label = "local"
-                gate_that_decided = "bypass"
-
-            # --- Skip Gate 1 path ------------------------------------------
-            elif source in _SKIP_GATE1_SOURCES:
-                action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
-
-            # --- Full 4-gate path -------------------------------------------
+            # Apply pain-day threshold adjustments
+            if snapshot.pain_day_active:
+                effective_cfg = _apply_pain_day_adjustments(self._cfg, snapshot)
             else:
-                # Gate 1 — Confidence
-                passed, cmd = await self._gate1(cmd)
-                if passed is None:
-                    # Gesture low confidence — discard silently
-                    log.debug("Gate 1 discard (low gesture conf): %r", cmd.text)
-                    return {"status": "discarded", "reason": "gate1_gesture_conf"}
-                if not passed:
-                    # Voice low confidence — re-transcribe and continue to Gate 2
-                    cmd = await _retranscribe(cmd)
+                effective_cfg = self._cfg
 
-                action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
+            # Populate session_context from twin state
+            if self._twin and self._twin.is_ready:
+                cmd = _dc_replace(cmd, session_context=self._twin.get_session_context())
+
+            # Temporarily apply effective_cfg for gate evaluation
+            _original_cfg = self._cfg
+            self._cfg = effective_cfg
+            try:
+                # --- Gate 0 — Privacy (applies before bypass; forces local) ----
+                if not self._gate0(cmd):
+                    log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
+                    action_str = await self._run_local(cmd)
+                    route_label = "local"
+                    gate_that_decided = "gate0_privacy"
+
+                # --- Bypass path -----------------------------------------------
+                elif source in _BYPASS_SOURCES:
+                    action_str = await self._run_local(cmd)
+                    route_label = "local"
+                    gate_that_decided = "bypass"
+
+                # --- Skip Gate 1 path ------------------------------------------
+                elif source in _SKIP_GATE1_SOURCES:
+                    action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
+
+                # --- Full 4-gate path -------------------------------------------
+                else:
+                    # Gate 1 — Confidence
+                    passed, cmd = await self._gate1(cmd)
+                    if passed is None:
+                        # Gesture low confidence — discard silently
+                        log.debug("Gate 1 discard (low gesture conf): %r", cmd.text)
+                        return {"status": "discarded", "reason": "gate1_gesture_conf"}
+                    if not passed:
+                        # Voice low confidence — re-transcribe and continue to Gate 2
+                        cmd = await _retranscribe(cmd)
+
+                    action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
+            finally:
+                self._cfg = _original_cfg
 
             # --- Execute the action ----------------------------------------
             result = await self._execute_action(action_str, cmd, route_label=route_label)

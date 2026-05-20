@@ -42,6 +42,12 @@ routing_log.jsonl
 benchmark_results.json
 gesture_calibration.json
 hotwords.txt
+# Audit DB (append-only, written at runtime)
+audit.db
+audit.db-shm
+audit.db-wal
+# ChromaDB persistent store (written at runtime by SemanticMemory)
+chroma_db/
 
 # OS
 Thumbs.db

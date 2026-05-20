@@ -181,7 +181,7 @@ def test_lr10_is_fresh_false_after_timeout():
     msg = make_depth_msg()
     lidar.on_depth_frame(msg)
     # Simulate old arrival
-    lidar._arrival_ts = time.monotonic() - 1.0
+    lidar._recv_mono = time.monotonic() - 1.0
     assert lidar.is_fresh(0.5) is False
 
 

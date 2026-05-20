@@ -159,31 +159,88 @@ struct ScientificKeypadView: View {
     }
 
     private func evalExpression(_ expr: String) -> Double? {
-        // Normalise to NSExpression-compatible form
+        // Normalise display symbols to ASCII operators
         var s = expr
         s = s.replacingOccurrences(of: "×", with: "*")
         s = s.replacingOccurrences(of: "÷", with: "/")
         s = s.replacingOccurrences(of: "−", with: "-")
         s = s.replacingOccurrences(of: "π", with: "3.14159265358979")
-        s = s.replacingOccurrences(of: "e", with: "2.71828182845905")
-        s = s.replacingOccurrences(of: "^", with: "**")
 
-        // Guard: NSExpression raises ObjC exceptions on malformed input.
-        // Validate balanced parens and non-empty string before calling.
+        // Replace standalone "e" (Euler's number) only when surrounded by
+        // non-alphanumeric characters, to avoid corrupting tokens like "1e6".
+        // Simple approach: only replace if "e" appears as the whole expression
+        // or adjacent to operators/parens — use word-boundary via regex-free check.
+        s = replaceEulerE(in: s)
+
+        // ^ (power): NSExpression does NOT support ** or ^.
+        // Evaluate power sub-expressions via Swift.pow before handing to NSExpression.
+        // If expression contains ^ and we can't safely rewrite it, return nil
+        // (preview stays blank — the raw expression still sends via DICTATE).
+        if s.contains("^") {
+            return evalWithPower(s)
+        }
+
+        return nsExpressionEval(s)
+    }
+
+    /// Replace lone "e" (Euler's number) but not "e" inside numeric tokens like 1e6.
+    private func replaceEulerE(in s: String) -> String {
+        var result = ""
+        var chars = Array(s)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "e" {
+                let prevIsDigit = i > 0 && chars[i - 1].isNumber
+                let nextIsDigit = i + 1 < chars.count && chars[i + 1].isNumber
+                // Keep "e" in scientific notation (1e6) but replace standalone e
+                if prevIsDigit && nextIsDigit {
+                    result.append(c)  // part of scientific notation — leave alone
+                } else {
+                    result += "2.71828182845905"
+                }
+            } else {
+                result.append(c)
+            }
+            i += 1
+        }
+        return result
+    }
+
+    /// Evaluate expressions containing ^ by splitting on the operator and using pow().
+    /// Only handles simple "a^b" with no further nesting — returns nil otherwise.
+    private func evalWithPower(_ s: String) -> Double? {
+        // Find the last ^ (right-associative is fine for simple cases)
+        guard let caretRange = s.range(of: "^", options: .backwards) else { return nil }
+        let baseStr  = String(s[s.startIndex ..< caretRange.lowerBound])
+        let expStr   = String(s[caretRange.upperBound...])
+        guard !baseStr.isEmpty, !expStr.isEmpty else { return nil }
+        // Recurse for chained powers (e.g. 2^3^4); avoid expressions with further ^
+        guard let base = nsExpressionEval(baseStr),
+              let exp  = nsExpressionEval(expStr) else { return nil }
+        let result = Foundation.pow(base, exp)
+        return result.isFinite ? result : nil
+    }
+
+    /// Thin wrapper around NSExpression that returns nil on any failure.
+    /// Pre-condition: caller has validated the expression string does not
+    /// contain "**" or "^" (those crash NSExpression on iOS 26).
+    private func nsExpressionEval(_ s: String) -> Double? {
         guard !s.isEmpty else { return nil }
-        let opens = s.filter { $0 == "(" }.count
+        // Double-check: never pass ** to NSExpression (iOS 26 throws ObjC exception)
+        guard !s.contains("**"), !s.contains("^") else { return nil }
+
+        let opens  = s.filter { $0 == "(" }.count
         let closes = s.filter { $0 == ")" }.count
         guard opens == closes else { return nil }
-        // Must not end with an operator or open paren
-        let lastChar = s.last
-        guard lastChar != nil,
+
+        guard let lastChar = s.last,
               lastChar != "(",
               lastChar != "+",
               lastChar != "-",
               lastChar != "*",
               lastChar != "/" else { return nil }
 
-        // Use NSExpression — safe after the guards above
         let nsExpr = NSExpression(format: s)
         guard let v = nsExpr.expressionValue(with: nil, context: nil) as? NSNumber else {
             return nil

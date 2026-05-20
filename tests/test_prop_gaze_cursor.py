@@ -286,7 +286,9 @@ class TestProperty14SuppressTiltAndHead:
     @settings(max_examples=100)
     def test_tilt_works_when_gaze_cursor_disabled(self, rx: float, ry: float) -> None:
         """Tilt events DO move cursor when gaze-to-cursor mode is disabled."""
-        assume(abs(rx) > 0.02 or abs(ry) > 0.02)  # above dead zone
+        # dead_zone_inner=0.05, outer=0.125; magnitude must exceed outer (0.125)
+        # to guarantee movement after the smoothstep ramp and int-rounding
+        assume(abs(rx) > 0.15 or abs(ry) > 0.15)
 
         engine = _make_engine(gaze_cursor_mode=False)
         engine.on_tilt(rx, ry)
@@ -401,7 +403,7 @@ class TestProperty15LowConfidenceHoldsCursor:
         self, init_x: float, init_y: float, high_conf: float, new_x: float, new_y: float
     ) -> None:
         """When confidence is at or above threshold, EMA position updates (contrast test)."""
-        assume(new_x != init_x or new_y != init_y)  # ensure there's a difference
+        assume(abs(new_x - init_x) > 0.01 or abs(new_y - init_y) > 0.01)  # meaningful delta
 
         engine = _make_engine()
 

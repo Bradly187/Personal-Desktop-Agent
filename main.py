@@ -251,8 +251,12 @@ class _ShutdownController:
     async def wait_for_shutdown(self) -> None:
         await self._stop_event.wait()
 
-    async def shutdown(self, trainer=None, agent_db=None, session_id: int = -1) -> None:
+    async def shutdown(self, trainer=None, agent_db=None, session_id: int = -1, twin_state=None) -> None:
         log.info("Saving calibration and flushing logs ...")
+
+        # Stop twin state (flushes pending observe() tasks, persists preference model)
+        if twin_state is not None:
+            await twin_state.stop()
 
         # Stop trainer (flushes final gesture calibration)
         if trainer is not None:
@@ -288,6 +292,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from db import AgentDB
     from local_inference import OllamaInference
     from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+    from behavioral_twin_state import BehavioralTwinState
     from fusion_engine import FusionEngine, FusionConfig
     from ipad_bridge import IPadBridge
     from continuous_trainer import ContinuousTrainer
@@ -337,17 +342,22 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     log.info("Session %d started (mode=%s git=%s)", session_id, mode, git_hash or "unknown")
     await audit.log_session_start(session_id)
 
+    # --- Instantiate BehavioralTwinState ---
+    twin_state = BehavioralTwinState(agent_db=agent_db)
+    await twin_state.start()
+
     # --- Build components ---
     cfg = CoordinatorConfig()
     local = OllamaInference()
 
-    trainer = ContinuousTrainer(agent_db=agent_db, config=cfg)
+    trainer = ContinuousTrainer(agent_db=agent_db, config=cfg, twin_state=twin_state)
 
     router = ModelRouter()
     coordinator = HybridCoordinator(
         local=local, config=cfg, trainer=trainer,
         agent_db=agent_db, session_id=session_id,
         content_filter=content_filter, audit_log=audit,
+        twin_state=twin_state,
     )
     dev_agent = DevAgent(
         router=router, coordinator=coordinator, trainer=trainer,
@@ -412,7 +422,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
-    await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id)
+    await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
     await audit.log_session_stop(reason="normal")
     await audit.close()
 

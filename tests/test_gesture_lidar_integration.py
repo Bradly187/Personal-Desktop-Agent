@@ -96,8 +96,8 @@ def test_gli01_pinch_accepted_with_real_lidar():
 
     assert cmd is not None, "PINCH with 20mm diff should be accepted"
     assert cmd.action == "CLICK"
-    assert cmd.params["pinch_mm"] is not None
-    assert cmd.params["pinch_mm"] < 30.0
+    assert cmd.params["pinch_z_delta_mm"] is not None
+    assert cmd.params["pinch_z_delta_mm"] < 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ def test_gli03_stale_lidar_2d_fallback():
 
     cmd = proc.on_camera_frame(make_camera_msg())
     assert cmd is not None, "Stale LiDAR should fall back to 2D and accept close PINCH"
-    assert cmd.params["pinch_mm"] is None
+    assert cmd.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ def test_gli05_masked_pixels_cause_2d_fallback():
     cmd = proc.on_camera_frame(make_camera_msg())
     # 2D distance between (0.5, 0.5) and (0.52, 0.5) = 0.02 < 0.06 threshold → pass
     assert cmd is not None, "Masked LiDAR pixels should fall back to 2D and accept"
-    assert cmd.params["pinch_mm"] is None
+    assert cmd.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------

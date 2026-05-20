@@ -43,13 +43,18 @@ log = logging.getLogger(__name__)
 try:
     import mediapipe as mp
     import numpy as np
-    _hands_solution = mp.solutions.hands
+    from mediapipe.tasks.python import BaseOptions as _BaseOptions
+    from mediapipe.tasks.python.vision import (
+        HandLandmarker as _HandLandmarker,
+        HandLandmarkerOptions as _HandLandmarkerOptions,
+        RunningMode as _RunningMode,
+    )
     _MP_AVAILABLE = True
-except (ImportError, AttributeError):
+except (ImportError, AttributeError) as _mp_import_err:
     _MP_AVAILABLE = False
     log.warning(
         "mediapipe not installed or incompatible — GestureProcessor disabled. "
-        "Install with: pip install mediapipe"
+        "Install with: pip install mediapipe  (%s)", _mp_import_err
     )
 
 try:
@@ -106,11 +111,12 @@ class _GestureResult:
 # ---------------------------------------------------------------------------
 
 def _tip_y(lm, idx: int) -> float:
-    return lm.landmark[idx].y
+    # lm is List[NormalizedLandmark] from the Tasks API (indexed directly, not .landmark[i])
+    return lm[idx].y
 
 
 def _tip_xy(lm, idx: int) -> tuple[float, float]:
-    pt = lm.landmark[idx]
+    pt = lm[idx]
     return pt.x, pt.y
 
 
@@ -195,14 +201,32 @@ class GestureProcessor:
     def set_lidar(self, lidar: "LiDARReceiver") -> None:
         self._lidar = lidar
 
+    _MODEL_PATH: str = "hand_landmarker.task"
+
     def _get_hands(self):
         if self._hands is None and _MP_AVAILABLE:
-            self._hands = _hands_solution.Hands(
-                static_image_mode=False,
-                max_num_hands=1,
-                min_detection_confidence=self._conf_min,
+            import os
+            model_path = self._MODEL_PATH
+            if not os.path.exists(model_path):
+                # Try relative to this file's directory
+                model_path = os.path.join(os.path.dirname(__file__), self._MODEL_PATH)
+            if not os.path.exists(model_path):
+                log.warning(
+                    "GestureProcessor: hand_landmarker.task not found — "
+                    "download from https://storage.googleapis.com/mediapipe-models/"
+                    "hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+                )
+                return None
+            options = _HandLandmarkerOptions(
+                base_options=_BaseOptions(model_asset_path=model_path),
+                running_mode=_RunningMode.VIDEO,
+                num_hands=1,
+                min_hand_detection_confidence=self._conf_min,
+                min_hand_presence_confidence=0.50,
                 min_tracking_confidence=0.50,
             )
+            self._hands = _HandLandmarker.create_from_options(options)
+            log.info("GestureProcessor: HandLandmarker loaded (%s)", model_path)
         return self._hands
 
     # ---------------------------------------------------------------------- #
@@ -253,25 +277,28 @@ class GestureProcessor:
             return None
 
         rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-        result = hands.process(rgb)
 
-        if not result.multi_hand_landmarks:
+        # Tasks API requires an mp.Image and a monotonically increasing timestamp in ms
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        timestamp_ms = int(time.monotonic() * 1000)
+        result = hands.detect_for_video(mp_image, timestamp_ms)
+
+        if not result.hand_landmarks:
             self.latest_landmarks = None
             return None
 
-        lm = result.multi_hand_landmarks[0]
+        # lm is List[NormalizedLandmark] — index directly (lm[i].x, lm[i].y)
+        lm = result.hand_landmarks[0]
 
         # Store normalised landmarks for external consumers (SensorViewer overlay)
-        self.latest_landmarks = [(lm.landmark[i].x, lm.landmark[i].y) for i in range(21)]
-        hand_label = "Right"
-        if result.multi_handedness:
-            hand_label = result.multi_handedness[0].classification[0].label
+        self.latest_landmarks = [(lm[i].x, lm[i].y) for i in range(21)]
 
-        conf = (
-            result.multi_handedness[0].classification[0].score
-            if result.multi_handedness
-            else self._conf_min
-        )
+        hand_label = "Right"
+        conf = self._conf_min
+        if result.handedness:
+            h = result.handedness[0][0]
+            hand_label = h.display_name   # 'Left' or 'Right'
+            conf = h.score
 
         # Requirement 10.1 / 10.2 — confidence threshold
         if conf < self._conf_min:
@@ -348,5 +375,8 @@ class GestureProcessor:
 
     def close(self) -> None:
         if self._hands is not None:
-            self._hands.close()
+            try:
+                self._hands.close()
+            except Exception:
+                pass
             self._hands = None

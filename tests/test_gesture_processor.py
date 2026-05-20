@@ -171,7 +171,7 @@ def test_gp10_pinch_2d_fallback_produces_click():
     assert result is not None
     assert result.action == "CLICK"
     assert result.params["gesture"] == "PINCH"
-    assert result.params["pinch_mm"] is None
+    assert result.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +238,7 @@ def test_gp14_debounce_independent_per_gesture():
 
 
 # ---------------------------------------------------------------------------
-# GP-15 — PINCH + fresh LiDAR + 20mm → Command with pinch_mm≈20
+# GP-15 — PINCH + fresh LiDAR + 20mm → Command with pinch_z_delta_mm≈20
 # ---------------------------------------------------------------------------
 
 def test_gp15_lidar_pinch_accept():
@@ -251,8 +251,8 @@ def test_gp15_lidar_pinch_accept():
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
     assert result.action == "CLICK"
-    assert result.params["pinch_mm"] is not None
-    assert abs(result.params["pinch_mm"] - 20.0) < 1.0
+    assert result.params["pinch_z_delta_mm"] is not None
+    assert abs(result.params["pinch_z_delta_mm"] - 20.0) < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +283,7 @@ def test_gp17_stale_lidar_falls_back_to_2d():
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
     mock_lidar.get_depth_at.assert_not_called()
-    assert result.params["pinch_mm"] is None
+    assert result.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -299,11 +299,11 @@ def test_gp18_lidar_both_none_no_rejection():
 
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
-    assert result.params["pinch_mm"] is None
+    assert result.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------
-# GP-19 — one depth None → Command, no pinch_mm
+# GP-19 — one depth None → Command, no pinch_z_delta_mm
 # ---------------------------------------------------------------------------
 
 def test_gp19_lidar_one_none_falls_back():
@@ -315,7 +315,7 @@ def test_gp19_lidar_one_none_falls_back():
 
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
-    assert result.params["pinch_mm"] is None
+    assert result.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------

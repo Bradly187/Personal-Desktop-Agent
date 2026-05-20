@@ -255,6 +255,30 @@ CREATE TABLE IF NOT EXISTS settings_versions (
     changed_by  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sv_ts ON settings_versions(component, key, ts);
+
+CREATE TABLE IF NOT EXISTS twin_session_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  INTEGER NOT NULL REFERENCES sessions(id),
+    ts          REAL    NOT NULL,
+    cmd_text    TEXT    NOT NULL,
+    action      TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    seq         INTEGER NOT NULL  -- position within session (0-based)
+);
+CREATE INDEX IF NOT EXISTS idx_tsh_session ON twin_session_history(session_id, seq);
+
+CREATE TABLE IF NOT EXISTS twin_pain_day_log (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id         INTEGER NOT NULL REFERENCES sessions(id),
+    ts                 REAL    NOT NULL,
+    pain_day_score     REAL    NOT NULL,
+    pain_day_active    INTEGER NOT NULL,  -- 0 or 1
+    fail_ratio         REAL,
+    clarify_ratio      REAL,
+    gesture_conf_delta REAL,
+    cmd_rate_delta     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_pdl_session ON twin_pain_day_log(session_id, ts);
 """
 
 
@@ -779,6 +803,200 @@ class AgentDB:
             await self._conn.commit()
         except Exception as exc:
             log.warning("AgentDB.insert_sensor_event failed: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # Behavioral twin queries
+    # ---------------------------------------------------------------------- #
+
+    async def get_recent_successful_commands(self, limit: int = 500) -> list[dict]:
+        """Return the N most recent successful commands across all sessions."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT text, action, source, ts, session_id
+                   FROM commands
+                   WHERE success = 1
+                   ORDER BY ts DESC LIMIT ?""",
+                (limit,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_recent_successful_commands failed: %s", exc)
+            return []
+
+    async def get_session_commands(self, session_id: int, limit: int = 20) -> list[dict]:
+        """Return the last N commands from a specific session."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT text, action, source, ts, session_id
+                   FROM commands
+                   WHERE session_id = ?
+                   ORDER BY ts DESC LIMIT ?""",
+                (session_id, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_session_commands failed: %s", exc)
+            return []
+
+    async def get_most_recent_session_id(
+        self, exclude_session_id: Optional[int] = None
+    ) -> Optional[int]:
+        """Return the id of the most recent session (optionally excluding current)."""
+        if not self._conn:
+            return None
+        try:
+            if exclude_session_id is not None:
+                async with self._conn.execute(
+                    """SELECT id FROM sessions
+                       WHERE id != ?
+                       ORDER BY started_at DESC LIMIT 1""",
+                    (exclude_session_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+            else:
+                async with self._conn.execute(
+                    """SELECT id FROM sessions
+                       ORDER BY started_at DESC LIMIT 1"""
+                ) as cur:
+                    row = await cur.fetchone()
+            return row["id"] if row else None
+        except Exception as exc:
+            log.warning("AgentDB.get_most_recent_session_id failed: %s", exc)
+            return None
+
+    async def get_command_stats_last_n_days(self, days: int = 30) -> list[dict]:
+        """Return commands from the last N days for time-of-day distribution."""
+        if not self._conn:
+            return []
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                """SELECT ts, action, source, success
+                   FROM commands
+                   WHERE ts >= ?
+                   ORDER BY ts DESC""",
+                (cutoff,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_command_stats_last_n_days failed: %s", exc)
+            return []
+
+    async def get_source_stats_last_n_days(self, days: int = 7) -> list[dict]:
+        """Return per-source success/total counts for the last N days."""
+        if not self._conn:
+            return []
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                """SELECT source,
+                          SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count,
+                          COUNT(*) AS total_count
+                   FROM commands
+                   WHERE ts >= ?
+                   GROUP BY source""",
+                (cutoff,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_source_stats_last_n_days failed: %s", exc)
+            return []
+
+    async def write_session_history(
+        self, session_id: int, history: list[dict]
+    ) -> None:
+        """Persist SessionHistory to twin_session_history table at session close."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "DELETE FROM twin_session_history WHERE session_id = ?",
+                (session_id,),
+            )
+            for seq, item in enumerate(history):
+                await self._conn.execute(
+                    """INSERT INTO twin_session_history
+                       (session_id, ts, cmd_text, action, source, seq)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        item["ts"],
+                        item["cmd_text"],
+                        item["action"],
+                        item["source"],
+                        seq,
+                    ),
+                )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.write_session_history failed: %s", exc)
+
+    async def read_session_history(
+        self, session_id: int, limit: int = 20
+    ) -> list[dict]:
+        """Read SessionHistory for a given session."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT ts, cmd_text, action, source, seq
+                   FROM twin_session_history
+                   WHERE session_id = ?
+                   ORDER BY seq ASC LIMIT ?""",
+                (session_id, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.read_session_history failed: %s", exc)
+            return []
+
+    async def log_pain_day(
+        self,
+        session_id: int,
+        score: float,
+        active: bool,
+        fail_ratio: float,
+        clarify_ratio: float,
+        gesture_conf_delta: float,
+        cmd_rate_delta: float,
+    ) -> None:
+        """Append a pain_day_log row."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                """INSERT INTO twin_pain_day_log
+                   (session_id, ts, pain_day_score, pain_day_active,
+                    fail_ratio, clarify_ratio, gesture_conf_delta, cmd_rate_delta)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id, time.time(), score, 1 if active else 0,
+                    fail_ratio, clarify_ratio, gesture_conf_delta, cmd_rate_delta,
+                ),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.log_pain_day failed: %s", exc)
+
+    async def get_preference_model_snapshot(self) -> Optional[str]:
+        """Return the most recent preference_model JSON from settings_versions."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                """SELECT new_value FROM settings_versions
+                   WHERE component = 'preference_model' AND key = 'snapshot'
+                   ORDER BY ts DESC LIMIT 1""",
+            ) as cur:
+                row = await cur.fetchone()
+                return row["new_value"] if row else None
+        except Exception as exc:
+            log.warning("AgentDB.get_preference_model_snapshot failed: %s", exc)
+            return None
 
     # ---------------------------------------------------------------------- #
     # Settings change log

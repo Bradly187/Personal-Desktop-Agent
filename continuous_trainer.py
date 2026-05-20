@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Optional
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from behavioral_twin_state import BehavioralTwinState
     from command_executor import Command
     from db import AgentDB
     from hybrid_coordinator import CoordinatorConfig
@@ -52,6 +53,7 @@ class ContinuousTrainer:
         local_failure_limit: float = 0.10,
         gate1_relaxation_step: float = 0.05,
         config: Optional["CoordinatorConfig"] = None,
+        twin_state: Optional["BehavioralTwinState"] = None,
     ) -> None:
         self._db = agent_db
         self._interval = adaptation_interval_s
@@ -61,6 +63,7 @@ class ContinuousTrainer:
         self._failure_limit = local_failure_limit
         self._gate1_step = gate1_relaxation_step
         self._config = config
+        self._twin = twin_state
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -102,6 +105,10 @@ class ContinuousTrainer:
     ) -> None:
         """Record a successfully executed command as a few-shot example."""
         await self._db.upsert_few_shot_example(cmd, action_str, domain, command_id)
+
+        # Feed observation into twin state (non-blocking)
+        if self._twin:
+            await self._twin.observe(cmd, action_str)
 
         # Gesture confidence tracking
         if cmd.source == "gesture":
@@ -188,13 +195,20 @@ class ContinuousTrainer:
 
     async def _adapt(self) -> None:
         log.debug("ContinuousTrainer: running adaptation pass")
+        from behavioral_twin_state import _DEFAULT_SNAPSHOT
+        snapshot = _DEFAULT_SNAPSHOT
+        if self._twin:
+            try:
+                snapshot = await self._twin.get_snapshot()
+            except Exception as exc:
+                log.warning("ContinuousTrainer: twin snapshot failed: %s", exc)
         entries = await self._db.get_recent_routing_stats(limit=1000)
         if entries:
-            self._adapt_gate1_threshold(entries)
+            self._adapt_gate1_threshold(entries, pain_day_active=snapshot.pain_day_active)
         await self._db.promote_hotwords(self._hotword_threshold)
-        await self._update_gesture_calibration()
+        await self._update_gesture_calibration(pain_day_active=snapshot.pain_day_active)
 
-    def _adapt_gate1_threshold(self, entries: list[dict]) -> None:
+    def _adapt_gate1_threshold(self, entries: list[dict], pain_day_active: bool = False) -> None:
         """Requirement 14.3 — relax Gate 1 when cloud escalation is high."""
         if not self._config:
             return
@@ -210,6 +224,9 @@ class ContinuousTrainer:
         failure_rate = error_count / len(entries) if entries else 0.0
 
         if cloud_rate > self._cloud_limit and failure_rate < self._failure_limit:
+            if pain_day_active:
+                log.info("Gate 1 tightening suppressed (pain day active)")
+                return  # skip tightening on pain days
             old = self._config.whisper_logprob_min
             self._config.whisper_logprob_min = min(
                 -0.1, old + self._gate1_step
@@ -221,7 +238,7 @@ class ContinuousTrainer:
                 cloud_rate * 100, failure_rate * 100,
             )
 
-    async def _update_gesture_calibration(self) -> None:
+    async def _update_gesture_calibration(self, pain_day_active: bool = False) -> None:
         """Requirement 14.5 — set gesture floor to p10(observed) - 0.05."""
         gestures = ["POINT", "PINCH", "OPEN_PALM", "FIST"]
         for gesture in gestures:
@@ -232,6 +249,8 @@ class ContinuousTrainer:
             p10_idx = max(0, int(len(samples_sorted) * 0.10) - 1)
             p10 = samples_sorted[p10_idx]
             floor = max(0.0, p10 - 0.05)
+            if pain_day_active:
+                floor = max(0.0, floor - 0.05)  # additional reduction on pain days
             old_floor = await self._db.get_gesture_floor(gesture)
             await self._db.update_gesture_calibration(
                 gesture, floor, len(samples), p10

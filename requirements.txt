@@ -3,11 +3,11 @@
 #
 # Install all:  pip install -r requirements.txt
 #
-# vLLM installed (0.21.0) but requires CUDA PyTorch + CUDA 12.x wheels to activate.
-# RTX 5090 uses CUDA 13.2; CUDA 13.x wheels not yet published — enable when available:
+# vLLM: 0.21.0 exists and installs (py3-none-any), but vllm._C CUDA extension
+# is still missing. Requires building from source with CUDA 12.8 torch wheels.
+# torch currently installed reports CUDA 12.8. When ready:
 #   pip install torch --index-url https://download.pytorch.org/whl/cu128
-#   pip install vllm  (reinstalls with CUDA torch, compiles vllm._C)
-#   Then: python -m huggingface_hub login  (for gated Meta models)
+#   pip install vllm  (recompiles vllm._C against installed CUDA torch)
 #   Benchmark: python benchmark_models.py --vllm meta-llama/Meta-Llama-3.1-8B-Instruct
 #
 # Not-yet-installed (install separately when ready):
@@ -68,4 +68,16 @@ sounddevice==0.5.5
 chatterbox-tts==0.1.3
 
 # ── AWS cloud fallback (Phase 6 — Bedrock, Transcribe, Polly) ────────────────
-boto3==1.38.28
+boto3==1.43.11
+# AgentCore Python SDK (runtime — deploy via AWS console, not CLI)
+# CLI (bedrock-agentcore.exe) ships but bedrock_agentcore.cli module missing;
+# deploy the Lambda function via CDK or the AgentCore console instead.
+bedrock-agentcore==1.10.0
+
+# ── Semantic memory (behavioral-twin-state) ──────────────────────────────────
+# ChromaDB vector store for SemanticMemory (all-MiniLM-L6-v2 embeddings).
+# Falls back to AgentDB Jaccard scoring when unavailable.
+chromadb==1.5.9
+
+# ── Test infrastructure ───────────────────────────────────────────────────────
+pytest-asyncio==1.3.0
