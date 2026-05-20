@@ -47,28 +47,27 @@ flowchart TD
     subgraph PC_Processing["PC — Processing"]
         fusion["FusionEngine\n10-level priority @ 60Hz"]
         whisper_str["WhisperStream\nSileroVAD + faster-whisper"]
-        gesture_proc["GestureProcessor\nMediaPipe + YOLOv8"]
-        lidar_recv["LiDARReceiver\nRecord3D depth frames"]
+        gesture_proc["GestureProcessor\nHandLandmarker Tasks API"]
+        lidar_recv["LiDARReceiver\ndepth_frame via WebSocket"]
         pyag["pyautogui\n(tilt/head direct path)"]
     end
 
     subgraph PC_Intelligence["PC — Intelligence"]
-        coord["HybridCoordinator\n4-gate routing"]
-        local_llm["LocalInference ABC\n(OllamaInference default\nVLLMInference Phase 2)"]
-        cloud_llm["CloudInference\nAWS Bedrock"]
+        coord["HybridCoordinator\nGate 0 (privacy) + Gates 1–4"]
+        twin["BehavioralTwinState\nPreferenceModel + PainDayEngine"]
+        local_llm["LocalInference ABC\n(OllamaInference default)"]
+        cloud_llm["CloudInference\nAWS Bedrock Haiku"]
     end
 
     subgraph PC_Execution["PC — Execution"]
-        agent["DesktopAgent\nActionParser + ElementFinder"]
-        desktop["Windows Desktop\npyautogui + accessibility tree"]
+        agent["CommandExecutor\n16 verbs → pyautogui / Win32"]
+        desktop["Windows Desktop"]
     end
 
     subgraph PC_Learning["PC — Learning"]
         trainer["ContinuousTrainer"]
-        fsm["few_shot_memory.db"]
-        rlog["routing_log.jsonl"]
-        gcal["gesture_calibration.json"]
-        hot["hotwords.txt"]
+        agentdb["agent.db\n(SQLite 14 tables)"]
+        chromadb["SemanticMemory\n(ChromaDB chroma_db/)"]
     end
 
     %% Hardware → Frameworks
@@ -79,7 +78,7 @@ flowchart TD
     mic_hw --> avfound
     front_cam_hw --> cam_stream
     touch_hw --> uikit
-    lidar_hw --> record3d_app
+    lidar_hw --> arkit
 
     %% Frameworks → Swift Classes
     cm --> tilt_sensor
@@ -89,26 +88,26 @@ flowchart TD
     avfound --> sound_det
     uikit --> touch_ui
 
-    %% Swift Classes → WebSocketManager
-    tilt_sensor -->|"TiltVector\n{rx, ry}"| ws_mgr
-    gaze_tracker -->|"GazePoint\n{x, y, conf}"| ws_mgr
-    gaze_tracker -->|"gaze_dwell event"| ws_mgr
-    head_tracker -->|"HeadPose\n{pitch, yaw}"| ws_mgr
-    kw_listener -->|"keyword match\nor PCM audio"| ws_mgr
-    sound_det -->|"sound_action\n{sound, conf}"| ws_mgr
-    cam_stream -->|"JPEG frames"| ws_mgr
-    touch_ui -->|"touch_command\nor trackpad deltas"| ws_mgr
-    record3d_app -->|"record3d lib\nRGBD frames"| lidar_recv
+    %% Swift Classes → WebSocketManager (single WS connection)
+    tilt_sensor -->|"tilt / tilt_position"| ws_mgr
+    gaze_tracker -->|"gaze_delta"| ws_mgr
+    head_tracker -->|"head_pose"| ws_mgr
+    kw_listener -->|"keyword"| ws_mgr
+    sound_det -->|"sound_action"| ws_mgr
+    cam_stream -->|"camera_frame JPEG"| ws_mgr
+    touch_ui -->|"touch_command / trackpad"| ws_mgr
+    arkit -->|"depth_frame (LiDAR)"| ws_mgr
 
     %% WebSocket wire
     ws_mgr --> ws_wire
     ws_wire --> dispatch
 
     %% Bridge dispatch → PC processing
-    dispatch -->|"tilt/head"| fusion
-    dispatch -->|"gaze, gaze_dwell\nsound, keyword\ntouch, gesture cmd"| fusion
+    dispatch -->|"tilt / head_pose"| fusion
+    dispatch -->|"gaze_delta, sound,\nkeyword, touch"| fusion
     dispatch -->|"PCM audio"| whisper_str
-    dispatch -->|"camera frames"| gesture_proc
+    dispatch -->|"camera_frame"| gesture_proc
+    dispatch -->|"depth_frame"| lidar_recv
     lidar_recv -->|"depth ndarray"| gesture_proc
 
     %% Processing → Fusion
@@ -116,8 +115,11 @@ flowchart TD
     gesture_proc -->|"Command(source=gesture)"| fusion
 
     %% Fusion → Coordinator or Direct
-    fusion -->|"tilt/head cursor deltas"| pyag
+    fusion -->|"tilt / head cursor deltas"| pyag
     fusion -->|"Command"| coord
+
+    %% Twin state feeds coordinator
+    twin -->|"TwinSnapshot (frozen)"| coord
 
     %% Coordinator → Inference
     coord -->|"local path"| local_llm
@@ -129,14 +131,13 @@ flowchart TD
     agent --> desktop
 
     %% Learning feedback
-    coord -->|"every outcome"| rlog
-    coord -->|"success pairs"| fsm
-    trainer --> coord
-    rlog --> trainer
-    fsm --> local_llm
-    trainer -->|"adapted floors"| gcal
-    trainer -->|"new hotwords"| hot
-    hot --> whisper_str
+    coord -->|"every outcome"| agentdb
+    coord -->|"observe(cmd, action)"| twin
+    trainer -->|"snapshot"| coord
+    agentdb --> trainer
+    agentdb --> chromadb
+    chromadb --> twin
+    trainer --> twin
 ```
 
 ---

@@ -62,46 +62,51 @@ flowchart TD
 
 ---
 
-## 2. HybridCoordinator — 4-Gate Routing Decision
+## 2. HybridCoordinator — Gate 0 + 4-Gate Routing Decision
 
 ```mermaid
 flowchart TD
-    A([Receive Command]) --> B{"source?"}
+    A([Receive Command]) --> TWIN["BehavioralTwinState.get_snapshot()\nAdjust thresholds if pain_day_active"]
 
-    B -->|"touch\nsound_action\ngaze_dwell\nmultimodal"| BYPASS["Bypass all gates\n→ direct local"]
-    B -->|"voice_local"| SKIP1["Skip Gate 1\n(on-device confidence\nalready validated)"]
-    B -->|"gesture\nvoice"| G1
+    TWIN --> G0{"Gate 0 — Privacy\nText contains sensitive patterns?\n(password, api_key, SSN, token…)"}
+    G0 -->|sensitive — force local| LOCAL
+    G0 -->|clean| B
+
+    B{"source?"}
+    B -->|"touch / sound_action\ngaze_dwell / multimodal"| BYPASS["Bypass all gates\n→ direct local"]
+    B -->|"voice_local"| G2
+    B -->|"gesture / voice"| G1
 
     BYPASS --> LOCAL
-    SKIP1 --> G2
 
-    G1{"Gate 1 — Confidence\nlogprob ≥ whisper_logprob_min\nAND gesture_conf ≥ gesture_confidence_min"}
+    G1{"Gate 1 — Confidence\nwhisper_logprob ≥ min\nAND gesture_conf ≥ min\n(thresholds relaxed on pain day)"}
     G1 -->|pass| G2
-    G1 -->|fail — voice low conf| TRANSCRIBE["Route to\nAmazon Transcribe\nre-transcribe then return to G2"]
-    G1 -->|fail — gesture low conf| DISCARD["Discard silently\nno Command produced"]
+    G1 -->|fail — voice low conf| TRANSCRIBE["Stage 1: vocab corrections\nStage 2: Amazon Transcribe\n(if audio_bytes present)"]
+    G1 -->|fail — gesture low conf| DISCARD["Discard silently"]
 
     TRANSCRIBE --> G2
 
-    G2{"Gate 2 — Complexity\ntoken_count ≤ max_local_tokens\nAND no complexity keywords\n('and then', 'after that', 'for each')"}
+    G2{"Gate 2 — Complexity\ntoken_count ≤ max_local_tokens\nno complexity keywords"}
     G2 -->|pass| G3
-    G2 -->|fail| CLOUD["Route to\nAWS Bedrock\n(Claude — complex reasoning)"]
+    G2 -->|fail| CLOUD
 
-    G3{"Gate 3 — VRAM\nvram_free_gb ≥ vram_free_min_gb"}
+    G3{"Gate 3 — VRAM\nvram_free_gb ≥ 8.0 GB"}
     G3 -->|pass| G4
     G3 -->|fail| CLOUD
 
-    G4{"Gate 4 — Latency\nlatency_ema_ms ≤ latency_budget_ms"}
+    G4{"Gate 4 — Latency EMA\nlatency_ema_ms ≤ 600 ms"}
     G4 -->|pass| LOCAL
     G4 -->|fail| CLOUD
 
-    LOCAL["LocalInference ABC\n(OllamaInference default, ~450ms\nVLLMInference Phase 2, ~280ms)"]
-    CLOUD["CloudInference\nAWS Bedrock Claude"]
+    LOCAL["LocalInference\nllama3.1:8b default\n373 ms warm p50"]
+    CLOUD["CloudInference\nAWS Bedrock Claude Haiku\n(AgentCore deferred)"]
 
     LOCAL --> ACTION["action string"]
     CLOUD --> ACTION
 
-    ACTION --> LOG["OutcomeLogger\nrouting_log.jsonl"]
-    LOG --> AGENT["DesktopAgent.execute()"]
+    ACTION --> LOG["AgentDB.insert_command()\nagent.db commands table\nroute + gate_that_decided + latency_ms"]
+    LOG --> EXEC["CommandExecutor.execute()\n16 verbs"]
+    EXEC --> TRAINER["ContinuousTrainer.observe()\nBehavioralTwinState.observe()"]
 ```
 
 ---

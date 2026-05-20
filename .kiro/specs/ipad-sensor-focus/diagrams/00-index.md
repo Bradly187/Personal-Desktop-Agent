@@ -21,7 +21,8 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 | 10 | [10-nemoclaw-system-architecture.md](10-nemoclaw-system-architecture.md) | Full pipeline with NemoClaw additions: Gate 0, NemotronInference, log field |
 | 11 | [11-nemoclaw-gate-flow.md](11-nemoclaw-gate-flow.md) | HybridCoordinator gate decision flowchart with gate_that_decided labels |
 | 12 | [12-nemoclaw-inference-tiers.md](12-nemoclaw-inference-tiers.md) | Local inference backends mapped against RTX 5090 VRAM budget |
-| 14 | [14-database-schema.md](14-database-schema.md) | agent.db (11 tables) + analytics.duckdb ER diagrams; pipeline write topology; index coverage |
+| 14 | [14-database-schema.md](14-database-schema.md) | agent.db (14 tables) + analytics.duckdb ER diagrams; pipeline write topology; index coverage |
+| 15 | [15-sprint-roadmap.md](15-sprint-roadmap.md) | Sprint 5–7 planning: vision grounding, UIAutomation, action verification loop |
 
 ---
 
@@ -29,15 +30,17 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 
 ### System Split
 ```
-iPad Pro (Swift/SwiftUI)          PC (Python 3.11 asyncio)
-─────────────────────────         ──────────────────────────
+iPad Pro (Swift/SwiftUI)          PC (Python asyncio)
+─────────────────────────         ────────────────────────────────
 Core Motion (tilt)         ──┐
-ARKit (gaze, head pose)    ──┤    IPadBridge (receives streams)
-Speech Framework (keywords)──┼──► FusionEngine (10-level priority)
-AVFoundation (sound actions)─┤    HybridCoordinator (4-gate routing)
-Touch UI (command pad)     ──┤    DesktopAgent (pyautogui)
-Camera feed (gesture)      ──┘    ContinuousTrainer (learning)
-                                  WhisperStream (GPU transcription)
+ARKit (gaze, head, LiDAR)  ──┤    IPadBridge (15 message types)
+Speech Framework (keywords)──┼──► FusionEngine (10-level @ 60Hz)
+AVFoundation (sound)       ──┤    BehavioralTwinState (ChromaDB)
+Touch UI (command pad)     ──┤    HybridCoordinator (Gate 0 + 1–4)
+Camera (gesture frames)    ──┘    CommandExecutor (16 verbs)
+                                  ContinuousTrainer (adaptation)
+                                  WhisperStream (Whisper large-v3)
+                                  GestureProcessor (HandLandmarker)
 ```
 
 ### Sensor Priority (FusionEngine — 10 levels)

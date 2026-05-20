@@ -152,7 +152,11 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (complete; needs CUDA 13.x torch to activate), `NemotronInference` |
 | `continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture confidence floors; delegates all storage to `AgentDB` |
 | `lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
-| `gesture_processor.py` | MediaPipe Hands; POINT/PINCH/PALM/FIST; LiDAR pinch depth; 800 ms debounce |
+| `behavioral_twin_state.py` | Persistent user behaviour model: `TwinSnapshot`, `PreferenceModel`, `PainDayEngine`; AgentDB + ChromaDB backing; feeds `HybridCoordinator` before every gate decision |
+| `semantic_memory.py` | ChromaDB vector store (all-MiniLM-L6-v2) for semantic few-shot retrieval; Jaccard fallback when chromadb unavailable; `stop()` releases WAL file handles on Windows |
+| `one_euro_filter.py` | Casiez 2012 adaptive low-pass filter (1€); used for tilt velocity, tilt position, gaze delta, head tracking — replaces EMA throughout sensor pipelines |
+| `gyro_bias_calibrator.py` | Gyro bias state machine (UNCALIBRATED→COLLECTING→CALIBRATED→FROZEN); stationary detection + lerp-smoothed bias subtraction for tilt velocity pipeline |
+| `gesture_processor.py` | MediaPipe Tasks API (`HandLandmarker`, `hand_landmarker.task`); POINT/PINCH/PALM/FIST; LiDAR Z-axis depth for pinch; 800 ms debounce |
 | `domain_classifier.py` | Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL |
 | `model_router.py` | VRAM-aware specialist model selection; domain-tuned prompts; Ollama inference |
 | `dev_agent.py` | Plan→execute→reflect agentic loop; 5 dev verbs; session context |
@@ -166,6 +170,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
 | `tts_service/server.js` | Node.js sidecar (port 8766); calls `StartSpeechSynthesisStream` (AWS SDK v3); returns OGG Vorbis; Python decodes with soundfile |
 | `approval_hook.py` | Claude Code `PreToolUse` gate; Danielle speaks action description; records iPad mic via WhisperStream signal file or PC mic fallback; yes/no → exit 0/2 |
+| `audit_log.py` | Append-only `audit.db` (SQLite WAL); records every MCP tool invocation, session lifecycle event, and security finding; UPDATE/DELETE blocked by triggers |
 | `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device (`"Microphone (Realtek USB Audio)"`), timeout, tts_backend |
 | `health_viz.py` | Cosmic nebula system health visualisation; CPU/GPU/VRAM metrics drive particle density, rotation speed, and palette |
 | `start_agent.bat` | Windows startup script; activates venv and runs `main.py`; logs to `logs/agent_startup.log` |

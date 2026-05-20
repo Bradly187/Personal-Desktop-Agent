@@ -11,14 +11,14 @@
 |---------|---------|
 | faster-whisper | Whisper large-v3 on CUDA (CTranslate2 backend) |
 | ultralytics | YOLOv8 pose estimation |
-| mediapipe | Hand landmarks, face mesh iris tracking |
+| mediapipe | Hand landmarks via Tasks API (`HandLandmarker`, `hand_landmarker.task`); `mp.solutions` was removed in 0.10.x |
 | opencv-python | Camera capture, frame processing |
 | sounddevice | Audio capture (mic stream) |
 | torch | CUDA tensor ops, Silero VAD |
 | pynvml | GPU VRAM monitoring |
 | boto3 | AWS SDK (Bedrock, Transcribe, Lex, Lambda) |
-| ollama | Local LLM inference — development backend (OllamaInference) |
-| vllm | Local LLM inference — production target (~280ms vs ~450ms for Ollama); see `local-inference-comparison.md` |
+| ollama | Local LLM inference — default backend (`OllamaInference`); llama3.1:8b warm p50 373ms |
+| vllm | Local LLM inference — production target; code complete in `VLLMInference` but blocked at runtime (`vllm._C` CUDA extension absent on RTX 5090); activate when CUDA build available |
 | aiosqlite | Async SQLite for few-shot memory |
 | aiohttp | iPad touch WebSocket server |
 | pyautogui | Mouse / keyboard execution |
@@ -46,12 +46,14 @@
 
 | Model | Hardware | Latency | VRAM |
 |-------|----------|---------|------|
-| Whisper large-v3 | RTX 5090 | < 400 ms | ~3 GB |
-| YOLOv8-pose | RTX 5090 | < 15 ms/frame | ~0.5 GB |
-| MediaPipe hands | CPU | < 5 ms/frame | 0 |
-| Ollama Llama 3.1 | RTX 5090 | < 600 ms | ~24 GB |
+| Whisper large-v3 | RTX 5090 | < 400 ms | ~4.2 GB |
+| MediaPipe HandLandmarker | CPU | < 5 ms/frame | 0 |
+| Ollama llama3.1:8b | RTX 5090 | 373 ms warm p50 | 4.6 GB |
+| Ollama nemotron-mini | RTX 5090 | < 200 ms target | ~2.7 GB |
+| Ollama qwen3-coder:30b | RTX 5090 | — | 18 GB |
 | EasyOCR | RTX 5090 | < 200 ms | ~1 GB |
 | Silero VAD | CPU | < 1 ms/chunk | 0 |
+| Chatterbox TTS | RTX 5090 | ~300 ms first token | ~2 GB |
 
 ## MCP Integration Layer
 
@@ -110,11 +112,12 @@ class LocalInference(ABC):
     @abstractmethod
     def get_status(self) -> dict: ...
 
-class OllamaInference(LocalInference): ...   # Phase 1 — development
-class VLLMInference(LocalInference): ...     # Phase 2 — production target
+class OllamaInference(LocalInference): ...   # Default — llama3.1:8b, 373 ms warm p50
+class NemotronInference(LocalInference): ... # Fast tier — nemotron-mini 4B, ~2.7 GB VRAM
+class VLLMInference(LocalInference): ...     # Production target — code complete; blocked on CUDA build
 ```
 
-Benchmark task 2.13 in `tasks.md` determines which becomes the default.
+`OllamaInference` with `llama3.1:8b` is the current production default (100% accuracy on command eval, 373 ms warm p50). `VLLMInference` is complete in code but `vllm._C` is missing on the RTX 5090 — activate when CUDA torch wheels are available.
 
 ## Coding Conventions
 

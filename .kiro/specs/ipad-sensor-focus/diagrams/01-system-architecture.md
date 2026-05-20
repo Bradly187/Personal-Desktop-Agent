@@ -15,9 +15,9 @@ C4Context
     }
 
     System_Boundary(desktop, "Desktop PC — RTX 5090") {
-        System(pc_service, "PC_Service", "Python 3.11 asyncio\nInference + execution")
-        SystemDb(storage, "Local Storage", "few_shot_memory.db\nrouting_log.jsonl\ngesture_calibration.json\nhotwords.txt")
-        System(ollama, "Ollama Server", "Llama 3.1 70B\n~24 GB VRAM")
+        System(pc_service, "PC_Service", "Python asyncio\nInference + execution")
+        SystemDb(storage, "Local Storage", "agent.db (SQLite 14 tables)\naudit.db (append-only)\nanalytics.duckdb\nchroma_db/ (vector store)")
+        System(ollama, "Ollama Server", "llama3.1:8b default\n4.6 GB VRAM / 373 ms p50")
     }
 
     System_Ext(aws, "AWS Cloud", "Fallback only\nBedrock / Transcribe / Polly")
@@ -39,27 +39,27 @@ flowchart LR
     subgraph iPad["iPad Pro (Native Swift App)"]
         direction TB
         CM["Core Motion\n(Tilt vectors @ 60Hz)"]
-        ARK["ARKit\n(Gaze direction + Head pose)"]
+        ARK["ARKit\n(Gaze delta + Head pose + LiDAR)"]
         SPE["Speech Framework\n(Keyword recognition)"]
         AVF["AVFoundation\n(Sound action detection)"]
-        CAM["Camera Feed\n(Frames for gesture)"]
+        CAM["Camera Feed\n(JPEG frames @ 10fps)"]
         TOUCH["SwiftUI Touch\n(Command pad + Trackpad)"]
-        R3D["Record3D\n(LiDAR depth frames)"]
     end
 
-    subgraph WS["WebSocket :8765"]
+    subgraph WS["WebSocket :8765 — 15 message types"]
         direction TB
-        MSG["JSON messages\nper sensor type"]
+        MSG["JSON: tilt, gaze_delta, head_pose,\ndepth_frame, camera_frame,\naudio_stream, touch_command, …"]
     end
 
-    subgraph PC["Desktop PC (Python)"]
+    subgraph PC["Desktop PC (Python asyncio)"]
         direction TB
-        BRIDGE["IPadBridge\n(Receives all streams)"]
+        BRIDGE["IPadBridge\n(Message router)"]
         FUSION["FusionEngine\n(10-level priority @ 60Hz)"]
-        WHISPER["WhisperStream\n(GPU transcription)"]
-        COORD["HybridCoordinator\n(4-gate routing)"]
-        AGENT["DesktopAgent\n(pyautogui execution)"]
-        TRAINER["ContinuousTrainer\n(Background learning)"]
+        WHISPER["WhisperStream\n(Silero VAD + Whisper large-v3)"]
+        TWIN["BehavioralTwinState\n(ChromaDB + AgentDB)"]
+        COORD["HybridCoordinator\n(Gate 0 + Gates 1–4)"]
+        AGENT["CommandExecutor\n(16 verbs → pyautogui)"]
+        TRAINER["ContinuousTrainer\n(Threshold + few-shot adaptation)"]
     end
 
     CM --> MSG
@@ -68,14 +68,15 @@ flowchart LR
     AVF --> MSG
     CAM --> MSG
     TOUCH --> MSG
-    R3D --> MSG
 
     MSG --> BRIDGE
     BRIDGE --> FUSION
     BRIDGE --> WHISPER
     FUSION --> COORD
+    TWIN --> COORD
     COORD --> AGENT
-    TRAINER --> COORD
+    COORD --> TRAINER
+    TRAINER --> TWIN
 ```
 
 ---
@@ -117,38 +118,29 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     subgraph ipad["iPad Pro"]
-        app["iPadApp\n(Swift/SwiftUI)"]
-        r3d["Record3D\n(separate iOS app)"]
+        app["iPadApp\n(Swift/SwiftUI)\nLiDARStreamer built-in"]
     end
 
-    subgraph desktop["Desktop PC (192.168.x.x)"]
+    subgraph desktop["Desktop PC (192.168.18.2)"]
         service["PC_Service\nPort 8765 (WS)"]
-        r3d_lib["LiDARReceiver\n(record3d Python lib)"]
         ollama_srv["Ollama\nPort 11434"]
+        chroma["ChromaDB\n./chroma_db/"]
         service <--> ollama_srv
-        r3d_lib --> service
+        service --> chroma
     end
 
     subgraph aws["AWS (fallback)"]
-        bedrock["Bedrock"]
+        bedrock["Bedrock\nClaude Haiku"]
         transcribe["Transcribe"]
-        polly["Polly"]
+        polly["Polly / Chatterbox"]
     end
 
-    app <-->|"WebSocket :8765\n(WiFi or USB)\nAll sensor data + touch"| service
-    r3d -->|"record3d lib\n(USB or WiFi)\nSeparate connection\nDepth frames only"| r3d_lib
-    service <-->|"boto3 HTTPS\n(fallback only)"| bedrock
-    service <-->|"boto3 HTTPS"| transcribe
-    service <-->|"boto3 HTTPS"| polly
+    app <-->|"WebSocket :8765 (WiFi)\n15 message types including\ndepth_frame + camera_frame"| service
+    service <-->|"boto3 HTTPS\n(Gate 2/3/4 fallback)"| bedrock
+    service <-->|"boto3 HTTPS\n(Gate 1 low-confidence)"| transcribe
+    service <-->|"HTTP :8766 sidecar"| polly
 ```
 
-### Dual-Connection Note
+### Single-Connection Architecture
 
-The iPad runs **two independent connections** to the PC:
-
-1. **iPadApp WebSocket** (port 8765) — carries all sensor data (tilt, gaze, head, keywords, sounds, touch, camera frames, audio)
-2. **Record3D USB/WiFi stream** — carries LiDAR depth frames via the `record3d` Python library on a separate channel
-
-This is intentional: Record3D is a third-party app with its own optimized streaming protocol. Routing depth frames through the iPadApp WebSocket would add unnecessary encoding overhead and latency. The `LiDARReceiver` on the PC merges depth data into the `GestureProcessor` pipeline alongside camera frames from the WebSocket.
-
-If Record3D is not running, the system degrades gracefully — gesture recognition falls back to 2D MediaPipe classification without depth.
+All sensor data — including LiDAR `depth_frame` and `camera_frame` — streams through a **single WebSocket connection** on port 8765. `LiDARStreamer.swift` uses `ARWorldTrackingConfiguration` + `.smoothedSceneDepth` and serialises depth frames directly in the iPadApp message protocol. Record3D is no longer required.
