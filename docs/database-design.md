@@ -108,7 +108,27 @@ The JSON fallback in `benchmark_models.py` remains for environments where DuckDB
 
 ---
 
-## 9. ML Readiness Design Choices
+## 9. Behavioral Twin State Tables (Sprint 3)
+
+Two new tables support the `BehavioralTwinState` component introduced in Sprint 3. Both follow the same append-only, session-anchored pattern as `gesture_calibration` and `settings_versions`.
+
+**`twin_session_history`** stores the ordered sequence of successfully executed commands within each session. `seq` is a 0-based position index within the session, allowing the next session to reconstruct the prior session's tail without a full table scan. On startup, `BehavioralTwinState` queries the 20 most recent rows from the most recent prior session to populate cross-session context.
+
+```sql
+SELECT cmd_text FROM twin_session_history
+WHERE session_id = (
+    SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1 OFFSET 1
+)
+ORDER BY seq DESC LIMIT 20
+```
+
+**`twin_pain_day_log`** records every pain-day score recomputation (every 60 seconds during an active session). The four signal columns (`fail_ratio`, `clarify_ratio`, `gesture_conf_delta`, `cmd_rate_delta`) are the raw inputs to the weighted average, stored alongside the computed score and activation flag. This gives a full audit trail of how the pain-day detector behaved across sessions — useful for tuning the weights and hysteresis thresholds over time.
+
+Both tables reference `sessions(id)` via foreign key, consistent with the session-anchor pattern in section 2. Neither table is ever updated or deleted — they are append-only by design.
+
+---
+
+## 10. ML Readiness Design Choices
 
 Three specific decisions were made to support future ML work without requiring schema migrations:
 

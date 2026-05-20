@@ -64,7 +64,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `SensorActivityBar.swift` — compact horizontal sensor-activity indicator strip
 - `GazeCalibrationSheet.swift`, `TiltCalibrationSheet.swift`, `SoundTrainingSheet.swift` — per-sensor calibration UX
 - `CursorConflictBanner.swift` — banner shown when multiple cursor sources are active simultaneously
-- `CommandToast.swift` — transient action feedback toast
+- `CommandToast.swift` — transient action feedback toast; success state (blue icon, 2 s) and error state (orange warning icon, 4 s) driven by `wsManager.commandFeed` and `wsManager.errorFeed` respectively
 - `ContentView.swift` — swipe-to-switch tabs; parent-driven scroll disable; custom tab bar always on top
 - CI: Xcode 16.4 + iOS 18.5 SDK on `macos-15`; `upload-artifact v7`; TestFlight upload made non-fatal (SDK version gate)
 

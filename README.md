@@ -153,6 +153,10 @@ Push changes to `iPadApp/` → GitHub Actions builds and uploads to TestFlight a
 
 Set `SAFE_MODE=1` to block destructive tools during testing.
 
+The MCP server automatically initializes the audit log on startup, recording all tool invocations to `audit.db`. If `audit_log.py` or `aiosqlite` is unavailable, the server runs without audit recording.
+
+All tool outputs are scanned by the `MCPTrustClassifier` before being returned to the LLM. If the classifier detects injection patterns (prompt injection, command injection, data exfiltration), high-risk results are blocked and logged. The classifier loads gracefully — if `mcp_trust_classifier.py` is unavailable, the server operates without output scanning.
+
 ## Health Visualization
 
 A cosmic nebula visualization of system health. Particles swirl outward from the center in spiral arms, creating a depth effect. Health metrics drive color (cyan-teal → golden amber → coral → deep rose), rotation speed, particle density, and arm structure.
