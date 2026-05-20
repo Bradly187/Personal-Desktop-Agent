@@ -12,11 +12,11 @@ struct ContentView: View {
 
     /// The first N tabs participate in swipe-to-switch (page-style).
     /// Settings and Sensors are tap-only since they're utility views.
-    private let swipeableTabCount = 4
+    private let swipeableTabCount = 3
 
     /// Tabs where page-swipe is disabled because the content owns horizontal gestures.
     /// Fix #1: Parent-driven scroll disable — no child hierarchy walking needed.
-    private let swipeDisabledTabs: Set<Int> = [1, 3]  // Trackpad, Handwriting
+    private let swipeDisabledTabs: Set<Int> = [1, 2]  // Trackpad, Write
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -82,11 +82,8 @@ struct ContentView: View {
                 TrackpadView()
                     .tag(1)
 
-                ScientificKeypadView()
-                    .tag(2)
-
                 HandwritingCanvasView()
-                    .tag(3)
+                    .tag(2)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .animation(.easeInOut(duration: 0.15), value: selectedTab)
@@ -103,8 +100,8 @@ struct ContentView: View {
             // Non-swipeable utility tabs — shown on top when active
             if selectedTab >= swipeableTabCount {
                 switch selectedTab {
-                case 4: SettingsView()
-                case 5: SensorDashboardView()
+                case 3: SettingsView()
+                case 4: SensorDashboardView()
                 default: SettingsView()
                 }
             }
@@ -126,10 +123,9 @@ struct ContentView: View {
         HStack(spacing: 0) {
             tabButton(0, "Commands", "square.grid.3x3.fill")
             tabButton(1, "Trackpad", "hand.point.up")
-            tabButton(2, "Keypad",   "function")
-            tabButton(3, "Write",    "pencil.and.scribble")
-            tabButton(4, "Settings", "gearshape.fill")
-            tabButton(5, "Sensors",  "sensor.tag.radiowaves.forward")
+            tabButton(2, "Write",    "pencil.and.scribble")
+            tabButton(3, "Settings", "gearshape.fill")
+            tabButton(4, "Sensors",  "sensor.tag.radiowaves.forward")
         }
         .frame(height: tabBarHeight)
         .background(
@@ -155,7 +151,7 @@ struct ContentView: View {
                 tabBarDragOffset = value.translation.width
             }
             .onEnded { value in
-                let totalTabs = 6
+                let totalTabs = 5
                 // Only advance from the tab we started on (prevents double-advance)
                 if value.translation.width < -dragThreshold {
                     let next = min(tabAtDragStart + 1, totalTabs - 1)

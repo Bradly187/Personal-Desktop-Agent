@@ -1,23 +1,58 @@
 import SwiftUI
 import PencilKit
+import Vision
 
-/// Apple Pencil canvas for handwritten math expressions.
-/// PKCanvasView uses .pencilOnly policy — finger touches pan the view, do not draw.
-/// On "Recognise" tap: renders PKDrawing to PNG → base64 → handwriting_image WebSocket message.
-/// On receiving handwriting_result: displays LaTeX + unicode, allows edit before send.
-/// Toolbar buttons use DesignTokens.Size.touchTargetCompact (64pt) minimum.
+// MARK: — Mode
+
+enum WriteMode: String, CaseIterable {
+    case math  = "Math"
+    case text  = "Text"
+
+    var icon: String {
+        switch self {
+        case .math: return "function"
+        case .text: return "text.cursor"
+        }
+    }
+}
+
+// MARK: — Main view
+
+/// Handwriting canvas for both math expressions and freeform prompt input.
+///
+/// Math mode  — sends drawing to the PC pix2tex server for LaTeX + unicode OCR.
+/// Text mode  — runs on-device Vision (VNRecognizeTextRequest) for plain text;
+///              no round-trip to the PC, works offline.
+///
+/// Result bar offers:
+///   Send          — DICTATE: pastes result into the currently focused PC field
+///   Click & Send  — CLICK at current cursor position to focus a field, then DICTATE
+///
+/// Apple Pencil draws; fingers pan. All toolbar buttons ≥ 64pt touch targets.
 struct HandwritingCanvasView: View {
     @EnvironmentObject var wsManager: WebSocketManager
 
     @Environment(\.appTheme) private var theme
 
     @StateObject private var vm = HandwritingViewModel()
-    @State private var showEditSheet = false
+    @State private var mode: WriteMode = .math
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Canvas
+
+                // Mode selector
+                Picker("Mode", selection: $mode) {
+                    ForEach(WriteMode.allCases, id: \.self) { m in
+                        Label(m.rawValue, systemImage: m.icon).tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+                .padding(.vertical, DesignTokens.Spacing.sm)
+                .onChange(of: mode) { _, _ in vm.clear() }
+
+                // Drawing canvas
                 PKCanvasRepresentable(drawing: $vm.drawing)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(theme.surfacePrimary)
@@ -25,44 +60,45 @@ struct HandwritingCanvasView: View {
                         canvasControls
                     }
 
-                // Result bar (appears after recognition)
+                // Result bar
                 if let result = vm.result {
                     resultBar(result)
                 } else if vm.isRecognizing {
-                    ProgressView("Recognizing…")
-                        .padding(DesignTokens.Spacing.lg)
+                    HStack(spacing: DesignTokens.Spacing.sm) {
+                        ProgressView().controlSize(.small)
+                        Text(mode == .math ? "Sending to PC for LaTeX recognition…"
+                                           : "Recognizing text on-device…")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    .padding(DesignTokens.Spacing.lg)
                 }
             }
-            .navigationTitle("Handwriting")
+            .navigationTitle("Write")
         }
         .onReceive(wsManager.messageStream) { msg in
+            // Math mode: PC returns handwriting_result
             if case .handwritingResult(_, let latex, let unicode, let error) = msg {
                 vm.handleResult(latex: latex, unicode: unicode, error: error)
             }
         }
     }
 
-    // MARK: — Toolbar
+    // MARK: — Canvas controls (bottom-right overlay)
 
     private var canvasControls: some View {
         HStack(spacing: DesignTokens.Spacing.md) {
-            Button {
-                vm.undo()
-            } label: {
+
+            // Undo
+            Button { vm.undo() } label: {
                 Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: DesignTokens.Size.iconSize))
-                    .foregroundStyle(theme.accent)
-                    .frame(minWidth: DesignTokens.Size.touchTargetCompact,
-                           minHeight: DesignTokens.Size.touchTargetCompact)
-                    .contentShape(Rectangle())
+                    .iconButton(theme: theme)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Undo")
-            .accessibilityHint("Double-tap to undo last stroke")
+            .accessibilityLabel("Undo last stroke")
 
-            Button(role: .destructive) {
-                vm.clear()
-            } label: {
+            // Clear
+            Button(role: .destructive) { vm.clear() } label: {
                 Image(systemName: "trash")
                     .font(.system(size: DesignTokens.Size.iconSize))
                     .foregroundStyle(theme.destructive)
@@ -72,10 +108,14 @@ struct HandwritingCanvasView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Clear canvas")
-            .accessibilityHint("Double-tap to erase all strokes")
 
+            // Recognise
             Button {
-                vm.recognize(ws: wsManager)
+                if mode == .math {
+                    vm.recognizeMath(ws: wsManager)
+                } else {
+                    vm.recognizeText()
+                }
             } label: {
                 HStack(spacing: DesignTokens.Spacing.sm) {
                     Image(systemName: "wand.and.stars")
@@ -86,14 +126,14 @@ struct HandwritingCanvasView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, DesignTokens.Spacing.lg)
                 .frame(minHeight: DesignTokens.Size.touchTargetCompact)
-                .background(theme.accent)
+                .background(vm.drawing.strokes.isEmpty || vm.isRecognizing
+                            ? theme.accent.opacity(0.4) : theme.accent)
                 .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(vm.drawing.strokes.isEmpty || vm.isRecognizing)
             .accessibilityLabel("Recognise handwriting")
-            .accessibilityHint("Double-tap to send drawing for recognition")
         }
         .padding(DesignTokens.Spacing.md)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
@@ -104,43 +144,93 @@ struct HandwritingCanvasView: View {
 
     private func resultBar(_ result: HandwritingResult) -> some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
-            if let latex = result.latex {
-                Label(latex, systemImage: "function")
+
+            // LaTeX preview (math mode only, collapsible)
+            if mode == .math, let latex = result.latex {
+                Text(latex)
                     .font(DesignTokens.Typography.mono)
-                    .foregroundStyle(theme.textPrimary)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(2)
+                    .accessibilityLabel("LaTeX: \(latex)")
             }
+
+            // Error
             if let error = result.error {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(theme.destructive)
                     .font(DesignTokens.Typography.caption)
             }
-            HStack(spacing: DesignTokens.Spacing.md) {
-                TextField("Unicode expression", text: $vm.editedUnicode)
+
+            // Editable output + send buttons
+            HStack(spacing: DesignTokens.Spacing.sm) {
+
+                TextField(mode == .math ? "Expression" : "Recognised text",
+                          text: $vm.editedText, axis: .vertical)
                     .font(DesignTokens.Typography.mono)
                     .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Recognised expression")
+                    .lineLimit(1...3)
+                    .accessibilityLabel("Recognised output — edit before sending")
 
-                Button {
-                    wsManager.sendCommand(action: "DICTATE", text: vm.editedUnicode)
-                    vm.clear()
-                } label: {
-                    Text("Send")
-                        .font(DesignTokens.Typography.body)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, DesignTokens.Spacing.lg)
-                        .frame(minHeight: DesignTokens.Size.touchTargetCompact)
-                        .background(theme.accent)
-                        .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
-                        .contentShape(Rectangle())
+                VStack(spacing: DesignTokens.Spacing.sm) {
+
+                    // Send — DICTATE into currently active PC field
+                    sendButton(
+                        label: "Send",
+                        icon: "paperplane.fill",
+                        help: "Paste into active field"
+                    ) {
+                        wsManager.sendCommand(action: "DICTATE", text: vm.editedText)
+                        vm.clear()
+                    }
+
+                    // Click & Send — click at cursor position first, then DICTATE
+                    sendButton(
+                        label: "Click\n& Send",
+                        icon: "cursorarrow.click",
+                        help: "Click current cursor position then paste",
+                        accent: false
+                    ) {
+                        // CLICK activates the field under the cursor; short delay
+                        // lets the field focus before DICTATE pastes.
+                        wsManager.sendCommand(action: "CLICK", text: "")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            wsManager.sendCommand(action: "DICTATE", text: vm.editedText)
+                            vm.clear()
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(vm.editedUnicode.isEmpty)
-                .accessibilityLabel("Send expression")
-                .accessibilityHint("Double-tap to type expression on PC")
             }
         }
         .padding(DesignTokens.Spacing.lg)
         .background(theme.surfaceSecondary)
+    }
+
+    @ViewBuilder
+    private func sendButton(
+        label: String,
+        icon: String,
+        help: String,
+        accent: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+                    .multilineTextAlignment(.center)
+            }
+            .foregroundStyle(.white)
+            .frame(minWidth: 64, minHeight: DesignTokens.Size.touchTargetCompact)
+            .background(accent ? theme.accent : theme.accent.opacity(0.7))
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(vm.editedText.isEmpty)
+        .accessibilityLabel(label.replacingOccurrences(of: "\n", with: " "))
+        .accessibilityHint(help)
     }
 }
 
@@ -148,7 +238,6 @@ struct HandwritingCanvasView: View {
 
 struct HandwritingResult {
     var latex: String?
-    var unicode: String?
     var error: String?
 }
 
@@ -156,30 +245,30 @@ struct HandwritingResult {
 final class HandwritingViewModel: ObservableObject {
     @Published var drawing = PKDrawing()
     @Published var result: HandwritingResult?
-    @Published var editedUnicode = ""
+    @Published var editedText = ""
     @Published var isRecognizing = false
 
     private var canvasView: PKCanvasView?
 
     func setCanvasView(_ v: PKCanvasView) { canvasView = v }
 
-    func undo() {
-        canvasView?.undoManager?.undo()
-    }
+    func undo() { canvasView?.undoManager?.undo() }
 
     func clear() {
         drawing = PKDrawing()
         result = nil
-        editedUnicode = ""
+        editedText = ""
         isRecognizing = false
     }
 
-    func recognize(ws: WebSocketManager) {
+    // MARK: Math mode — pix2tex via PC bridge
+
+    func recognizeMath(ws: WebSocketManager) {
         guard !drawing.strokes.isEmpty else { return }
         isRecognizing = true
         result = nil
+        editedText = ""
 
-        // Capture drawing state for background rendering
         let drawingCopy = drawing
         let scale = UIScreen.main.scale
 
@@ -191,16 +280,67 @@ final class HandwritingViewModel: ObservableObject {
                 return
             }
             let b64 = pngData.base64EncodedString()
-            await MainActor.run {
-                ws.sendHandwritingImage(base64PNG: b64)
-            }
+            await MainActor.run { ws.sendHandwritingImage(base64PNG: b64) }
         }
     }
 
+    /// Called by ContentView when the PC bridge returns handwriting_result.
     func handleResult(latex: String?, unicode: String?, error: String?) {
         isRecognizing = false
-        result = HandwritingResult(latex: latex, unicode: unicode, error: error)
-        editedUnicode = unicode ?? latex ?? ""
+        result = HandwritingResult(latex: latex, error: error)
+        // Prefer unicode (human-readable); fall back to LaTeX for math mode
+        editedText = unicode ?? latex ?? ""
+    }
+
+    // MARK: Text mode — on-device Vision (VNRecognizeTextRequest)
+
+    func recognizeText() {
+        guard !drawing.strokes.isEmpty else { return }
+        isRecognizing = true
+        result = nil
+        editedText = ""
+
+        let drawingCopy = drawing
+        let scale = UIScreen.main.scale
+
+        Task.detached(priority: .userInitiated) {
+            let bounds = drawingCopy.bounds.insetBy(dx: -20, dy: -20)
+            let uiImage = drawingCopy.image(from: bounds, scale: scale)
+            guard let cgImage = uiImage.cgImage else {
+                await MainActor.run { self.isRecognizing = false }
+                return
+            }
+
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.automaticallyDetectsLanguage = true
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                await MainActor.run {
+                    self.isRecognizing = false
+                    self.result = HandwritingResult(error: "Vision error: \(error.localizedDescription)")
+                }
+                return
+            }
+
+            let recognized = (request.results ?? [])
+                .compactMap { $0.topCandidates(1).first?.string }
+                .joined(separator: " ")
+
+            await MainActor.run {
+                self.isRecognizing = false
+                if recognized.isEmpty {
+                    self.result = HandwritingResult(error: "No text recognised — try writing larger or more clearly")
+                } else {
+                    self.result = HandwritingResult()
+                    self.editedText = recognized
+                }
+            }
+        }
     }
 }
 
@@ -238,7 +378,6 @@ struct PKCanvasRepresentable: UIViewRepresentable {
 
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         @Binding var drawing: PKDrawing
-        // Fix #10: Retain the tool picker for the lifetime of the canvas.
         let toolPicker = PKToolPicker()
 
         init(drawing: Binding<PKDrawing>) { _drawing = drawing }
@@ -246,5 +385,18 @@ struct PKCanvasRepresentable: UIViewRepresentable {
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             drawing = canvasView.drawing
         }
+    }
+}
+
+// MARK: — Convenience modifier
+
+private extension Image {
+    func iconButton(theme: AppTheme) -> some View {
+        self
+            .font(.system(size: DesignTokens.Size.iconSize))
+            .foregroundStyle(theme.accent)
+            .frame(minWidth: DesignTokens.Size.touchTargetCompact,
+                   minHeight: DesignTokens.Size.touchTargetCompact)
+            .contentShape(Rectangle())
     }
 }
