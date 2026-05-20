@@ -111,12 +111,7 @@ class CoordinatorConfig:
     bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     bedrock_region: str = "us-east-1"
 
-    # AgentCore fallback (preferred cloud path — set True after `bedrock-agentcore deploy`)
-    # Disabled by default: raw Bedrock is the active cloud path until AgentCore is deployed.
-    agentcore_enabled: bool = False
-    agentcore_dev_url: str = "http://localhost:8080/invocations"
-    agentcore_deployed_url: str | None = None
-    agentcore_use_dev: bool = False  # False = use deployed_url; True = localhost dev server
+    # Cloud path: raw Bedrock Claude Haiku (AgentCore deployment deferred)
 
 
 # ---------------------------------------------------------------------------
@@ -386,18 +381,7 @@ class HybridCoordinator:
         self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
         self._vram_cache_ttl: float = 2.0  # seconds
 
-        # Lazy-init AgentCore client if enabled but not provided
-        if self._agentcore is None and self._cfg.agentcore_enabled:
-            try:
-                from agentcore_fallback.client import AgentCoreFallbackClient, FallbackConfig
-                self._agentcore = AgentCoreFallbackClient(FallbackConfig(
-                    dev_url=self._cfg.agentcore_dev_url,
-                    deployed_url=self._cfg.agentcore_deployed_url,
-                    use_dev=self._cfg.agentcore_use_dev,
-                ))
-                log.info("AgentCore fallback client initialized (dev=%s)", self._cfg.agentcore_use_dev)
-            except ImportError:
-                log.debug("AgentCore fallback client not available, using raw Bedrock")
+        # AgentCore deployment deferred — raw Bedrock is the active cloud path.
 
     # ---------------------------------------------------------------------- #
     # Public entry point

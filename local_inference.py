@@ -385,34 +385,7 @@ class VLLMInference(LocalInference):
         }
 
 
-# ---------------------------------------------------------------------------
-# NemotronInference — NVIDIA Nemotron via Ollama (task 2.13 benchmark candidate)
-# ---------------------------------------------------------------------------
-
-class NemotronInference(OllamaInference):
-    """Calls a local Ollama server with an NVIDIA Nemotron model.
-
-    Nemotron models are available via Ollama and are optimised for RTX hardware
-    by NVIDIA.  This backend is otherwise identical to OllamaInference —
-    same HTTP API, same prompt format, same timeout handling.
-
-    Recommended models (pull with `ollama pull <model>`):
-      nemotron-mini          — 4B, ~8 GB VRAM, fastest
-      nemotron               — 70B, ~40 GB VRAM (RAM-offload on 32 GB VRAM)
-
-    Task 2.13: benchmark against OllamaInference (Llama 3.1 70B) and VLLMInference.
-    Decision criterion: if Nemotron p95 < 350 ms and quality is acceptable, promote.
-    """
-
-    def __init__(
-        self,
-        model: str = "nemotron-mini",      # 4B default; swap to "nemotron" for 70B
-        host: str = "http://localhost:11434",
-        timeout: float = 10.0,
-    ) -> None:
-        super().__init__(model=model, host=host, timeout=timeout)
-
-    def get_status(self) -> dict:
-        status = super().get_status()
-        status["backend"] = "nemotron"
-        return status
+# NemotronInference removed: nemotron-mini scored 25% on command eval (2026-05-13).
+# llama3.1:8b is the default and fits easily on RTX 5090 — no VRAM pressure justifies
+# switching to a model with 25% accuracy. Re-evaluate if a higher-accuracy Nemotron
+# model becomes available via Ollama.

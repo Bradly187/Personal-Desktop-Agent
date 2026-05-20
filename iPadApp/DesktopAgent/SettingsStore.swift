@@ -374,7 +374,9 @@ final class SettingsStore: ObservableObject {
         activeCursorSensor = defaults.string(forKey: "activeCursorSensor") ?? "tilt"
         trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 2.0
         palmRejectRadius = defaults.double(forKey: "palmRejectRadius").nonZero ?? 25.0
-        keywordList = defaults.stringArray(forKey: "keywordList") ?? ["click", "scroll", "open"]
+        // Empty default: KeywordListener is off until the user adds words in Settings.
+        // WhisperStream handles all voice input more naturally — keywords are opt-in.
+        keywordList = defaults.stringArray(forKey: "keywordList") ?? []
         gazeDwellClickEnabled = defaults.object(forKey: "gazeDwellClickEnabled") as? Bool ?? true
         gazeDwellRightClickEnabled = defaults.object(forKey: "gazeDwellRightClickEnabled") as? Bool ?? true
         gazeDwellDoubleClickEnabled = defaults.object(forKey: "gazeDwellDoubleClickEnabled") as? Bool ?? true

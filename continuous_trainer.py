@@ -152,34 +152,11 @@ class ContinuousTrainer:
         correct_action: str,
         command_id: Optional[int] = None,
     ) -> None:
-        """Record a user correction locally and forward to AgentCore."""
-        # Store the correct mapping as a few-shot example
+        """Record a user correction as a few-shot example."""
         await self._db.upsert_few_shot_example(cmd, correct_action, "command", command_id)
         if command_id and command_id > 0:
             await self._db.mark_command_corrected(command_id, correct_action)
         log.info("Correction stored: %r → %s (was %s)", cmd.text, correct_action, wrong_action)
-
-        # Forward to AgentCore (fire-and-forget)
-        asyncio.create_task(
-            self._send_correction_to_agentcore(cmd.text, wrong_action, correct_action)
-        )
-
-    async def _send_correction_to_agentcore(
-        self, original_text: str, wrong_action: str, correct_action: str
-    ) -> None:
-        try:
-            from agentcore_fallback.client import AgentCoreFallbackClient
-            client = AgentCoreFallbackClient()
-            result = await client.record_correction(
-                original_text=original_text,
-                wrong_action=wrong_action,
-                correct_action=correct_action,
-            )
-            log.info("Correction sent to AgentCore: %s", result)
-        except ImportError:
-            log.debug("AgentCore not available — correction stored locally only")
-        except Exception as exc:
-            log.warning("Failed to send correction to AgentCore: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Adaptation loop
