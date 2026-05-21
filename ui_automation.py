@@ -136,7 +136,7 @@ class UIAutomationProvider:
         Returns:
             UIElement with center() coords, or None if not found.
         """
-        cache_key = (target.lower().strip(), app_name.lower())
+        cache_key = (target.lower().strip(), (app_name or "").lower())
         now = time.monotonic()
         if cache_key in self._cache:
             elem, expiry = self._cache[cache_key]

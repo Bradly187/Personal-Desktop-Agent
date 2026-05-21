@@ -466,6 +466,7 @@ class FusionEngine:
             self._cfg,
             head_tremor_threshold=2.0,
             head_lock_threshold=0.8,
+            head_unlock_threshold=2.5,  # wider hysteresis on pain day to suppress tremor
             gaze_stability_pct=0.07,
             dead_zone_inner=0.08,
             sound_cooldown_s=0.3,
@@ -473,8 +474,8 @@ class FusionEngine:
             gaze_cursor_conf_min=0.45,
         )
         # HeadStationaryLock reads thresholds directly — sync immediately
-        self._head_lock.lock_threshold   = 0.8
-        self._head_lock.unlock_threshold = self._cfg.head_unlock_threshold
+        self._head_lock.lock_threshold   = self._effective_cfg.head_lock_threshold
+        self._head_lock.unlock_threshold = self._effective_cfg.head_unlock_threshold
         log.info("FusionEngine: pain-day thresholds applied")
 
     # ---------------------------------------------------------------------- #

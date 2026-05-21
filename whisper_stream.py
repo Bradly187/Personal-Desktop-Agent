@@ -214,7 +214,7 @@ class WhisperStream:
         Set to None to cancel. Used by VoiceCalibrator during guided sessions.
         """
         self._calibration_capture = callback
-        log.info("WhisperStream: lecture mode %s", "ON" if enabled else "OFF")
+        log.info("WhisperStream: calibration capture %s", "SET" if callback else "CLEARED")
 
     def set_awaiting_clarification(self, active: bool) -> None:
         """Called by HybridCoordinator to bypass wake-phrase check during Q&A."""

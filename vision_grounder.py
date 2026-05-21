@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -77,6 +78,11 @@ class VisionGrounder:
             GroundingResult or None if element not found / confidence too low.
         """
         if not target or not screenshot_b64:
+            return None
+
+        # Sanitize: keep only printable ASCII to prevent prompt injection
+        target = re.sub(r"[^\x20-\x7E]", "", target)[:128].strip()
+        if not target:
             return None
 
         cache_key = target.lower().strip()

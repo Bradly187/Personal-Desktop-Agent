@@ -203,7 +203,7 @@ class AcousticProfiler:
         self._healthy_samples = list(self._healthy_samples[-40:])
         log.info("AcousticProfiler: marked as freshly calibrated")
         if self._db.available and self._event_loop:
-            asyncio.run_coroutine_threadsafe(
+            fut = asyncio.run_coroutine_threadsafe(
                 self._db.upsert_voice_profile({
                     "baseline_rms":     statistics.median([m.rms_amplitude for m in self._healthy_samples] or [0]),
                     "baseline_logprob": statistics.median([m.avg_logprob for m in self._healthy_samples] or [-1]),
@@ -214,6 +214,10 @@ class AcousticProfiler:
                     "sample_count":     self._sample_count,
                 }),
                 self._event_loop,
+            )
+            fut.add_done_callback(
+                lambda f: log.error("AcousticProfiler: upsert_voice_profile failed: %s", f.exception())
+                if f.exception() else None
             )
 
     async def load(self, condition: str | None = None) -> None:

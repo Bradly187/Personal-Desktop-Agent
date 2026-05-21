@@ -112,8 +112,9 @@ class ActionVerifier:
             post_b64 = self.snapshot()
 
         if not post_b64:
+            log.warning("ActionVerifier: post-action snapshot failed — cannot verify")
             return VerifyResult(
-                success=True, diff_pct=0.0, reason="error",
+                success=False, diff_pct=0.0, reason="error",
                 pre_b64=pre_b64, post_b64="",
                 elapsed_ms=(time.monotonic() - t0) * 1000,
             )
