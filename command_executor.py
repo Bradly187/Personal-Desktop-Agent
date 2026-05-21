@@ -29,6 +29,66 @@ from tools import keyboard, mouse, screen, windows
 
 log = logging.getLogger(__name__)
 
+# Lazy singleton — UIAutomation COM init is expensive; reuse across calls.
+_ui_provider: "UIAutomationProvider | None" = None
+_action_verifier: "ActionVerifier | None" = None
+
+def _get_action_verifier():
+    global _action_verifier
+    if _action_verifier is None:
+        try:
+            from action_verifier import ActionVerifier
+            _action_verifier = ActionVerifier()
+        except Exception as exc:
+            log.debug("ActionVerifier unavailable: %s", exc)
+    return _action_verifier
+
+def _get_ui_provider():
+    global _ui_provider
+    if _ui_provider is None:
+        try:
+            from ui_automation import UIAutomationProvider
+            _ui_provider = UIAutomationProvider()
+        except Exception as exc:
+            log.debug("UIAutomationProvider unavailable: %s", exc)
+    return _ui_provider
+
+# ---------------------------------------------------------------------------
+# Known-app registry — bypass Win+S for apps that Win Search misfires on.
+# Keys are lowercased voice aliases; value is the absolute exe path.
+# ---------------------------------------------------------------------------
+_KNOWN_APPS: dict[str, str] = {
+    # Kiro IDE (phonetic aliases for Whisper misrecognitions)
+    "kiro":             r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
+    "kiro ide":         r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
+    "key row":          r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
+    "key-row":          r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
+    "cairo":            r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
+    # VS Code
+    "vs code":          r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+    "vscode":           r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+    "visual studio code": r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+    "code":             r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+    # Terminal
+    "terminal":         r"C:\Users\bradt\AppData\Local\Microsoft\WindowsApps\wt.exe",
+    "windows terminal": r"C:\Users\bradt\AppData\Local\Microsoft\WindowsApps\wt.exe",
+    # Chrome
+    "chrome":           r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "google chrome":    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    # Slack
+    "slack":            r"C:\Users\bradt\AppData\Local\slack\slack.exe",
+    # Discord
+    "discord":          r"C:\Users\bradt\AppData\Local\Discord\app-1.0.9237\Discord.exe",
+}
+
+# URL shortcuts — opened with the default browser via os.startfile.
+_KNOWN_URLS: dict[str, str] = {
+    "claude":           "https://claude.ai",
+    "claude ai":        "https://claude.ai",
+    "linkedin":         "https://linkedin.com",
+    "github":           "https://github.com",
+}
+
 
 # ---------------------------------------------------------------------------
 # Amazon Polly TTS — spoken clarification for cloud-routed commands
@@ -151,13 +211,36 @@ class CommandExecutor:
                 log.error("Failed to execute %s: %s", action, exc)
                 return {"status": "error", "action": action, "error": str(exc)}
 
+        # Take a pre-action snapshot for verifiable verbs
+        from action_verifier import VERIFIABLE_VERBS
+        verifier = _get_action_verifier()
+        pre_b64 = ""
+        if verifier and action in VERIFIABLE_VERBS:
+            pre_b64 = await asyncio.to_thread(verifier.snapshot)
+
         try:
             result = await asyncio.to_thread(self._dispatch, action, cmd)
             log.info("Executed %s [source=%s]: %s", action, cmd.source, result)
-            return {"status": "ok", "action": action, "result": result}
         except Exception as exc:
             log.error("Failed to execute %s: %s", action, exc)
             return {"status": "error", "action": action, "error": str(exc)}
+
+        # Post-action verification — perceptual diff confirms screen changed
+        verify_result = None
+        if verifier and pre_b64:
+            vr = await asyncio.to_thread(verifier.verify, pre_b64, action)
+            verify_result = {"success": vr.success, "diff_pct": vr.diff_pct,
+                             "reason": vr.reason, "elapsed_ms": vr.elapsed_ms}
+            if not vr.success:
+                log.warning(
+                    "ActionVerifier: %s — no visible change (diff=%.1f%%, %dms)",
+                    action, vr.diff_pct, vr.elapsed_ms,
+                )
+
+        resp = {"status": "ok", "action": action, "result": result}
+        if verify_result:
+            resp["verification"] = verify_result
+        return resp
 
     def _dispatch(self, action: str, cmd: Command) -> dict:
         p = cmd.params
@@ -187,16 +270,30 @@ class CommandExecutor:
             return keyboard.keyboard_type(text)
 
         # ------------------------------------------------------------------ #
-        # OPEN — Win+S search for the named app / file
+        # OPEN — known-app shortcut → subprocess; unknown → Win+S search
         # ------------------------------------------------------------------ #
         if action == "OPEN":
             target = p.get("target", cmd.text)
+            key = target.lower().strip()
+            # 1. Known exe path
+            exe = _KNOWN_APPS.get(key)
+            if exe and Path(exe).exists():
+                import subprocess
+                subprocess.Popen([exe])
+                return {"status": "ok", "opened": target, "method": "direct"}
+            # 2. Known URL
+            url = _KNOWN_URLS.get(key)
+            if url:
+                import os
+                os.startfile(url)
+                return {"status": "ok", "opened": target, "method": "url"}
+            # 3. Win+S search fallback
             keyboard.keyboard_hotkey("win", "s")
             time.sleep(0.4)
             keyboard.keyboard_type(target)
-            time.sleep(0.3)
+            time.sleep(0.5)
             keyboard.keyboard_press("enter")
-            return {"opened": target}
+            return {"status": "ok", "opened": target, "method": "search"}
 
         # ------------------------------------------------------------------ #
         # CLOSE — Alt+F4 on the active window
@@ -276,7 +373,7 @@ class CommandExecutor:
                 log.debug("TTS speak failed, falling back to legacy Polly: %s", _tts_exc)
                 if p.get("route") == "cloud":
                     spoken = _polly_speak(message)
-            return {"clarify": True, "message": message, "spoken": spoken}
+            return {"status": "ok", "clarify": True, "message": message, "spoken": spoken}
 
         # ================================================================== #
         # Dev-agent extended verbs
@@ -326,7 +423,7 @@ class CommandExecutor:
             query = p.get("query", cmd.text)
             url = "https://www.google.com/search?" + urlencode({"q": query})
             webbrowser.open(url)
-            return {"opened": url}
+            return {"status": "ok", "opened": url}
 
         # ------------------------------------------------------------------ #
         # READ_SCREEN — capture screenshot for vision model consumption
@@ -343,12 +440,37 @@ class CommandExecutor:
 
     @staticmethod
     def _resolve_coords(cmd: Command) -> tuple[int, int]:
-        """Return (x, y) from explicit params → gaze coords → current cursor position."""
+        """Return (x, y) via: explicit params → UIAutomation → gaze coords → cursor.
+
+        Fallback chain:
+          1. Explicit x/y in params  (vision grounder, gaze dwell)
+          2. UIAutomation structured element lookup  ← Sprint 6
+          3. Gaze coords from Command
+          4. Current cursor position
+        """
         p = cmd.params
         if "x" in p and "y" in p:
             return int(p["x"]), int(p["y"])
+
+        # UIAutomation: try structured element lookup when target text is available
+        target = (p.get("target") or cmd.text or "").strip()
+        if target and len(target.split()) <= 5:  # skip long sentences
+            provider = _get_ui_provider()
+            if provider and provider.is_available():
+                try:
+                    element = provider.find(target, timeout_s=0.3)
+                    if element and element.is_enabled:
+                        cx, cy = element.center()
+                        log.info(
+                            "UIAutomation resolved %r → (%d, %d) [%s]",
+                            target, cx, cy, element.role,
+                        )
+                        return cx, cy
+                except Exception as exc:
+                    log.debug("UIAutomation lookup failed: %s", exc)
+
         if cmd.gaze_coords:
             return cmd.gaze_coords
-        # Fall back to current cursor position (click where the user is looking/pointing)
+        # Fall back to current cursor position
         import pyautogui
         return pyautogui.position()
