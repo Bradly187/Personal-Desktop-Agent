@@ -297,6 +297,8 @@ class BehavioralTwinState:
         self._session_clarify_count: int = 0    # CLARIFY responses in current session
         self._session_gesture_confs: list[float] = []  # gesture confidence values in session
         self._session_start_ts: float = time.monotonic()  # session start time
+        self._acoustic_profiler = None   # set via set_acoustic_profiler()
+        self._manual_pain_day: bool = False  # user override via "hey agent pain day on"
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -388,6 +390,18 @@ class BehavioralTwinState:
     def get_session_context(self) -> list[str]:
         """Return current SessionHistory as list[str] for Command.session_context."""
         return list(self._session_history)
+
+    def set_acoustic_profiler(self, profiler) -> None:
+        """Wire AcousticProfiler so voice clarity feeds into pain detection."""
+        self._acoustic_profiler = profiler
+
+    def set_manual_pain_day(self, active: bool) -> None:
+        """User override — immediately force pain_day_active state."""
+        self._manual_pain_day = active
+        self._pain_day_active = active
+        log.info("BehavioralTwinState: manual pain day %s", "ON" if active else "OFF")
+        if self._agent_db and self._agent_db.available:
+            asyncio.create_task(self._agent_db.set_manual_pain_day(active))
 
     # ── Internal ───────────────────────────────────────────────────────
 
@@ -499,11 +513,23 @@ class BehavioralTwinState:
             self._working_set = []
 
     async def _load_preference_model(self) -> None:
-        """Reconstruct PreferenceModel from AgentDB settings_versions."""
+        """Reconstruct PreferenceModel from AgentDB settings_versions.
+
+        Handles the historic double-serialization bug where log_settings_change
+        called json.dumps() on an already-serialized JSON string.  We detect
+        this by checking whether json.loads() returns a str or dict.
+        """
         try:
             json_data = await self._agent_db.get_preference_model_snapshot()
             if json_data:
-                self._preference_model = PreferenceModel.from_json(json_data)
+                # Safety: un-nest any legacy double-serialized value
+                parsed = json.loads(json_data) if isinstance(json_data, str) else json_data
+                if isinstance(parsed, str):
+                    # Double-serialized row — parse one more time
+                    parsed = json.loads(parsed)
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"Unexpected preference model type: {type(parsed)}")
+                self._preference_model = PreferenceModel.from_json(json.dumps(parsed))
                 log.debug("BehavioralTwinState: loaded PreferenceModel from AgentDB")
             else:
                 log.debug("BehavioralTwinState: no saved PreferenceModel — using default")
@@ -578,11 +604,25 @@ class BehavioralTwinState:
         else:
             signal_4 = 0.0
 
+        # Signal 5: voice clarity drop (from AcousticProfiler)
+        # Captures voice softening during RA flares — the most distinctive
+        # early indicator for users like Brad.
+        if self._acoustic_profiler is not None:
+            signal_5 = self._acoustic_profiler.voice_clarity_score()
+        else:
+            signal_5 = 0.0
+
+        # If manual override is active, drive score to 1.0 regardless
+        if self._manual_pain_day:
+            return 1.0
+
+        # Reweight: voice clarity gets 0.15, others compress proportionally
         score = (
-            0.35 * signal_1 +
-            0.25 * signal_2 +
-            0.20 * signal_3 +
-            0.20 * signal_4
+            0.30 * signal_1 +   # fail ratio
+            0.20 * signal_2 +   # clarify ratio
+            0.15 * signal_3 +   # gesture confidence drop
+            0.20 * signal_4 +   # command rate drop
+            0.15 * signal_5     # voice clarity drop  ← new
         )
         return max(0.0, min(1.0, score))
 

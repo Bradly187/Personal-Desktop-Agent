@@ -131,6 +131,9 @@ class IPadBridge:
     def set_whisper_stream(self, whisper: "WhisperStream") -> None:
         self._whisper = whisper
 
+    def set_coordinator(self, coordinator) -> None:
+        self._coordinator = coordinator
+
     def set_viewer(self, viewer: "SensorViewer") -> None:
         self._viewer = viewer
 
@@ -385,6 +388,29 @@ class IPadBridge:
                 self._viewer.on_camera_frame(msg)
             return
 
+        if msg_type == "gesture_assessment":
+            # {"type": "gesture_assessment", "disabled": ["PINCH", "FIST"]}
+            disabled = set(msg.get("disabled", []))
+            if self._gesture:
+                self._gesture.set_disabled_gestures(disabled)
+            await self._ack(ws, msg.get("id"), "ok", "gesture_assessment applied")
+            return
+
+        if msg_type == "pain_day_override":
+            active = bool(msg.get("active", False))
+            log.info("ipad_bridge: pain_day_override active=%s", active)
+            if self._coordinator and hasattr(self._coordinator, "_twin") \
+                    and self._coordinator._twin:
+                self._coordinator._twin.set_manual_pain_day(active)
+            if self._whisper and hasattr(self._whisper, "_profiler") \
+                    and self._whisper._profiler:
+                vad = self._whisper._profiler.get_vad_threshold(pain_day=active)
+                self._whisper._silence_thresh = vad
+                log.info("ipad_bridge: VAD %s to %.3f",
+                         "relaxed" if active else "restored", vad)
+            await self._ack(ws, msg.get("id"), "ok", "pain_day_override applied")
+            return
+
         if msg_type == "audio_stream":
             if self._whisper and self._whisper.available:
                 samples_b64 = msg.get("samples", "")
@@ -620,6 +646,28 @@ class IPadBridge:
             await ws.send_json(payload)
         except Exception as exc:
             log.debug("Failed to send status: %s", exc)
+
+    async def broadcast_json(self, payload: dict) -> None:
+        """Send a JSON message to all connected iPad clients."""
+        dead: set = set()
+        for ws in list(self._clients):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.add(ws)
+        self._clients -= dead
+
+    async def send_recalibration_request(
+        self, reason: str = "voice_clarity", degradation_pct: float = 0.0
+    ) -> None:
+        """Ask the iPad to start a quick voice re-calibration session."""
+        payload = {
+            "type":            "recalibration_request",
+            "reason":          reason,
+            "degradation_pct": degradation_pct,
+        }
+        log.info("ipad_bridge: sending recalibration_request (reason=%s)", reason)
+        await self.broadcast_json(payload)
 
     async def _send_handwriting_result(
         self,

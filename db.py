@@ -302,6 +302,87 @@ CREATE TABLE IF NOT EXISTS twin_pain_day_log (
     cmd_rate_delta     REAL
 );
 CREATE INDEX IF NOT EXISTS idx_pdl_session ON twin_pain_day_log(session_id, ts);
+
+-- ── Voice calibration (Sprint A) ─────────────────────────────────────────
+
+-- Per-utterance acoustic measurements collected during calibration sessions
+-- and passively during normal operation.
+CREATE TABLE IF NOT EXISTS voice_calibration (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     INTEGER REFERENCES sessions(id),
+    ts             REAL    NOT NULL,
+    phrase         TEXT,               -- phrase presented to user
+    actual_text    TEXT,               -- what Whisper transcribed
+    rms_amplitude  REAL,               -- RMS of voiced frames (0.0–1.0)
+    freq_centroid  REAL,               -- spectral centroid Hz
+    avg_logprob    REAL,               -- Whisper segment confidence
+    duration_s     REAL,               -- speech duration
+    is_flare_day   INTEGER DEFAULT 0   -- 1 when pain_day_active at capture time
+);
+CREATE INDEX IF NOT EXISTS idx_vc_session ON voice_calibration(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_vc_flare   ON voice_calibration(is_flare_day, ts);
+
+-- Single-row per-user voice profile derived from calibration samples.
+-- Updated in-place; history lives in voice_calibration.
+CREATE TABLE IF NOT EXISTS voice_profile (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    updated_at          REAL    NOT NULL,
+    baseline_rms        REAL,           -- median RMS on healthy days
+    baseline_logprob    REAL,           -- median Whisper logprob on healthy days
+    baseline_freq       REAL,           -- median frequency centroid Hz
+    flare_rms_scale     REAL DEFAULT 0.5,  -- flare voice volume as fraction of baseline
+    vad_threshold       REAL,           -- computed silence threshold for WhisperStream
+    logprob_floor       REAL,           -- computed Gate 1 logprob floor
+    sample_count        INTEGER DEFAULT 0
+);
+
+-- Phrase bank presented during voice onboarding.
+CREATE TABLE IF NOT EXISTS voice_phrases (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    phrase    TEXT    NOT NULL,         -- what to display and say
+    category  TEXT    NOT NULL,         -- verb / app / navigation / number
+    phonetic  TEXT,                     -- expected Whisper output (may differ)
+    active    INTEGER NOT NULL DEFAULT 1
+);
+
+-- Per-sensor range-of-motion measurements from assessment onboarding.
+CREATE TABLE IF NOT EXISTS sensor_rom (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                REAL    NOT NULL,
+    session_id        INTEGER REFERENCES sessions(id),
+    sensor            TEXT    NOT NULL,   -- voice/gaze/tilt/head/gesture/sound
+    direction         TEXT,               -- left/right/up/down/pinch/cluck/etc
+    max_value         REAL,               -- maximum comfortable measurement
+    comfortable_value REAL,               -- daily-use comfortable value
+    unit              TEXT                -- degrees/rms/confidence/etc
+);
+CREATE INDEX IF NOT EXISTS idx_rom_sensor ON sensor_rom(sensor, ts);
+
+-- User-defined flare degradation profile.
+CREATE TABLE IF NOT EXISTS flare_profile (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    updated_at          REAL    NOT NULL,
+    voice_degrades      INTEGER NOT NULL DEFAULT 1,
+    gesture_degrades    INTEGER NOT NULL DEFAULT 0,
+    gaze_degrades       INTEGER NOT NULL DEFAULT 0,
+    tilt_degrades       INTEGER NOT NULL DEFAULT 0,
+    flare_vad_scale     REAL    NOT NULL DEFAULT 0.5,  -- voice volume fraction
+    manual_pain_day     INTEGER NOT NULL DEFAULT 0,    -- user override flag
+    notes               TEXT
+);
+
+-- Lecture mode transcriptions: speech heard while lecture mode is active.
+-- Captures lecture audio for later search and review via DevAgent.
+CREATE TABLE IF NOT EXISTS ambient_transcripts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  INTEGER REFERENCES sessions(id),
+    ts          REAL    NOT NULL,
+    text        TEXT    NOT NULL,
+    logprob     REAL,
+    duration_s  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_at_session ON ambient_transcripts(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_at_ts      ON ambient_transcripts(ts);
 """
 
 
@@ -430,7 +511,10 @@ class AgentDB:
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     session_id, time.time(), cmd.source, cmd.text,
-                    action, json.dumps(cmd.params) if cmd.params else None,
+                    action, json.dumps(
+                        {k: v for k, v in cmd.params.items()
+                         if not isinstance(v, (bytes, bytearray))}
+                    ) if cmd.params else None,
                     route, gate_that_decided,
                     round(latency_ms, 1) if latency_ms is not None else None,
                     cmd.whisper_logprob, cmd.gesture_confidence,
@@ -442,6 +526,234 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.insert_command failed: %s", exc)
             return -1
+
+    # ── Voice calibration (Sprint A) ──────────────────────────────────────
+
+    async def insert_voice_calibration(
+        self,
+        session_id: int,
+        phrase: str,
+        actual_text: str,
+        rms_amplitude: float,
+        freq_centroid: float,
+        avg_logprob: float,
+        duration_s: float,
+        is_flare_day: bool = False,
+    ) -> None:
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                """INSERT INTO voice_calibration
+                   (session_id, ts, phrase, actual_text, rms_amplitude,
+                    freq_centroid, avg_logprob, duration_s, is_flare_day)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (session_id, time.time(), phrase, actual_text, rms_amplitude,
+                 freq_centroid, avg_logprob, duration_s, int(is_flare_day)),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.insert_voice_calibration failed: %s", exc)
+
+    async def upsert_voice_profile(self, profile: dict) -> None:
+        """Insert or replace the single-row voice profile."""
+        if not self._conn:
+            return
+        try:
+            existing = await (await self._conn.execute(
+                "SELECT id FROM voice_profile ORDER BY id LIMIT 1"
+            )).fetchone()
+            if existing:
+                await self._conn.execute(
+                    """UPDATE voice_profile SET
+                       updated_at=?, baseline_rms=?, baseline_logprob=?,
+                       baseline_freq=?, flare_rms_scale=?, vad_threshold=?,
+                       logprob_floor=?, sample_count=?
+                       WHERE id=?""",
+                    (time.time(), profile.get("baseline_rms"),
+                     profile.get("baseline_logprob"), profile.get("baseline_freq"),
+                     profile.get("flare_rms_scale", 0.5),
+                     profile.get("vad_threshold"), profile.get("logprob_floor"),
+                     profile.get("sample_count", 0), existing[0]),
+                )
+            else:
+                await self._conn.execute(
+                    """INSERT INTO voice_profile
+                       (updated_at, baseline_rms, baseline_logprob, baseline_freq,
+                        flare_rms_scale, vad_threshold, logprob_floor, sample_count)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (time.time(), profile.get("baseline_rms"),
+                     profile.get("baseline_logprob"), profile.get("baseline_freq"),
+                     profile.get("flare_rms_scale", 0.5),
+                     profile.get("vad_threshold"), profile.get("logprob_floor"),
+                     profile.get("sample_count", 0)),
+                )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.upsert_voice_profile failed: %s", exc)
+
+    async def get_voice_profile(self) -> dict | None:
+        """Return the current voice profile row, or None if not yet calibrated."""
+        if not self._conn:
+            return None
+        try:
+            row = await (await self._conn.execute(
+                """SELECT baseline_rms, baseline_logprob, baseline_freq,
+                          flare_rms_scale, vad_threshold, logprob_floor, sample_count
+                   FROM voice_profile ORDER BY id LIMIT 1"""
+            )).fetchone()
+            if not row:
+                return None
+            return {
+                "baseline_rms": row[0], "baseline_logprob": row[1],
+                "baseline_freq": row[2], "flare_rms_scale": row[3],
+                "vad_threshold": row[4], "logprob_floor": row[5],
+                "sample_count": row[6],
+            }
+        except Exception as exc:
+            log.warning("AgentDB.get_voice_profile failed: %s", exc)
+            return None
+
+    async def get_voice_calibration_samples(
+        self, is_flare_day: bool | None = None, limit: int = 200
+    ) -> list[dict]:
+        """Return recent voice calibration samples, optionally filtered by flare state."""
+        if not self._conn:
+            return []
+        try:
+            if is_flare_day is None:
+                rows = await (await self._conn.execute(
+                    """SELECT rms_amplitude, freq_centroid, avg_logprob, duration_s, is_flare_day
+                       FROM voice_calibration ORDER BY ts DESC LIMIT ?""", (limit,)
+                )).fetchall()
+            else:
+                rows = await (await self._conn.execute(
+                    """SELECT rms_amplitude, freq_centroid, avg_logprob, duration_s, is_flare_day
+                       FROM voice_calibration WHERE is_flare_day=?
+                       ORDER BY ts DESC LIMIT ?""", (int(is_flare_day), limit)
+                )).fetchall()
+            return [
+                {"rms": r[0], "freq": r[1], "logprob": r[2],
+                 "duration_s": r[3], "flare": bool(r[4])}
+                for r in rows if r[0] is not None
+            ]
+        except Exception as exc:
+            log.warning("AgentDB.get_voice_calibration_samples failed: %s", exc)
+            return []
+
+    async def get_flare_profile(self) -> dict | None:
+        if not self._conn:
+            return None
+        try:
+            row = await (await self._conn.execute(
+                """SELECT voice_degrades, gesture_degrades, gaze_degrades,
+                          tilt_degrades, flare_vad_scale, manual_pain_day, notes
+                   FROM flare_profile ORDER BY id DESC LIMIT 1"""
+            )).fetchone()
+            if not row:
+                return None
+            return {
+                "voice_degrades": bool(row[0]), "gesture_degrades": bool(row[1]),
+                "gaze_degrades": bool(row[2]), "tilt_degrades": bool(row[3]),
+                "flare_vad_scale": row[4], "manual_pain_day": bool(row[5]),
+                "notes": row[6],
+            }
+        except Exception as exc:
+            log.warning("AgentDB.get_flare_profile failed: %s", exc)
+            return None
+
+    async def set_manual_pain_day(self, active: bool) -> None:
+        """User override: force pain_day_active regardless of auto-detection."""
+        if not self._conn:
+            return
+        try:
+            existing = await (await self._conn.execute(
+                "SELECT id FROM flare_profile ORDER BY id DESC LIMIT 1"
+            )).fetchone()
+            if existing:
+                await self._conn.execute(
+                    "UPDATE flare_profile SET manual_pain_day=?, updated_at=? WHERE id=?",
+                    (int(active), time.time(), existing[0]),
+                )
+            else:
+                await self._conn.execute(
+                    """INSERT INTO flare_profile
+                       (updated_at, manual_pain_day, flare_vad_scale)
+                       VALUES (?,?,0.5)""",
+                    (time.time(), int(active)),
+                )
+            await self._conn.commit()
+            log.info("AgentDB: manual_pain_day set to %s", active)
+        except Exception as exc:
+            log.warning("AgentDB.set_manual_pain_day failed: %s", exc)
+
+    async def search_lecture_notes(
+        self,
+        query: str,
+        session_id: int | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Full-text search over ambient_transcripts (lecture mode captures).
+
+        Uses SQLite LIKE for simple substring matching. Returns rows ordered
+        by timestamp descending so most recent results come first.
+
+        Args:
+            query:      Search term — matched as %query% substring.
+            session_id: Restrict to a specific session (None = all sessions).
+            limit:      Max rows to return.
+        """
+        if not self._conn:
+            return []
+        try:
+            like = f"%{query}%"
+            if session_id is not None:
+                rows = await (await self._conn.execute(
+                    """SELECT ts, text, logprob, duration_s
+                       FROM ambient_transcripts
+                       WHERE session_id = ? AND text LIKE ?
+                       ORDER BY ts DESC LIMIT ?""",
+                    (session_id, like, limit),
+                )).fetchall()
+            else:
+                rows = await (await self._conn.execute(
+                    """SELECT ts, text, logprob, duration_s
+                       FROM ambient_transcripts
+                       WHERE text LIKE ?
+                       ORDER BY ts DESC LIMIT ?""",
+                    (like, limit),
+                )).fetchall()
+            return [
+                {"ts": r[0], "text": r[1], "logprob": r[2], "duration_s": r[3]}
+                for r in rows
+            ]
+        except Exception as exc:
+            log.warning("AgentDB.search_lecture_notes failed: %s", exc)
+            return []
+
+    async def insert_ambient_transcript(
+        self,
+        session_id: int,
+        text: str,
+        logprob: float | None = None,
+        duration_s: float | None = None,
+    ) -> None:
+        """Store a transcription that was heard but not routed as a command.
+
+        Captures lecture audio, background conversation, etc. so it can be
+        searched or reviewed later via DevAgent ("search my lecture notes").
+        """
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                """INSERT INTO ambient_transcripts (session_id, ts, text, logprob, duration_s)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, time.time(), text, logprob, duration_s),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.insert_ambient_transcript failed: %s", exc)
 
     async def mark_command_corrected(self, command_id: int, corrected_to: str) -> None:
         if not self._conn or command_id < 0:
@@ -1108,8 +1420,10 @@ class AgentDB:
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (
                     time.time(), component, key,
-                    json.dumps(old_value) if old_value is not None else None,
-                    json.dumps(new_value),
+                    # Avoid double-serialization: if the value is already a JSON
+                    # string (e.g. from PreferenceModel.to_json()), store as-is.
+                    json.dumps(old_value) if (old_value is not None and not isinstance(old_value, str)) else old_value,
+                    new_value if isinstance(new_value, str) else json.dumps(new_value),
                     changed_by,
                 ),
             )
