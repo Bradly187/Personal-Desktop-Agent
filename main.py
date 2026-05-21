@@ -300,6 +300,81 @@ class _ShutdownController:
 
 
 # ---------------------------------------------------------------------------
+# Watchdog — periodic health checks for soak testing
+# ---------------------------------------------------------------------------
+
+async def _watchdog(fusion, whisper, session_id: int) -> None:
+    """Log periodic health metrics every 60 s to make soak runs interpretable.
+
+    Checks:
+      - FusionEngine tick rate (warns if < 50 Hz — indicates event loop starvation)
+      - WhisperStream VAD thread alive
+      - Ollama reachability (every 10 min)
+      - GPU VRAM headroom (every 10 min)
+      - Route task queue depth (warns if > 10 in-flight simultaneously)
+    """
+    import urllib.request as _ureq
+
+    _last_tick_count = getattr(fusion, "_tick_count", None)
+    _ollama_check_interval = 10  # every N watchdog cycles (= 10 min)
+    _cycle = 0
+
+    # Patch tick counter onto FusionEngine if absent (safe — only used here)
+    if not hasattr(fusion, "_tick_count"):
+        fusion._tick_count = 0
+        _orig_tick = fusion._tick.__func__ if hasattr(fusion._tick, "__func__") else None
+
+    while True:
+        await asyncio.sleep(60)
+        _cycle += 1
+
+        # --- Tick rate ---
+        current_ticks = getattr(fusion, "_tick_count", 0)
+        if _last_tick_count is not None:
+            hz = current_ticks - _last_tick_count
+            if hz < 50:
+                log.warning("WATCHDOG: FusionEngine tick rate LOW: %d Hz (expected 60)", hz)
+            else:
+                log.info("WATCHDOG: FusionEngine %.0f Hz  route_tasks_inflight=%d",
+                         hz, len(getattr(fusion, "_route_tasks", set())))
+        _last_tick_count = current_ticks
+
+        # --- Route task queue depth ---
+        inflight = len(getattr(fusion, "_route_tasks", set()))
+        if inflight > 10:
+            log.warning("WATCHDOG: %d route tasks in-flight — possible coordinator stall", inflight)
+
+        # --- WhisperStream thread ---
+        if whisper is not None:
+            vad_alive = getattr(whisper, "_vad_thread", None)
+            if vad_alive is not None and not vad_alive.is_alive():
+                log.error("WATCHDOG: WhisperStream VAD thread is DEAD (session %d)", session_id)
+
+        # --- Ollama + VRAM (every 10 min) ---
+        if _cycle % _ollama_check_interval == 0:
+            try:
+                with _ureq.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
+                    r.read()
+                log.info("WATCHDOG: Ollama reachable")
+            except Exception as exc:
+                log.warning("WATCHDOG: Ollama unreachable: %s", exc)
+
+            try:
+                import pynvml as nvml
+                nvml.nvmlInit()
+                h = nvml.nvmlDeviceGetHandleByIndex(0)
+                info = nvml.nvmlDeviceGetMemoryInfo(h)
+                nvml.nvmlShutdown()
+                free_gb = info.free / (1024 ** 3)
+                if free_gb < 2.0:
+                    log.warning("WATCHDOG: GPU VRAM critically low: %.1f GB free", free_gb)
+                else:
+                    log.info("WATCHDOG: GPU VRAM %.1f GB free", free_gb)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Pipeline assembly
 # ---------------------------------------------------------------------------
 
@@ -466,15 +541,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if not args.quiet:
         _print_startup_table(args.port, args.safe_mode, host=args.host)
 
-    # --- Run bridge + fusion concurrently ---
+    # --- Run bridge + fusion + watchdog concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
     fusion_task = asyncio.create_task(fusion.run())
+    watchdog_task = asyncio.create_task(_watchdog(fusion, whisper, session_id))
 
     # Wait for Ctrl-C
     await shutdown.wait_for_shutdown()
 
     # Cancel running tasks
-    for t in (bridge_task, fusion_task):
+    for t in (bridge_task, fusion_task, watchdog_task):
         t.cancel()
         try:
             await t

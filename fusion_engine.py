@@ -419,6 +419,9 @@ class FusionEngine:
         # --- Wired coordinator ---
         self._coordinator: Optional["HybridCoordinator"] = None
         self._running = False
+        # Tracked set prevents fire-and-forget tasks from being GC'd before completion
+        # and surfaces unhandled exceptions via the done-callback log.
+        self._route_tasks: set = set()
 
     # ---------------------------------------------------------------------- #
     # Wiring
@@ -1182,7 +1185,13 @@ class FusionEngine:
     async def _emit(self, cmd: Command) -> None:
         if self._coordinator:
             # Fire-and-forget: prevents 200-600ms LLM inference from blocking the 60Hz tick loop.
-            asyncio.create_task(self._coordinator.route(cmd))
+            task = asyncio.create_task(self._coordinator.route(cmd))
+            self._route_tasks.add(task)
+            task.add_done_callback(self._route_tasks.discard)
+            task.add_done_callback(
+                lambda t: log.error("FusionEngine route task failed: %s", t.exception())
+                if not t.cancelled() and t.exception() else None
+            )
         else:
             log.warning("FusionEngine: no coordinator set — dropping %r", cmd)
 
@@ -1374,12 +1383,14 @@ class FusionEngine:
 
     async def run(self) -> None:
         self._running = True
+        self._tick_count: int = 0
         interval = 1.0 / self._cfg.tick_hz
         log.info("FusionEngine running at %.0f Hz", self._cfg.tick_hz)
         while self._running:
             t0 = time.monotonic()
             try:
                 await self._tick()
+                self._tick_count += 1
             except Exception as exc:
                 log.error("FusionEngine tick error: %s", exc)
             await asyncio.sleep(max(0.0, interval - (time.monotonic() - t0)))

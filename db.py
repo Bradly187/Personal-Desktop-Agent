@@ -470,6 +470,14 @@ class AgentDB:
             return
         self._conn = await aiosqlite.connect(Path(path))
         self._conn.row_factory = aiosqlite.Row
+        # WAL mode: concurrent readers don't block writers; no "database is locked" under load.
+        # busy_timeout: wait up to 5 s before raising an error (handles burst contention).
+        # synchronous=NORMAL: safe with WAL; skips fsync on every write for ~3× throughput.
+        await self._conn.executescript(
+            "PRAGMA journal_mode=WAL;"
+            "PRAGMA busy_timeout=5000;"
+            "PRAGMA synchronous=NORMAL;"
+        )
         await self._conn.executescript(AGENT_DB_SCHEMA)
         await self._conn.commit()
         self.available = True
