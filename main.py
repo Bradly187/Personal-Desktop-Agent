@@ -402,6 +402,19 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     whisper.set_acoustic_profiler(profiler)
     coordinator.set_whisper_stream(whisper)
     coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
+    coordinator.set_profiler(profiler)
+
+    # Wire VoiceCalibrator
+    from voice_calibrator import VoiceCalibrator
+    try:
+        from polly_stream import get_client as _get_tts
+        _speak_fn = _get_tts().speak_sync
+    except Exception:
+        _speak_fn = None
+    calibrator = VoiceCalibrator(agent_db=agent_db, whisper_stream=whisper, profiler=profiler)
+    if _speak_fn:
+        calibrator.set_tts(_speak_fn)
+    coordinator.set_calibrator(calibrator)
 
     # Wire profiler into twin state for voice clarity pain signal
     if twin_state:

@@ -169,6 +169,7 @@ class WhisperStream:
         self._session_id: int = -1
         self._lecture_mode: bool = False
         self._event_loop = None
+        self._calibration_capture = None
         self._profiler = None
         self._logprob_floor_override: float | None = None
 
@@ -207,6 +208,12 @@ class WhisperStream:
     def set_lecture_mode(self, enabled: bool) -> None:
         """Enable/disable lecture mode — stores non-command audio to AgentDB."""
         self._lecture_mode = enabled
+
+    def set_calibration_capture(self, callback) -> None:
+        """One-shot capture: next transcript goes to callback(text, logprob, duration_s).
+        Set to None to cancel. Used by VoiceCalibrator during guided sessions.
+        """
+        self._calibration_capture = callback
         log.info("WhisperStream: lecture mode %s", "ON" if enabled else "OFF")
 
     def set_awaiting_clarification(self, active: bool) -> None:
@@ -445,6 +452,16 @@ class WhisperStream:
             except Exception as exc:
                 log.warning("WhisperStream: could not write approval response: %s", exc)
             return  # consumed by approval gate — do NOT forward to FusionEngine
+
+        # Calibration capture: one-shot intercept for VoiceCalibrator sessions.
+        # Fires before wake-phrase gate so the user doesn't need "hey agent".
+        if self._calibration_capture is not None:
+            cb = self._calibration_capture
+            self._calibration_capture = None  # consume — one shot only
+            duration_s = len(audio) / self.SAMPLE_RATE
+            log.info("WhisperStream: calibration capture: %r (logprob=%.2f)", text, avg_logprob)
+            cb(text, avg_logprob, duration_s)
+            return  # don't route to FusionEngine
 
         # Post-TTS echo guard: discard transcription results that completed
         # while the mic was suppressed (e.g. Danielle's voice buffered during

@@ -1,0 +1,343 @@
+﻿<svg id="mermaid-1779330402688" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="mindmapDiagram" style="max-width: 1534.3726806640625px;" viewBox="5 5 1534.3726806640625 674.8505249023438" role="graphics-document document" aria-roledescription="mindmap">
+<defs><style>foreignObject div { overflow: visible !important; }</style></defs><style>#mermaid-1779330402688{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#mermaid-1779330402688 .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#mermaid-1779330402688 .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#mermaid-1779330402688 .error-icon{fill:#552222;}#mermaid-1779330402688 .error-text{fill:#552222;stroke:#552222;}#mermaid-1779330402688 .edge-thickness-normal{stroke-width:1px;}#mermaid-1779330402688 .edge-thickness-thick{stroke-width:3.5px;}#mermaid-1779330402688 .edge-pattern-solid{stroke-dasharray:0;}#mermaid-1779330402688 .edge-thickness-invisible{stroke-width:0;fill:none;}#mermaid-1779330402688 .edge-pattern-dashed{stroke-dasharray:3;}#mermaid-1779330402688 .edge-pattern-dotted{stroke-dasharray:2;}#mermaid-1779330402688 .marker{fill:#333333;stroke:#333333;}#mermaid-1779330402688 .marker.cross{stroke:#333333;}#mermaid-1779330402688 svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#mermaid-1779330402688 p{margin:0;}#mermaid-1779330402688 .edge{stroke-width:3;}#mermaid-1779330402688 .section--1 rect,#mermaid-1779330402688 .section--1 path,#mermaid-1779330402688 .section--1 circle,#mermaid-1779330402688 .section--1 polygon,#mermaid-1779330402688 .section--1 path{fill:hsl(240, 100%, 76.2745098039%);}#mermaid-1779330402688 .section--1 text{fill:#ffffff;}#mermaid-1779330402688 .node-icon--1{font-size:40px;color:#ffffff;}#mermaid-1779330402688 .section-edge--1{stroke:hsl(240, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth--1{stroke-width:17;}#mermaid-1779330402688 .section--1 line{stroke:hsl(60, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-0 rect,#mermaid-1779330402688 .section-0 path,#mermaid-1779330402688 .section-0 circle,#mermaid-1779330402688 .section-0 polygon,#mermaid-1779330402688 .section-0 path{fill:hsl(60, 100%, 73.5294117647%);}#mermaid-1779330402688 .section-0 text{fill:black;}#mermaid-1779330402688 .node-icon-0{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-0{stroke:hsl(60, 100%, 73.5294117647%);}#mermaid-1779330402688 .edge-depth-0{stroke-width:14;}#mermaid-1779330402688 .section-0 line{stroke:hsl(240, 100%, 83.5294117647%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-1 rect,#mermaid-1779330402688 .section-1 path,#mermaid-1779330402688 .section-1 circle,#mermaid-1779330402688 .section-1 polygon,#mermaid-1779330402688 .section-1 path{fill:hsl(80, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-1 text{fill:black;}#mermaid-1779330402688 .node-icon-1{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-1{stroke:hsl(80, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-1{stroke-width:11;}#mermaid-1779330402688 .section-1 line{stroke:hsl(260, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-2 rect,#mermaid-1779330402688 .section-2 path,#mermaid-1779330402688 .section-2 circle,#mermaid-1779330402688 .section-2 polygon,#mermaid-1779330402688 .section-2 path{fill:hsl(270, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-2 text{fill:#ffffff;}#mermaid-1779330402688 .node-icon-2{font-size:40px;color:#ffffff;}#mermaid-1779330402688 .section-edge-2{stroke:hsl(270, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-2{stroke-width:8;}#mermaid-1779330402688 .section-2 line{stroke:hsl(90, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-3 rect,#mermaid-1779330402688 .section-3 path,#mermaid-1779330402688 .section-3 circle,#mermaid-1779330402688 .section-3 polygon,#mermaid-1779330402688 .section-3 path{fill:hsl(300, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-3 text{fill:black;}#mermaid-1779330402688 .node-icon-3{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-3{stroke:hsl(300, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-3{stroke-width:5;}#mermaid-1779330402688 .section-3 line{stroke:hsl(120, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-4 rect,#mermaid-1779330402688 .section-4 path,#mermaid-1779330402688 .section-4 circle,#mermaid-1779330402688 .section-4 polygon,#mermaid-1779330402688 .section-4 path{fill:hsl(330, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-4 text{fill:black;}#mermaid-1779330402688 .node-icon-4{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-4{stroke:hsl(330, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-4{stroke-width:2;}#mermaid-1779330402688 .section-4 line{stroke:hsl(150, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-5 rect,#mermaid-1779330402688 .section-5 path,#mermaid-1779330402688 .section-5 circle,#mermaid-1779330402688 .section-5 polygon,#mermaid-1779330402688 .section-5 path{fill:hsl(0, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-5 text{fill:black;}#mermaid-1779330402688 .node-icon-5{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-5{stroke:hsl(0, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-5{stroke-width:-1;}#mermaid-1779330402688 .section-5 line{stroke:hsl(180, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-6 rect,#mermaid-1779330402688 .section-6 path,#mermaid-1779330402688 .section-6 circle,#mermaid-1779330402688 .section-6 polygon,#mermaid-1779330402688 .section-6 path{fill:hsl(30, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-6 text{fill:black;}#mermaid-1779330402688 .node-icon-6{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-6{stroke:hsl(30, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-6{stroke-width:-4;}#mermaid-1779330402688 .section-6 line{stroke:hsl(210, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-7 rect,#mermaid-1779330402688 .section-7 path,#mermaid-1779330402688 .section-7 circle,#mermaid-1779330402688 .section-7 polygon,#mermaid-1779330402688 .section-7 path{fill:hsl(90, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-7 text{fill:black;}#mermaid-1779330402688 .node-icon-7{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-7{stroke:hsl(90, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-7{stroke-width:-7;}#mermaid-1779330402688 .section-7 line{stroke:hsl(270, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-8 rect,#mermaid-1779330402688 .section-8 path,#mermaid-1779330402688 .section-8 circle,#mermaid-1779330402688 .section-8 polygon,#mermaid-1779330402688 .section-8 path{fill:hsl(150, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-8 text{fill:black;}#mermaid-1779330402688 .node-icon-8{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-8{stroke:hsl(150, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-8{stroke-width:-10;}#mermaid-1779330402688 .section-8 line{stroke:hsl(330, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-9 rect,#mermaid-1779330402688 .section-9 path,#mermaid-1779330402688 .section-9 circle,#mermaid-1779330402688 .section-9 polygon,#mermaid-1779330402688 .section-9 path{fill:hsl(180, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-9 text{fill:black;}#mermaid-1779330402688 .node-icon-9{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-9{stroke:hsl(180, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-9{stroke-width:-13;}#mermaid-1779330402688 .section-9 line{stroke:hsl(0, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-10 rect,#mermaid-1779330402688 .section-10 path,#mermaid-1779330402688 .section-10 circle,#mermaid-1779330402688 .section-10 polygon,#mermaid-1779330402688 .section-10 path{fill:hsl(210, 100%, 76.2745098039%);}#mermaid-1779330402688 .section-10 text{fill:black;}#mermaid-1779330402688 .node-icon-10{font-size:40px;color:black;}#mermaid-1779330402688 .section-edge-10{stroke:hsl(210, 100%, 76.2745098039%);}#mermaid-1779330402688 .edge-depth-10{stroke-width:-16;}#mermaid-1779330402688 .section-10 line{stroke:hsl(30, 100%, 86.2745098039%);stroke-width:3;}#mermaid-1779330402688 .disabled,#mermaid-1779330402688 .disabled circle,#mermaid-1779330402688 .disabled text{fill:lightgray;}#mermaid-1779330402688 .disabled text{fill:#efefef;}#mermaid-1779330402688 .section-root rect,#mermaid-1779330402688 .section-root path,#mermaid-1779330402688 .section-root circle,#mermaid-1779330402688 .section-root polygon{fill:hsl(240, 100%, 46.2745098039%);}#mermaid-1779330402688 .section-root text{fill:#ffffff;}#mermaid-1779330402688 .section-root span{color:#ffffff;}#mermaid-1779330402688 .section-2 span{color:#ffffff;}#mermaid-1779330402688 .icon-container{height:100%;display:flex;justify-content:center;align-items:center;}#mermaid-1779330402688 .edge{fill:none;}#mermaid-1779330402688 .mindmap-node-label{dy:1em;alignment-baseline:middle;text-anchor:middle;dominant-baseline:middle;text-align:center;}#mermaid-1779330402688 :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g><marker id="mermaid-1779330402688_mindmap-pointEnd" class="marker mindmap" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><marker id="mermaid-1779330402688_mindmap-pointStart" class="marker mindmap" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path></marker><g class="subgraphs"></g><g class="edgePaths"><path d="M758.785,359.192L775.902,370.769C793.02,382.347,827.254,405.502,861.488,428.657C895.722,451.812,929.957,474.967,947.074,486.544L964.191,498.122" id="edge_0_1" class=" edge-thickness-normal edge-pattern-solid edge section-edge-0 edge-depth-1" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_0_1" data-points="W3sieCI6NzU4Ljc4NTE4NDExNjE5OTYsInkiOjM1OS4xOTE3ODc5NzcyMTQ2fSx7IngiOjg2MS40ODgxNzA0NDM1MDE4LCJ5Ijo0MjguNjU2NzM0NzU1OTUyMjR9LHsieCI6OTY0LjE5MTE1Njc3MDgwMzksInkiOjQ5OC4xMjE2ODE1MzQ2ODk5fV0="></path><path d="M967.357,518.326L960.117,527.553C952.877,536.78,938.398,555.234,923.918,573.688C909.439,592.142,894.96,610.596,887.72,619.823L880.48,629.05" id="edge_1_2" class=" edge-thickness-normal edge-pattern-solid edge section-edge-0 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_1_2" data-points="W3sieCI6OTY3LjM1NjYwMjk4NjY0NSwieSI6NTE4LjMyNjQzODA0MDM5Mzd9LHsieCI6OTIzLjkxODM1Mjg2NDc5OTcsInkiOjU3My42ODc5NzM2NjQzMjY2fSx7IngiOjg4MC40ODAxMDI3NDI5NTQzLCJ5Ijo2MjkuMDQ5NTA5Mjg4MjU5NX1d"></path><path d="M968.774,493.738L965.518,488.43C962.263,483.121,955.751,472.503,949.24,461.885C942.728,451.267,936.216,440.649,932.961,435.34L929.705,430.031" id="edge_1_3" class=" edge-thickness-normal edge-pattern-solid edge section-edge-0 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_1_3" data-points="W3sieCI6OTY4Ljc3NDIzOTU1NjM3MTgsInkiOjQ5My43Mzg0NjY1MjMzNzk4fSx7IngiOjk0OS4yMzk1NDQ2NDUwMjE0LCJ5Ijo0NjEuODg0NzA1NjMyNDU2NjR9LHsieCI6OTI5LjcwNDg0OTczMzY3MSwieSI6NDMwLjAzMDk0NDc0MTUzMzQ2fV0="></path><path d="M991.612,506.857L1020.474,507.497C1049.335,508.136,1107.058,509.414,1164.781,510.692C1222.504,511.97,1280.227,513.248,1309.088,513.887L1337.95,514.526" id="edge_1_4" class=" edge-thickness-normal edge-pattern-solid edge section-edge-0 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_1_4" data-points="W3sieCI6OTkxLjYxMjMyNzU5MDQ2NSwieSI6NTA2Ljg1NzQ4OTk3NjU0NTkzfSx7IngiOjExNjQuNzgxMTEwNjc0ODMzNCwieSI6NTEwLjY5MTc4NTU1OTcyNzI0fSx7IngiOjEzMzcuOTQ5ODkzNzU5MjAxOCwieSI6NTE0LjUyNjA4MTE0MjkwODV9XQ=="></path><path d="M962.303,511.014L948.4,515.374C934.496,519.733,906.689,528.453,878.881,537.173C851.074,545.893,823.267,554.613,809.363,558.972L795.46,563.332" id="edge_1_5" class=" edge-thickness-normal edge-pattern-solid edge section-edge-0 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_1_5" data-points="W3sieCI6OTYyLjMwMzIwODIyMTExNTgsInkiOjUxMS4wMTM2Mzc1MjQ4MzIxfSx7IngiOjg3OC44ODE0MTMxMjc3NDcxLCJ5Ijo1MzcuMTcyOTgxMzI5MzE5fSx7IngiOjc5NS40NTk2MTgwMzQzNzg0LCJ5Ijo1NjMuMzMyMzI1MTMzODA1OX1d"></path><path d="M990.106,513.084L999.853,517.823C1009.601,522.562,1029.096,532.041,1048.59,541.519C1068.085,550.997,1087.58,560.475,1097.327,565.214L1107.075,569.953" id="edge_1_6" class=" edge-thickness-normal edge-pattern-solid edge section-edge-0 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_1_6" data-points="W3sieCI6OTkwLjEwNjA5NjUxNDA4NDEsInkiOjUxMy4wODQyMDU4NzkzNTE0fSx7IngiOjEwNDguNTkwMzcyMDQ3OTM4MiwieSI6NTQxLjUxODc0MjU5MzQxNn0seyJ4IjoxMTA3LjA3NDY0NzU4MTc5MjMsInkiOjU2OS45NTMyNzkzMDc0ODA3fV0="></path><path d="M744.063,335.965L742.043,322.929C740.023,309.893,735.982,283.821,731.942,257.749C727.901,231.678,723.861,205.606,721.841,192.57L719.82,179.534" id="edge_0_7" class=" edge-thickness-normal edge-pattern-solid edge section-edge-1 edge-depth-1" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_0_7" data-points="W3sieCI6NzQ0LjA2MzE0ODg0NjIwODQsInkiOjMzNS45NjQ5NzM3MDIzMjg3fSx7IngiOjczMS45NDE3NzM0MTE1Nzc0LCJ5IjoyNTcuNzQ5NDYxMDUzMzA0MjN9LHsieCI6NzE5LjgyMDM5Nzk3Njk0NjQsInkiOjE3OS41MzM5NDg0MDQyNzk3OH1d"></path><path d="M709.56,151.999L704.585,144.059C699.611,136.118,689.661,120.237,679.712,104.355C669.763,88.474,659.814,72.593,654.839,64.652L649.865,56.712" id="edge_7_8" class=" edge-thickness-normal edge-pattern-solid edge section-edge-1 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_7_8" data-points="W3sieCI6NzA5LjU1OTc4NTQ1MjcxOTEsInkiOjE1MS45OTkzMjk2OTgzMTkzNH0seyJ4Ijo2NzkuNzEyMjg2MzAyNzM1MywieSI6MTA0LjM1NTQ0NzMwODI4NDUxfSx7IngiOjY0OS44NjQ3ODcxNTI3NTEzLCJ5Ijo1Ni43MTE1NjQ5MTgyNDk2NjR9XQ=="></path><path d="M702.578,165.988L680.277,167.893C657.976,169.799,613.375,173.609,568.774,177.42C524.173,181.231,479.571,185.042,457.271,186.947L434.97,188.853" id="edge_7_9" class=" edge-thickness-normal edge-pattern-solid edge section-edge-1 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_7_9" data-points="W3sieCI6NzAyLjU3NzY2MjYwOTIxMjQsInkiOjE2NS45ODc4NTg5NjQ3MjM1fSx7IngiOjU2OC43NzM4MzI0MDMyNzU1LCJ5IjoxNzcuNDIwMjA5MDcwMTA5NjV9LHsieCI6NDM0Ljk3MDAwMjE5NzMzODYsInkiOjE4OC44NTI1NTkxNzU0OTU4fV0="></path><path d="M732.522,164.561L760.84,164.278C789.158,163.995,845.794,163.43,902.43,162.864C959.065,162.298,1015.701,161.732,1044.019,161.449L1072.337,161.167" id="edge_7_10" class=" edge-thickness-normal edge-pattern-solid edge section-edge-1 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_7_10" data-points="W3sieCI6NzMyLjUyMjQ2MDgzNDY2NDEsInkiOjE2NC41NjEwNjI4NjcxNTU3OH0seyJ4Ijo5MDIuNDI5NjM2OTIwNzk4OCwieSI6MTYyLjg2MzgxMjIzMDcyNDJ9LHsieCI6MTA3Mi4zMzY4MTMwMDY5MzM0LCJ5IjoxNjEuMTY2NTYxNTk0MjkyNn1d"></path><path d="M731.584,159.486L743.96,154.887C756.335,150.288,781.087,141.09,805.838,131.892C830.59,122.694,855.342,113.496,867.717,108.897L880.093,104.298" id="edge_7_11" class=" edge-thickness-normal edge-pattern-solid edge section-edge-1 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_7_11" data-points="W3sieCI6NzMxLjU4Mzc0MzU5NjEyNTksInkiOjE1OS40ODU4MjMxNjIzNzE3fSx7IngiOjgwNS44Mzg0OTkzMzM1MDc3LCJ5IjoxMzEuODkxODIxOTA4MDc1NDN9LHsieCI6ODgwLjA5MzI1NTA3MDg4OTQsInkiOjEwNC4yOTc4MjA2NTM3NzkxNn1d"></path><path d="M702.825,161.72L681.669,157.414C660.513,153.109,618.201,144.498,575.889,135.887C533.577,127.276,491.265,118.665,470.109,114.36L448.953,110.054" id="edge_7_12" class=" edge-thickness-normal edge-pattern-solid edge section-edge-1 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_7_12" data-points="W3sieCI6NzAyLjgyNDUwMTk0OTE3OTIsInkiOjE2MS43MTk1NzI4Mzc3MjM5fSx7IngiOjU3NS44ODg2NTM0ODA5MzM3LCJ5IjoxMzUuODg2OTYzMDUxNzYyNDV9LHsieCI6NDQ4Ljk1MjgwNTAxMjY4ODIsInkiOjExMC4wNTQzNTMyNjU4MDEwMX1d"></path><path d="M730.995,171.307L738.397,174.931C745.8,178.555,760.604,185.804,775.409,193.053C790.213,200.301,805.018,207.55,812.42,211.174L819.822,214.798" id="edge_7_13" class=" edge-thickness-normal edge-pattern-solid edge section-edge-1 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_7_13" data-points="W3sieCI6NzMwLjk5NTExMTEyMDQwNjcsInkiOjE3MS4zMDY5NDMyNzM2Mjc4N30seyJ4Ijo3NzUuNDA4Nzk5Mjc3NzYzNSwieSI6MTkzLjA1MjU2MjM1ODYxNDE4fSx7IngiOjgxOS44MjI0ODc0MzUxMjAzLCJ5IjoyMTQuNzk4MTgxNDQzNjAwNX1d"></path><path d="M761.36,350.684L787.145,350.505C812.929,350.325,864.498,349.967,916.067,349.609C967.637,349.251,1019.206,348.892,1044.99,348.713L1070.775,348.534" id="edge_0_14" class=" edge-thickness-normal edge-pattern-solid edge section-edge-2 edge-depth-1" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_0_14" data-points="W3sieCI6NzYxLjM1OTk3NTU3Nzg0MSwieSI6MzUwLjY4MzgwNjIwOTgyMDF9LHsieCI6OTE2LjA2NzQzMjM4MjY5MjksInkiOjM0OS42MDg4NTk2NDg2NjAzfSx7IngiOjEwNzAuNzc0ODg5MTg3NTQ0NywieSI6MzQ4LjUzMzkxMzA4NzUwMDU0fV0="></path><path d="M1071.786,343.014L1061.02,338.846C1050.254,334.678,1028.722,326.341,1007.189,318.005C985.657,309.669,964.125,301.332,953.358,297.164L942.592,292.996" id="edge_14_15" class=" edge-thickness-normal edge-pattern-solid edge section-edge-2 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_14_15" data-points="W3sieCI6MTA3MS43ODYyODA5ODY0MjU1LCJ5IjozNDMuMDE0MDY5MDEwNzQxMn0seyJ4IjoxMDA3LjE4OTIxNTQ5Mjk4NjUsInkiOjMxOC4wMDQ5NzY1NzA4OTI3fSx7IngiOjk0Mi41OTIxNDk5OTk1NDc2LCJ5IjoyOTIuOTk1ODg0MTMxMDQ0MjV9XQ=="></path><path d="M1094.832,360.386L1100.232,367.515C1105.632,374.643,1116.432,388.9,1127.231,403.157C1138.031,417.413,1148.831,431.67,1154.231,438.799L1159.631,445.927" id="edge_14_16" class=" edge-thickness-normal edge-pattern-solid edge section-edge-2 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_14_16" data-points="W3sieCI6MTA5NC44MzE5ODAwNjUxMDcsInkiOjM2MC4zODYzODY0MTkwMjM5NX0seyJ4IjoxMTI3LjIzMTM2OTIyNTIyNSwieSI6NDAzLjE1NjY0NDY2Nzc0OTQ1fSx7IngiOjExNTkuNjMwNzU4Mzg1MzQzMSwieSI6NDQ1LjkyNjkwMjkxNjQ3NDk0fV0="></path><path d="M1100.64,346.423L1125.129,343.118C1149.618,339.813,1198.596,333.203,1247.574,326.593C1296.552,319.982,1345.53,313.372,1370.019,310.067L1394.507,306.762" id="edge_14_17" class=" edge-thickness-normal edge-pattern-solid edge section-edge-2 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_14_17" data-points="W3sieCI6MTEwMC42Mzk3NTA2NTQ1NzY2LCJ5IjozNDYuNDIzNDE5MzcwOTc1N30seyJ4IjoxMjQ3LjU3MzYyNDE5NTY2ODYsInkiOjMyNi41OTI2MTIyNzY3OTI4fSx7IngiOjEzOTQuNTA3NDk3NzM2NzYwNiwieSI6MzA2Ljc2MTgwNTE4MjYwOTl9XQ=="></path><path d="M1100.679,350.116L1124.321,352.79C1147.963,355.464,1195.247,360.812,1242.531,366.161C1289.815,371.509,1337.099,376.858,1360.741,379.532L1384.383,382.206" id="edge_14_18" class=" edge-thickness-normal edge-pattern-solid edge section-edge-2 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_14_18" data-points="W3sieCI6MTEwMC42Nzk0NzkzMjczMjMsInkiOjM1MC4xMTU2MzM1Mzc3NTU0fSx7IngiOjEyNDIuNTMxMTAyNTQ0NTExNywieSI6MzY2LjE2MDg3NTkzMDY1NTV9LHsieCI6MTM4NC4zODI3MjU3NjE3MDA0LCJ5IjozODIuMjA2MTE4MzIzNTU1Nn1d"></path><path d="M1095.769,337.244L1102.015,330.254C1108.262,323.263,1120.755,309.282,1133.248,295.3C1145.741,281.319,1158.234,267.338,1164.48,260.347L1170.726,253.356" id="edge_14_19" class=" edge-thickness-normal edge-pattern-solid edge section-edge-2 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_14_19" data-points="W3sieCI6MTA5NS43NjkwMTU1ODE4MDc1LCJ5IjozMzcuMjQ0NDI0Njk5NzQ4M30seyJ4IjoxMTMzLjI0NzcwNzMzNTM5NywieSI6Mjk1LjMwMDM4OTI5OTEzMTN9LHsieCI6MTE3MC43MjYzOTkwODg5ODY3LCJ5IjoyNTMuMzU2MzUzODk4NTE0MzN9XQ=="></path><path d="M732.574,356.699L711.359,365.796C690.144,374.893,647.714,393.087,605.283,411.281C562.853,429.474,520.422,447.668,499.207,456.765L477.992,465.862" id="edge_0_20" class=" edge-thickness-normal edge-pattern-solid edge section-edge-3 edge-depth-1" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_0_20" data-points="W3sieCI6NzMyLjU3NDI1NDMyNzAwMDIsInkiOjM1Ni42OTkzNjQ2MTIzMDYzNH0seyJ4Ijo2MDUuMjgzMTk5OTc0ODkyMSwieSI6NDExLjI4MDUxODQ2MjgwNjA3fSx7IngiOjQ3Ny45OTIxNDU2MjI3ODM5NCwieSI6NDY1Ljg2MTY3MjMxMzMwNTh9XQ=="></path><path d="M468.605,486.114L471.083,494.192C473.561,502.27,478.516,518.426,483.472,534.583C488.428,550.739,493.383,566.895,495.861,574.974L498.339,583.052" id="edge_20_21" class=" edge-thickness-normal edge-pattern-solid edge section-edge-3 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_20_21" data-points="W3sieCI6NDY4LjYwNDgwNjExMDI5MzEsInkiOjQ4Ni4xMTM1NDgyMjg3MDQ0fSx7IngiOjQ4My40NzE5NjI4MjYwMDc4LCJ5Ijo1MzQuNTgyNjIxODQyMTE1OH0seyJ4Ijo0OTguMzM5MTE5NTQxNzIyNTQsInkiOjU4My4wNTE2OTU0NTU1MjcyfV0="></path><path d="M449.84,476.088L433.768,480.914C417.697,485.741,385.553,495.395,353.41,505.049C321.266,514.702,289.123,524.356,273.051,529.183L256.98,534.01" id="edge_20_22" class=" edge-thickness-normal edge-pattern-solid edge section-edge-3 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_20_22" data-points="W3sieCI6NDQ5LjgzOTk4MTI4NTE0MjI0LCJ5Ijo0NzYuMDg3NjAyODQ4Njk2MjR9LHsieCI6MzUzLjQwOTg2MjMxNDQwMTUsInkiOjUwNS4wNDg2NTA0NTQ3ODgxfSx7IngiOjI1Ni45Nzk3NDMzNDM2NjA3NCwieSI6NTM0LjAwOTY5ODA2MDg4fV0="></path><path d="M479.19,472.476L499.751,473.441C520.313,474.406,561.437,476.336,602.56,478.266C643.684,480.196,684.808,482.126,705.369,483.091L725.931,484.056" id="edge_20_23" class=" edge-thickness-normal edge-pattern-solid edge section-edge-3 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_20_23" data-points="W3sieCI6NDc5LjE4OTU3MDY2NDI4NjQ2LCJ5Ijo0NzIuNDc2MjAwMDU2NDk2fSx7IngiOjYwMi41NjAzODQ3MTc3MjIxLCJ5Ijo0NzguMjY2MTEyMzUzMzc0ODd9LHsieCI6NzI1LjkzMTE5ODc3MTE1NzYsInkiOjQ4NC4wNTYwMjQ2NTAyNTM3M31d"></path><path d="M473.986,483.146L476.645,486.239C479.304,489.331,484.623,495.516,489.941,501.7C495.259,507.885,500.578,514.069,503.237,517.162L505.896,520.254" id="edge_20_24" class=" edge-thickness-normal edge-pattern-solid edge section-edge-3 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_20_24" data-points="W3sieCI6NDczLjk4NjExMTk4MjM4MjUsInkiOjQ4My4xNDYyNTExOTc2NTYwNn0seyJ4Ijo0ODkuOTQwOTY2ODc2ODE5NzQsInkiOjUwMS43MDAxODc4MTkzMjI0fSx7IngiOjUwNS44OTU4MjE3NzEyNTcsInkiOjUyMC4yNTQxMjQ0NDA5ODg4fV0="></path><path d="M449.212,471.368L425.837,470.737C402.463,470.107,355.714,468.845,308.965,467.583C262.216,466.321,215.467,465.06,192.093,464.429L168.718,463.798" id="edge_20_25" class=" edge-thickness-normal edge-pattern-solid edge section-edge-3 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_20_25" data-points="W3sieCI6NDQ5LjIxMTUyMjc5NDc0NTcsInkiOjQ3MS4zNjgzMDU3NDk2NDE5M30seyJ4IjozMDguOTY0OTQ1ODQ4MTM3OSwieSI6NDY3LjU4MzA0MDY3OTI3MTMzfSx7IngiOjE2OC43MTgzNjg5MDE1MzAxNCwieSI6NDYzLjc5Nzc3NTYwODkwMDc0fV0="></path><path d="M731.383,349.971L711.545,348.89C691.707,347.808,652.032,345.645,612.356,343.483C572.681,341.32,533.005,339.157,513.167,338.075L493.33,336.994" id="edge_0_26" class=" edge-thickness-normal edge-pattern-solid edge section-edge-4 edge-depth-1" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_0_26" data-points="W3sieCI6NzMxLjM4MjU3ODk0NDUxMzIsInkiOjM0OS45NzE0ODM0ODEwMDI0NX0seyJ4Ijo2MTIuMzU2MTU1NjYwODkxMSwieSI6MzQzLjQ4MjUwNzc0MzYxNDg2fSx7IngiOjQ5My4zMjk3MzIzNzcyNjkwNywieSI6MzM2Ljk5MzUzMjAwNjIyNzI3fV0="></path><path d="M490.028,326.76L496.282,321.717C502.536,316.673,515.044,306.585,527.552,296.497C540.06,286.41,552.567,276.322,558.821,271.278L565.075,266.235" id="edge_26_27" class=" edge-thickness-normal edge-pattern-solid edge section-edge-4 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_26_27" data-points="W3sieCI6NDkwLjAyNzg5MjkzMzAwMTcsInkiOjMyNi43NjAzNTg1OTEwMjE3fSx7IngiOjUyNy41NTE2MTg2MDQyMTgxLCJ5IjoyOTYuNDk3NDcyMTYzMjA1OX0seyJ4Ijo1NjUuMDc1MzQ0Mjc1NDM0NSwieSI6MjY2LjIzNDU4NTczNTM5MDA2fV0="></path><path d="M464.267,341.335L452.935,345.484C441.603,349.634,418.939,357.933,396.275,366.232C373.611,374.531,350.947,382.829,339.615,386.979L328.283,391.128" id="edge_26_28" class=" edge-thickness-normal edge-pattern-solid edge section-edge-4 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_26_28" data-points="W3sieCI6NDY0LjI2NjU4NzY3MzUxNjksInkiOjM0MS4zMzQ2OTExMDIxNTA0M30seyJ4IjozOTYuMjc0NjU1MTUyOTI5MjYsInkiOjM2Ni4yMzE1NzM2OTc0NDI2fSx7IngiOjMyOC4yODI3MjI2MzIzNDE2MywieSI6MzkxLjEyODQ1NjI5MjczNDh9XQ=="></path><path d="M489.438,346.282L495.405,351.72C501.372,357.159,513.306,368.037,525.24,378.915C537.174,389.792,549.108,400.67,555.075,406.109L561.043,411.547" id="edge_26_29" class=" edge-thickness-normal edge-pattern-solid edge section-edge-4 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_26_29" data-points="W3sieCI6NDg5LjQzNzkwMzgxOTEyMjMsInkiOjM0Ni4yODE1NDg5ODQwNjk3fSx7IngiOjUyNS4yNDAyMjU5NzgyNjc5LCJ5IjozNzguOTE0NTExOTI2NzkyMX0seyJ4Ijo1NjEuMDQyNTQ4MTM3NDEzNCwieSI6NDExLjU0NzQ3NDg2OTUxNDUzfV0="></path><path d="M464.541,330.325L453.56,325.672C442.58,321.02,420.62,311.715,398.66,302.41C376.699,293.105,354.739,283.8,343.759,279.148L332.778,274.495" id="edge_26_30" class=" edge-thickness-normal edge-pattern-solid edge section-edge-4 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_26_30" data-points="W3sieCI6NDY0LjU0MDYzODM1MDA2MTA0LCJ5IjozMzAuMzI0ODkyOTMwNTI3M30seyJ4IjozOTguNjU5NTEzMjc2NDE0OCwieSI6MzAyLjQwOTk1MjE4ODkxNTF9LHsieCI6MzMyLjc3ODM4ODIwMjc2ODYsInkiOjI3NC40OTUwMTE0NDczMDI5fV0="></path><path d="M463.353,336L437.24,335.691C411.127,335.382,358.902,334.765,306.676,334.147C254.45,333.53,202.225,332.912,176.112,332.603L149.999,332.295" id="edge_26_31" class=" edge-thickness-normal edge-pattern-solid edge section-edge-4 edge-depth-3" style="undefined;;;undefined" data-edge="true" data-et="edge" data-id="edge_26_31" data-points="W3sieCI6NDYzLjM1MzAyMjExMzgxMTQsInkiOjMzNS45OTk2NDAzMDY5ODAwNH0seyJ4IjozMDYuNjc1OTg2ODM1MTk4MSwieSI6MzM0LjE0NzA5MDEzMzAwMTI2fSx7IngiOjE0OS45OTg5NTE1NTY1ODQ4LCJ5IjozMzIuMjk0NTM5OTU5MDIyNX1d"></path></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" data-id="edge_0_1" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_1_2" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_1_3" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_1_4" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_1_5" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_1_6" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_0_7" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_7_8" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_7_9" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_7_10" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_7_11" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_7_12" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_7_13" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_0_14" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_14_15" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_14_16" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_14_17" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_14_18" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_14_19" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_0_20" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_20_21" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_20_22" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_20_23" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_20_24" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_20_25" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_0_26" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_26_27" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_26_28" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_26_29" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_26_30" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="edge_26_31" transform="translate(0, 0)"><foreignObject width="0" height="20"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel "></span></div></foreignObject></g></g></g><g class="nodes"><g class="node mindmap-node section-root section--1 " id="node_0" transform="translate(746.360337651386, 350.78802749003944)"><circle class="basic label-container" style="" r="60.2578125" cx="0" cy="0"></circle><g class="label" style="" transform="translate(-50.2578125, -12)"><rect></rect><foreignObject width="100.515625" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel "><p>DesktopAgent</p></span></div></foreignObject></g></g><g class="node mindmap-node section-0 " id="node_1" transform="translate(976.6160032356175, 506.52544202186505)"><path id="node-1" class="node-bkg node-0" style="" d="
+    M-100.5078125 12
+    v-24
+    q0,-5 5,-5
+    h191.015625
+    q5,0 5,5
+    v24
+    q0,5 -5,5
+    h-191.015625
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-100.5078125" y1="17" x2="100.5078125" y2="17"></line><g class="label" style="" transform="translate(-80.5078125, -12)"><rect></rect><foreignObject width="161.015625" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel "><p>Setup and Onboarding</p></span></div></foreignObject></g></g><g class="node mindmap-node section-0 " id="node_2" transform="translate(871.2207024939818, 640.8505053067881)"><path id="node-2" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Install companion on Mac or PC</p></span></div></foreignObject></g></g><g class="node mindmap-node section-0 " id="node_3" transform="translate(921.8630860544253, 417.24396924304824)"><path id="node-3" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Pair iPad via QR code in under 5 min</p></span></div></foreignObject></g></g><g class="node mindmap-node section-0 " id="node_4" transform="translate(1352.9462181140493, 514.8581290975894)"><path id="node-4" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Grant camera microphone motion permissions</p></span></div></foreignObject></g></g><g class="node mindmap-node section-0 " id="node_5" transform="translate(781.1468230198767, 567.8205206367729)"><path id="node-5" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Complete guided calibration wizard</p></span></div></foreignObject></g></g><g class="node mindmap-node section-0 " id="node_6" transform="translate(1120.564740860259, 576.512043164967)"><path id="node-6" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Test first gesture before leaving onboarding</p></span></div></foreignObject></g></g><g class="node mindmap-node section-1 " id="node_7" transform="translate(717.5232091717688, 164.71089461656902)"><path id="node-7" class="node-bkg node-0" style="" d="
+    M-111.140625 12
+    v-24
+    q0,-5 5,-5
+    h212.28125
+    q5,0 5,5
+    v24
+    q0,5 -5,5
+    h-212.28125
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-111.140625" y1="17" x2="111.140625" y2="17"></line><g class="label" style="" transform="translate(-91.140625, -12)"><rect></rect><foreignObject width="182.28125" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel "><p>Daily Accessibility Control</p></span></div></foreignObject></g></g><g class="node mindmap-node section-1 " id="node_8" transform="translate(641.9013634337016, 44)"><path id="node-8" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Control cursor with gaze delta</p></span></div></foreignObject></g></g><g class="node mindmap-node section-1 " id="node_9" transform="translate(420.02445563478216, 190.12952352365028)"><path id="node-9" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Click with peace-sign gesture</p></span></div></foreignObject></g></g><g class="node mindmap-node section-1 " id="node_10" transform="translate(1087.3360646698288, 161.01672984487936)"><path id="node-10" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Dictate text hands-free via voice</p></span></div></foreignObject></g></g><g class="node mindmap-node section-1 " id="node_11" transform="translate(894.1537894952465, 99.07274919958184)"><path id="node-11" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Switch windows by voice command</p></span></div></foreignObject></g></g><g class="node mindmap-node section-1 " id="node_12" transform="translate(434.2540977900986, 107.06303148695588)"><path id="node-12" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Capture screenshot by gesture or voice</p></span></div></foreignObject></g></g><g class="node mindmap-node section-1 " id="node_13" transform="translate(833.2943893837581, 221.39423010065934)"><path id="node-13" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Scroll documents by tilt or gesture</p></span></div></foreignObject></g></g><g class="node mindmap-node section-2 " id="node_14" transform="translate(1085.7745271139997, 348.4296918072812)"><path id="node-14" class="node-bkg node-0" style="" d="
+    M-116.34375 12
+    v-24
+    q0,-5 5,-5
+    h222.6875
+    q5,0 5,5
+    v24
+    q0,5 -5,5
+    h-222.6875
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-116.34375" y1="17" x2="116.34375" y2="17"></line><g class="label" style="" transform="translate(-96.34375, -12)"><rect></rect><foreignObject width="192.6875" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel "><p>Coding and Dev Workflows</p></span></div></foreignObject></g></g><g class="node mindmap-node section-2 " id="node_15" transform="translate(928.6039038719733, 287.58026133450426)"><path id="node-15" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Voice-to-code in VS Code and IntelliJ</p></span></div></foreignObject></g></g><g class="node mindmap-node section-2 " id="node_16" transform="translate(1168.6882113364504, 457.8835975282177)"><path id="node-16" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Navigate SQL schemas by voice</p></span></div></foreignObject></g></g><g class="node mindmap-node section-2 " id="node_17" transform="translate(1409.3727212773374, 304.7555327463044)"><path id="node-17" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Run terminal commands hands-free</p></span></div></foreignObject></g></g><g class="node mindmap-node section-2 " id="node_18" transform="translate(1399.2876779750236, 383.8920600540298)"><path id="node-18" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Read screen content aloud via TTS</p></span></div></foreignObject></g></g><g class="node mindmap-node section-2 " id="node_19" transform="translate(1180.7208875567944, 242.17108679098146)"><path id="node-19" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Generate and explain code via Claude Haiku</p></span></div></foreignObject></g></g><g class="node mindmap-node section-3 " id="node_20" transform="translate(464.20606229839814, 471.7730094355727)"><path id="node-20" class="node-bkg node-0" style="" d="
+    M-111.6015625 12
+    v-24
+    q0,-5 5,-5
+    h213.203125
+    q5,0 5,5
+    v24
+    q0,5 -5,5
+    h-213.203125
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-111.6015625" y1="17" x2="111.6015625" y2="17"></line><g class="label" style="" transform="translate(-91.6015625, -12)"><rect></rect><foreignObject width="183.203125" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel "><p>Pain Day Accommodation</p></span></div></foreignObject></g></g><g class="node mindmap-node section-3 " id="node_21" transform="translate(502.7378633536175, 597.392234248659)"><path id="node-21" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Toggle pain-day mode manually</p></span></div></foreignObject></g></g><g class="node mindmap-node section-3 " id="node_22" transform="translate(242.61366233040485, 538.3242914740035)"><path id="node-22" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Auto-detect from gesture jitter signal</p></span></div></foreignObject></g></g><g class="node mindmap-node section-3 " id="node_23" transform="translate(740.9147071370459, 484.759215271177)"><path id="node-23" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Lower velocity thresholds automatically</p></span></div></foreignObject></g></g><g class="node mindmap-node section-3 " id="node_24" transform="translate(515.6758714552413, 531.6273662030721)"><path id="node-24" class="node-bkg node-0" style="" d="
+    M-114.265625 12
+    v-24
+    q0,-5 5,-5
+    h218.53125
+    q5,0 5,5
+    v24
+    q0,5 -5,5
+    h-218.53125
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-114.265625" y1="17" x2="114.265625" y2="17"></line><g class="label" style="" transform="translate(-94.265625, -12)"><rect></rect><foreignObject width="188.53125" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel "><p>Increase dwell target sizes</p></span></div></foreignObject></g></g><g class="node mindmap-node section-3 " id="node_25" transform="translate(153.7238293978777, 463.39307192296997)"><path id="node-25" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Persist pain-day preference across sessions</p></span></div></foreignObject></g></g><g class="node mindmap-node section-4 " id="node_26" transform="translate(478.3519736703962, 336.1769879971903)"><path id="node-26" class="node-bkg node-0" style="" d="
+    M-110.28125 12
+    v-24
+    q0,-5 5,-5
+    h210.5625
+    q5,0 5,5
+    v24
+    q0,5 -5,5
+    h-210.5625
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-110.28125" y1="17" x2="110.28125" y2="17"></line><g class="label" style="" transform="translate(-90.28125, -12)"><rect></rect><foreignObject width="180.5625" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel "><p>Subscription and Account</p></span></div></foreignObject></g></g><g class="node mindmap-node section-4 " id="node_27" transform="translate(576.75126353804, 256.8179563292215)"><path id="node-27" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Start 14-day free trial on install</p></span></div></foreignObject></g></g><g class="node mindmap-node section-4 " id="node_28" transform="translate(314.1973366354623, 396.286159397695)"><path id="node-28" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Subscribe at 9.99 per month via StoreKit</p></span></div></foreignObject></g></g><g class="node mindmap-node section-4 " id="node_29" transform="translate(572.1284782861395, 421.6520358563939)"><path id="node-29" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Track inference cost per session dashboard</p></span></div></foreignObject></g></g><g class="node mindmap-node section-4 " id="node_30" transform="translate(318.96705288243345, 268.6429163806399)"><path id="node-30" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Export personal calibration data</p></span></div></foreignObject></g></g><g class="node mindmap-node section-4 " id="node_31" transform="translate(135, 332.11719226881223)"><path id="node-31" class="node-bkg node-0" style="" d="
+    M-120 24
+    v-48
+    q0,-5 5,-5
+    h230
+    q5,0 5,5
+    v48
+    q0,5 -5,5
+    h-230
+    q-5,0 -5,-5
+    Z
+  "></path><line class="node-line-" x1="-120" y1="29" x2="120" y2="29"></line><g class="label" style="" transform="translate(-100, -24)"><rect></rect><foreignObject width="200" height="68"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel "><p>Restore purchases on new device</p></span></div></foreignObject></g></g></g></g></svg>

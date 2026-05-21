@@ -388,6 +388,8 @@ class HybridCoordinator:
         self._fusion = None   # set via set_fusion_engine() after FusionEngine is created
         self._pending_clarification: Optional[str] = None
         self._lecture_mode: bool = False
+        self._profiler = None    # set via set_profiler()
+        self._calibrator = None  # set via set_calibrator()
 
         # Gate 3 VRAM cache — avoid calling pynvml on every command
         self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
@@ -402,6 +404,39 @@ class HybridCoordinator:
 
     def set_whisper_stream(self, whisper_stream) -> None:
         self._whisper = whisper_stream
+
+    def set_profiler(self, profiler) -> None:
+        self._profiler = profiler
+
+    def set_calibrator(self, calibrator) -> None:
+        self._calibrator = calibrator
+
+    def add_personal_corrections(self, corrections: dict) -> None:
+        """Merge condition-specific corrections into the live _VOICE_CORRECTIONS map."""
+        global _VOICE_CORRECTIONS
+        for heard, expected in corrections.items():
+            if heard not in _VOICE_CORRECTIONS:
+                _VOICE_CORRECTIONS[heard] = expected
+                log.info("Personal correction loaded: %r → %r", heard, expected)
+
+    async def _switch_condition(self, condition: str) -> None:
+        """Load and apply a voice profile for the given condition."""
+        if self._profiler and hasattr(self._profiler, 'load'):
+            await self._profiler.load(condition)
+            if self._whisper:
+                await self._profiler.apply_to(self._whisper, coordinator=self)
+            log.info("Condition switched to: %s", condition)
+
+    async def _run_calibration(self, condition: str, quick: bool) -> None:
+        """Start a guided voice calibration session."""
+        if self._calibrator:
+            report = await self._calibrator.run(condition=condition, quick=quick)
+            # Apply the newly built profile immediately
+            await self._switch_condition(condition)
+            log.info(
+                "Calibration complete: condition=%s accuracy=%.0f%% corrections=%d",
+                report.condition, report.accuracy * 100, report.corrections_added,
+            )
 
     def set_fusion_engine(self, fusion_engine) -> None:
         """Wire FusionEngine so pain-day thresholds propagate on each route()."""
@@ -490,6 +525,44 @@ class HybridCoordinator:
                     self._whisper._silence_thresh = vad
                     log.info("Pain day OFF — VAD restored to %.3f", vad)
                 return {"status": "ok", "action": "PAIN_DAY", "enabled": False}
+
+            # Condition switching — loads calibrated voice profile for condition
+            _CONDITION_TRIGGERS: dict[str, str] = {
+                "this is a good day":      "good_day",
+                "good day mode":           "good_day",
+                "feeling well":            "good_day",
+                "this is a flare day":     "flare_day",
+                "flare day":               "flare_day",
+                "flare mode":              "flare_day",
+                "this is an allergy day":  "allergy_day",
+                "allergy day":             "allergy_day",
+                "allergy mode":            "allergy_day",
+                "having an svt":           "svt_attack",
+                "svt attack":              "svt_attack",
+                "svt mode":                "svt_attack",
+                "this is an svt day":      "svt_attack",
+            }
+            if _lower in _CONDITION_TRIGGERS and self._profiler:
+                condition = _CONDITION_TRIGGERS[_lower]
+                asyncio.create_task(self._switch_condition(condition))
+                return {"status": "ok", "action": "CONDITION_SWITCH",
+                        "condition": condition}
+
+            # Calibration triggers
+            _CALIBRATION_TRIGGERS: dict[str, tuple[str, bool]] = {
+                "run voice calibration":   ("good_day",    False),
+                "calibrate my voice":      ("good_day",    False),
+                "quick calibration":       ("good_day",    True),
+                "calibrate flare day":     ("flare_day",   False),
+                "calibrate allergy day":   ("allergy_day", False),
+                "calibrate svt":           ("svt_attack",  False),
+                "calibrate svt attack":    ("svt_attack",  False),
+            }
+            if _lower in _CALIBRATION_TRIGGERS and self._calibrator:
+                condition, quick = _CALIBRATION_TRIGGERS[_lower]
+                asyncio.create_task(self._run_calibration(condition, quick))
+                return {"status": "ok", "action": "CALIBRATION_START",
+                        "condition": condition, "quick": quick}
 
         t0 = time.monotonic()
         route_label = "local"

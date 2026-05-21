@@ -371,6 +371,39 @@ CREATE TABLE IF NOT EXISTS flare_profile (
     notes               TEXT
 );
 
+-- Voice calibration sessions — one row per calibration run.
+CREATE TABLE IF NOT EXISTS voice_calibration_sessions (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        REAL    NOT NULL,
+    condition TEXT    NOT NULL,  -- good_day | flare_day | allergy_day | svt_attack
+    notes     TEXT
+);
+
+-- Per-phrase calibration results captured during a session.
+CREATE TABLE IF NOT EXISTS voice_pronunciations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER NOT NULL REFERENCES voice_calibration_sessions(id),
+    ts            REAL    NOT NULL,
+    expected      TEXT    NOT NULL,
+    heard         TEXT    NOT NULL,
+    logprob       REAL,
+    duration_s    REAL,
+    accepted      INTEGER NOT NULL DEFAULT 1  -- 1=used in profile, 0=rejected
+);
+CREATE INDEX IF NOT EXISTS idx_vp_session ON voice_pronunciations(session_id);
+CREATE INDEX IF NOT EXISTS idx_vp_expected ON voice_pronunciations(expected);
+
+-- Compiled voice profiles — one row per condition, updated after each session.
+CREATE TABLE IF NOT EXISTS voice_profiles (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    condition        TEXT    NOT NULL UNIQUE,
+    corrections_json TEXT    NOT NULL DEFAULT '{}',
+    vad_threshold    REAL    NOT NULL DEFAULT 0.015,
+    logprob_floor    REAL    NOT NULL DEFAULT -0.8,
+    initial_prompt   TEXT,
+    updated_at       REAL    NOT NULL
+);
+
 -- Lecture mode transcriptions: speech heard while lecture mode is active.
 -- Captures lecture audio for later search and review via DevAgent.
 CREATE TABLE IF NOT EXISTS ambient_transcripts (
@@ -730,6 +763,98 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.search_lecture_notes failed: %s", exc)
             return []
+
+    # ---------------------------------------------------------------------- #
+    # Voice calibration
+    # ---------------------------------------------------------------------- #
+
+    async def start_calibration_session(self, condition: str, notes: str = "") -> int:
+        if not self._conn:
+            return -1
+        cur = await self._conn.execute(
+            "INSERT INTO voice_calibration_sessions (ts, condition, notes) VALUES (?,?,?)",
+            (time.time(), condition, notes),
+        )
+        await self._conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    async def insert_pronunciation(
+        self,
+        session_id: int,
+        expected: str,
+        heard: str,
+        logprob: float | None = None,
+        duration_s: float | None = None,
+    ) -> None:
+        if not self._conn:
+            return
+        await self._conn.execute(
+            """INSERT INTO voice_pronunciations
+               (session_id, ts, expected, heard, logprob, duration_s)
+               VALUES (?,?,?,?,?,?)""",
+            (session_id, time.time(), expected, heard, logprob, duration_s),
+        )
+        await self._conn.commit()
+
+    async def save_voice_profile(
+        self,
+        condition: str,
+        corrections: dict,
+        vad_threshold: float,
+        logprob_floor: float,
+        initial_prompt: str | None = None,
+    ) -> None:
+        if not self._conn:
+            return
+        await self._conn.execute(
+            """INSERT INTO voice_profiles
+               (condition, corrections_json, vad_threshold, logprob_floor,
+                initial_prompt, updated_at)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(condition) DO UPDATE SET
+                 corrections_json=excluded.corrections_json,
+                 vad_threshold=excluded.vad_threshold,
+                 logprob_floor=excluded.logprob_floor,
+                 initial_prompt=excluded.initial_prompt,
+                 updated_at=excluded.updated_at""",
+            (condition, json.dumps(corrections), vad_threshold,
+             logprob_floor, initial_prompt, time.time()),
+        )
+        await self._conn.commit()
+
+    async def load_voice_profile(self, condition: str) -> dict | None:
+        if not self._conn:
+            return None
+        cur = await self._conn.execute(
+            "SELECT corrections_json, vad_threshold, logprob_floor, initial_prompt "
+            "FROM voice_profiles WHERE condition=?",
+            (condition,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return {
+            "corrections": json.loads(row[0]),
+            "vad_threshold": row[1],
+            "logprob_floor": row[2],
+            "initial_prompt": row[3],
+        }
+
+    async def get_all_pronunciations(self, condition: str) -> list[dict]:
+        """Return all accepted pronunciations for a condition across all sessions."""
+        if not self._conn:
+            return []
+        cur = await self._conn.execute(
+            """SELECT vp.expected, vp.heard, vp.logprob, vp.duration_s
+               FROM voice_pronunciations vp
+               JOIN voice_calibration_sessions vcs ON vp.session_id = vcs.id
+               WHERE vcs.condition=? AND vp.accepted=1
+               ORDER BY vp.ts DESC""",
+            (condition,),
+        )
+        rows = await cur.fetchall()
+        return [{"expected": r[0], "heard": r[1], "logprob": r[2], "duration_s": r[3]}
+                for r in rows]
 
     async def insert_ambient_transcript(
         self,

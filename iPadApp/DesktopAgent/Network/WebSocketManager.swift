@@ -55,6 +55,9 @@ final class WebSocketManager: ObservableObject {
     /// Feed of re-calibration requests from the PC (voice drift or seasonal prompt).
     let recalibrationFeed = PassthroughSubject<RecalibrationRequest, Never>()
 
+    /// Feed of voice calibration events from the PC (phrase prompts, results, completion).
+    let calibrationEventPublisher = PassthroughSubject<CalibrationEvent, Never>()
+
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
 
@@ -274,6 +277,34 @@ final class WebSocketManager: ObservableObject {
             let pct     = json["degradation_pct"] as? Double ?? 0.0
             recalibrationFeed.send(RecalibrationRequest(reason: reason, degradationPct: pct))
             parsed = .unknown(type: type, raw: json)
+
+        case "calibration_phrase":
+            // PC → iPad: present the next phrase to the user
+            let phrase = json["phrase"]  as? String ?? ""
+            let index  = json["index"]   as? Int    ?? 0
+            let total  = json["total"]   as? Int    ?? 0
+            calibrationEventPublisher.send(.phrasePrompt(phrase: phrase, index: index, total: total))
+            parsed = .unknown(type: type, raw: json)
+
+        case "calibration_result":
+            // PC → iPad: result for the phrase just spoken
+            let expected = json["expected"] as? String ?? ""
+            let heard    = json["heard"]    as? String ?? ""
+            let matched  = json["matched"]  as? Bool   ?? false
+            calibrationEventPublisher.send(.phraseResult(expected: expected, heard: heard, matched: matched))
+            parsed = .unknown(type: type, raw: json)
+
+        case "calibration_complete":
+            let accuracy    = json["accuracy"]     as? Double ?? 0.0
+            let corrections = json["corrections"]  as? Int    ?? 0
+            calibrationEventPublisher.send(.complete(accuracy: accuracy, correctionsAdded: corrections))
+            parsed = .unknown(type: type, raw: json)
+
+        case "calibration_error":
+            let msg = json["message"] as? String ?? "Unknown calibration error"
+            calibrationEventPublisher.send(.error(msg))
+            parsed = .unknown(type: type, raw: json)
+
         default:
             parsed = .unknown(type: type, raw: json)
         }
@@ -428,6 +459,18 @@ extension WebSocketManager {
 
     func sendAudioStream(samplesBase64: String, frames: Int) {
         send(["type": "audio_stream", "samples": samplesBase64, "frames": frames])
+    }
+
+    // MARK: — Voice calibration
+
+    /// Tell the PC to start a guided calibration session.
+    func sendCalibrationStart(condition: String, quick: Bool) {
+        send(["type": "calibration_start", "condition": condition, "quick": quick])
+    }
+
+    /// Cancel an in-progress calibration session.
+    func sendCalibrationCancel() {
+        send(["type": "calibration_cancel"])
     }
 
     /// Notify the PC of a manual pain-day override so it immediately

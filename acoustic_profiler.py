@@ -176,6 +176,8 @@ class AcousticProfiler:
         self._sample_count: int = 0
 
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._active_condition: str = "good_day"
+        self._condition_corrections: dict = {}
 
         # Sprint C — continuous re-calibration
         self._total_commands: int = 0
@@ -214,8 +216,13 @@ class AcousticProfiler:
                 self._event_loop,
             )
 
-    async def load(self) -> None:
-        """Load stored profile from AgentDB and apply thresholds."""
+    async def load(self, condition: str | None = None) -> None:
+        """Load stored profile from AgentDB and apply thresholds.
+
+        If condition is provided (good_day/flare_day/allergy_day/svt_attack),
+        loads that condition's calibrated corrections and threshold overrides
+        from voice_profiles table in addition to the baseline acoustic profile.
+        """
         try:
             self._event_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -243,6 +250,39 @@ class AcousticProfiler:
         flare = await self._db.get_flare_profile()
         if flare and flare.get("flare_vad_scale"):
             self._flare_vad_scale = flare["flare_vad_scale"]
+
+        # Load condition-specific calibrated overrides if requested
+        if condition:
+            self._active_condition = condition
+            cond_profile = await self._db.load_voice_profile(condition)
+            if cond_profile:
+                if cond_profile.get("vad_threshold"):
+                    self._vad_threshold = cond_profile["vad_threshold"]
+                if cond_profile.get("logprob_floor"):
+                    self._logprob_floor = cond_profile["logprob_floor"]
+                self._condition_corrections = cond_profile.get("corrections", {})
+                log.info(
+                    "AcousticProfiler: condition %r applied — vad=%.3f logprob=%.2f "
+                    "corrections=%d",
+                    condition, self._vad_threshold, self._logprob_floor,
+                    len(self._condition_corrections),
+                )
+            else:
+                log.info(
+                    "AcousticProfiler: no calibration for %r — using acoustic defaults",
+                    condition,
+                )
+
+    async def apply_to(self, whisper_stream, coordinator=None) -> None:
+        """Push the active profile to WhisperStream and optionally the coordinator."""
+        whisper_stream.set_acoustic_profiler(self)
+        corrections = getattr(self, "_condition_corrections", {})
+        if coordinator and corrections:
+            coordinator.add_personal_corrections(corrections)
+            log.info(
+                "AcousticProfiler: applied %d personal corrections to coordinator",
+                len(corrections),
+            )
 
     # ── Recording ──────────────────────────────────────────────────────────
 

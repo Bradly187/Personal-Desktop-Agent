@@ -442,7 +442,10 @@ private struct SoundDetailView: View {
 
 private struct AudioDetailView: View {
     @ObservedObject var streamer: AudioStreamer
+    @EnvironmentObject var wsManager: WebSocketManager
     @Environment(\.appTheme) private var theme
+
+    @State private var showVoiceCalibration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
@@ -460,6 +463,18 @@ private struct AudioDetailView: View {
             Text("50ms chunks, base64 over WebSocket.")
                 .font(DesignTokens.Typography.caption)
                 .foregroundStyle(theme.textSecondary)
+
+            // Voice calibration entry point
+            Button("Calibrate My Voice…") {
+                showVoiceCalibration = true
+            }
+            .font(DesignTokens.Typography.caption)
+            .foregroundStyle(theme.accent)
+            .padding(.top, DesignTokens.Spacing.xs)
+            .accessibilityLabel("Open voice calibration — teach the system how your voice sounds today")
+            .sheet(isPresented: $showVoiceCalibration) {
+                VoiceCalibrationSheet(wsManager: wsManager)
+            }
         }
     }
 }

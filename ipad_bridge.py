@@ -411,6 +411,23 @@ class IPadBridge:
             await self._ack(ws, msg.get("id"), "ok", "pain_day_override applied")
             return
 
+        if msg_type == "calibration_start":
+            condition = msg.get("condition", "good_day")
+            quick = bool(msg.get("quick", False))
+            log.info("ipad_bridge: calibration_start condition=%s quick=%s", condition, quick)
+            if self._coordinator and self._coordinator._calibrator:
+                asyncio.create_task(
+                    self._run_calibration_with_progress(ws, condition, quick)
+                )
+            await self._ack(ws, msg.get("id"), "ok", "calibration started")
+            return
+
+        if msg_type == "calibration_cancel":
+            if self._coordinator and self._coordinator._calibrator:
+                self._coordinator._calibrator.stop()
+            await self._ack(ws, msg.get("id"), "ok", "calibration cancelled")
+            return
+
         if msg_type == "audio_stream":
             if self._whisper and self._whisper.available:
                 samples_b64 = msg.get("samples", "")
@@ -423,6 +440,71 @@ class IPadBridge:
 
         log.warning("Unknown message type: %s", msg_type)
         await self._ack(ws, msg_id, "error", f"unknown type: {msg_type}")
+
+    # ---------------------------------------------------------------------- #
+    # Voice calibration — PC drives the session, iPad shows progress
+    # ---------------------------------------------------------------------- #
+
+    async def _run_calibration_with_progress(
+        self,
+        ws: web.WebSocketResponse,
+        condition: str,
+        quick: bool,
+    ) -> None:
+        """Run VoiceCalibrator and stream phrase/result events back to iPad."""
+        calibrator = self._coordinator._calibrator
+
+        def _on_progress(index: int, total: int, result) -> None:
+            # Called from the event loop (via asyncio.create_task inside run())
+            asyncio.create_task(ws.send_json({
+                "type": "calibration_result",
+                "expected": result.expected,
+                "heard": result.heard,
+                "matched": result.match,
+            }))
+
+        # Monkey-patch VoiceCalibrator to also send phrase prompts to the iPad
+        original_speak = calibrator._speak_safe
+
+        def _speak_with_ipad(text: str) -> None:
+            original_speak(text)
+            # Extract phrase from "Say: <phrase>" prompts
+            if text.lower().startswith("say:"):
+                phrase = text[4:].strip()
+                # We'll send phrase prompts in the next iteration's ack
+                # Store for the progress callback to pick up
+                self._pending_calibration_phrase = phrase
+
+        calibrator._speak_safe = _speak_with_ipad
+
+        try:
+            report = await calibrator.run(
+                condition=condition,
+                quick=quick,
+                on_progress=lambda idx, total, result: (
+                    _on_progress(idx, total, result),
+                    asyncio.create_task(ws.send_json({
+                        "type": "calibration_phrase",
+                        "phrase": getattr(self, "_pending_calibration_phrase", ""),
+                        "index": idx,
+                        "total": total,
+                    })) if idx < total else None,
+                ),
+            )
+            await ws.send_json({
+                "type": "calibration_complete",
+                "accuracy": round(report.accuracy, 3),
+                "corrections": report.corrections_added,
+                "condition": report.condition,
+            })
+        except Exception as exc:
+            log.error("ipad_bridge: calibration error: %s", exc)
+            await ws.send_json({
+                "type": "calibration_error",
+                "message": str(exc),
+            })
+        finally:
+            calibrator._speak_safe = original_speak
 
     # ---------------------------------------------------------------------- #
     # touch_command — routed through FusionEngine (priority 1)

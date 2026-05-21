@@ -198,3 +198,69 @@ New tests: `test_fusion_fixes.py` (24), `test_acoustic_profiler.py` (18), `test_
 - Whisper large-v3 GPU load: **2.5s** (cached), **~4.2 GB VRAM**
 - VRAM headroom: ~14 GB free for additional models
 - Gate distribution: 91% bypass, 9% gate2_complexity (still too sparse for threshold tuning)
+
+---
+
+## Afternoon Session — App Store Privacy + Commercial Roadmap
+
+### App Store Privacy Disclosure
+
+Completed the full App Store privacy label for the DesktopAgent iPad app. Key decisions:
+
+| Data Type | Usage Purpose | Notes |
+|---|---|---|
+| Audio Data | App Functionality | Voice commands → WhisperStream; Amazon Transcribe cloud fallback |
+| Photos or Videos | App Functionality | Camera frames streamed to PC; ScreenshotStore |
+| Hands | App Functionality | MediaPipe HandLandmarker for 13-gesture vocabulary |
+| Head | App Functionality | ARKit face anchor for head pose + gaze tracking |
+| Environment Scanning | App Functionality | LiDAR depth for gesture Z-validation |
+| Other User Content | App Functionality | HandwritingCanvasView → pix2tex OCR |
+| Product Interaction | App Functionality | Commands + routing logged to agent.db |
+| Crash Data | App Functionality | Apple system crash reporting only |
+| Health | **Not selected** | Pain-day inference is on-device gesture math, not health data |
+| Location | **Not selected** | LiDAR is environment scan, not GPS |
+| Sensitive Info | **Not selected** | RA accommodation is calibration parameter, not medical record |
+
+Accessibility: **No** (VoiceOver/DynamicType/DarkMode not yet implemented — honest answer).
+Content Rights: No third-party content.
+Accessibility URL: Skipped (no public website).
+
+---
+
+### Commercialization Analysis
+
+Full gap analysis conducted. Key findings:
+
+- **Architecture decision:** Option A (iPad + Companion App) — ship a native Mac/Windows companion, not a cloud backend
+- **Biggest blocker:** RTX 5090 hard dependency — must be replaced with cloud inference for general users
+- **Cloud inference target:** Claude Haiku (`claude-haiku-4-5`) via direct API or Bedrock; $0.80/$4.00 per 1M tokens; estimated <$0.10/user/day
+- **Mac-first:** companion app targets Mac before Windows; iPad + Mac is the likely user profile
+- **No medical device claims:** market as "hands-free desktop control for people with limited hand mobility"
+- **Pricing:** $9.99/month subscription via StoreKit; 14-day free trial; covers cloud inference cost
+
+---
+
+### 7-Phase Commercial Roadmap
+
+| Phase | Dates | Mode | Goal |
+|---|---|---|---|
+| 1 — Hardening | May–Jul '26 | Full-time | 8hr session without restart |
+| 2 — Coursework | Jul–Sep '26 | Full-time | Hands-free DB + OOP coursework |
+| 3 — GPU removal | Sep–Nov '26 | Part-time | Works on MacBook M4 via Haiku |
+| 4 — Companion app | Nov '26–Feb '27 | Part-time | 10-min install by non-technical user |
+| 5 — Multi-user | Feb–Apr '27 | Part-time+ | 10 external beta users onboarded |
+| 6 — Commercial infra | Apr–Jun '27 | Part-time | App Store submission accepted |
+| 7 — Launch | Jul–Sep '27 | Flexible | 100 subscribers / $1K MRR |
+
+Fall semester target: App stable for database class (SQL navigation, DBeaver) + OOP class (VS Code voice-to-code).
+
+---
+
+### Diagrams Generated
+
+Three Mermaid diagrams rendered and saved to `docs/diagrams/` (PNG + SVG):
+
+- **`domain-model`** — Class diagram: User/Subscription/Device/Session hierarchy + pipeline (FusionEngine → HybridCoordinator → ClaudeHaikuInference / OllamaInference → CommandExecutor)
+- **`database-schema`** — ERD: 12 tables — 4 new commercial (USERS, SUBSCRIPTIONS, DEVICES, INFERENCE_COSTS) + 8 existing extended with user_id FK
+- **`user-stories`** — Mindmap: 5 epics (Setup, Daily Control, Coding/Dev, Pain Day, Subscription)
+
