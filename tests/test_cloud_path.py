@@ -6,8 +6,7 @@ Covers:
   3. Voice-misrecognition disambiguation (cloud-specific guidance)
   4. Graceful degradation — bad credentials → CLARIFY (no crash)
   5. Gate 0 (privacy) force-local — cloud is never invoked for sensitive text
-  6. AgentCoreFallbackClient.resolve() fall-through to raw Bedrock when AgentCore
-     returns CLARIFY
+  6. ContentFilter scrubs secrets before cloud transmission
 
 Run:
     python tests/test_cloud_path.py
@@ -82,7 +81,7 @@ async def test_gate2_routes_to_cloud() -> tuple[bool, str]:
     mock_cloud = AsyncMock(return_value="CLOSE")
     mock_execute = AsyncMock(return_value={"status": "ok"})
 
-    cfg = CoordinatorConfig(agentcore_enabled=False)
+    cfg = CoordinatorConfig()
     coord = HybridCoordinator(config=cfg)
     coord._cloud.infer = mock_cloud
     coord._execute_action = mock_execute
@@ -148,7 +147,7 @@ async def test_gate0_blocks_cloud_for_sensitive_text() -> tuple[bool, str]:
     mock_local = AsyncMock(return_value="TYPE ****")
     mock_execute = AsyncMock(return_value={"status": "ok"})
 
-    cfg = CoordinatorConfig(agentcore_enabled=False)
+    cfg = CoordinatorConfig()
     coord = HybridCoordinator(config=cfg)
     coord._cloud.infer = mock_cloud
     coord._local.infer = mock_local
@@ -169,29 +168,28 @@ async def test_gate0_blocks_cloud_for_sensitive_text() -> tuple[bool, str]:
 # Test 6: AgentCore fall-through to raw Bedrock
 # ---------------------------------------------------------------------------
 
-async def test_agentcore_clarify_falls_through_to_bedrock() -> tuple[bool, str]:
-    """When AgentCore returns CLARIFY cloud*, _run_cloud falls through to Bedrock."""
-    mock_agentcore = AsyncMock(return_value="CLARIFY cloud unavailable")
-    mock_bedrock = AsyncMock(return_value="CLOSE")
-    mock_execute = AsyncMock(return_value={"status": "ok"})
+async def test_cloud_content_filter_scrubs_secrets() -> tuple[bool, str]:
+    """ContentFilter scrubs secrets before cloud transmission."""
+    from unittest.mock import AsyncMock as _AM
+    from content_filter import ContentFilter
 
-    from agentcore_fallback.client import AgentCoreFallbackClient, FallbackConfig
-    agentcore_client = AgentCoreFallbackClient(FallbackConfig())
-    agentcore_client.resolve = mock_agentcore
+    mock_bedrock = _AM(return_value="CLARIFY")
+    mock_execute = _AM(return_value={"status": "ok"})
 
-    cfg = CoordinatorConfig(agentcore_enabled=True)
-    coord = HybridCoordinator(config=cfg, agentcore_client=agentcore_client)
+    coord = HybridCoordinator(config=CoordinatorConfig())
     coord._cloud.infer = mock_bedrock
     coord._execute_action = mock_execute
+    coord._content_filter = ContentFilter()
 
-    cmd = _complex_cmd("close the window and then open Chrome")
+    cmd = _complex_cmd("my password is secret123 close the window and open Chrome")
     await coord.route(cmd)
 
-    if not mock_agentcore.called:
-        return False, "AgentCore.resolve() was never called"
     if not mock_bedrock.called:
-        return False, "Bedrock fallback was not called after AgentCore returned CLARIFY"
-    return True, "AgentCore→Bedrock fall-through works correctly"
+        return False, "Bedrock was never called"
+    transmitted_text = mock_bedrock.call_args[0][0].text
+    if "secret123" in transmitted_text:
+        return False, f"Secret not scrubbed — Bedrock received: {transmitted_text!r}"
+    return True, "ContentFilter scrubbed secret before cloud transmission"
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +234,7 @@ async def run_tests() -> int:
         ("Cloud resolves voice misrecognition",        test_cloud_resolves_voice_misrecognition),
         ("Bad credentials → CLARIFY (no crash)",       test_cloud_bad_credentials_returns_clarify),
         ("Gate 0 blocks cloud for sensitive text",     test_gate0_blocks_cloud_for_sensitive_text),
-        ("AgentCore CLARIFY falls through to Bedrock", test_agentcore_clarify_falls_through_to_bedrock),
+        ("ContentFilter scrubs secrets before cloud",  test_cloud_content_filter_scrubs_secrets),
         ("Gate 1 vocabulary correction (5 cases)",     test_gate1_vocab_correction),
         ("Gate 1 retranscribe — no audio fallback",    test_gate1_retranscribe_no_audio),
     ]

@@ -108,9 +108,8 @@ iPad Sensors → WebSocket → ipad_bridge.py → FusionEngine (priority routing
 ├── domain_classifier.py       # Route to specialist models
 ├── model_router.py            # VRAM-aware model selection
 ├── sensor_viewer.py           # Desktop viewer: camera + depth + overlays + snapshot (tkinter)
-├── health_viz.py              # Cosmic nebula system health visualization (pygame-ce)
 ├── dev_agent.py               # Plan→execute→reflect for dev tasks
-├── local_inference.py         # Ollama / vLLM / Nemotron backends
+├── local_inference.py         # Ollama / vLLM backends
 ├── mcp_server/                # MCP server (16 tools for Claude)
 │   ├── desktop_mcp_server.py
 │   └── tools/ (mouse, keyboard, screen, windows, handwriting)
@@ -156,31 +155,6 @@ Set `SAFE_MODE=1` to block destructive tools during testing.
 The MCP server automatically initializes the audit log on startup, recording all tool invocations to `audit.db`. If `audit_log.py` or `aiosqlite` is unavailable, the server runs without audit recording.
 
 All tool outputs are scanned by the `MCPTrustClassifier` before being returned to the LLM. If the classifier detects injection patterns (prompt injection, command injection, data exfiltration), high-risk results are blocked and logged. The classifier loads gracefully — if `mcp_trust_classifier.py` is unavailable, the server operates without output scanning.
-
-## Health Visualization
-
-A cosmic nebula visualization of system health. Particles swirl outward from the center in spiral arms, creating a depth effect. Health metrics drive color (cyan-teal → golden amber → coral → deep rose), rotation speed, particle density, and arm structure.
-
-```bash
-pip install pygame-ce
-python health_viz.py
-python health_viz.py --width 1000 --height 700 --fps 36
-```
-
-CPU usage drives rotation speed and arm brightness. GPU VRAM/util drives core glow intensity. Temperature shifts the palette warmer. Process count and network connections control particle density. Press `Esc` or `Q` to quit.
-
-### Temperature Monitoring
-
-GPU temperature is read via pynvml (always available when an NVIDIA GPU is present). CPU package temperature requires LibreHardwareMonitor or OpenHardwareMonitor running with its WMI provider exposed — install the `wmi` Python package (`pip install wmi`). If neither WMI namespace is available, CPU temp reports as 0 and the visualization continues without it.
-
-Thermal thresholds used for color mapping and error scoring:
-
-| Range | Meaning |
-|-------|---------|
-| < 40 °C | Cool (green) |
-| 40–65 °C | Warm (transition) |
-| 65–80 °C | Hot (amber/warning) |
-| > 90 °C | Critical (red, adds to error count) |
 
 ## Sensor Viewer
 

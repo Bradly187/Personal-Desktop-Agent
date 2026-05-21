@@ -240,6 +240,10 @@ class GestureProcessor:
         # Per-gesture debounce
         self._last_fired: dict[str, float] = {}
 
+        # Gestures disabled by user assessment (GestureAssessmentSheet → iPad → bridge)
+        # Maps base gesture names: "PINCH", "POINT", "OPEN_PALM", "FIST"
+        self._disabled_gestures: set[str] = set()
+
         # Grab (MOUSEDOWN) state
         self._grabbing: bool = False
         self._grab_origin: Optional[tuple[float, float]] = None
@@ -599,7 +603,25 @@ class GestureProcessor:
         dz = z_vals[-1][1] - z_vals[0][1]
         return dz / dt
 
+    def set_disabled_gestures(self, gestures: set[str]) -> None:
+        """Update the set of gestures disabled by user assessment.
+
+        Called by IPadBridge when the iPad sends a gesture_assessment message.
+        Gesture names match those from GestureAssessmentSheet:
+        "PINCH", "POINT", "OPEN_PALM", "FIST"
+        """
+        self._disabled_gestures = {g.upper() for g in gestures}
+        log.info(
+            "GestureProcessor: disabled gestures updated: %s",
+            self._disabled_gestures or "none",
+        )
+
     def _debounced(self, gesture: str) -> bool:
+        # Respect user-assessed gesture disabilities from onboarding
+        base = gesture.split("_")[0]  # "PEACE_SWIPE_UP" → "PEACE" not matched; exact names for 4 basics
+        if gesture in self._disabled_gestures or base in self._disabled_gestures:
+            log.debug("GestureProcessor: %r disabled by user assessment — skipping", gesture)
+            return False
         now = time.monotonic()
         if now - self._last_fired.get(gesture, 0.0) < self._debounce_s:
             return False

@@ -12,36 +12,35 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–6 complete + sensor-refinement + async perf (2026-05-18)
+## Current Status — Phases 1–6 complete + sensor-refinement + gesture-rewrite (2026-05-19)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
 **Done (Phase 2):**
 - `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz; gaze delta cursor integration (relative eye movement → cursor), sound actions, tilt/head direct-to-pyautogui
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
-- `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090), `NemotronInference`
+- `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090)
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app (41 Swift source files, 15 Swift test files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `ScientificKeypadView`, `HandwritingCanvasView`, `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`, `OnboardingView`, `SensorDashboardView`, `SensorActivityBar`, `GazeCalibrationSheet`, `TiltCalibrationSheet`, `SoundTrainingSheet`, `CursorConflictBanner`, `CommandToast`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
+- `iPadApp/DesktopAgent/` — SwiftUI app (41 Swift source files, 15 Swift test files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `HandwritingCanvasView` (Write tab — Math+Text mode, Click & Send), `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`, `OnboardingView`, `SensorDashboardView`, `SensorActivityBar`, `GazeCalibrationSheet`, `TiltCalibrationSheet`, `SoundTrainingSheet`, `CursorConflictBanner`, `CommandToast`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
 
 **Done (Phase 3):**
-- `gesture_processor.py` — MediaPipe Hands; POINT/PINCH/OPEN_PALM/FIST; LiDAR depth integration; 800 ms debounce
+- `gesture_processor.py` — MediaPipe Tasks API (`HandLandmarker`); peace-sign base pose; 13-gesture vocabulary (PEACE_SWIPE_*, TWO_FINGER_GRAB/RELEASE, GRAB_SNAP_*, GRAB_NEXT/PREV_MONITOR, OPEN_PUSH/PULL, PINCH); 500ms rolling frame buffer; velocity learning; 800ms debounce
 - `lidar_receiver.py` — Decodes `depth_frame` messages; confidence-map filtering; `get_depth_at()`
 - `domain_classifier.py` — Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL
 - `model_router.py` — VRAM-aware specialist model selection; 2 GB tolerance; domain-tuned prompts; fallback chain per domain
 - `dev_agent.py` — Plan→execute→reflect agentic loop; 5 dev verbs; session context
 
 **Done (Phase 4):**
-- `continuous_trainer.py` — Routing threshold adaptation; few-shot ranking; gesture confidence floors; delegates storage to `AgentDB`
+- `continuous_trainer.py` — Routing threshold adaptation; few-shot ranking; gesture confidence floors; velocity-floor calibration (p10 of observed samples, −30% on pain days); delegates all storage to `AgentDB`
 - `main.py` — Unified entry point; `--measure-vram`; startup status table; Ctrl-C shutdown
 - `benchmark_models.py` — Ollama model benchmark; p50/p95 latency; VRAM snapshots; `--vllm` flag for VLLMInference comparison
 - `whisper_stream.py` — GPU-accelerated speech; Silero VAD + faster-whisper; preserves audio bytes in `Command.params` for Gate 1 Transcribe re-transcription
-- `db.py` — `AgentDB` (aiosqlite, 12 tables) + `AnalyticsDB` (DuckDB); MiniLM semantic few-shot retrieval
-- `migrate.py` — One-time migration from legacy files (trainer.db, routing_log.jsonl, benchmark_results.json) to new DB layer
+- `db.py` — `AgentDB` (aiosqlite, 14 tables) + `AnalyticsDB` (DuckDB); MiniLM semantic few-shot retrieval; +2 tables for gesture velocity learning (gesture_velocity_samples, gesture_velocity_calibration)
 
 **Done (Phase 6 — cloud fallback):**
 - `hybrid_coordinator.py` — `_retranscribe()`: Stage 1 phonetic vocabulary correction (6 misrecognitions, 0ms), Stage 2 Amazon Transcribe streaming (activates when `pip install amazon-transcribe`); Gate 1 route label propagated to executor
 - `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Danielle neural, 16kHz PCM) sidecar-down fallback for CLARIFY; primary path uses `polly_stream.get_client().speak_sync()`; SEARCH_WEB URL-encoded via `urllib.parse`
-- Cloud path: raw Bedrock `us.anthropic.claude-haiku-4-5-20251001-v1:0` (8/8 accuracy on voice misrecognitions); AgentCore (Strands + LTM memory) code complete in `agentcore_fallback/`, deployment deferred (bedrock-agentcore 1.9.0 CLI missing)
+- Cloud path: raw Bedrock `us.anthropic.claude-haiku-4-5-20251001-v1:0` (8/8 accuracy on voice misrecognitions); AgentCore deployment deferred and source deleted — raw Bedrock is the active cloud path
 
 **Done (LiDAR gesture depth + Settings UI + housekeeping — 2026-05-16):**
 - `LiDARStreamer.swift` — ARWorldTrackingConfiguration + `.smoothedSceneDepth`; 5 fps depth / 10 fps camera; serialises `depth_frame` (float32 + uint8 conf) and `camera_frame` (JPEG 480px) matching PC bridge protocol; publishes UIImages for debug view
@@ -49,7 +48,6 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `lidar_receiver.py` bug fix: `is_fresh()` compared `time.monotonic()` vs Unix timestamp (always True after first frame); fixed to use `_recv_mono`
 - `gesture_processor.py`: `pinch_dist_mm` renamed `pinch_z_delta_mm` (Z-axis delta only, not 3D Euclidean)
 - `chatterbox_tts.py` — local GPU TTS backend; `ChatterboxClient` mirrors `PollyStreamClient` interface; emotion exaggeration, paralinguistic tags, zero-shot voice cloning via audio prompt; dispatched from `polly_stream.get_client()` when `tts_backend == "chatterbox"` in `approval_config.json`
-- `health_viz.py` — cosmic nebula system health visualisation; CPU/GPU metrics drive particle density and colour
 - `start_agent.bat` — Windows startup script; launches `main.py` with rolling log to `logs/agent_startup.log`
 - Settings UI: keyword list, sound mappings, command pad editor all migrated from read-only `Text` to editable `TextField` bindings
 - Approval hook bug fix: `log` was undefined (NameError on PC-mic fallback); fixed with `import logging` + logger instance
@@ -73,7 +71,16 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `DAConnectionBanner.swift` — added `.allowsHitTesting(isDisconnected)`; removed `.contentShape(Rectangle())`
 - Tests: `OverlayTouchInterceptionTests.swift` (bug condition geometry), `OverlayPreservationTests.swift` (17 preservation property tests)
 
-**Test suite (2026-05-17):** 262 pytest tests + 30 standalone integration scripts + 15 Swift XCTest files = 307 total
+**Done (Minority Report gestures + dead code removal — 2026-05-19):**
+- `gesture_processor.py` — complete rewrite: static-pose classifier → two-finger spatial motion detection. Base pose is peace sign (index+middle extended). 13-gesture vocabulary; 500ms rolling frame buffer; axis-dominance debounce; LiDAR-validated grab depth; `compute_peace_jitter()` inflammation signal; `drain_velocity_samples()` for ContinuousTrainer
+- `db.py` — +2 tables: `gesture_velocity_samples`, `gesture_velocity_calibration`; +4 methods: `record_gesture_velocity`, `get_recent_gesture_velocities`, `update_gesture_velocity_calibration`, `get_gesture_velocity_floor`
+- `continuous_trainer.py` — `gesture_processor=` param; `record_success()` drains velocity queue; `_update_gesture_velocity_calibration()`: velocity_floor = p10(observed), pain_day → ×0.70; calibrated thresholds pushed back to GestureProcessor
+- `HandwritingCanvasView.swift` — enhanced Write tab (replaces Keypad tab): Math mode (pix2tex), Text mode (on-device VNRecognizeTextRequest); Click & Send action; editable result field; tabs reduced from 6→5
+- Dead code deleted: `migrate.py` (migration already run), `health_viz.py` (zero accessibility value), `agentcore_fallback/` (deployment deferred, CLI missing), `NemotronInference` class (25% accuracy)
+- `approval_config.json` — gate narrowed: Bash/PowerShell/Agent → voice approval; Edit/Write/Read/Glob/Grep/WebSearch/WebFetch → silent
+- CI: `.github/workflows/build-ipad-app.yml` — `continue-on-error: true` on artifact upload (transient ECONNRESET)
+
+**Test suite (2026-05-19):** 262 pytest tests + 30 standalone integration scripts + 15 Swift XCTest files = 307 total
 
 ## Run Commands
 
@@ -149,22 +156,21 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `mcp_server/tools/handwriting.py` | pix2tex LaTeX OCR; latex_to_unicode fallback converter |
 | `fusion_engine.py` | 60 Hz tick loop; 10-level sensor priority; direct pyautogui for tilt/head |
 | `hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); AWS Bedrock fallback; outcome logger |
-| `local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (complete; needs CUDA 13.x torch to activate), `NemotronInference` |
-| `continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture confidence floors; delegates all storage to `AgentDB` |
+| `local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (complete; needs CUDA 13.x torch to activate) |
+| `continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
 | `lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
 | `behavioral_twin_state.py` | Persistent user behaviour model: `TwinSnapshot`, `PreferenceModel`, `PainDayEngine`; AgentDB + ChromaDB backing; feeds `HybridCoordinator` before every gate decision |
 | `semantic_memory.py` | ChromaDB vector store (all-MiniLM-L6-v2) for semantic few-shot retrieval; Jaccard fallback when chromadb unavailable; `stop()` releases WAL file handles on Windows |
 | `one_euro_filter.py` | Casiez 2012 adaptive low-pass filter (1€); used for tilt velocity, tilt position, gaze delta, head tracking — replaces EMA throughout sensor pipelines |
 | `gyro_bias_calibrator.py` | Gyro bias state machine (UNCALIBRATED→COLLECTING→CALIBRATED→FROZEN); stationary detection + lerp-smoothed bias subtraction for tilt velocity pipeline |
-| `gesture_processor.py` | MediaPipe Tasks API (`HandLandmarker`, `hand_landmarker.task`); POINT/PINCH/PALM/FIST; LiDAR Z-axis depth for pinch; 800 ms debounce |
+| `gesture_processor.py` | MediaPipe Tasks API (`HandLandmarker`, `hand_landmarker.task`); peace-sign base pose; 13 gestures (swipe/grab/snap/monitor/push-pull/pinch); 500ms rolling buffer; velocity learning; 800ms debounce |
 | `domain_classifier.py` | Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL |
 | `model_router.py` | VRAM-aware specialist model selection; domain-tuned prompts; Ollama inference |
 | `dev_agent.py` | Plan→execute→reflect agentic loop; 5 dev verbs; session context |
 | `main.py` | Unified entry point; `--measure-vram`; `--viewer`/`--viewer-only`; startup status table; Ctrl-C shutdown |
 | `sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
 | `whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
-| `db.py` | `AgentDB` (aiosqlite, 12 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval |
-| `migrate.py` | One-time migration from legacy trainer.db / routing_log.jsonl / benchmark_results.json to new DB layer; run once then delete |
+| `db.py` | `AgentDB` (aiosqlite, 14 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity tables for continuous calibration |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
 | `polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
 | `chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
@@ -172,7 +178,6 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `approval_hook.py` | Claude Code `PreToolUse` gate; Danielle speaks action description; records iPad mic via WhisperStream signal file or PC mic fallback; yes/no → exit 0/2 |
 | `audit_log.py` | Append-only `audit.db` (SQLite WAL); records every MCP tool invocation, session lifecycle event, and security finding; UPDATE/DELETE blocked by triggers |
 | `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device (`"Microphone (Realtek USB Audio)"`), timeout, tts_backend |
-| `health_viz.py` | Cosmic nebula system health visualisation; CPU/GPU/VRAM metrics drive particle density, rotation speed, and palette |
 | `start_agent.bat` | Windows startup script; activates venv and runs `main.py`; logs to `logs/agent_startup.log` |
 
 ## Polly TTS Voice
