@@ -45,6 +45,8 @@ def _make_twin(
     twin._session_start_ts = time.monotonic() - max(elapsed_s, 1e-9)
     twin._working_set = working_set if working_set is not None else []
     twin._pain_day_active = pain_day_active
+    twin._acoustic_profiler = None   # added via set_acoustic_profiler(); not set by __new__
+    twin._manual_pain_day = False    # added via set_manual_pain_day(); not set by __new__
     return twin
 
 

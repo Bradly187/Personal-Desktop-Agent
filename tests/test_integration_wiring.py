@@ -96,6 +96,18 @@ class MockAgentDB:
     async def get_hotwords(self):
         return []
 
+    async def record_gesture_velocity(self, gesture, velocity_px_s, command_id=None):
+        pass
+
+    async def get_recent_gesture_velocities(self, gesture, limit=500):
+        return []
+
+    async def update_gesture_velocity_calibration(self, gesture, velocity_floor, n_samples, p10):
+        pass
+
+    async def get_gesture_velocity_floor(self, gesture):
+        return 0.0
+
 
 @dataclass
 class MockCommand:

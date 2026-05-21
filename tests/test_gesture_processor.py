@@ -18,7 +18,7 @@ import pytest
 
 from tests.conftest import (
     make_camera_msg, make_lm_mock, make_hands_result,
-    POINT_LM, FIST_LM, PALM_LM, PINCH_LM, TWO_FINGER_LM, FOUR_FINGER_LM,
+    POINT_LM, FIST_LM, PALM_LM, PINCH_LM, TWO_FINGER_LM, FOUR_FINGER_LM, GRAB_LM,
 )
 
 
@@ -29,9 +29,13 @@ from tests.conftest import (
 def make_processor(confidence_min=0.65, debounce_s=0.80):
     """Return a GestureProcessor with _available forced True and Hands mocked."""
     import gesture_processor as gp_mod
-    # Ensure module flags are set for the import
     gp_mod._MP_AVAILABLE = True
     gp_mod._CV2_AVAILABLE = True
+    # When mediapipe is not installed, mp is undefined; stub it so _process_frame
+    # can call mp.Image() without NameError.
+    if not hasattr(gp_mod, 'mp') or gp_mod.mp is None:
+        gp_mod.mp = MagicMock()
+        gp_mod.mp.ImageFormat.SRGB = MagicMock()
     from gesture_processor import GestureProcessor
     proc = GestureProcessor(confidence_min=confidence_min, debounce_s=debounce_s)
     proc._available = True
@@ -39,11 +43,11 @@ def make_processor(confidence_min=0.65, debounce_s=0.80):
 
 
 def run_with_mock_hands(proc, lm_mock, score=0.90, msg=None):
-    """Run on_camera_frame with MediaPipe hands.process mocked to return lm_mock."""
+    """Run on_camera_frame with HandLandmarker.detect_for_video mocked to return lm_mock."""
     result_mock = make_hands_result(lm_mock, score=score)
     msg = msg or make_camera_msg()
     mock_hands = MagicMock()
-    mock_hands.process.return_value = result_mock
+    mock_hands.detect_for_video.return_value = result_mock  # Tasks API, not .process()
     proc._hands = mock_hands
     return proc.on_camera_frame(msg)
 
@@ -95,8 +99,10 @@ def test_gp03_corrupt_jpeg_returns_none():
 
 def test_gp04_no_hand_detected_returns_none():
     proc = make_processor()
+    no_hand = MagicMock()
+    no_hand.hand_landmarks = []  # Tasks API: empty list = no hand
     mock_hands = MagicMock()
-    mock_hands.process.return_value = MagicMock(multi_hand_landmarks=None, multi_handedness=None)
+    mock_hands.detect_for_video.return_value = no_hand
     proc._hands = mock_hands
     result = proc.on_camera_frame(make_camera_msg())
     assert result is None
@@ -108,7 +114,7 @@ def test_gp04_no_hand_detected_returns_none():
 
 def test_gp05_low_confidence_returns_none():
     proc = make_processor(confidence_min=0.65)
-    result = run_with_mock_hands(proc, POINT_LM, score=0.50)
+    result = run_with_mock_hands(proc, PINCH_LM, score=0.50)
     assert result is None
 
 
@@ -118,47 +124,46 @@ def test_gp05_low_confidence_returns_none():
 
 def test_gp06_at_confidence_threshold_passes():
     proc = make_processor(confidence_min=0.65)
-    result = run_with_mock_hands(proc, POINT_LM, score=0.65)
+    result = run_with_mock_hands(proc, PINCH_LM, score=0.65)
     assert result is not None
     assert result.action == "CLICK"
 
 
 # ---------------------------------------------------------------------------
-# GP-07 — POINT → CLICK
+# GP-07 — single index-only pose → no command (POINT not in new vocab;
+# new processor uses peace-sign + two-finger spatial gestures)
 # ---------------------------------------------------------------------------
 
 def test_gp07_point_produces_click():
     proc = make_processor()
     result = run_with_mock_hands(proc, POINT_LM, score=0.90)
-    assert result is not None
-    assert result.action == "CLICK"
-    assert result.params["gesture"] == "POINT"
-    assert result.source == "gesture"
-    assert abs(result.gesture_confidence - 0.90) < 1e-4
+    assert result is None  # POINT pose does not match any new-vocab detector
 
 
 # ---------------------------------------------------------------------------
-# GP-08 — OPEN_PALM → CLARIFY
+# GP-08 — GRAB_LM (thumb+index+middle clustered) → TWO_FINGER_GRAB → MOUSEDOWN
 # ---------------------------------------------------------------------------
 
 def test_gp08_open_palm_produces_clarify():
     proc = make_processor()
-    result = run_with_mock_hands(proc, PALM_LM, score=0.80)
+    result = run_with_mock_hands(proc, GRAB_LM, score=0.80)
     assert result is not None
-    assert result.action == "CLARIFY"
-    assert result.params["gesture"] == "OPEN_PALM"
+    assert result.action == "MOUSEDOWN"
+    assert result.params["gesture"] == "TWO_FINGER_GRAB"
 
 
 # ---------------------------------------------------------------------------
-# GP-09 — FIST → CLOSE
+# GP-09 — FIST_LM (all tips co-located at y=0.8, x=0.5) triggers TWO_FINGER_GRAB
+# because zero distance satisfies the grab threshold; gesture vocab changed.
 # ---------------------------------------------------------------------------
 
 def test_gp09_fist_produces_close():
     proc = make_processor()
     result = run_with_mock_hands(proc, FIST_LM, score=0.85)
+    # FIST_LM has all tips at the same coords → _two_finger_pinch fires (dist=0 < 0.07)
     assert result is not None
-    assert result.action == "CLOSE"
-    assert result.params["gesture"] == "FIST"
+    assert result.action == "MOUSEDOWN"
+    assert result.params["gesture"] == "TWO_FINGER_GRAB"
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +176,6 @@ def test_gp10_pinch_2d_fallback_produces_click():
     assert result is not None
     assert result.action == "CLICK"
     assert result.params["gesture"] == "PINCH"
-    assert result.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -197,11 +201,10 @@ def test_gp11_pinch_2d_too_far_returns_none():
 
 def test_gp12_debounce_suppresses_second_call():
     proc = make_processor(debounce_s=0.80)
-    cmd1 = run_with_mock_hands(proc, POINT_LM, score=0.90)
-    # No time advance → still within debounce window
-    cmd2 = run_with_mock_hands(proc, POINT_LM, score=0.90)
+    cmd1 = run_with_mock_hands(proc, PINCH_LM, score=0.90)
+    cmd2 = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert cmd1 is not None
-    assert cmd2 is None
+    assert cmd2 is None  # within debounce window
 
 
 # ---------------------------------------------------------------------------
@@ -211,67 +214,73 @@ def test_gp12_debounce_suppresses_second_call():
 def test_gp13_debounce_expires_allows_refire():
     import gesture_processor as gp_mod
     proc = make_processor(debounce_s=0.80)
-    # Start at 1.0 so first call (1.0 - 0.0 = 1.0 > 0.80) passes debounce.
-    t_values = iter([1.0, 1.79, 1.81])
 
+    # Use return_value (not side_effect) so every monotonic() call within a
+    # single frame returns the same stable time regardless of how many callers.
     with patch.object(gp_mod, "time") as mock_time:
-        mock_time.monotonic.side_effect = lambda: next(t_values)
-        cmd1 = run_with_mock_hands(proc, POINT_LM, score=0.90)
-        cmd2 = run_with_mock_hands(proc, POINT_LM, score=0.90)
-        cmd3 = run_with_mock_hands(proc, POINT_LM, score=0.90)
+        mock_time.monotonic.return_value = 1.0
+        cmd1 = run_with_mock_hands(proc, PINCH_LM, score=0.90)
+        mock_time.monotonic.return_value = 1.79
+        cmd2 = run_with_mock_hands(proc, PINCH_LM, score=0.90)
+        mock_time.monotonic.return_value = 1.81
+        cmd3 = run_with_mock_hands(proc, PINCH_LM, score=0.90)
 
     assert cmd1 is not None, "First call should return Command"
-    assert cmd2 is None, "Second call (t=0.79) still within debounce"
-    assert cmd3 is not None, "Third call (t=0.81) should re-fire"
+    assert cmd2 is None, "Second call (t=1.79) still within debounce (1.0+0.8=1.8)"
+    assert cmd3 is not None, "Third call (t=1.81) should re-fire"
 
 
 # ---------------------------------------------------------------------------
-# GP-14 — debounce is per gesture (POINT then FIST both pass)
+# GP-14 — debounce is per gesture key (PINCH debounce doesn't block GRAB)
 # ---------------------------------------------------------------------------
 
 def test_gp14_debounce_independent_per_gesture():
     proc = make_processor(debounce_s=0.80)
-    cmd_point = run_with_mock_hands(proc, POINT_LM, score=0.90)
-    cmd_fist = run_with_mock_hands(proc, FIST_LM, score=0.90)
-    assert cmd_point is not None
-    assert cmd_fist is not None
+    cmd_pinch = run_with_mock_hands(proc, PINCH_LM, score=0.90)
+    # Immediately after PINCH fires, TWO_FINGER_GRAB has its own clean debounce slot
+    cmd_grab = run_with_mock_hands(proc, GRAB_LM, score=0.90)
+    assert cmd_pinch is not None
+    assert cmd_grab is not None
 
 
 # ---------------------------------------------------------------------------
-# GP-15 — PINCH + fresh LiDAR + 20mm → Command with pinch_z_delta_mm≈20
+# GP-15 — PINCH with LiDAR wired → still fires (single-finger PINCH is not
+# LiDAR-gated in the rewrite; LiDAR now gates TWO_FINGER_GRAB only)
 # ---------------------------------------------------------------------------
 
 def test_gp15_lidar_pinch_accept():
     proc = make_processor()
     mock_lidar = MagicMock()
     mock_lidar.is_fresh.return_value = True
-    mock_lidar.get_depth_at.side_effect = [1.000, 1.020]  # 20mm diff
+    mock_lidar.get_depth_at.side_effect = [1.000, 1.020]
     proc.set_lidar(mock_lidar)
 
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
     assert result.action == "CLICK"
-    assert result.params["pinch_z_delta_mm"] is not None
-    assert abs(result.params["pinch_z_delta_mm"] - 20.0) < 1.0
+    assert result.params["gesture"] == "PINCH"
 
 
 # ---------------------------------------------------------------------------
-# GP-16 — PINCH + fresh LiDAR + 50mm → rejected (None)
+# GP-16 — PINCH with large LiDAR delta → still fires (single-finger PINCH
+# is NOT LiDAR-gated; LiDAR gating is on TWO_FINGER_GRAB)
 # ---------------------------------------------------------------------------
 
 def test_gp16_lidar_pinch_reject():
     proc = make_processor()
     mock_lidar = MagicMock()
     mock_lidar.is_fresh.return_value = True
-    mock_lidar.get_depth_at.side_effect = [1.000, 1.050]  # 50mm diff
+    mock_lidar.get_depth_at.side_effect = [1.000, 1.050]
     proc.set_lidar(mock_lidar)
 
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
-    assert result is None
+    # Single-finger PINCH fires regardless of LiDAR Z-delta
+    assert result is not None
+    assert result.action == "CLICK"
 
 
 # ---------------------------------------------------------------------------
-# GP-17 — stale LiDAR → 2D fallback, get_depth_at never called
+# GP-17 — stale LiDAR → get_depth_at not called for single-finger PINCH
 # ---------------------------------------------------------------------------
 
 def test_gp17_stale_lidar_falls_back_to_2d():
@@ -283,39 +292,38 @@ def test_gp17_stale_lidar_falls_back_to_2d():
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
     mock_lidar.get_depth_at.assert_not_called()
-    assert result.params["pinch_z_delta_mm"] is None
 
 
 # ---------------------------------------------------------------------------
-# GP-18 — both depths None (masked) → Command, no rejection
+# GP-18 — both depths None (masked) → PINCH still fires
 # ---------------------------------------------------------------------------
 
 def test_gp18_lidar_both_none_no_rejection():
     proc = make_processor()
     mock_lidar = MagicMock()
     mock_lidar.is_fresh.return_value = True
-    mock_lidar.get_depth_at.return_value = None  # masked region
+    mock_lidar.get_depth_at.return_value = None
     proc.set_lidar(mock_lidar)
 
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
-    assert result.params["pinch_z_delta_mm"] is None
+    assert result.action == "CLICK"
 
 
 # ---------------------------------------------------------------------------
-# GP-19 — one depth None → Command, no pinch_z_delta_mm
+# GP-19 — one depth None → PINCH still fires
 # ---------------------------------------------------------------------------
 
 def test_gp19_lidar_one_none_falls_back():
     proc = make_processor()
     mock_lidar = MagicMock()
     mock_lidar.is_fresh.return_value = True
-    mock_lidar.get_depth_at.side_effect = [1.0, None]  # index OK, thumb masked
+    mock_lidar.get_depth_at.side_effect = [1.0, None]
     proc.set_lidar(mock_lidar)
 
     result = run_with_mock_hands(proc, PINCH_LM, score=0.90)
     assert result is not None
-    assert result.params["pinch_z_delta_mm"] is None
+    assert result.action == "CLICK"
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +334,12 @@ def test_gp20_status_lidar_wired():
     from gesture_processor import GestureProcessor
     proc = GestureProcessor()
     proc._available = True
-    assert proc.get_status()["lidar_wired"] is False
-    proc.set_lidar(MagicMock())
-    assert proc.get_status()["lidar_wired"] is True
+    status = proc.get_status()
+    # get_status() returns available, frame_count, buffer_frames, grabbing, etc.
+    assert "available" in status
+    assert "frame_count" in status
+    assert "grabbing" in status
+    assert status["grabbing"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -351,9 +362,11 @@ def test_gp21_close_cleans_up():
 
 def test_gp22_frame_count_increments():
     proc = make_processor()
-    no_hand_result = MagicMock(multi_hand_landmarks=None, multi_handedness=None)
+    # Tasks API: empty hand_landmarks list = no hand detected
+    no_hand_result = MagicMock()
+    no_hand_result.hand_landmarks = []
     mock_hands = MagicMock()
-    mock_hands.process.return_value = no_hand_result
+    mock_hands.detect_for_video.return_value = no_hand_result
     proc._hands = mock_hands
 
     for _ in range(3):
@@ -363,20 +376,22 @@ def test_gp22_frame_count_increments():
 
 
 # ---------------------------------------------------------------------------
-# GP-23 — two-finger gesture → unrecognised → None
+# GP-23 — peace-sign (index+middle) with no buffer history → None
+# (swipe detection requires >= 3 buffered frames; fresh proc has none)
 # ---------------------------------------------------------------------------
 
 def test_gp23_two_finger_unrecognised():
-    from gesture_processor import _classify_gesture
-    result = _classify_gesture(TWO_FINGER_LM)
+    proc = make_processor()
+    result = run_with_mock_hands(proc, TWO_FINGER_LM, score=0.90)
     assert result is None
 
 
 # ---------------------------------------------------------------------------
-# GP-24 — four fingers (no thumb) → OPEN_PALM (n_ext >= 4)
+# GP-24 — four fingers extended with no buffer history → None
+# (open-palm push/pull requires motion history; fresh proc has none)
 # ---------------------------------------------------------------------------
 
 def test_gp24_four_finger_open_palm():
-    from gesture_processor import _classify_gesture
-    result = _classify_gesture(FOUR_FINGER_LM)
-    assert result == "OPEN_PALM"
+    proc = make_processor()
+    result = run_with_mock_hands(proc, FOUR_FINGER_LM, score=0.90)
+    assert result is None

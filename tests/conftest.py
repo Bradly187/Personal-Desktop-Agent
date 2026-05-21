@@ -82,15 +82,20 @@ def make_lm_mock(
 
 
 def make_hands_result(lm: MagicMock, score: float = 0.90, label: str = "Right") -> MagicMock:
-    """Wrap a landmark mock in a MediaPipe process() result mock."""
+    """Wrap a landmark mock in a MediaPipe Tasks API HandLandmarkerResult mock.
+
+    Tasks API shape (used by HandLandmarker.detect_for_video):
+      result.hand_landmarks[0]    — list of 21 NormalizedLandmark (with .x, .y, .z)
+      result.handedness[0][0]     — Category with .score and .display_name
+    """
     result = MagicMock()
-    result.multi_hand_landmarks = [lm]
-    cls = MagicMock()
-    cls.score = score
-    cls.label = label
-    handed = MagicMock()
-    handed.classification = [cls]
-    result.multi_handedness = [handed]
+    # hand_landmarks[0] is a plain list of 21 point mocks; production code does lm[i].x
+    result.hand_landmarks = [lm.landmark]
+    # handedness[0][0] is a Category with .score and .display_name
+    cat = MagicMock()
+    cat.score = score
+    cat.display_name = label
+    result.handedness = [[cat]]
     return result
 
 
@@ -115,8 +120,15 @@ PINCH_LM = make_lm_mock(
     {4: 0.49, 8: 0.51},
 )
 
-# two fingers extended — unrecognised pose
+# two fingers extended (index+middle) — peace sign; triggers swipe detection
 TWO_FINGER_LM = make_lm_mock({8: 0.2, 12: 0.2})
 
-# four fingers (no thumb) — should still trigger OPEN_PALM (n_ext >= 4)
+# four fingers (no thumb) — open palm; triggers push/pull detection
 FOUR_FINGER_LM = make_lm_mock({8: 0.2, 12: 0.2, 16: 0.2, 20: 0.2})
+
+# TWO_FINGER_GRAB: thumb + index + middle all clustered → triggers MOUSEDOWN
+# _dist(INDEX, THUMB) = 0.03 < 0.07, _dist(MIDDLE, THUMB) = 0.06 < 0.091
+GRAB_LM = make_lm_mock(
+    {4: 0.30, 8: 0.33, 12: 0.36, 16: 0.70, 20: 0.70},
+    {4: 0.50, 8: 0.50, 12: 0.50},
+)

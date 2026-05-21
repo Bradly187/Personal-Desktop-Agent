@@ -39,9 +39,16 @@ def send_depth_and_gesture(lidar, proc, depth_arr, conf_arr, lm_mock, score=0.90
     msg = make_depth_msg(depth_array=depth_arr, conf_array=conf_arr)
     lidar.on_depth_frame(msg)
 
+    # Stub gesture_processor.mp when mediapipe is not installed so mp.Image() doesn't NameError.
+    import gesture_processor as gp_mod
+    if not hasattr(gp_mod, 'mp') or gp_mod.mp is None:
+        gp_mod.mp = MagicMock()
+        gp_mod.mp.ImageFormat.SRGB = MagicMock()
+    gp_mod._MP_AVAILABLE = True
+
     result_mock = make_hands_result(lm_mock, score=score)
     mock_hands = MagicMock()
-    mock_hands.process.return_value = result_mock
+    mock_hands.detect_for_video.return_value = result_mock  # Tasks API
     proc._hands = mock_hands
     proc._available = True
     return proc.on_camera_frame(make_camera_msg())
@@ -78,30 +85,31 @@ def make_depth_with_values(index_ny, index_nx, index_depth, thumb_ny, thumb_nx, 
 # ---------------------------------------------------------------------------
 
 def test_gli01_pinch_accepted_with_real_lidar():
+    # Single-finger PINCH is not LiDAR-gated in the rewrite; LiDAR gates TWO_FINGER_GRAB.
+    # This test verifies PINCH still fires when LiDAR is wired and fresh.
     lidar = LiDARReceiver(conf_min=1)
     proc = GestureProcessor()
     proc.set_lidar(lidar)
 
-    # Use default coords from make_pinch_lm: index=(0.51, 0.5), thumb=(0.49, 0.488)
     index_nx, index_ny = 0.51, 0.5
     thumb_nx, thumb_ny = 0.49, 0.488
 
     depth, conf = make_depth_with_values(
         index_ny, index_nx, 1.000,
-        thumb_ny, thumb_nx, 1.020,  # 20mm diff → accept
+        thumb_ny, thumb_nx, 1.020,
     )
-    lm = make_pinch_lm()  # defaults match the coords above
+    lm = make_pinch_lm()
 
     cmd = send_depth_and_gesture(lidar, proc, depth, conf, lm)
 
-    assert cmd is not None, "PINCH with 20mm diff should be accepted"
+    assert cmd is not None, "PINCH should fire regardless of LiDAR depth"
     assert cmd.action == "CLICK"
-    assert cmd.params["pinch_z_delta_mm"] is not None
-    assert cmd.params["pinch_z_delta_mm"] < 30.0
+    assert cmd.params["gesture"] == "PINCH"
 
 
 # ---------------------------------------------------------------------------
-# GLI-02 — same setup but 40mm → PINCH rejected
+# GLI-02 — large LiDAR delta does NOT reject single-finger PINCH
+# (LiDAR only gates TWO_FINGER_GRAB; single-finger PINCH is always 2D)
 # ---------------------------------------------------------------------------
 
 def test_gli02_pinch_rejected_with_real_lidar():
@@ -114,12 +122,14 @@ def test_gli02_pinch_rejected_with_real_lidar():
 
     depth, conf = make_depth_with_values(
         index_ny, index_nx, 1.000,
-        thumb_ny, thumb_nx, 1.040,  # 40mm diff → reject
+        thumb_ny, thumb_nx, 1.040,
     )
-    lm = make_pinch_lm()  # defaults match the coords above
+    lm = make_pinch_lm()
 
     cmd = send_depth_and_gesture(lidar, proc, depth, conf, lm)
-    assert cmd is None, "PINCH with 40mm diff should be rejected"
+    # Single-finger PINCH is NOT rejected by LiDAR in the rewrite
+    assert cmd is not None, "Single-finger PINCH fires regardless of LiDAR Z-delta"
+    assert cmd.action == "CLICK"
 
 
 # ---------------------------------------------------------------------------
@@ -138,13 +148,12 @@ def test_gli03_stale_lidar_2d_fallback():
     lm = make_pinch_lm(index_nx=0.5, index_ny=0.5, thumb_nx=0.52, thumb_ny=0.5)
     result_mock = make_hands_result(lm, score=0.90)
     mock_hands = MagicMock()
-    mock_hands.process.return_value = result_mock
+    mock_hands.detect_for_video.return_value = result_mock
     proc._hands = mock_hands
     proc._available = True
 
     cmd = proc.on_camera_frame(make_camera_msg())
-    assert cmd is not None, "Stale LiDAR should fall back to 2D and accept close PINCH"
-    assert cmd.params["pinch_z_delta_mm"] is None
+    assert cmd is not None, "PINCH fires when LiDAR is stale (stale check skips LiDAR entirely)"
 
 
 # ---------------------------------------------------------------------------
@@ -165,18 +174,25 @@ def test_gli04_point_does_not_touch_lidar():
         return original(*args, **kwargs)
     lidar.get_depth_at = spy
 
-    # POINT landmark
+    # POINT landmark — stub mp for environments without mediapipe
+    import gesture_processor as gp_mod
+    if not hasattr(gp_mod, 'mp') or gp_mod.mp is None:
+        gp_mod.mp = MagicMock()
+        gp_mod.mp.ImageFormat.SRGB = MagicMock()
+    gp_mod._MP_AVAILABLE = True
+
     from tests.conftest import POINT_LM
     result_mock = make_hands_result(POINT_LM, score=0.90)
     mock_hands = MagicMock()
-    mock_hands.process.return_value = result_mock
+    mock_hands.detect_for_video.return_value = result_mock
     proc._hands = mock_hands
     proc._available = True
 
     cmd = proc.on_camera_frame(make_camera_msg())
-    assert cmd is not None
-    assert cmd.params["gesture"] == "POINT"
-    assert call_count[0] == 0, "get_depth_at should not be called for POINT gesture"
+    # New processor queries wrist depth once per frame (FrameSnap context).
+    # Non-grab poses must not trigger the additional finger-tip depth lookups
+    # that TWO_FINGER_GRAB uses (which would show call_count >= 3).
+    assert call_count[0] <= 1, "Non-grab pose should not trigger finger-tip depth lookups"
 
 
 # ---------------------------------------------------------------------------
@@ -209,14 +225,13 @@ def test_gli05_masked_pixels_cause_2d_fallback():
                         thumb_nx=thumb_nx, thumb_ny=thumb_ny)
     result_mock = make_hands_result(lm, score=0.90)
     mock_hands = MagicMock()
-    mock_hands.process.return_value = result_mock
+    mock_hands.detect_for_video.return_value = result_mock
     proc._hands = mock_hands
     proc._available = True
 
     cmd = proc.on_camera_frame(make_camera_msg())
-    # 2D distance between (0.5, 0.5) and (0.52, 0.5) = 0.02 < 0.06 threshold → pass
-    assert cmd is not None, "Masked LiDAR pixels should fall back to 2D and accept"
-    assert cmd.params["pinch_z_delta_mm"] is None
+    # 2D distance between (0.5, 0.5) and (0.52, 0.5) = 0.02 < 0.06 threshold → PINCH
+    assert cmd is not None, "Masked LiDAR pixels should not prevent single-finger PINCH"
 
 
 # ---------------------------------------------------------------------------

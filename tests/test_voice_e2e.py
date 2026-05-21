@@ -40,10 +40,11 @@ from whisper_stream import WhisperStream
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_segment(text: str, logprob: float = -0.3):
+def _make_segment(text: str, logprob: float = -0.3, no_speech_prob: float = 0.0):
     seg = MagicMock()
     seg.text = text
     seg.avg_logprob = logprob
+    seg.no_speech_prob = no_speech_prob  # required by hallucination filter
     return seg
 
 
