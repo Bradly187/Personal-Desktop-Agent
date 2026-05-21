@@ -12,7 +12,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–6 complete + sensor-refinement + gesture-rewrite (2026-05-19)
+## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 (2026-05-20)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
@@ -80,7 +80,49 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `approval_config.json` — gate narrowed: Bash/PowerShell/Agent → voice approval; Edit/Write/Read/Glob/Grep/WebSearch/WebFetch → silent
 - CI: `.github/workflows/build-ipad-app.yml` — `continue-on-error: true` on artifact upload (transient ECONNRESET)
 
-**Test suite (2026-05-19):** 262 pytest tests + 30 standalone integration scripts + 15 Swift XCTest files = 307 total
+**Done (FusionEngine bug fixes + pain-day adaptation — 2026-05-20):**
+- `fusion_engine.py` — 4 bug fixes: tilt/head starvation (moved `return` inside `if dx or dy:`); gyro-suppression starvation (wrapped pipeline in `if not _suppressed:`); double cursor movement (`_apply_gaze_cursor` returns bool, gates gaze_delta); silent click drop (CLARIFY emitted when gaze click has no target)
+- `fusion_engine.py` — `apply_pain_day()` method: 6 thresholds relaxed on pain days; wired through `HybridCoordinator` via `BehavioralTwinState`
+- `tests/test_fusion_fixes.py` — 24 new tests covering all 4 bug fixes and pain-day config propagation
+
+**Done (Voice pipeline improvements — 2026-05-20):**
+- `whisper_stream.py` — wake phrase `"hey agent"` / `"agent"` with punctuation normalisation; lecture mode (`ambient_transcripts` table); hallucination filter (`no_speech_prob > 0.5` + `avg_logprob < -0.8`); CLARIFY echo suppression (pre-suppress before TTS + 1.5s post-suppress); pending clarification context prepended to LLM prompt; awaiting-clarification gate blocks long non-answer transcripts
+- `local_inference.py` — known-app voice corrections applied pre-gate so `"cairo"` → `"kiro"` always fires before LLM sees text
+
+**Done (Sprint A — Acoustic Profiler — 2026-05-20):**
+- `acoustic_profiler.py` — measures RMS amplitude, spectral centroid, Whisper logprob per utterance; derives per-user `vad_threshold` and `logprob_floor`; scales both on flare days; Voice clarity as Signal 5 in PainDayEngine; passive calibration (calibrated after 15 samples); drift detection (every 20 samples, >30% drop → recal callback); seasonal prompt (every 50 commands, >30 days since last cal)
+- `db.py` — +6 tables: `voice_calibration`, `voice_profile`, `voice_phrases`, `sensor_rom`, `flare_profile`, `ambient_transcripts` (total: 20 AgentDB tables)
+- `tests/test_acoustic_profiler.py` — 18 new tests
+
+**Done (Sprint B — iPad Accessibility Onboarding UI — 2026-05-20):**
+- `VoiceProfilingSheet.swift` — 10 phrases × 3 repeats, 4s countdown; iPad streams mic while AcousticProfiler captures samples passively
+- `GestureAssessmentSheet.swift` — rates 4 gestures (POINT/PINCH/OPEN_PALM/FIST) as Easy/Hard/Can't; disabled gestures synced to `GestureProcessor.set_disabled_gestures()`
+- `FlareProfileSheet.swift` — which sensors degrade, voice volume fraction slider, manual pain day toggle (syncs to PC via `pain_day_override` WebSocket message in <100ms)
+- `QuickRecalSheet.swift` — 3 phrases × 3 repeats (~90s); shown automatically when PC detects voice drift or seasonal prompt fires; wired into `ContentView` via `wsManager.recalibrationFeed`
+- `OnboardingView.swift` — expanded 7 → 10 steps with the 3 new calibration sheets (all skippable)
+
+**Done (Sprint C — Continuous Recalibration — 2026-05-20):**
+- `voice_calibrator.py` — guided voice calibration for good_day / flare_day / allergy_day / svt_attack conditions; 20-phrase full session; voice-triggered (`"hey agent run voice calibration"`) and iPad-triggered (Settings → Voice Calibration tab)
+- `ipad_bridge.py` — `pain_day_override` message type handler → `BehavioralTwinState.set_manual_pain_day()` → `AcousticProfiler.get_vad_threshold(pain_day=True)` → `WhisperStream._silence_thresh` relaxed immediately
+- After every 20 voice samples: drift check → `bridge.send_recalibration_request()` → `QuickRecalSheet`; after every 50 commands: seasonal prompt (same path)
+
+**Done (Sprint 5 — Vision Grounding — 2026-05-20):**
+- `vision_grounder.py` — `claude-sonnet-4-6` vision resolves named UI targets to pixel coords; confidence gate ≥0.7; 2s cache per target; fallback chain: vision → gaze_coords → Tesseract OCR → cursor + CLARIFY; hooked into `HybridCoordinator._execute_action` for CLICK with named target; expected CLICK success 42% → ~78%
+- `tests/test_vision_grounder.py` — 11 new tests
+
+**Done (Sprint 6 — UIAutomation — 2026-05-20):**
+- `ui_automation.py` — Win32 UIAutomation BFS tree search; fuzzy name scoring (exact → contains → word-overlap → value match); 0.3s timeout; 1s cache per (target, app); targets VS Code, Chrome, Edge, Kiro, Windows Terminal, Notepad, Acrobat, Zotero; first fallback in `_resolve_coords` before vision grounder; expected CLICK success ~78% → ~88%
+
+**Done (Sprint 7 — Action Verification — 2026-05-20):**
+- `action_verifier.py` — Pillow perceptual diff pre/post screenshot; verifies CLICK, OPEN, CLOSE, SCROLL; 2% pixel change threshold = success; 400ms delay for animations; pre-snapshot taken before dispatch, post-snapshot after; result in execute() response; expected CLICK success ~88% → ~92%
+
+**Done (Commercial roadmap + diagrams — 2026-05-20):**
+- `docs/diagrams/domain-model.{png,svg}` — class diagram: User/Subscription/Device/Session + pipeline hierarchy
+- `docs/diagrams/database-schema.{png,svg}` — ERD: 12 tables (4 new commercial: USERS, SUBSCRIPTIONS, DEVICES, INFERENCE_COSTS + 8 existing extended with user_id FK)
+- `docs/diagrams/user-stories.{png,svg}` — mindmap: 5 epics (Setup, Daily Control, Coding/Dev, Pain Day, Subscription)
+- 7-phase commercial roadmap: May 2026 hardening → Jul 2027 launch at 100 subscribers / $1K MRR; cloud inference via `claude-haiku-4-5` at <$0.10/user/day; $9.99/month StoreKit subscription
+
+**Test suite (2026-05-20):** 315 pytest tests + 31 standalone integration scripts + 15 Swift XCTest files = 361 total
 
 ## Run Commands
 
@@ -170,7 +212,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `main.py` | Unified entry point; `--measure-vram`; `--viewer`/`--viewer-only`; startup status table; Ctrl-C shutdown |
 | `sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
 | `whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
-| `db.py` | `AgentDB` (aiosqlite, 14 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity tables for continuous calibration |
+| `db.py` | `AgentDB` (aiosqlite, 20 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice calibration tables |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
 | `polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
 | `chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
@@ -179,6 +221,11 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `audit_log.py` | Append-only `audit.db` (SQLite WAL); records every MCP tool invocation, session lifecycle event, and security finding; UPDATE/DELETE blocked by triggers |
 | `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device (`"Microphone (Realtek USB Audio)"`), timeout, tts_backend |
 | `start_agent.bat` | Windows startup script; activates venv and runs `main.py`; logs to `logs/agent_startup.log` |
+| `acoustic_profiler.py` | Per-user VAD threshold + logprob floor from measured RMS/spectral-centroid/Whisper-logprob; passive calibration; drift detection; seasonal re-cal prompt; Signal 5 in PainDayEngine |
+| `voice_calibrator.py` | Guided voice calibration for 4 conditions (good/flare/allergy/SVT); 20 phrases; voice-triggered or iPad Settings tab; writes to `voice_profile` + `voice_phrases` tables |
+| `vision_grounder.py` | Claude vision API resolves named UI targets to pixel coords; confidence ≥0.7; 2s cache; fallback chain: vision → gaze → OCR → CLARIFY |
+| `ui_automation.py` | Win32 UIAutomation BFS tree search; fuzzy name scoring; 0.3s timeout; 1s cache; first fallback in `_resolve_coords` |
+| `action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |
 
 ## Polly TTS Voice
 

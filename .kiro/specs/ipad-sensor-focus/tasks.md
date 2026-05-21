@@ -220,17 +220,10 @@
   - 8 tests: real Bedrock call, Gate 2 routing, misrecognition, bad-creds degradation,
     Gate 0 privacy block, AgentCore→Bedrock fall-through, Gate 1 vocab + retranscribe
 
-- [ ] **6.4 AgentCore Tier 1 deployment — deferred**
-  - Code complete: `agentcore_fallback/src/main.py` (Strands Agent + STM/LTM memory)
-  - Blocked: `bedrock-agentcore==1.9.0` ships without `bedrock_agentcore.cli` module;
-    CLI `bedrock-agentcore deploy` fails at import. Options:
-      a) Downgrade: `uv add "bedrock-agentcore<1.9.0"` in agentcore_fallback/ and retry
-      b) AWS console: zip `agentcore_fallback/src/` → Bedrock AgentCore → Create Agent Runtime
-      c) SDK: `boto3.client("bedrock-agentcore-control").create_agent_runtime()` with
-         `codeConfiguration` pointing to S3 zip + IAM execution role
-  - AWS account pre-filled in `.bedrock_agentcore.yaml` (567877624345, us-east-1)
-  - Priority: LOW — raw Bedrock (6.1) provides 90% of cloud value;
-    AgentCore adds cross-session LTM memory which partially overlaps ContinuousTrainer
+- [ ] **6.4 AgentCore Tier 1 deployment — source deleted, permanently deferred**
+  - `agentcore_fallback/` directory deleted 2026-05-19 (dead code removal sprint)
+  - Raw Bedrock (6.1) is the active and permanent cloud path
+  - AgentCore LTM memory partially overlaps `ContinuousTrainer` + `semantic_memory.py`; net value too low to re-implement
 
 - [ ] **N.6 Evaluate Nemotron-4 340B with RAM offload (stretch goal)**
   - 192 GB RAM + 32 GB VRAM on this machine makes llama.cpp offloaded 340B feasible
@@ -287,3 +280,65 @@
 
 - [x] **4.5 Pin `requirements.txt`** with installed versions; added `pynvml>=11.5.0` and
   `aiosqlite>=0.19.0`; not-yet-installed packages documented as comments
+
+---
+
+## Sprint A — Acoustic Profiler + per-user VAD (2026-05-20)
+
+- [x] **A.1 Implement `acoustic_profiler.py`** — passive per-user calibration
+  - Measures RMS amplitude, spectral centroid, Whisper logprob per utterance
+  - Derives per-user `vad_threshold` and `logprob_floor`; scales on flare days
+  - Voice clarity as Signal 5 in `PainDayEngine`; drift detection; seasonal re-cal prompt
+  - 6 new AgentDB tables: `voice_calibration`, `voice_profile`, `voice_phrases`, `sensor_rom`, `flare_profile`, `ambient_transcripts`
+
+- [x] **A.2 Implement `voice_calibrator.py`** — guided condition-aware calibration
+  - 4 conditions (good_day / flare_day / allergy_day / svt_attack); 20 full phrases
+  - Voice-triggered (`"hey agent run voice calibration"`) + iPad Settings tab
+  - Quick session: 5 phrases, ~90s (`"hey agent quick calibration"`)
+
+- [x] **A.3 Wire AcousticProfiler into WhisperStream + HybridCoordinator**
+  - `whisper_stream.set_acoustic_profiler()` → per-utterance sample recording
+  - `_silence_thresh` updated live from profiler on pain day override
+
+---
+
+## Sprint B — iPad Accessibility Onboarding UI (2026-05-20)
+
+- [x] **B.1 `VoiceProfilingSheet.swift`** — 10 phrases × 3 repeats; 4s countdown; passive profiling
+- [x] **B.2 `GestureAssessmentSheet.swift`** — rates 4 gestures; disabled list synced to PC
+- [x] **B.3 `FlareProfileSheet.swift`** — sensor degradation config + manual pain day toggle; syncs via `pain_day_override` WebSocket in <100ms
+- [x] **B.4 `QuickRecalSheet.swift`** — 3 phrases × 3 repeats; auto-shown on drift/seasonal prompt via `wsManager.recalibrationFeed`
+- [x] **B.5 `OnboardingView.swift`** — expanded 7 → 10 steps (all 3 new sheets optional/skippable)
+
+---
+
+## Sprint C — Continuous Recalibration (2026-05-20)
+
+- [x] **C.1 Drift detection** — every 20 samples: clarity drop ≥30% → `bridge.send_recalibration_request()` → `QuickRecalSheet`
+- [x] **C.2 Seasonal prompt** — every 50 commands: >30 days since last cal → same path (`reason="seasonal"`)
+- [x] **C.3 `ipad_bridge.py` `pain_day_override` handler** — routes to `BehavioralTwinState` → `AcousticProfiler` → `WhisperStream` in single sync chain
+
+---
+
+## Sprint 5 — Vision Grounding (2026-05-20)
+
+- [x] **5.1 Implement `vision_grounder.py`** — Claude vision API; confidence ≥0.7; 2s cache; fallback chain
+  - Hooked into `HybridCoordinator._execute_action` for CLICK with named target
+  - Expected CLICK success: 42% → ~78%
+  - 11 new tests in `tests/test_vision_grounder.py`
+
+---
+
+## Sprint 6 — UIAutomation (2026-05-20)
+
+- [x] **6.A Implement `ui_automation.py`** — Win32 UIAutomation BFS; fuzzy scoring; 0.3s timeout; 1s cache
+  - First fallback in `command_executor._resolve_coords` before vision grounder
+  - Expected CLICK success: ~78% → ~88%
+
+---
+
+## Sprint 7 — Action Verification (2026-05-20)
+
+- [x] **7.1 Implement `action_verifier.py`** — Pillow perceptual diff; 2% threshold; 400ms animation delay
+  - Wraps CLICK/OPEN/CLOSE/SCROLL in `command_executor.execute()`
+  - Expected CLICK success: ~88% → ~92%
