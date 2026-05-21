@@ -59,7 +59,6 @@ async def start_gesture_bridge(
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
 
     coord_config = CoordinatorConfig(
-        agentcore_enabled=False,
         vram_free_min_gb=0.0,
         latency_budget_ms=99999.0,
     )
@@ -186,7 +185,7 @@ async def _start_lidar_gesture_bridge(infer_return="CLICK"):
     mock_local.infer = AsyncMock(return_value=infer_return)
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
     coord_config = CoordinatorConfig(
-        agentcore_enabled=False, vram_free_min_gb=0.0, latency_budget_ms=99999.0
+        vram_free_min_gb=0.0, latency_budget_ms=99999.0
     )
     coordinator = HybridCoordinator(local=mock_local, config=coord_config)
     config = FusionConfig(tick_hz=60.0)
@@ -271,7 +270,7 @@ async def test_gbe05_no_gesture_proc_no_crash():
     mock_local = MagicMock()
     mock_local.infer = AsyncMock(return_value="CLICK")
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
-    coord_config = CoordinatorConfig(agentcore_enabled=False, vram_free_min_gb=0.0)
+    coord_config = CoordinatorConfig(vram_free_min_gb=0.0)
     coordinator = HybridCoordinator(local=mock_local, config=coord_config)
     config = FusionConfig(tick_hz=60.0)
     fusion = FusionEngine(screen_width=1920, screen_height=1080, config=config)
@@ -307,7 +306,7 @@ async def test_gbe06_no_lidar_wired_no_crash():
     mock_local = MagicMock()
     mock_local.infer = AsyncMock(return_value="CLICK")
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
-    coord_config = CoordinatorConfig(agentcore_enabled=False, vram_free_min_gb=0.0)
+    coord_config = CoordinatorConfig(vram_free_min_gb=0.0)
     coordinator = HybridCoordinator(local=mock_local, config=coord_config)
     config = FusionConfig(tick_hz=60.0)
     fusion = FusionEngine(screen_width=1920, screen_height=1080, config=config)

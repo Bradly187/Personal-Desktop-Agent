@@ -207,7 +207,6 @@ async def test_low_logprob_triggers_gate1_correction() -> tuple[bool, str]:
         return {"status": "ok", "action": cmd.action, "result": {}}
 
     cfg = CoordinatorConfig(
-        agentcore_enabled=False,
         whisper_logprob_min=-1.0,  # Gate 1 threshold
     )
     coord = HybridCoordinator(config=cfg)
@@ -241,7 +240,7 @@ async def test_voice_e2e_latency_under_600ms() -> tuple[bool, str]:
         await asyncio.sleep(0.05)  # 50ms simulated inference
         return "CLOSE"
 
-    cfg = CoordinatorConfig(agentcore_enabled=False)
+    cfg = CoordinatorConfig()
     coord = HybridCoordinator(config=cfg)
     coord._local.infer = slow_infer
 

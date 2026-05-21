@@ -60,7 +60,7 @@ async def start_test_bridge() -> tuple[IPadBridge, FusionEngine, asyncio.Task, a
     mock_local.infer = AsyncMock(return_value="CLICK")
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
 
-    coord_config = CoordinatorConfig(agentcore_enabled=False)
+    coord_config = CoordinatorConfig()
     coordinator = HybridCoordinator(local=mock_local, config=coord_config)
 
     # Wire components

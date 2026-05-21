@@ -203,7 +203,7 @@ async def test_coordinator_sets_cloud_route_in_params() -> tuple[bool, str]:
         captured_params.append(dict(cmd.params))
         return {"clarify": True, "message": "test", "spoken": False}
 
-    cfg = CoordinatorConfig(agentcore_enabled=False)
+    cfg = CoordinatorConfig()
     coord = HybridCoordinator(config=cfg)
 
     # Make cloud inference return CLARIFY

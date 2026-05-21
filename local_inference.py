@@ -5,9 +5,8 @@ a concrete implementation. This allows swapping backends without touching
 routing logic.
 
 Concrete implementations:
-  OllamaInference    — Phase 1 dev backend  (~450 ms, easy setup)
-  VLLMInference      — Phase 2 prod target  (~280 ms, task 2.13)
-  NemotronInference  — NVIDIA Nemotron via Ollama (task 2.13 benchmark candidate)
+  OllamaInference    — default backend  (373 ms warm p50, 100% accuracy on command eval)
+  VLLMInference      — prod target      (~280 ms; code complete; blocked on CUDA 13.x torch wheels)
 """
 
 from __future__ import annotations
