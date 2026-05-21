@@ -73,7 +73,7 @@ async def test_trainer_record_correction_stores_locally():
 
     mock_db = AsyncMock()
     mock_db.available = True
-    mock_db.store_few_shot_example = AsyncMock()
+    mock_db.upsert_few_shot_example = AsyncMock()
     mock_db.get_recent_commands = AsyncMock(return_value=[])
 
     trainer = ContinuousTrainer(agent_db=mock_db)
@@ -87,11 +87,10 @@ async def test_trainer_record_correction_stores_locally():
 
     await trainer.record_correction(cmd, "TYPE pen notepad", "OPEN notepad")
 
-    mock_db.store_few_shot_example.assert_called_once()
-    call_args = mock_db.store_few_shot_example.call_args
-    assert call_args[1].get("input_text") == "oh pen notepad" or (
-        len(call_args[0]) > 0 and "oh pen notepad" in str(call_args)
-    ), f"Expected input_text in call args: {call_args}"
+    mock_db.upsert_few_shot_example.assert_called_once()
+    call_args = mock_db.upsert_few_shot_example.call_args
+    assert "oh pen notepad" in str(call_args), \
+        f"Expected 'oh pen notepad' in call args: {call_args}"
     print("✓ test_trainer_record_correction_stores_locally passed")
 
 
