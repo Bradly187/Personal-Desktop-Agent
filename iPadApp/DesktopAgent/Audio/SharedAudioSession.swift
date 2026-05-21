@@ -109,7 +109,7 @@ final class SharedAudioSession {
             do {
                 try activate()
             } catch {
-                print("SharedAudioSession: failed to activate for consumer '\(id)': \(error)")
+                AppLogger.shared.error("SharedAudioSession", "Failed to activate for consumer '\(id)': \(error)")
             }
         }
     }
@@ -150,7 +150,7 @@ final class SharedAudioSession {
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         } catch {
-            print("SharedAudioSession: failed to deactivate session: \(error)")
+            AppLogger.shared.warning("SharedAudioSession", "Failed to deactivate session: \(error)")
         }
     }
 
@@ -211,7 +211,7 @@ final class SharedAudioSession {
         switch type {
         case .began:
             // System interrupted audio — engine is automatically paused by the system.
-            print("SharedAudioSession: interruption began")
+            AppLogger.shared.info("SharedAudioSession", "Interruption began")
 
         case .ended:
             // Interruption ended — re-activate if we still have consumers.
@@ -227,9 +227,9 @@ final class SharedAudioSession {
                     // Reset tapInstalled so _installSharedTapIfNeeded() re-installs it.
                     _removeSharedTap()
                     try activate()
-                    print("SharedAudioSession: re-activated after interruption")
+                    AppLogger.shared.info("SharedAudioSession", "Re-activated after interruption")
                 } catch {
-                    print("SharedAudioSession: failed to re-activate after interruption: \(error)")
+                    AppLogger.shared.error("SharedAudioSession", "Failed to re-activate after interruption: \(error)")
                 }
             }
 

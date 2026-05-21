@@ -25,6 +25,8 @@ struct DesktopAgentApp: App {
         _sensorManager = StateObject(wrappedValue: SensorManager(ws: ws, settings: s))
         featureToggleSyncer = FeatureToggleSyncer(settings: s, ws: ws)
         dwellActionSyncer = DwellActionSyncer(settings: s, ws: ws)
+        // Wire AppLogger transport so sensor logs are forwarded to the PC bridge.
+        AppLogger.shared.setTransport(ws)
     }
 
     var body: some Scene {

@@ -112,6 +112,10 @@ class IPadBridge:
         self._whisper: Optional["WhisperStream"] = None
         self._viewer: Optional["SensorViewer"] = None
 
+        # DB for persistent iPad log storage (wired by main.py)
+        self._agent_db = None
+        self._session_id: int = -1
+
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
 
@@ -136,6 +140,10 @@ class IPadBridge:
 
     def set_viewer(self, viewer: "SensorViewer") -> None:
         self._viewer = viewer
+
+    def set_agent_db(self, agent_db, session_id: int) -> None:
+        self._agent_db = agent_db
+        self._session_id = session_id
 
     # ---------------------------------------------------------------------- #
     # Startup
@@ -438,6 +446,10 @@ class IPadBridge:
                 log.debug("audio_stream received (WhisperStream not wired or unavailable)")
             return
 
+        if msg_type == "ipad_log":
+            await self._handle_ipad_log(msg)
+            return  # fire-and-forget, no ack
+
         log.warning("Unknown message type: %s", msg_type)
         await self._ack(ws, msg_id, "error", f"unknown type: {msg_type}")
 
@@ -711,6 +723,48 @@ class IPadBridge:
             await ws.send_json(payload)
         except Exception as exc:
             log.debug("Failed to send ack: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # iPad structured log forwarding
+    # ---------------------------------------------------------------------- #
+
+    # Level mapping: iPad AppLogger levels → Python logging levels
+    _IPAD_LOG_LEVELS: dict = {
+        "debug":   logging.DEBUG,
+        "info":    logging.INFO,
+        "warning": logging.WARNING,
+        "error":   logging.ERROR,
+        "fault":   logging.CRITICAL,
+    }
+
+    async def _handle_ipad_log(self, msg: dict) -> None:
+        """Handle an ipad_log batch message.
+
+        Routes each entry to a Python logger named 'ipad.<subsystem>' so iPad
+        events appear in the main log file alongside PC-side events. warning+
+        entries are also persisted to the ipad_logs AgentDB table for soak
+        test post-analysis.
+        """
+        entries = msg.get("entries")
+        if not entries or not isinstance(entries, list):
+            return
+
+        db_entries: list = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            level_str = entry.get("level", "info")
+            subsystem = entry.get("subsystem", "unknown")
+            text = entry.get("msg", "")
+            py_level = self._IPAD_LOG_LEVELS.get(level_str, logging.INFO)
+            logging.getLogger(f"ipad.{subsystem}").log(py_level, "%s", text)
+            if py_level >= logging.WARNING:
+                db_entries.append(entry)
+
+        if db_entries and self._agent_db and self._session_id >= 0:
+            asyncio.create_task(
+                self._agent_db.log_ipad_events(self._session_id, db_entries)
+            )
 
     async def _send_status(self, ws: web.WebSocketResponse) -> None:
         from tools import windows as win_tools

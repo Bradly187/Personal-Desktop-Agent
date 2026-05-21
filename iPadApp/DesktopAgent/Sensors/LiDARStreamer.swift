@@ -73,7 +73,7 @@ final class LiDARStreamer: NSObject, ObservableObject {
     func start() {
         guard !isRunning else { return }
         guard LiDARStreamer.isSupported else {
-            print("LiDARStreamer: sceneDepth not supported on this device (requires iPad Pro 2020+ with LiDAR)")
+            AppLogger.shared.warning("LiDARStreamer", "sceneDepth not supported — requires iPad Pro 2020+ with LiDAR")
             return
         }
         let config = ARWorldTrackingConfiguration()
@@ -82,7 +82,7 @@ final class LiDARStreamer: NSObject, ObservableObject {
         isRunning = true
         recoveryAttempts = 0
         _t.fpsWindowStart = CACurrentMediaTime()
-        print("LiDARStreamer: started (depth \(Int(1/depthInterval)) fps, camera \(Int(1/cameraInterval)) fps)")
+        AppLogger.shared.info("LiDARStreamer", "Started — depth \(Int(1/depthInterval)) fps, camera \(Int(1/cameraInterval)) fps")
     }
 
     func stop() {
@@ -99,7 +99,7 @@ final class LiDARStreamer: NSObject, ObservableObject {
         validPixelPct = 0
         depthRangeMin = 0
         depthRangeMax = 0
-        print("LiDARStreamer: stopped")
+        AppLogger.shared.info("LiDARStreamer", "Stopped")
     }
 }
 
@@ -142,7 +142,7 @@ extension LiDARStreamer: ARSessionDelegate {
     }
 
     nonisolated func session(_ session: ARSession, didFailWithError error: Error) {
-        print("LiDARStreamer: ARSession error — \(error.localizedDescription)")
+        AppLogger.shared.error("LiDARStreamer", "ARSession error — \(error.localizedDescription)")
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.isRunning = false
@@ -156,13 +156,13 @@ extension LiDARStreamer: ARSessionDelegate {
 private extension LiDARStreamer {
     func _attemptRecovery() {
         guard recoveryAttempts < maxRecoveryAttempts else {
-            print("LiDARStreamer: max recovery attempts (\(maxRecoveryAttempts)) reached, giving up")
+            AppLogger.shared.error("LiDARStreamer", "Max recovery attempts (\(maxRecoveryAttempts)) reached — giving up")
             return
         }
 
         recoveryAttempts += 1
         let attempt = recoveryAttempts
-        print("LiDARStreamer: attempting recovery (\(attempt)/\(maxRecoveryAttempts)) in 2s")
+        AppLogger.shared.warning("LiDARStreamer", "Attempting recovery (\(attempt)/\(maxRecoveryAttempts)) in 2s")
 
         recoveryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 second delay

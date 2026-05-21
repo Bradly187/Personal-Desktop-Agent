@@ -416,6 +416,17 @@ CREATE TABLE IF NOT EXISTS ambient_transcripts (
 );
 CREATE INDEX IF NOT EXISTS idx_at_session ON ambient_transcripts(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_at_ts      ON ambient_transcripts(ts);
+
+CREATE TABLE IF NOT EXISTS ipad_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  INTEGER REFERENCES sessions(id),
+    ts          REAL    NOT NULL,
+    level       TEXT    NOT NULL,   -- 'debug' | 'info' | 'warning' | 'error' | 'fault'
+    subsystem   TEXT    NOT NULL,
+    msg         TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ipad_logs_session ON ipad_logs(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_ipad_logs_level   ON ipad_logs(level, ts);
 """
 
 
@@ -517,6 +528,42 @@ class AgentDB:
         await self._conn.execute(
             "UPDATE sessions SET ended_at = ? WHERE id = ?",
             (time.time(), session_id),
+        )
+        await self._conn.commit()
+
+    # ---------------------------------------------------------------------- #
+    # iPad log forwarding
+    # ---------------------------------------------------------------------- #
+
+    async def log_ipad_events(
+        self,
+        session_id: int,
+        entries: list,
+    ) -> None:
+        """Persist a batch of structured log entries forwarded from the iPad app.
+
+        Each entry is a dict with keys: ts (float), level (str), subsystem (str), msg (str).
+        Silently no-ops if DB is unavailable or the entry list is empty.
+        """
+        if not self._conn or not entries:
+            return
+        rows = [
+            (
+                session_id,
+                float(e.get("ts", time.time())),
+                str(e.get("level", "info"))[:16],
+                str(e.get("subsystem", "unknown"))[:64],
+                str(e.get("msg", ""))[:2048],
+            )
+            for e in entries
+            if isinstance(e, dict)
+        ]
+        if not rows:
+            return
+        await self._conn.executemany(
+            "INSERT INTO ipad_logs (session_id, ts, level, subsystem, msg)"
+            " VALUES (?, ?, ?, ?, ?)",
+            rows,
         )
         await self._conn.commit()
 

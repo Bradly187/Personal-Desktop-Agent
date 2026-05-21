@@ -71,7 +71,7 @@ final class TiltSensor: ObservableObject {
     func start() {
         guard !isRunning else { return }
         guard motion.isDeviceMotionAvailable else {
-            print("TiltSensor: DeviceMotion unavailable")
+            AppLogger.shared.warning("TiltSensor", "DeviceMotion unavailable — CMMotionManager.isDeviceMotionAvailable == false")
             return
         }
 

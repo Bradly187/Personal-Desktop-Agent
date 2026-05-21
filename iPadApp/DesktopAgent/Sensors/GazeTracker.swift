@@ -86,7 +86,7 @@ final class GazeTracker: NSObject, ObservableObject {
 
     func start() {
         guard SharedFaceSession.isSupported else {
-            print("GazeTracker: ARFaceTracking not supported on this device")
+            AppLogger.shared.warning("GazeTracker", "ARFaceTracking not supported on this device")
             return
         }
         guard let settings, settings.gazeEnabled else { return }

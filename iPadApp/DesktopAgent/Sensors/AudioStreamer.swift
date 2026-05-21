@@ -62,7 +62,7 @@ final class AudioStreamer: ObservableObject {
             channels: 1,
             interleaved: true
         ) else {
-            print("AudioStreamer: failed to create output format")
+            AppLogger.shared.error("AudioStreamer", "Failed to create output format")
             return
         }
         outputFormat = outFmt
@@ -130,7 +130,7 @@ final class AudioStreamer: ObservableObject {
                 consecutiveErrors += 1
                 if consecutiveErrors >= maxConsecutiveErrors {
                     let msg = "Audio conversion failed \(consecutiveErrors) times: \(error.localizedDescription)"
-                    print("AudioStreamer: \(msg)")
+                    AppLogger.shared.error("AudioStreamer", msg)
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         self.lastError = msg

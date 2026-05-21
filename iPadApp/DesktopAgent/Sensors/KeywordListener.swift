@@ -48,7 +48,7 @@ final class KeywordListener: NSObject, ObservableObject {
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             Task { @MainActor [weak self] in
                 guard status == .authorized else {
-                    print("KeywordListener: speech recognition not authorized")
+                    AppLogger.shared.error("KeywordListener", "Speech recognition not authorized by user")
                     return
                 }
                 self?._startRecognition()
@@ -68,7 +68,7 @@ final class KeywordListener: NSObject, ObservableObject {
 
     private func _startRecognition() {
         guard let recognizer, recognizer.isAvailable else {
-            print("KeywordListener: recognizer unavailable")
+            AppLogger.shared.warning("KeywordListener", "Recognizer unavailable")
             return
         }
 
@@ -115,7 +115,7 @@ final class KeywordListener: NSObject, ObservableObject {
         lastRestartTime = now
 
         if consecutiveRestarts > maxConsecutiveRestarts {
-            print("KeywordListener: too many consecutive restarts (\(consecutiveRestarts)), backing off")
+            AppLogger.shared.warning("KeywordListener", "Too many consecutive restarts (\(consecutiveRestarts)), backing off 5s")
             // Wait 5 seconds before trying again
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 5_000_000_000)

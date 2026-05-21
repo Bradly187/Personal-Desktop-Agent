@@ -138,7 +138,7 @@ final class SensorManager: ObservableObject {
 
     private func _startTilt() {
         guard isTiltAvailable else {
-            print("SensorManager: TiltSensor unavailable — CMMotionManager.isDeviceMotionAvailable == false")
+            AppLogger.shared.warning("SensorManager", "TiltSensor unavailable — CMMotionManager.isDeviceMotionAvailable == false")
             _updateState(id: "tilt", isAvailable: false, lastError: "Device motion hardware unavailable")
             return
         }
@@ -153,7 +153,7 @@ final class SensorManager: ObservableObject {
 
     private func _startGaze() {
         guard isFaceTrackingAvailable else {
-            print("SensorManager: GazeTracker unavailable — ARFaceTrackingConfiguration.isSupported == false")
+            AppLogger.shared.warning("SensorManager", "GazeTracker unavailable — ARFaceTrackingConfiguration.isSupported == false")
             _updateState(id: "gaze", isAvailable: false, lastError: "TrueDepth camera not available")
             return
         }
@@ -168,7 +168,7 @@ final class SensorManager: ObservableObject {
 
     private func _startHead() {
         guard isFaceTrackingAvailable else {
-            print("SensorManager: HeadTracker unavailable — ARFaceTrackingConfiguration.isSupported == false")
+            AppLogger.shared.warning("SensorManager", "HeadTracker unavailable — ARFaceTrackingConfiguration.isSupported == false")
             _updateState(id: "head", isAvailable: false, lastError: "TrueDepth camera not available")
             return
         }
@@ -213,7 +213,7 @@ final class SensorManager: ObservableObject {
 
     private func _startLiDAR() {
         guard isLiDARAvailable else {
-            print("SensorManager: LiDARStreamer unavailable — device has no LiDAR scanner")
+            AppLogger.shared.warning("SensorManager", "LiDARStreamer unavailable — device has no LiDAR scanner")
             _updateState(id: "lidar", isAvailable: false, lastError: "LiDAR scanner not available on this device")
             return
         }

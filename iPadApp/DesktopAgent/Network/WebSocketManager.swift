@@ -170,7 +170,7 @@ final class WebSocketManager: ObservableObject {
             guard let self else { return }
             // If still connecting (no message received), trigger disconnect/reconnect
             if self.state == .connecting {
-                print("[WebSocketManager] Connection timeout after \(self.connectionTimeoutSeconds)s")
+                AppLogger.shared.warning("WebSocketManager", "Connection timeout after \(self.connectionTimeoutSeconds)s")
                 wsTask.cancel(with: .abnormalClosure, reason: nil)
                 self._handleDisconnect(error: URLError(.timedOut))
             }
@@ -190,8 +190,7 @@ final class WebSocketManager: ObservableObject {
                 self._handleReceived(message: firstMessage)
                 try await self._receiveLoop(task: wsTask)
             } catch {
-                print("[WebSocketManager] Connection error: \(error.localizedDescription)")
-                print("[WebSocketManager] URL was: \(url)")
+                AppLogger.shared.error("WebSocketManager", "Connection error: \(error.localizedDescription) — URL: \(url)")
                 await MainActor.run {
                     self.connectionTimeoutTask?.cancel()
                     self.connectionTimeoutTask = nil
@@ -483,6 +482,13 @@ extension WebSocketManager {
     /// can skip gestures marked "Can't do this" in onboarding.
     func sendGestureAssessment(disabled: [String]) {
         send(["type": "gesture_assessment", "disabled": disabled])
+    }
+
+    /// Forward a batch of structured log entries to the PC bridge.
+    /// Called by AppLogger on a 500ms timer; no ack expected.
+    func sendLogBatch(_ entries: [[String: Any]]) {
+        guard state == .connected, !entries.isEmpty else { return }
+        send(["type": "ipad_log", "entries": entries])
     }
 
     func sendDepthFrame(width: Int, height: Int, depthB64: String, confB64: String, ts: Double) {

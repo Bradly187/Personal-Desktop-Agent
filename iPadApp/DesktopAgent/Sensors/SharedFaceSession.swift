@@ -93,7 +93,7 @@ final class SharedFaceSession: NSObject {
 
     private func _start() {
         guard Self.isSupported else {
-            print("SharedFaceSession: ARFaceTracking not supported on this device")
+            AppLogger.shared.warning("SharedFaceSession", "ARFaceTracking not supported on this device")
             return
         }
         let config = ARFaceTrackingConfiguration()
@@ -114,7 +114,7 @@ final class SharedFaceSession: NSObject {
 
     private func _attemptRecovery() {
         guard recoveryAttempts < maxRecoveryAttempts else {
-            print("SharedFaceSession: max recovery attempts reached, giving up")
+            AppLogger.shared.error("SharedFaceSession", "Max recovery attempts reached — giving up")
             return
         }
 
@@ -126,7 +126,7 @@ final class SharedFaceSession: NSObject {
 
         recoveryAttempts += 1
         let attempt = recoveryAttempts
-        print("SharedFaceSession: attempting recovery (\(attempt)/\(maxRecoveryAttempts))")
+        AppLogger.shared.warning("SharedFaceSession", "Attempting recovery (\(attempt)/\(maxRecoveryAttempts))")
 
         recoveryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
@@ -160,7 +160,7 @@ extension SharedFaceSession: ARSessionDelegate {
 
     /// Fix #4: On error, notify consumers and attempt automatic recovery.
     nonisolated func session(_ session: ARSession, didFailWithError error: Error) {
-        print("SharedFaceSession: ARSession error — \(error.localizedDescription)")
+        AppLogger.shared.error("SharedFaceSession", "ARSession error — \(error.localizedDescription)")
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.isRunning = false

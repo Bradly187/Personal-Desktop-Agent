@@ -501,6 +501,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_gesture_processor(gesture)
     bridge.set_whisper_stream(whisper)
     bridge.set_coordinator(coordinator)  # needed for pain_day_override message
+    bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
 
     # Wire acoustic drift → bridge recalibration request (thread-safe)
     _loop = asyncio.get_event_loop()

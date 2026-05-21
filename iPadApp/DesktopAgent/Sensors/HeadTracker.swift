@@ -58,7 +58,7 @@ final class HeadTracker: NSObject {
 
     func start() {
         guard SharedFaceSession.isSupported else {
-            print("HeadTracker: ARFaceTracking not supported")
+            AppLogger.shared.warning("HeadTracker", "ARFaceTracking not supported on this device")
             return
         }
         guard let settings, settings.headEnabled else { return }
