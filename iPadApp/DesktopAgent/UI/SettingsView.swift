@@ -173,8 +173,8 @@ struct SettingsView: View {
 
                 // Keywords
                 Section {
-                    ForEach(settings.keywordList.indices, id: \.self) { i in
-                        Text(settings.keywordList[i])
+                    ForEach(settings.keywordList, id: \.self) { keyword in
+                        Text(keyword)
                             .foregroundStyle(theme.textPrimary)
                     }
                     .onDelete { idx in settings.keywordList.remove(atOffsets: idx) }
@@ -182,13 +182,9 @@ struct SettingsView: View {
                         TextField("New keyword", text: $newKeyword)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                        Button("Add") {
-                            let trimmed = newKeyword.trimmingCharacters(in: .whitespaces)
-                            guard !trimmed.isEmpty else { return }
-                            settings.keywordList.append(trimmed)
-                            newKeyword = ""
-                        }
-                        .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
+                            .onSubmit { _addKeyword() }
+                        Button("Add", action: _addKeyword)
+                            .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
                 } header: {
                     DASectionHeader(title: "Voice Keywords")
@@ -270,5 +266,12 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
         }
+    }
+
+    private func _addKeyword() {
+        let trimmed = newKeyword.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !settings.keywordList.contains(trimmed) else { return }
+        settings.keywordList.append(trimmed)
+        newKeyword = ""
     }
 }

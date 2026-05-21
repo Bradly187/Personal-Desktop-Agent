@@ -9,6 +9,8 @@ struct ContentView: View {
     @Environment(\.appTheme) private var theme
 
     @State private var selectedTab = 0
+    @State private var recalRequest: RecalibrationRequest? = nil
+    @State private var showRecalSheet = false
 
     /// The first N tabs participate in swipe-to-switch (page-style).
     /// Settings and Sensors are tap-only since they're utility views.
@@ -63,6 +65,19 @@ struct ContentView: View {
         .onReceive(wsManager.messageStream) { message in
             if case .screenshot(_, let imageBase64, let mime) = message {
                 screenshotStore.handleScreenshot(base64: imageBase64, mime: mime)
+            }
+        }
+        .onReceive(wsManager.recalibrationFeed) { request in
+            recalRequest = request
+            showRecalSheet = true
+        }
+        .sheet(isPresented: $showRecalSheet) {
+            if let req = recalRequest {
+                QuickRecalSheet(
+                    settings: settings,
+                    reason: req.reason,
+                    degradationPct: req.degradationPct
+                )
             }
         }
     }

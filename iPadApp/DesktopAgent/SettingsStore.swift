@@ -259,6 +259,50 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(keywordList, forKey: "keywordList") }
     }
 
+    // MARK: — Flare / Accessibility Profile (Sprint B)
+    @Published var flareVoiceDegrades: Bool {
+        didSet { defaults.set(flareVoiceDegrades, forKey: "flareVoiceDegrades") }
+    }
+    @Published var flareGestureDegrades: Bool {
+        didSet { defaults.set(flareGestureDegrades, forKey: "flareGestureDegrades") }
+    }
+    @Published var flareGazeDegrades: Bool {
+        didSet { defaults.set(flareGazeDegrades, forKey: "flareGazeDegrades") }
+    }
+    @Published var flareTiltDegrades: Bool {
+        didSet { defaults.set(flareTiltDegrades, forKey: "flareTiltDegrades") }
+    }
+    /// Fraction of baseline voice volume on flare days (0.25–0.75).
+    @Published var flareVadScale: Double {
+        didSet { defaults.set(flareVadScale, forKey: "flareVadScale") }
+    }
+    /// User-initiated flare day override — synced to PC via WebSocket.
+    @Published var manualPainDay: Bool {
+        didSet {
+            defaults.set(manualPainDay, forKey: "manualPainDay")
+        }
+    }
+    /// Gesture capability assessment results: gesture name → "Easy" / "Hard on bad days" / "Can't do this"
+    @Published var gestureAssessment: [String: String] {
+        didSet {
+            if let data = try? JSONEncoder().encode(gestureAssessment) {
+                defaults.set(data, forKey: "gestureAssessment")
+            }
+        }
+    }
+    /// Gesture names the user has explicitly disabled.
+    @Published var disabledGestures: Set<String> {
+        didSet {
+            if let data = try? JSONEncoder().encode(Array(disabledGestures)) {
+                defaults.set(data, forKey: "disabledGestures")
+            }
+        }
+    }
+    /// Date of last voice calibration — used for seasonal re-cal prompts.
+    @Published var lastCalibrationDate: Date? {
+        didSet { defaults.set(lastCalibrationDate, forKey: "lastCalibrationDate") }
+    }
+
     // MARK: — Feature Toggles (Gaze Dwell Actions)
     @Published var gazeDwellClickEnabled: Bool {
         didSet { defaults.set(gazeDwellClickEnabled, forKey: "gazeDwellClickEnabled") }
@@ -377,6 +421,25 @@ final class SettingsStore: ObservableObject {
         // Empty default: KeywordListener is off until the user adds words in Settings.
         // WhisperStream handles all voice input more naturally — keywords are opt-in.
         keywordList = defaults.stringArray(forKey: "keywordList") ?? []
+        flareVoiceDegrades  = defaults.object(forKey: "flareVoiceDegrades")  as? Bool ?? true
+        flareGestureDegrades = defaults.object(forKey: "flareGestureDegrades") as? Bool ?? false
+        flareGazeDegrades   = defaults.object(forKey: "flareGazeDegrades")   as? Bool ?? false
+        flareTiltDegrades   = defaults.object(forKey: "flareTiltDegrades")   as? Bool ?? false
+        flareVadScale       = defaults.double(forKey: "flareVadScale").nonZero ?? 0.5
+        manualPainDay       = defaults.object(forKey: "manualPainDay")       as? Bool ?? false
+        if let data = defaults.data(forKey: "gestureAssessment"),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            gestureAssessment = decoded
+        } else {
+            gestureAssessment = [:]
+        }
+        if let data = defaults.data(forKey: "disabledGestures"),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            disabledGestures = Set(decoded)
+        } else {
+            disabledGestures = []
+        }
+        lastCalibrationDate = defaults.object(forKey: "lastCalibrationDate") as? Date
         gazeDwellClickEnabled = defaults.object(forKey: "gazeDwellClickEnabled") as? Bool ?? true
         gazeDwellRightClickEnabled = defaults.object(forKey: "gazeDwellRightClickEnabled") as? Bool ?? true
         gazeDwellDoubleClickEnabled = defaults.object(forKey: "gazeDwellDoubleClickEnabled") as? Bool ?? true

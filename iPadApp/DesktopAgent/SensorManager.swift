@@ -346,6 +346,23 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Manual pain-day override — sync to PC immediately on toggle
+        settings.$manualPainDay
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] active in
+                self?.ws.sendPainDayOverride(active: active)
+            }
+            .store(in: &cancellables)
+
+        // Disabled gestures — sync when assessment changes and on first connect
+        settings.$disabledGestures
+            .removeDuplicates()
+            .sink { [weak self] disabled in
+                self?.ws.sendGestureAssessment(disabled: Array(disabled))
+            }
+            .store(in: &cancellables)
+
         // Sound mappings — non-empty means enabled
         settings.$soundMappings
             .removeDuplicates()

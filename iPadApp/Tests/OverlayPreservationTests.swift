@@ -289,15 +289,15 @@ final class OverlayPreservationTests: XCTestCase {
         ws.sendTrackpadScroll(direction: "right")
     }
 
-    // MARK: — Property: ScientificKeypadView Buttons Register (Req 3.14)
+    // MARK: — Property: Write Tab Expressions Register (Req 3.14)
 
-    /// For all keypad button presses, the sendCommand method is callable with DICTATE action.
+    /// For all expression sends from the Write tab, the sendCommand method is callable with DICTATE action.
     ///
     /// **Validates: Requirements 3.14**
     func testScientificKeypadSendExpression() {
         let ws = makeWSManager()
 
-        // Simulate various expressions being sent (same logic as ScientificKeypadView.sendExpression)
+        // Simulate various expressions being sent via the Write tab (HandwritingCanvasView)
         let expressions = ["1+2", "sin(3.14)", "42", "2^10", "sqrt(16)", "3.14*2"]
 
         for expr in expressions {

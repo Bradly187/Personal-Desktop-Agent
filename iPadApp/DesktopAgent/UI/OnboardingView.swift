@@ -23,7 +23,7 @@ struct OnboardingView: View {
     @Binding var isComplete: Bool
 
     @State private var currentStep = 0
-    private let totalSteps = 7
+    private let totalSteps = 10
 
     var body: some View {
         ZStack {
@@ -49,8 +49,14 @@ struct OnboardingView: View {
                         .tag(4)
                     VoiceStep(settings: settings)
                         .tag(5)
-                    DoneStep()
+                    VoiceProfilingStep(settings: settings)
                         .tag(6)
+                    GestureAssessmentStep(settings: settings)
+                        .tag(7)
+                    FlareProfileStep(settings: settings)
+                        .tag(8)
+                    DoneStep()
+                        .tag(9)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
                 .animation(.easeInOut(duration: 0.3), value: currentStep)
@@ -661,7 +667,160 @@ private struct VoiceStep: View {
     }
 }
 
-// MARK: - Step 7: Done
+// MARK: - Step 7: Voice Profiling
+
+private struct VoiceProfilingStep: View {
+    @ObservedObject var settings: SettingsStore
+    @Environment(\.appTheme) private var theme
+    @State private var showSheet = false
+
+    var body: some View {
+        VStack(spacing: DesignTokens.Spacing.xl) {
+            Spacer()
+
+            Image(systemName: "waveform.badge.mic")
+                .font(.system(size: 72))
+                .foregroundStyle(theme.accent)
+
+            Text("Voice Profile")
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                .foregroundStyle(theme.textPrimary)
+
+            Text("Say 10 common commands aloud so the system can measure your natural voice volume and clarity — and stay accurate on harder days.")
+                .font(DesignTokens.Typography.body)
+                .foregroundStyle(theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+
+            Button {
+                showSheet = true
+            } label: {
+                Label("Start Voice Profiling", systemImage: "mic.fill")
+                    .font(DesignTokens.Typography.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: DesignTokens.Size.touchTargetCompact)
+                    .background(theme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                    .padding(.horizontal, DesignTokens.Spacing.xl)
+            }
+
+            Button("Skip for now") { }
+                .font(DesignTokens.Typography.body)
+                .foregroundStyle(theme.textSecondary)
+
+            Spacer()
+        }
+        .padding(DesignTokens.Spacing.xl)
+        .sheet(isPresented: $showSheet) {
+            VoiceProfilingSheet(settings: settings)
+        }
+    }
+}
+
+// MARK: - Step 8: Gesture Assessment
+
+private struct GestureAssessmentStep: View {
+    @ObservedObject var settings: SettingsStore
+    @Environment(\.appTheme) private var theme
+    @State private var showSheet = false
+
+    var body: some View {
+        VStack(spacing: DesignTokens.Spacing.xl) {
+            Spacer()
+
+            Image(systemName: "hand.wave.fill")
+                .font(.system(size: 72))
+                .foregroundStyle(theme.accent)
+
+            Text("Gesture Check")
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                .foregroundStyle(theme.textPrimary)
+
+            Text("Tell us which hand gestures you can do comfortably. The system adjusts confidence thresholds — especially on days when your hands are harder to control.")
+                .font(DesignTokens.Typography.body)
+                .foregroundStyle(theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+
+            Button {
+                showSheet = true
+            } label: {
+                Label("Start Assessment", systemImage: "hand.raised.fill")
+                    .font(DesignTokens.Typography.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: DesignTokens.Size.touchTargetCompact)
+                    .background(theme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                    .padding(.horizontal, DesignTokens.Spacing.xl)
+            }
+
+            Button("Skip for now") { }
+                .font(DesignTokens.Typography.body)
+                .foregroundStyle(theme.textSecondary)
+
+            Spacer()
+        }
+        .padding(DesignTokens.Spacing.xl)
+        .sheet(isPresented: $showSheet) {
+            GestureAssessmentSheet(settings: settings)
+        }
+    }
+}
+
+// MARK: - Step 9: Flare Profile
+
+private struct FlareProfileStep: View {
+    @ObservedObject var settings: SettingsStore
+    @Environment(\.appTheme) private var theme
+    @State private var showSheet = false
+
+    var body: some View {
+        VStack(spacing: DesignTokens.Spacing.xl) {
+            Spacer()
+
+            Image(systemName: "heart.text.clipboard")
+                .font(.system(size: 72))
+                .foregroundStyle(theme.accent)
+
+            Text("Flare Day Profile")
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                .foregroundStyle(theme.textPrimary)
+
+            Text("Describe how your abilities change on hard days. The system pre-adapts before auto-detection would normally kick in — and you can flip a single toggle when a flare starts.")
+                .font(DesignTokens.Typography.body)
+                .foregroundStyle(theme.textSecondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+
+            Button {
+                showSheet = true
+            } label: {
+                Label("Set Up Flare Profile", systemImage: "heart.fill")
+                    .font(DesignTokens.Typography.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: DesignTokens.Size.touchTargetCompact)
+                    .background(theme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                    .padding(.horizontal, DesignTokens.Spacing.xl)
+            }
+
+            Button("Skip for now") { }
+                .font(DesignTokens.Typography.body)
+                .foregroundStyle(theme.textSecondary)
+
+            Spacer()
+        }
+        .padding(DesignTokens.Spacing.xl)
+        .sheet(isPresented: $showSheet) {
+            FlareProfileSheet(settings: settings)
+        }
+    }
+}
+
+// MARK: - Step 10: Done
 
 private struct DoneStep: View {
     @Environment(\.appTheme) private var theme

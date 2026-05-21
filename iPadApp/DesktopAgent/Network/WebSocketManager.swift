@@ -3,6 +3,13 @@ import Network
 import Combine
 import QuartzCore
 
+// MARK: — Recalibration request (PC → iPad)
+
+struct RecalibrationRequest {
+    let reason: String          // "voice_clarity" | "seasonal"
+    let degradationPct: Double  // 0–100
+}
+
 // MARK: — Connection state
 
 enum ConnectionState: Equatable {
@@ -44,6 +51,9 @@ final class WebSocketManager: ObservableObject {
     /// Feed of error messages from the PC bridge (ack errors, inference failures).
     /// Emits a human-readable error string for display in the UI.
     let errorFeed = PassthroughSubject<String, Never>()
+
+    /// Feed of re-calibration requests from the PC (voice drift or seasonal prompt).
+    let recalibrationFeed = PassthroughSubject<RecalibrationRequest, Never>()
 
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
@@ -259,6 +269,11 @@ final class WebSocketManager: ObservableObject {
                 unicode: json["unicode"] as? String,
                 error: json["error"] as? String
             )
+        case "recalibration_request":
+            let reason  = json["reason"]          as? String ?? "voice_clarity"
+            let pct     = json["degradation_pct"] as? Double ?? 0.0
+            recalibrationFeed.send(RecalibrationRequest(reason: reason, degradationPct: pct))
+            parsed = .unknown(type: type, raw: json)
         default:
             parsed = .unknown(type: type, raw: json)
         }
@@ -413,6 +428,18 @@ extension WebSocketManager {
 
     func sendAudioStream(samplesBase64: String, frames: Int) {
         send(["type": "audio_stream", "samples": samplesBase64, "frames": frames])
+    }
+
+    /// Notify the PC of a manual pain-day override so it immediately
+    /// adapts VAD thresholds and PainDayEngine state.
+    func sendPainDayOverride(active: Bool) {
+        send(["type": "pain_day_override", "active": active])
+    }
+
+    /// Send the user's gesture capability assessment so GestureProcessor
+    /// can skip gestures marked "Can't do this" in onboarding.
+    func sendGestureAssessment(disabled: [String]) {
+        send(["type": "gesture_assessment", "disabled": disabled])
     }
 
     func sendDepthFrame(width: Int, height: Int, depthB64: String, confB64: String, ts: Double) {
