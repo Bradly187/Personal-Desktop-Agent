@@ -24,6 +24,8 @@ struct OnboardingView: View {
 
     @State private var currentStep = 0
     private let totalSteps = 10
+    /// Tracks which calibrations were completed (or auto-satisfied) during onboarding.
+    @State private var calibrationsDone: Set<String> = []
 
     var body: some View {
         ZStack {
@@ -45,8 +47,13 @@ struct OnboardingView: View {
                         .tag(2)
                     CursorControlStep(settings: settings)
                         .tag(3)
-                    CalibrationStep(sensorManager: sensorManager, settings: settings)
-                        .tag(4)
+                    CalibrationStep(
+                        sensorManager: sensorManager,
+                        settings: settings,
+                        wsManager: wsManager,
+                        done: $calibrationsDone
+                    )
+                    .tag(4)
                     VoiceStep(settings: settings)
                         .tag(5)
                     VoiceProfilingStep(settings: settings)
@@ -55,7 +62,7 @@ struct OnboardingView: View {
                         .tag(7)
                     FlareProfileStep(settings: settings)
                         .tag(8)
-                    DoneStep()
+                    DoneStep(settings: settings, done: calibrationsDone)
                         .tag(9)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
@@ -489,82 +496,270 @@ private struct CursorControlStep: View {
     }
 }
 
-// MARK: - Step 5: Calibration
+// MARK: - Step 5: Sensor Calibration Hub
 
 private struct CalibrationStep: View {
     @ObservedObject var sensorManager: SensorManager
     @ObservedObject var settings: SettingsStore
+    @ObservedObject var wsManager: WebSocketManager
+    @Binding var done: Set<String>
+
     @Environment(\.appTheme) private var theme
 
-    @State private var calibrated = false
+    @State private var showGazeSensitivitySheet = false
+    @State private var showMonitorCalSheet = false
+    @State private var showSoundTrainingSheet = false
+    @State private var gyroCountdown: Int? = nil
+
+    private var isConnected: Bool { wsManager.state == .connected }
+    private var hasTilt: Bool { settings.tiltEnabled }
+    private var hasGaze: Bool { settings.gazeEnabled }
+    private var hasHead: Bool { settings.headEnabled }
+    private var hasSounds: Bool { !settings.soundMappings.isEmpty }
+    private var hasAny: Bool { hasTilt || hasGaze || hasHead || hasSounds }
 
     var body: some View {
-        VStack(spacing: DesignTokens.Spacing.xl) {
-            Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: DesignTokens.Spacing.xl) {
 
-            Image(systemName: settings.tiltEnabled ? "level" : "arrow.right.circle")
-                .font(.system(size: 56))
-                .foregroundStyle(theme.accent)
-                .accessibilityHidden(true)
+                // Header
+                VStack(spacing: DesignTokens.Spacing.sm) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 48))
+                        .foregroundStyle(theme.accent)
+                    Text("Calibrate Your Sensors")
+                        .font(DesignTokens.Typography.headline)
+                        .foregroundStyle(theme.textPrimary)
+                    Text("Complete the steps below for each sensor you've enabled. You can skip any and return later from Settings.")
+                        .font(DesignTokens.Typography.body)
+                        .foregroundStyle(theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, DesignTokens.Spacing.lg)
 
-            if settings.tiltEnabled {
-                Text("Calibrate Tilt")
-                    .font(DesignTokens.Typography.headline)
-                    .foregroundStyle(theme.textPrimary)
-
-                Text("Hold your iPad in the position you'll normally use it, then tap the button below. This sets the \"center\" position for cursor control.")
-                    .font(DesignTokens.Typography.body)
-                    .foregroundStyle(theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, DesignTokens.Spacing.lg)
-
-                Button {
-                    sensorManager.tiltSensor.calibrate()
-                    calibrated = true
-                } label: {
-                    HStack(spacing: DesignTokens.Spacing.sm) {
-                        Image(systemName: calibrated ? "checkmark" : "scope")
-                        Text(calibrated ? "Calibrated!" : "Set Neutral Position")
+                if !hasAny {
+                    VStack(spacing: DesignTokens.Spacing.md) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 48))
+                            .foregroundStyle(theme.success)
+                        Text("No calibration needed")
+                            .font(DesignTokens.Typography.headline)
+                            .foregroundStyle(theme.textPrimary)
+                        Text("Trackpad mode needs no sensor calibration.")
+                            .font(DesignTokens.Typography.body)
+                            .foregroundStyle(theme.textSecondary)
                     }
-                    .font(DesignTokens.Typography.body.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, DesignTokens.Spacing.xl)
-                    .frame(minHeight: DesignTokens.Size.touchTargetMin)
-                    .background(calibrated ? theme.success : theme.accent)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                } else {
+                    VStack(alignment: .leading, spacing: DesignTokens.Spacing.xl) {
+
+                        // TILT
+                        if hasTilt {
+                            calSection("Tilt Navigation", icon: "ipad.landscape") {
+                                CalibrationCard(
+                                    title: "Neutral Position",
+                                    subtitle: "Hold iPad in your usual resting position, then tap.",
+                                    isDone: done.contains("tilt_neutral"),
+                                    isBlocked: false
+                                ) {
+                                    sensorManager.tiltSensor.calibrate()
+                                    done.insert("tilt_neutral")
+                                }
+                                CalibrationCard(
+                                    title: "Gyro Bias",
+                                    subtitle: gyroCountdown.map { "Hold still… \($0)s" }
+                                        ?? "Place iPad on a flat surface, then tap to zero out sensor drift.",
+                                    isDone: done.contains("tilt_gyro"),
+                                    isBlocked: false
+                                ) {
+                                    runGyroBias()
+                                }
+                            }
+                        }
+
+                        // GAZE
+                        if hasGaze {
+                            calSection("Eye Gaze", icon: "eye") {
+                                CalibrationCard(
+                                    title: "Sensitivity Auto-Tune",
+                                    subtitle: "Measures your eye-movement range (~15 s).",
+                                    isDone: done.contains("gaze_sensitivity"),
+                                    isBlocked: false
+                                ) { showGazeSensitivitySheet = true }
+
+                                CalibrationCard(
+                                    title: "Monitor Mapping",
+                                    subtitle: "Maps gaze to exact screen pixels via 5 dots (~2 min). Requires PC bridge.",
+                                    isDone: done.contains("gaze_monitor"),
+                                    isBlocked: !isConnected
+                                ) { showMonitorCalSheet = true }
+                            }
+                        }
+
+                        // HEAD
+                        if hasHead {
+                            calSection("Head Tracking", icon: "face.smiling") {
+                                CalibrationCard(
+                                    title: "Range Auto-Calibrates",
+                                    subtitle: "Move your head left, right, up, down through your comfortable range. The system learns automatically — nothing to do here.",
+                                    isDone: true,
+                                    isBlocked: false
+                                ) { }
+                            }
+                        }
+
+                        // SOUND ACTIONS
+                        if hasSounds {
+                            calSection("Sound Actions", icon: "mouth") {
+                                CalibrationCard(
+                                    title: "Sound Training",
+                                    subtitle: "Confirm cluck, pop, and hiss are detected by your device.",
+                                    isDone: done.contains("sound_training"),
+                                    isBlocked: false
+                                ) { showSoundTrainingSheet = true }
+                            }
+                        }
+                    }
+                }
+
+                // PC connection nudge for pending monitor calibration
+                if hasGaze && !done.contains("gaze_monitor") && !isConnected {
+                    HStack(spacing: DesignTokens.Spacing.sm) {
+                        Image(systemName: "wifi.exclamationmark")
+                            .foregroundStyle(theme.warning)
+                        Text("Start the PC bridge to unlock Monitor Mapping. You can finish it later from Settings → Gaze → Calibrate Monitor.")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    .padding(DesignTokens.Spacing.md)
+                    .background(theme.surfaceSecondary)
                     .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                 }
-                .accessibilityLabel(calibrated ? "Calibration complete" : "Calibrate neutral tilt position")
 
-                if calibrated {
-                    Text("You can recalibrate anytime from Settings.")
-                        .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(theme.textSecondary)
-                }
-            } else {
-                Text("Calibration")
-                    .font(DesignTokens.Typography.headline)
-                    .foregroundStyle(theme.textPrimary)
+                Spacer(minLength: DesignTokens.Spacing.xxl)
+            }
+            .padding(.horizontal, DesignTokens.Spacing.lg)
+        }
+        .onAppear {
+            if hasTilt { sensorManager.tiltSensor.start() }
+            if hasGaze { sensorManager.gazeTracker.start() }
+            if hasHead { done.insert("head_range") }
+        }
+        .sheet(isPresented: $showGazeSensitivitySheet, onDismiss: {
+            done.insert("gaze_sensitivity")
+        }) {
+            GazeCalibrationSheet(sensorManager: sensorManager, settings: settings)
+        }
+        .sheet(isPresented: $showMonitorCalSheet, onDismiss: {
+            done.insert("gaze_monitor")
+        }) {
+            MonitorCalibrationSheet()
+                .environmentObject(wsManager)
+                .environmentObject(sensorManager)
+        }
+        .sheet(isPresented: $showSoundTrainingSheet, onDismiss: {
+            done.insert("sound_training")
+        }) {
+            SoundTrainingSheet(wsManager: wsManager, settings: settings)
+        }
+    }
 
-                Text("No calibration needed for your selected cursor method. You're all set!")
-                    .font(DesignTokens.Typography.body)
+    private func runGyroBias() {
+        guard gyroCountdown == nil else { return }
+        Task { @MainActor in
+            for i in stride(from: 3, through: 1, by: -1) {
+                gyroCountdown = i
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            gyroCountdown = nil
+            // GyrobiasCalibirator inside FusionEngine captures bias automatically
+            // when the iPad is stationary — prompting the user to hold still is enough.
+            done.insert("tilt_gyro")
+        }
+    }
+
+    @ViewBuilder
+    private func calSection<C: View>(_ title: String, icon: String, @ViewBuilder content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
+            HStack(spacing: DesignTokens.Spacing.xs) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                Text(title.uppercased())
+                    .font(.system(.caption2, design: .default).weight(.semibold))
                     .foregroundStyle(theme.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, DesignTokens.Spacing.lg)
+                    .kerning(0.8)
+            }
+            content()
+        }
+    }
+}
 
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 48))
-                    .foregroundStyle(theme.success)
+// MARK: - CalibrationCard
+
+private struct CalibrationCard: View {
+    let title: String
+    let subtitle: String
+    let isDone: Bool
+    let isBlocked: Bool
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: DesignTokens.Spacing.md) {
+            Image(systemName: isDone ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 22))
+                .foregroundStyle(isDone ? theme.success : theme.textSecondary)
+                .frame(width: 26)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(DesignTokens.Typography.body.weight(.semibold))
+                    .foregroundStyle(isDone ? theme.textSecondary : theme.textPrimary)
+                    .strikethrough(isDone)
+                Text(subtitle)
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if isBlocked {
+                    Label("Needs PC bridge connection", systemImage: "wifi.exclamationmark")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.warning)
+                }
             }
 
             Spacer()
-        }
-        .padding(DesignTokens.Spacing.xl)
-        .onAppear {
-            // Start tilt sensor temporarily for calibration
-            if settings.tiltEnabled {
-                sensorManager.tiltSensor.start()
+
+            if isDone {
+                Text("Done")
+                    .font(.system(.caption, design: .default).weight(.semibold))
+                    .foregroundStyle(theme.success)
+            } else if isBlocked {
+                Image(systemName: "lock")
+                    .font(.caption)
+                    .foregroundStyle(theme.textSecondary)
+            } else {
+                Button(action: action) {
+                    Text("Start")
+                        .font(.system(.caption, design: .default).weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, DesignTokens.Spacing.md)
+                        .padding(.vertical, DesignTokens.Spacing.sm)
+                        .background(theme.accent)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
         }
+        .padding(DesignTokens.Spacing.md)
+        .background(theme.surfaceSecondary)
+        .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+        .opacity(isBlocked ? 0.55 : 1.0)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(isDone ? "complete" : isBlocked ? "locked, needs PC connection" : "pending")")
     }
 }
 
@@ -823,40 +1018,106 @@ private struct FlareProfileStep: View {
 // MARK: - Step 10: Done
 
 private struct DoneStep: View {
+    @ObservedObject var settings: SettingsStore
+    let done: Set<String>
+
     @Environment(\.appTheme) private var theme
 
+    // All calibration items with relevance predicate
+    private var calibrationItems: [(id: String, label: String, relevant: Bool)] { [
+        ("tilt_neutral",    "Tilt neutral position",   settings.tiltEnabled),
+        ("tilt_gyro",       "Gyro bias",               settings.tiltEnabled),
+        ("gaze_sensitivity","Gaze sensitivity",         settings.gazeEnabled),
+        ("gaze_monitor",    "Monitor mapping",          settings.gazeEnabled),
+        ("head_range",      "Head tracking",            settings.headEnabled),
+        ("sound_training",  "Sound training",           !settings.soundMappings.isEmpty),
+    ].filter { $0.relevant } }
+
+    private var completedCount: Int { calibrationItems.filter { done.contains($0.id) }.count }
+    private var totalCount: Int { calibrationItems.count }
+    private var allDone: Bool { completedCount == totalCount }
+
     var body: some View {
-        VStack(spacing: DesignTokens.Spacing.xl) {
-            Spacer()
+        ScrollView {
+            VStack(spacing: DesignTokens.Spacing.xl) {
+                Spacer(minLength: DesignTokens.Spacing.xl)
 
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 72))
-                .foregroundStyle(theme.success)
-                .accessibilityHidden(true)
+                Image(systemName: allDone ? "checkmark.seal.fill" : "checkmark.seal")
+                    .font(.system(size: 72))
+                    .foregroundStyle(allDone ? theme.success : theme.accent)
+                    .accessibilityHidden(true)
 
-            Text("You're All Set!")
-                .font(.system(.largeTitle, design: .rounded).weight(.bold))
-                .foregroundStyle(theme.textPrimary)
+                Text(allDone ? "Fully Calibrated!" : "Almost Ready!")
+                    .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                    .foregroundStyle(theme.textPrimary)
 
-            Text("Your Desktop Agent is configured and ready to go. You can adjust any setting later from the Settings tab.")
-                .font(DesignTokens.Typography.body)
-                .foregroundStyle(theme.textSecondary)
-                .multilineTextAlignment(.center)
+                Text(allDone
+                    ? "All sensors are calibrated. Your Desktop Agent is ready."
+                    : "Some calibrations were skipped. You can complete them anytime from Settings.")
+                    .font(DesignTokens.Typography.body)
+                    .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, DesignTokens.Spacing.xl)
+
+                // Calibration summary
+                if !calibrationItems.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Text("Calibration Summary")
+                                .font(.system(.caption2, design: .default).weight(.semibold))
+                                .foregroundStyle(theme.textSecondary)
+                                .kerning(0.8)
+                            Spacer()
+                            Text("\(completedCount)/\(totalCount)")
+                                .font(DesignTokens.Typography.caption)
+                                .foregroundStyle(completedCount == totalCount ? theme.success : theme.warning)
+                        }
+                        .padding(.horizontal, DesignTokens.Spacing.lg)
+                        .padding(.bottom, DesignTokens.Spacing.sm)
+
+                        VStack(spacing: 0) {
+                            ForEach(calibrationItems, id: \.id) { item in
+                                let isDone = done.contains(item.id)
+                                HStack(spacing: DesignTokens.Spacing.md) {
+                                    Image(systemName: isDone ? "checkmark.circle.fill" : "exclamationmark.circle")
+                                        .foregroundStyle(isDone ? theme.success : theme.warning)
+                                        .font(.system(size: 16))
+                                    Text(item.label)
+                                        .font(DesignTokens.Typography.body)
+                                        .foregroundStyle(theme.textPrimary)
+                                    Spacer()
+                                    Text(isDone ? "Done" : "Skipped")
+                                        .font(DesignTokens.Typography.caption)
+                                        .foregroundStyle(isDone ? theme.success : theme.textSecondary)
+                                }
+                                .padding(.horizontal, DesignTokens.Spacing.lg)
+                                .padding(.vertical, DesignTokens.Spacing.md)
+                                if item.id != calibrationItems.last?.id {
+                                    Divider().padding(.leading, 52)
+                                }
+                            }
+                        }
+                        .background(theme.surfaceSecondary)
+                        .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                        .padding(.horizontal)
+                    }
+                }
+
+                // Tips
+                VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
+                    tipRow(icon: "hand.tap",        text: "Swipe between tabs or drag the tab bar")
+                    tipRow(icon: "gearshape",       text: "All calibrations are re-runnable from Settings")
+                    tipRow(icon: "sensor.tag.radiowaves.forward", text: "Tap Sensors tab to see live status")
+                }
+                .padding(DesignTokens.Spacing.lg)
+                .background(theme.surfaceSecondary)
+                .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                 .padding(.horizontal, DesignTokens.Spacing.xl)
 
-            VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
-                tipRow(icon: "hand.tap", text: "Swipe between tabs or drag the tab bar")
-                tipRow(icon: "gearshape", text: "Fine-tune sensors in Settings")
-                tipRow(icon: "questionmark.circle", text: "Tap Sensors tab to see live status")
+                Spacer(minLength: DesignTokens.Spacing.xxl)
             }
-            .padding(DesignTokens.Spacing.lg)
-            .background(theme.surfaceSecondary)
-            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
-            .padding(.horizontal, DesignTokens.Spacing.xl)
-
-            Spacer()
+            .padding(.horizontal, DesignTokens.Spacing.lg)
         }
-        .padding(DesignTokens.Spacing.xl)
     }
 
     private func tipRow(icon: String, text: String) -> some View {
