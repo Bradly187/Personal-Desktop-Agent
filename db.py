@@ -427,6 +427,23 @@ CREATE TABLE IF NOT EXISTS ipad_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_ipad_logs_session ON ipad_logs(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_ipad_logs_level   ON ipad_logs(level, ts);
+
+-- Gaze-to-monitor calibration: affine angular mapping from gaze ray to screen pixel.
+-- One active row; history preserved by AUTOINCREMENT (never deleted).
+-- ref_dir: JSON [x,y,z] unit vector (ARKit device-fixed space).
+-- matrix:  JSON 2×3 affine [[a0,a1,a2],[b0,b1,b2]] mapping (az,el)→(px_x,px_y).
+CREATE TABLE IF NOT EXISTS gaze_monitor_calibration (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   INTEGER REFERENCES sessions(id),
+    ref_dir      TEXT    NOT NULL,
+    matrix       TEXT    NOT NULL,
+    screen_w     INTEGER NOT NULL,
+    screen_h     INTEGER NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 5,
+    residual_px  REAL    NOT NULL,
+    created_at   REAL    NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_gmc_created ON gaze_monitor_calibration(created_at);
 """
 
 
@@ -774,6 +791,71 @@ class AgentDB:
             log.info("AgentDB: manual_pain_day set to %s", active)
         except Exception as exc:
             log.warning("AgentDB.set_manual_pain_day failed: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # Gaze monitor calibration
+    # ---------------------------------------------------------------------- #
+
+    async def upsert_gaze_calibration(
+        self,
+        session_id: int,
+        ref_dir: list[float],
+        matrix: list[list[float]],
+        screen_w: int,
+        screen_h: int,
+        residual_px: float,
+        sample_count: int = 5,
+    ) -> None:
+        """Insert a new gaze calibration row (history is kept; rows never deleted)."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                """INSERT INTO gaze_monitor_calibration
+                   (session_id, ref_dir, matrix, screen_w, screen_h,
+                    sample_count, residual_px, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    json.dumps(ref_dir),
+                    json.dumps(matrix),
+                    screen_w,
+                    screen_h,
+                    sample_count,
+                    residual_px,
+                    time.time(),
+                ),
+            )
+            await self._conn.commit()
+            log.info("AgentDB: gaze calibration stored  residual=%.1f px", residual_px)
+        except Exception as exc:
+            log.warning("AgentDB.upsert_gaze_calibration failed: %s", exc)
+
+    async def get_gaze_calibration(self) -> dict | None:
+        """Return the most recent gaze calibration row, or None if not calibrated."""
+        if not self._conn:
+            return None
+        try:
+            row = await (await self._conn.execute(
+                """SELECT ref_dir, matrix, screen_w, screen_h,
+                          sample_count, residual_px, created_at
+                   FROM gaze_monitor_calibration
+                   ORDER BY id DESC LIMIT 1"""
+            )).fetchone()
+            if not row:
+                return None
+            return {
+                "ref_dir":      json.loads(row[0]),
+                "matrix":       json.loads(row[1]),
+                "screen_w":     row[2],
+                "screen_h":     row[3],
+                "sample_count": row[4],
+                "residual_px":  row[5],
+                "created_at":   row[6],
+            }
+        except Exception as exc:
+            log.warning("AgentDB.get_gaze_calibration failed: %s", exc)
+            return None
 
     async def search_lecture_notes(
         self,

@@ -12,7 +12,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 (2026-05-20)
+## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 + G1–G4 + iPad logging (2026-05-22)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
@@ -122,7 +122,31 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - `docs/diagrams/user-stories.{png,svg}` — mindmap: 5 epics (Setup, Daily Control, Coding/Dev, Pain Day, Subscription)
 - 7-phase commercial roadmap: May 2026 hardening → Jul 2027 launch at 100 subscribers / $1K MRR; cloud inference via `claude-haiku-4-5` at <$0.10/user/day; $9.99/month StoreKit subscription
 
-**Test suite (2026-05-20):** 315 pytest tests + 31 standalone integration scripts + 15 Swift XCTest files = 361 total
+**Done (Test coverage + tilt snapshot — 2026-05-21):**
+- `tests/test_ui_automation.py` — 29 new tests: `UIElement`, `_detect_app`, `_score` (all 5 tiers), `UIAutomationProvider` (cache hit/miss/expiry, exception path, status)
+- `tests/test_action_verifier.py` — 22 new tests: `VerifyResult`, all skip paths, post-snapshot error, `_diff()` (identical/different/size-mismatch/noise-floor), `verify()` end-to-end for all 4 verifiable verbs
+- `engineering/tilt_implementation.md` (memory) — full working-state snapshot: two modes, axis mapping, all FusionConfig defaults, pain-day deltas, fall-through guarantee, stationary lock
+
+**Done (Sprint G1–G4 — Gaze monitor calibration — 2026-05-21):**
+- `gaze_calibrator.py` — angular affine mapping: 5-point `add_sample()` → `solve()` (numpy lstsq, az/el tangent plane) → `project(ray_dir) → (px_x, px_y)`; `gaze_calibration.json` sidecar persistence; `save_to_db()` for history
+- `calibration_overlay.py` — tkinter full-screen translucent overlay; 5 dots (top-left, top-right, center, bottom-left, bottom-right, 5% padding); cyan 40px dot + crosshair; daemon thread; advances via `advance()`, closes via `finish()`/`cancel()`
+- `db.py` — +1 table: `gaze_monitor_calibration` (total: **21 AgentDB tables**); +2 methods: `upsert_gaze_calibration()`, `get_gaze_calibration()`
+- `GazeTracker.swift` — `currentWorldRay` property; world-space extraction from `faceAnchor.transform * eyeTransform`; 10 Hz `gaze_ray` WebSocket send (rate-limited, every 6th frame)
+- `WebSocketManager.swift` — `sendGazeRay(dx:dy:dz:confidence:)`
+- `ipad_bridge.py` — `gaze_ray` handler (stores ray + timestamp); `gaze_dwell` handler attaches fresh ray (< 300ms) to FusionEngine call; `gaze_calibration_sample` handler; `set_gaze_calibrator()` wiring
+- `fusion_engine.py` — `set_gaze_calibrator()`; `on_gaze_dwell()` extended with `ray_dir` param → calibrator override of (x, y) when calibrated
+- `main.py` — `GazeCalibrator` load at startup; startup status table "Gaze monitor calibration" row; wired to bridge and fusion
+- `tests/test_gaze_calibrator.py` — 22 new tests: sample management, solve (success/failure/collinear), project (center, all samples, bounds clamp, zero ray, type), JSON round-trip, DB persistence
+- **Remaining:** voice command trigger (`"hey agent calibrate monitor"` → overlay → solve → TTS report) and `MonitorCalibrationSheet.swift` iPad UI
+
+**Done (iPad structured log forwarding — 2026-05-22):**
+- `ipad_bridge.py` — `ipad_log` message handler: routes each AppLogger entry to `ipad.<subsystem>` Python logger; warning+ entries persisted to DB
+- `db.py` — +1 table: `ipad_logs`; +1 method: `log_ipad_events(session_id, entries)`; total is now **27 AgentDB tables** (previous Sprint C tables were undercounted)
+- `iPadApp/DesktopAgent/AppLogger.swift` — structured log forwarding over WebSocket (subsystem + level + msg batching)
+- Multiple Swift sensor files updated to use AppLogger for structured output: `SharedAudioSession`, `AudioStreamer`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `LiDARStreamer`, `SharedFaceSession`, `TiltSensor`, `SensorManager`, `DesktopAgentApp`
+- `fusion_engine.py` — `set_gaze_calibrator()` wiring path also updated
+
+**Test suite (2026-05-21):** 388 pytest tests + 31 standalone integration scripts + 15 Swift XCTest files = 434 total
 
 ## Run Commands
 
@@ -212,7 +236,9 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `main.py` | Unified entry point; `--measure-vram`; `--viewer`/`--viewer-only`; startup status table; Ctrl-C shutdown |
 | `sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
 | `whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
-| `db.py` | `AgentDB` (aiosqlite, 20 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice calibration tables |
+| `db.py` | `AgentDB` (aiosqlite, 27 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice + gaze monitor calibration + iPad log tables |
+| `gaze_calibrator.py` | Angular affine mapping from world-space gaze ray → screen pixel; `add_sample()`/`solve()`/`project()`; numpy lstsq; `gaze_calibration.json` + AgentDB persistence |
+| `calibration_overlay.py` | Tkinter full-screen 5-dot calibration overlay; daemon thread; advances/closes via method calls |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
 | `polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
 | `chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
@@ -272,11 +298,15 @@ used instead (4-second recording window, auto-approve on silence).
 
 ## WebSocket Protocol
 
-**iPad → PC (15 types):** `tilt`, `tilt_position`, `gaze`, `gaze_delta`, `gaze_dwell`, `head_pose`, `keyword`, `sound_action`, `touch_command`, `trackpad`, `audio_stream`, `camera_frame`, `depth_frame`, `handwriting_image`, `tilt_tap`
+**iPad → PC (28 types):**
+- *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`, `gaze_calibration_sample`, `head_pose`, `keyword`, `sound_action`, `audio_stream`, `camera_frame`, `depth_frame`
+- *Direct control:* `touch_command`, `trackpad`, `handwriting_image`, `ping`
+- *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `calibration_start`, `calibration_cancel`
+- *Diagnostics:* `ipad_log`
 
-**PC → iPad (4 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image)
+**PC → iPad (5 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (drift/seasonal re-cal trigger → QuickRecalSheet)
 
-`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 10. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. The remaining sensor types (gaze, head_pose, keyword, etc.) are dispatched to FusionEngine.
+`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 10. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `gaze_ray` carries a world-space unit vector `{dx,dy,dz}` at ~10 Hz; `ipad_bridge` stores it and attaches it to the next `gaze_dwell` event so `FusionEngine` can use `GazeCalibrator.project()` for absolute pixel positioning. `gaze_calibration_sample` delivers a dot_index + known pixel + ray during calibration sessions. `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (gaze, head_pose, keyword, etc.) are dispatched to FusionEngine.
 
 ## Sensor Priority (FusionEngine — `fusion_engine.py`)
 

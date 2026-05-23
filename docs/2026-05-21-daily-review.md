@@ -2,97 +2,141 @@
 
 ## Session Summary
 
-Automated daily housekeeping session. No new feature work. Review of 2026-05-20 commits, stale-reference audit, file fixes, and documentation updates.
+Three-part session: test coverage for Sprint 6/7 (ui_automation + action_verifier), architecture design for gaze-to-monitor absolute positioning, and implementation of Sprint G1–G4 (gaze calibration infrastructure).
 
 ---
 
-## 1. Yesterday's Work (2026-05-20) — Summary
+## 1. Sprint #1 — Tests for ui_automation.py and action_verifier.py
 
-Ten commits landed on 2026-05-20. Full detail in `docs/2026-05-20-daily-review.md`; highlights:
+Both modules shipped on 2026-05-20 with zero test coverage. Fixed today.
 
-| Deliverable | Files | Tests |
-|---|---|---|
-| FusionEngine 4 bug fixes + pain-day adaptation | `fusion_engine.py`, `hybrid_coordinator.py` | +24 (test_fusion_fixes.py) |
-| Voice pipeline (wake phrase, lecture mode, CLARIFY echo, hallucination filter) | `whisper_stream.py`, `local_inference.py` | — |
-| Sprint A — Acoustic Profiler | `acoustic_profiler.py`, `db.py` (+6 tables) | +18 (test_acoustic_profiler.py) |
-| Sprint B — iPad onboarding UI (4 sheets) | `VoiceProfilingSheet.swift`, `GestureAssessmentSheet.swift`, `FlareProfileSheet.swift`, `QuickRecalSheet.swift` | — |
-| Sprint C — Continuous recalibration + pain-day sync | `voice_calibrator.py`, `ipad_bridge.py` | — |
-| Sprint 5 — Vision Grounding | `vision_grounder.py` | +11 (test_vision_grounder.py) |
-| Sprint 6 — UIAutomation | `ui_automation.py` | — |
-| Sprint 7 — Action Verification | `action_verifier.py` | — |
-| Commercial roadmap + diagrams | `docs/diagrams/*.{png,svg}` | — |
+### test_ui_automation.py — 29 tests
 
-**Test delta:** 307 → 361 total (315 pytest + 31 standalone + 15 Swift)
-
----
-
-## 2. Housekeeping Performed
-
-### 2.1 CLAUDE.md Updates
-
-- Header updated: `2026-05-19` → `2026-05-20`
-- Eight new **Done** sections added covering all Sprints A–C and 5–7 and FusionEngine fixes
-- Test count updated: `262/307` → `315/361`
-- `db.py` entry updated: `14 tables` → `20 tables`
-- Key Files table extended with 5 new modules: `acoustic_profiler.py`, `voice_calibrator.py`, `vision_grounder.py`, `ui_automation.py`, `action_verifier.py`
-
-### 2.2 Kiro Tasks Updated (`.kiro/specs/ipad-sensor-focus/tasks.md`)
-
-- **Phase 6 / Task 6.4** — stale agentcore deployment instructions replaced with one-line note: source deleted 2026-05-19, permanently deferred
-- **Sprints A–C and 5–7** — seven new done-task blocks appended covering all 2026-05-20 deliverables
-
-### 2.3 No Code Changes Required
-
-- All 5 new Python modules imported cleanly (zero errors)
-- 49/49 tests pass in `test_fusion_fixes.py` + `test_acoustic_profiler.py` + `test_vision_grounder.py`
-- Zero Python syntax errors across all `.py` files in the project
-
----
-
-## 3. Stale Reference Audit Results
-
-| Finding | Location | Severity | Resolution |
-|---|---|---|---|
-| `agentcore_fallback/` deploy instructions referencing deleted code | `.kiro/specs/ipad-sensor-focus/tasks.md:223–233` | Medium | Fixed — condensed to deferred notice |
-| Sprint A–C and 5–7 not in kiro tasks | `tasks.md` | Medium | Fixed — appended done blocks |
-| CLAUDE.md missing 2026-05-20 sprint work | `CLAUDE.md:15,83` | High | Fixed — header, done sections, test count, key files |
-| `NemotronInference` comment in `local_inference.py:387` | `local_inference.py` | Info | Comment only; not a live reference. No change needed |
-| `ScientificKeypadView` still referenced in `.kiro/specs/ipad-sensor-focus/tasks.md:123` (task 2.14 checked done) | `tasks.md` | Info | Task correctly marked `[x]`; feature replaced by Write tab. No change needed |
-| Stale worktrees: `lucid-hawking-964be9` (68b3af6, 2026-05-19), `wonderful-tu-dd64b5` and `zealous-beaver-fdf097` (ab1ee51, 2026-05-20) | `.claude/worktrees/` | Low | Per CLAUDE.md open items: "prune when they close". Not touched — user should review |
-
----
-
-## 4. Wiring Verification
-
-| Chain | Status |
+| Class | Tests |
 |---|---|
-| Pain-day sync: `FlareProfileSheet` → `sendPainDayOverride` → `ipad_bridge` → `BehavioralTwinState` → `AcousticProfiler` → `WhisperStream._silence_thresh` | ✅ Verified in code |
-| Recalibration feed: drift/seasonal → `bridge.send_recalibration_request()` → `wsManager.recalibrationFeed` → `QuickRecalSheet` | ✅ Verified in code |
-| Vision grounding: `HybridCoordinator._execute_action` → `vision_grounder.ground()` for CLICK with named target | ✅ Verified in code |
-| UIAutomation: `command_executor._resolve_coords` → `UIAutomationProvider.find()` → vision grounder → OCR | ✅ Verified in code |
-| Action verification: `command_executor.execute()` → `ActionVerifier.wrap()` for CLICK/OPEN/CLOSE/SCROLL | ✅ Verified in code |
-| Gesture disabled list: `GestureAssessmentSheet` → `SettingsStore.disabledGestures` → WebSocket → `gesture_processor.set_disabled_gestures()` | ✅ Verified in code |
+| `TestUIElement` | `center()` midpoint, `width()`/`height()`, integer division |
+| `TestDetectApp` | VS Code, Chrome, Kiro, Windows Terminal, unknown exe, case-insensitive |
+| `TestScore` | Exact name, exact value, contained-in-name (0.85), non-contiguous word match (0.80), partial overlap (0.65), value fallback (0.60), no match, empty |
+| `TestUIAutomationProvider` | COM unavailable, COM ready, cache hit skips UIA, expired cache bypassed, search exception → None, successful result cached, `list_clickable` when unavailable, status keys, cache count, known role name, unknown role format |
+
+### test_action_verifier.py — 22 tests
+
+| Class | Tests |
+|---|---|
+| `TestVerifyResult` | Default optional fields, explicit fields |
+| `TestActionVerifierSkip` | TYPE, HOTKEY, DICTATE, empty pre_b64, unavailable |
+| `TestActionVerifierError` | Failed post-snapshot → error result |
+| `TestActionVerifierDiff` | Identical images → 0.0%, fully different → >90%, size mismatch → no crash, noise ≤10/channel not counted |
+| `TestActionVerifierVerify` | Changed → success, unchanged → no_change, OPEN, SCROLL, case-insensitive verb, CLOSE, elapsed_ms, status keys, threshold constant |
 
 ---
 
-## 5. Open Items Carried Forward (unchanged)
+## 2. Tilt implementation snapshot
+
+Saved comprehensive working-state snapshot to memory (`engineering/tilt_implementation.md`) covering:
+- Both tilt modes (position-mapped and velocity-based) with all FusionConfig defaults
+- Critical axis mapping (rx→vertical/screen-Y, ry→horizontal/screen-X, both negated)
+- Fall-through guarantee: tilt returns only when ≥1 pixel produced (2026-05-20 bug fix)
+- Gaze escape hatch, ratchet, stationary lock, pain-day deltas, sensor switch hold
+- iPad-side stationary lock (200ms / 0.01 rad/s), message suppression (Δ < 0.001)
+
+---
+
+## 3. Gaze-to-monitor absolute positioning — architecture + implementation
+
+### Architecture discussion
+
+**Problem:** Gaze delta mode is relative (trackpad-like) — dwell clicks land where the cursor is, not where the user is looking. No absolute reference.
+
+**Solution:** Fit an affine angular mapping from world-space gaze ray direction → screen pixel using 5 calibration points. iPad sits fixed on rolltop desk, front camera ~6 inches below monitor center (identical geometry to Tobii PCEye placement). Chair height is fixed → calibration is permanent (no recurring recalibration needed, unlike commercial eye trackers).
+
+**Approach chosen:** Angular mapping (azimuth/elevation offsets from reference direction → screen pixel via numpy least squares). Avoids full 3D ray-plane geometry while being accurate for a flat monitor subtending ~35° visual angle.
+
+**LiDAR note:** Not needed for single-monitor case — 5 calibration points establish the plane implicitly. LiDAR reserved for Phase 2 (multi-monitor detection).
+
+### Sprint G1 — World-space gaze ray extraction (Swift)
+
+**GazeTracker.swift:**
+- Added `currentWorldRay: (origin: SIMD3<Float>, dir: SIMD3<Float>)?` (nonisolated(unsafe), processQueue-safe)
+- World-space extraction: `faceAnchor.transform * leftEyeTransform` → eye midpoint + `−Z` column as gaze direction
+- Sends `gaze_ray` at ~10 Hz (every 6th frame) via rate counter; full 60 Hz extraction still updates `currentWorldRay` for fresh dwell reads
+
+**WebSocketManager.swift:**
+- Added `sendGazeRay(dx:dy:dz:confidence:)` → `{"type": "gaze_ray", "dx", "dy", "dz", "conf"}`
+
+### Sprint G2 — PC-side gaze calibrator
+
+**gaze_calibrator.py (new, 220 lines):**
+- `GazeCalibrator` class: `add_sample(ray_dir, px_x, px_y)` → `solve()` → `project(ray_dir) → (px_x, px_y) | None`
+- Math: mean of all rays → reference direction; project each ray onto tangent plane → (az, el); `numpy.linalg.lstsq` fits 2×3 affine matrix; RMS residual reported
+- Persistence: `gaze_calibration.json` sidecar (fast cold-start) + `AgentDB` (history)
+
+**db.py:**
+- +1 table: `gaze_monitor_calibration` (total: **21 AgentDB tables**)
+- +2 methods: `upsert_gaze_calibration()`, `get_gaze_calibration()`
+
+### Sprint G3 — Calibration protocol + PC overlay
+
+**calibration_overlay.py (new, 160 lines):**
+- Tkinter full-screen translucent overlay (25% opacity, topmost, no title bar)
+- 5 dots: top-left, top-right, center, bottom-left, bottom-right (5% padding)
+- Cyan 40px dot + white crosshair + index label; advances via `advance()`, closes via `finish()`/`cancel()`
+- Daemon thread (same pattern as sensor_viewer.py); thread-safe via `queue.Queue`
+
+**ipad_bridge.py:**
+- `gaze_ray` message handler: normalises ray, stores `_latest_gaze_ray` + timestamp
+- `gaze_dwell` handler: attaches stored ray if fresh (< 300ms) before forwarding to FusionEngine
+- `gaze_calibration_sample` handler: routes to `GazeCalibrator.add_sample()`
+- `set_gaze_calibrator()` wiring method
+
+### Sprint G4 — Runtime absolute dwell positioning
+
+**fusion_engine.py:**
+- `set_gaze_calibrator(calibrator)` wiring method
+- `on_gaze_dwell()` extended with `ray_dir` param: if calibrated ray present, override (x, y) with `calibrator.project(ray_dir)` result; all existing dwell path unchanged
+
+**main.py:**
+- `GazeCalibrator` loaded at startup; `gaze_calibration.json` loaded if present
+- Startup status table: new "Gaze monitor calibration" row (shows residual + age if calibrated, WARN if not)
+- Wired to bridge (`set_gaze_calibrator`) and fusion (`set_gaze_calibrator`)
+
+### Remaining wiring (not yet built)
+
+Voice command handler to trigger calibration flow: `"hey agent calibrate monitor"` → TTS instructions → `CalibrationOverlay.start()` → dwell 5 dots → `solve()` → TTS residual report. All infrastructure is in place; this is the final wiring step.
+
+---
+
+## 4. Test count
+
+| Suite | Before | After |
+|---|---|---|
+| pytest | 315 | 388 (+73) |
+| Standalone integration | 31 | 31 |
+| Swift XCTest | 15 | 15 |
+| **Total** | **361** | **434** |
+
+New tests: `test_ui_automation.py` (29), `test_action_verifier.py` (22), `test_gaze_calibrator.py` (22).
+
+---
+
+## 5. Open Items
 
 | Item | Status |
 |---|---|
-| AgentCore deployment | 🔒 Permanently deferred — source deleted |
-| VLLMInference activation | 🔒 Blocked (CUDA 13.x wheels not published) |
+| Gaze calibration voice trigger | 📋 Next session — all infra done, needs voice→overlay→solve wiring |
+| `MonitorCalibrationSheet.swift` | 📋 Next session — iPad Settings UI for calibration status |
+| AgentCore deployment | 🔒 Permanently deferred |
+| VLLMInference activation | 🔒 Blocked (CUDA 13.x wheels) |
 | Nemotron 340B RAM offload | 🔁 Stretch goal |
-| Peace-jitter → BehavioralTwinState | 📋 Sprint 5+ |
-| Sensor ROM assessment UI | 📋 Future sprint |
+| Peace-jitter → BehavioralTwinState | 📋 Future sprint |
 | Grad school study mode profile | 📋 Pre Jan 2027 |
-| Stale worktrees (3) | 🔁 Prune when sessions close |
-| pix2tex handwriting OCR | 📦 Install when needed |
+| Soak test run (8hr session) | 📋 Hardening phase — next major task |
 
 ---
 
 ## 6. Performance Snapshot (unchanged from 2026-05-15 baseline)
 
 - Ollama llama3.1:8b warm p50: **373ms**
-- Whisper large-v3 GPU load: **2.5s** (cached), **~4.2 GB VRAM**
-- VRAM headroom: ~14 GB free for additional models
-- Expected CLICK success rate post-sprints-5-7: **~92%** (up from 42% baseline)
+- Whisper large-v3 GPU: **~4.2 GB VRAM**, 2.5s load
+- Expected CLICK success (post-sprints 5–7): **~92%**
+- Gaze monitor calibration: **not yet calibrated** (infrastructure complete; first-run calibration needed)

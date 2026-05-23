@@ -416,8 +416,9 @@ class FusionEngine:
             "gaze_cursor_mode": True,
         }
 
-        # --- Wired coordinator ---
+        # --- Wired components ---
         self._coordinator: Optional["HybridCoordinator"] = None
+        self._gaze_calibrator = None   # GazeCalibrator — wired by main.py
         self._running = False
         # Tracked set prevents fire-and-forget tasks from being GC'd before completion
         # and surfaces unhandled exceptions via the done-callback log.
@@ -429,6 +430,10 @@ class FusionEngine:
 
     def set_coordinator(self, coordinator: "HybridCoordinator") -> None:
         self._coordinator = coordinator
+
+    def set_gaze_calibrator(self, calibrator) -> None:
+        self._gaze_calibrator = calibrator
+        log.info("FusionEngine: GazeCalibrator wired (calibrated=%s)", calibrator.is_calibrated)
 
     # ---------------------------------------------------------------------- #
     # Pain-day threshold adaptation
@@ -553,7 +558,20 @@ class FusionEngine:
         self._gaze_delta_conf = conf
         self._gaze_delta_saccade = saccade
 
-    def on_gaze_dwell(self, x: float, y: float, action_type: str = "left_click") -> None:
+    def on_gaze_dwell(
+        self,
+        x: float,
+        y: float,
+        action_type: str = "left_click",
+        ray_dir: Optional[tuple[float, float, float]] = None,
+    ) -> None:
+        # If a calibrated gaze calibrator is wired and a fresh ray arrived,
+        # override the normalised (x, y) with the calibrator's absolute projection.
+        if ray_dir is not None and self._gaze_calibrator is not None:
+            result = self._gaze_calibrator.project(ray_dir)
+            if result is not None:
+                x = result[0] / self._w
+                y = result[1] / self._h
         self._gaze_dwell = (x, y)
         self._gaze_dwell_action_type = action_type
 

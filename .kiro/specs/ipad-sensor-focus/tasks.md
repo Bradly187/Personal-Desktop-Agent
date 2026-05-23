@@ -342,3 +342,42 @@
 - [x] **7.1 Implement `action_verifier.py`** — Pillow perceptual diff; 2% threshold; 400ms animation delay
   - Wraps CLICK/OPEN/CLOSE/SCROLL in `command_executor.execute()`
   - Expected CLICK success: ~88% → ~92%
+
+---
+
+## Sprint #1 — Test coverage for Sprint 6 + 7 (2026-05-21)
+
+- [x] **#1.1 `tests/test_ui_automation.py`** — 29 tests
+  - `UIElement.center()/width()/height()`; `_detect_app()` (6 cases); `_score()` (all 5 tiers); `UIAutomationProvider` cache hit/miss/expiry, exception path, successful caching, status
+- [x] **#1.2 `tests/test_action_verifier.py`** — 22 tests
+  - `VerifyResult` fields; skip paths (TYPE/HOTKEY/DICTATE/empty/unavailable); error path (failed snapshot); `_diff()` (identical/different/size-mismatch/noise floor); `verify()` end-to-end for CLICK/OPEN/SCROLL/CLOSE; status dict
+
+---
+
+## Sprint G1–G4 — Gaze-to-monitor absolute positioning (2026-05-21)
+
+Physical setup: iPad in landscape mode, front camera resting on rolltop desk, ~6 inches below monitor center. Chair height is fixed — calibration is permanent (one-time setup).
+
+Approach: angular affine mapping (azimuth/elevation offsets from reference gaze direction → screen pixel via numpy least squares). 5-point calibration: top-left, top-right, center, bottom-left, bottom-right.
+
+- [x] **G1 World-space gaze ray extraction (Swift)**
+  - `GazeTracker.swift` — `currentWorldRay: (origin, dir)` property; `faceAnchor.transform * eyeTransform` world-space extraction; 10 Hz `gaze_ray` send (every 6th frame)
+  - `WebSocketManager.swift` — `sendGazeRay(dx:dy:dz:confidence:)` → `{"type": "gaze_ray", ...}`
+
+- [x] **G2 PC-side gaze calibrator**
+  - `gaze_calibrator.py` — `GazeCalibrator`: `add_sample()`, `solve()` (numpy lstsq, tangent plane projection), `project()`, `load()`/`save_to_db()`
+  - `db.py` — `gaze_monitor_calibration` table (21st AgentDB table); `upsert_gaze_calibration()`, `get_gaze_calibration()`
+
+- [x] **G3 Calibration protocol + PC overlay**
+  - `calibration_overlay.py` — tkinter full-screen overlay; 5 dots with advance/finish/cancel API; daemon thread
+  - `ipad_bridge.py` — `gaze_ray` handler (stores ray + timestamp); `gaze_dwell` attaches fresh ray (< 300ms); `gaze_calibration_sample` handler; `set_gaze_calibrator()` wiring
+
+- [x] **G4 Runtime absolute dwell positioning**
+  - `fusion_engine.py` — `set_gaze_calibrator()`; `on_gaze_dwell(ray_dir=)` overrides normalised coords with `calibrator.project()`
+  - `main.py` — `GazeCalibrator` load at startup; startup table row; wired to bridge + fusion
+  - `tests/test_gaze_calibrator.py` — 22 tests (sample management, solve, project, persistence, DB)
+
+- [ ] **G5 Voice trigger + calibration UX (next session)**
+  - Voice command `"hey agent calibrate monitor"` → TTS guidance → `CalibrationOverlay` → 5-dot dwell flow → `solve()` → TTS residual report
+  - `MonitorCalibrationSheet.swift` — iPad Settings UI: calibration status, "Calibrate Monitor" button, progress view
+  - Wire into `OnboardingView` as optional step 11

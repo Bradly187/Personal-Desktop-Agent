@@ -389,6 +389,12 @@ extension WebSocketManager {
         send(["type": "gaze_delta", "dx": dx, "dy": dy, "conf": confidence, "saccade": saccade])
     }
 
+    /// Send world-space gaze ray direction at ~10 Hz for monitor calibration.
+    /// Called from GazeTracker.processQueue — WebSocketManager.send() is queue-safe.
+    func sendGazeRay(dx: Double, dy: Double, dz: Double, confidence: Double = 1.0) {
+        send(["type": "gaze_ray", "dx": dx, "dy": dy, "dz": dz, "conf": confidence])
+    }
+
     func sendGazeDwell(x: Double, y: Double, actionType: DwellActionType) {
         msgCounter += 1
         send(["type": "gaze_dwell", "id": "gd-\(msgCounter)", "x": x, "y": y, "action_type": actionType.rawValue])
