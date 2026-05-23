@@ -189,7 +189,7 @@ struct VoiceCalibrationSheet: View {
                 .accessibilityLabel("Start voice calibration for \(selectedCondition.display)")
             }
         }
-        .background(theme.surfaceSecondaryPrimary)
+        .background(theme.surfacePrimary)
     }
 
     private func conditionCard(_ condition: VoiceCondition) -> some View {
@@ -299,7 +299,7 @@ struct VoiceCalibrationSheet: View {
 
             Spacer()
         }
-        .background(theme.surfaceSecondaryPrimary)
+        .background(theme.surfacePrimary)
         .animation(.easeInOut(duration: 0.3), value: lastResult?.expected)
     }
 
@@ -343,7 +343,7 @@ struct VoiceCalibrationSheet: View {
 
             Spacer()
         }
-        .background(theme.surfaceSecondaryPrimary)
+        .background(theme.surfacePrimary)
     }
 
     // MARK: — Cancelled view
@@ -359,7 +359,7 @@ struct VoiceCalibrationSheet: View {
                 .foregroundStyle(theme.textPrimary)
             Spacer()
         }
-        .background(theme.surfaceSecondaryPrimary)
+        .background(theme.surfacePrimary)
     }
 
     // MARK: — Actions

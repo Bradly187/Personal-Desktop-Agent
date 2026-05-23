@@ -353,7 +353,7 @@ final class SensorManager: ObservableObject {
             .removeDuplicates()
             .dropFirst()
             .sink { [weak self] active in
-                self?.ws.sendPainDayOverride(active: active)
+                self?.ws?.sendPainDayOverride(active: active)
             }
             .store(in: &cancellables)
 
@@ -361,7 +361,7 @@ final class SensorManager: ObservableObject {
         settings.$disabledGestures
             .removeDuplicates()
             .sink { [weak self] disabled in
-                self?.ws.sendGestureAssessment(disabled: Array(disabled))
+                self?.ws?.sendGestureAssessment(disabled: Array(disabled))
             }
             .store(in: &cancellables)
 
