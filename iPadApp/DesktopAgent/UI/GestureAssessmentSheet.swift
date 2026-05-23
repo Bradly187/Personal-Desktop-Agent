@@ -131,7 +131,7 @@ struct GestureAssessmentSheet: View {
             HStack(spacing: DesignTokens.Spacing.xl) {
                 legendItem("checkmark.circle.fill", "Easy", theme.success)
                 legendItem("exclamationmark.triangle.fill", "Hard on bad days", theme.warning)
-                legendItem("xmark.circle.fill", "Can't do this", theme.error)
+                legendItem("xmark.circle.fill", "Can't do this", theme.destructive)
             }
         }
     }
@@ -201,7 +201,7 @@ struct GestureAssessmentSheet: View {
             switch rating {
             case .easy:   return theme.success
             case .hard:   return theme.warning
-            case .unable: return theme.error
+            case .unable: return theme.destructive
             }
         }()
 
@@ -242,7 +242,6 @@ struct GestureAssessmentSheet: View {
 
             VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
                 ForEach(gestures) { gesture in
-                    let rating = ratings[gesture.name]
                     HStack(spacing: DesignTokens.Spacing.md) {
                         Image(systemName: gesture.icon)
                             .foregroundStyle(theme.accent)
@@ -251,9 +250,9 @@ struct GestureAssessmentSheet: View {
                             .font(DesignTokens.Typography.body)
                             .foregroundStyle(theme.textPrimary)
                         Spacer()
-                        if let r = rating {
-                            let c: Color = r == .easy ? theme.success : r == .hard ? theme.warning : theme.error
-                            Image(systemName: r.icon).foregroundStyle(c)
+                        if let r = ratings[gesture.name] {
+                            Image(systemName: r.icon)
+                                .foregroundStyle(r == .easy ? theme.success : r == .hard ? theme.warning : theme.destructive)
                             Text(r.rawValue)
                                 .font(DesignTokens.Typography.caption)
                                 .foregroundStyle(theme.textSecondary)

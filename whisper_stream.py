@@ -172,6 +172,7 @@ class WhisperStream:
         self._calibration_capture = None
         self._profiler = None
         self._logprob_floor_override: float | None = None
+        self._gaze_cal_trigger = None  # callable: () → None, set by main.py
 
     # ---------------------------------------------------------------------- #
     # Wiring
@@ -204,6 +205,10 @@ class WhisperStream:
             self._event_loop = _asyncio.get_running_loop()
         except RuntimeError:
             self._event_loop = None
+
+    def set_gaze_calibration_trigger(self, callback) -> None:
+        """Set callable to invoke when 'calibrate monitor' is spoken after wake phrase."""
+        self._gaze_cal_trigger = callback
 
     def set_lecture_mode(self, enabled: bool) -> None:
         """Enable/disable lecture mode — stores non-command audio to AgentDB."""
@@ -542,6 +547,17 @@ class WhisperStream:
                 return
 
             log.info("WhisperStream: wake phrase detected, command: %r", text)
+
+            # Intercept "calibrate monitor" before it reaches the LLM pipeline.
+            if text.lower().startswith("calibrate monitor") and self._gaze_cal_trigger:
+                log.info("WhisperStream: 'calibrate monitor' → launching gaze calibration")
+                if self._event_loop is not None:
+                    import asyncio as _asyncio
+                    _asyncio.run_coroutine_threadsafe(
+                        self._gaze_cal_trigger(),
+                        self._event_loop,
+                    )
+                return
 
         cmd = Command(
             text=text,

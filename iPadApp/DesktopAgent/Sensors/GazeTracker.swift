@@ -152,6 +152,15 @@ final class GazeTracker: NSObject, ObservableObject {
         }
     }
 
+    /// Captures the current world-space gaze ray direction on processQueue (thread-safe).
+    /// Calls completion on the main queue with the dir vector, or nil if no ray available.
+    func captureWorldRay(completion: @escaping (simd_float3?) -> Void) {
+        processQueue.async { [weak self] in
+            let dir = self?.currentWorldRay?.dir
+            DispatchQueue.main.async { completion(dir) }
+        }
+    }
+
     // MARK: — Gaze delta extraction (runs on processQueue)
 
     /// Processes a face anchor update. Runs entirely on processQueue — no MainActor involvement.

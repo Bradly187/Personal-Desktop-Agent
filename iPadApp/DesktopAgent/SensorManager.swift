@@ -32,6 +32,7 @@ final class SensorManager: ObservableObject {
     private let sharedAudioSession: SharedAudioSession
     private let sharedFaceSession: SharedFaceSession
     private let settings: SettingsStore
+    private weak var ws: WebSocketManager?
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Published Sensor States (3.6)
@@ -56,6 +57,7 @@ final class SensorManager: ObservableObject {
 
     init(ws: WebSocketManager, settings: SettingsStore) {
         self.settings = settings
+        self.ws = ws
 
         // Create shared audio infrastructure
         let audioSession = SharedAudioSession()
@@ -351,7 +353,7 @@ final class SensorManager: ObservableObject {
             .removeDuplicates()
             .dropFirst()
             .sink { [weak self] active in
-                self?.ws.sendPainDayOverride(active: active)
+                self?.ws?.sendPainDayOverride(active: active)
             }
             .store(in: &cancellables)
 
@@ -359,7 +361,7 @@ final class SensorManager: ObservableObject {
         settings.$disabledGestures
             .removeDuplicates()
             .sink { [weak self] disabled in
-                self?.ws.sendGestureAssessment(disabled: Array(disabled))
+                self?.ws?.sendGestureAssessment(disabled: Array(disabled))
             }
             .store(in: &cancellables)
 

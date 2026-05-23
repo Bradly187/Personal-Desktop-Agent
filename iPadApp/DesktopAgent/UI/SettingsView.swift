@@ -12,6 +12,7 @@ struct SettingsView: View {
     @State private var newSoundName = ""
     @State private var newSoundAction = ""
     @State private var newKeyword = ""
+    @State private var showMonitorCalSheet = false
 
     var body: some View {
         NavigationStack {
@@ -138,8 +139,19 @@ struct SettingsView: View {
                             }
                     }
                     .disabled(!ARFaceTrackingConfiguration.isSupported)
+                    Button("Calibrate Monitor") {
+                        showMonitorCalSheet = true
+                    }
+                    .disabled(!ARFaceTrackingConfiguration.isSupported ||
+                              wsManager.state != .connected)
+                    .accessibilityHint("Double-tap to run 5-dot gaze monitor calibration")
                 } header: {
                     DASectionHeader(title: "Gaze")
+                }
+                .sheet(isPresented: $showMonitorCalSheet) {
+                    MonitorCalibrationSheet()
+                        .environmentObject(wsManager)
+                        .environmentObject(sensorManager)
                 }
 
                 // Head
