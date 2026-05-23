@@ -32,6 +32,7 @@ final class SensorManager: ObservableObject {
     private let sharedAudioSession: SharedAudioSession
     private let sharedFaceSession: SharedFaceSession
     private let settings: SettingsStore
+    private weak var ws: WebSocketManager?
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Published Sensor States (3.6)
@@ -56,6 +57,7 @@ final class SensorManager: ObservableObject {
 
     init(ws: WebSocketManager, settings: SettingsStore) {
         self.settings = settings
+        self.ws = ws
 
         // Create shared audio infrastructure
         let audioSession = SharedAudioSession()

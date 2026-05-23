@@ -123,7 +123,7 @@ struct MonitorCalibrationSheet: View {
 
                 Spacer()
 
-                DAButton(title: "Capture", style: .primary) {
+                DAButton(label: "Capture", icon: "camera.viewfinder") {
                     captureRay()
                 }
                 .disabled(!ARFaceTrackingConfiguration.isSupported)
@@ -153,7 +153,7 @@ struct MonitorCalibrationSheet: View {
                 .foregroundStyle(theme.connected)
 
             Text("Calibration Complete")
-                .font(DesignTokens.Typography.title)
+                .font(DesignTokens.Typography.headline)
                 .foregroundStyle(theme.textPrimary)
 
             Text(resultMessage)
@@ -163,7 +163,7 @@ struct MonitorCalibrationSheet: View {
 
             Spacer()
 
-            DAButton(title: "Done", style: .primary) {
+            DAButton(label: "Done", icon: "checkmark") {
                 dismiss()
             }
         }
@@ -176,7 +176,7 @@ struct MonitorCalibrationSheet: View {
                 .foregroundStyle(theme.disconnected)
 
             Text("Calibration Failed")
-                .font(DesignTokens.Typography.title)
+                .font(DesignTokens.Typography.headline)
                 .foregroundStyle(theme.textPrimary)
 
             Text(resultMessage)
@@ -187,14 +187,14 @@ struct MonitorCalibrationSheet: View {
             Spacer()
 
             HStack(spacing: DesignTokens.Spacing.md) {
-                DAButton(title: "Try Again", style: .secondary) {
+                DAButton(label: "Try Again", icon: "arrow.counterclockwise") {
                     phase = .waiting
                     dotIndex = 0
                     dotLabel = "Waiting for PC…"
                     resultMessage = ""
                     wsManager.sendGazeCalibrationStart()
                 }
-                DAButton(title: "Close", style: .primary) {
+                DAButton(label: "Close", icon: "xmark") {
                     dismiss()
                 }
             }

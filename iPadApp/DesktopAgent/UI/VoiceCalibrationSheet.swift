@@ -141,7 +141,7 @@ struct VoiceCalibrationSheet: View {
                 // Condition picker
                 VStack(spacing: DesignTokens.Spacing.sm) {
                     Text("How are you feeling today?")
-                        .font(DesignTokens.Typography.subheadline)
+                        .font(DesignTokens.Typography.body)
                         .foregroundStyle(theme.textPrimary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal)
@@ -164,7 +164,7 @@ struct VoiceCalibrationSheet: View {
                         }
                     }
                     .padding()
-                    .background(theme.surface)
+                    .background(theme.surfaceSecondary)
                     .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                     .padding(.horizontal)
                 }
@@ -189,7 +189,7 @@ struct VoiceCalibrationSheet: View {
                 .accessibilityLabel("Start voice calibration for \(selectedCondition.display)")
             }
         }
-        .background(theme.background)
+        .background(theme.surfaceSecondaryPrimary)
     }
 
     private func conditionCard(_ condition: VoiceCondition) -> some View {
@@ -221,7 +221,7 @@ struct VoiceCalibrationSheet: View {
                 }
             }
             .padding()
-            .background(selectedCondition == condition ? theme.accent : theme.surface)
+            .background(selectedCondition == condition ? theme.accent : theme.surfaceSecondary)
             .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
             .padding(.horizontal)
         }
@@ -250,7 +250,7 @@ struct VoiceCalibrationSheet: View {
             // Current phrase
             VStack(spacing: DesignTokens.Spacing.md) {
                 Text("Say this phrase:")
-                    .font(DesignTokens.Typography.subheadline)
+                    .font(DesignTokens.Typography.body)
                     .foregroundStyle(theme.textSecondary)
 
                 Text(currentPhrase.isEmpty ? "Waiting…" : currentPhrase)
@@ -259,7 +259,7 @@ struct VoiceCalibrationSheet: View {
                     .multilineTextAlignment(.center)
                     .padding()
                     .frame(maxWidth: .infinity)
-                    .background(theme.surface)
+                    .background(theme.surfaceSecondary)
                     .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.lg))
                     .padding(.horizontal)
             }
@@ -281,7 +281,7 @@ struct VoiceCalibrationSheet: View {
                     }
                 }
                 .padding()
-                .background(theme.surface)
+                .background(theme.surfaceSecondary)
                 .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                 .padding(.horizontal)
                 .transition(.opacity.combined(with: .scale))
@@ -299,7 +299,7 @@ struct VoiceCalibrationSheet: View {
 
             Spacer()
         }
-        .background(theme.background)
+        .background(theme.surfaceSecondaryPrimary)
         .animation(.easeInOut(duration: 0.3), value: lastResult?.expected)
     }
 
@@ -320,7 +320,7 @@ struct VoiceCalibrationSheet: View {
             if let r = report {
                 VStack(spacing: DesignTokens.Spacing.sm) {
                     Text(String(format: "%.0f%% accuracy", r.accuracy * 100))
-                        .font(DesignTokens.Typography.subheadline)
+                        .font(DesignTokens.Typography.body)
                         .foregroundStyle(theme.textPrimary)
                     Text("\(r.correctionsAdded) personal corrections saved")
                         .font(DesignTokens.Typography.caption)
@@ -343,7 +343,7 @@ struct VoiceCalibrationSheet: View {
 
             Spacer()
         }
-        .background(theme.background)
+        .background(theme.surfaceSecondaryPrimary)
     }
 
     // MARK: — Cancelled view
@@ -359,7 +359,7 @@ struct VoiceCalibrationSheet: View {
                 .foregroundStyle(theme.textPrimary)
             Spacer()
         }
-        .background(theme.background)
+        .background(theme.surfaceSecondaryPrimary)
     }
 
     // MARK: — Actions
@@ -391,7 +391,7 @@ struct VoiceCalibrationSheet: View {
             withAnimation { phase = .done }
 
         case .error(let msg):
-            log("Calibration error: \(msg)")
+            AppLogger.shared.warning("VoiceCalibrationSheet", "Calibration error: \(msg)")
             phase = .cancelled
         }
     }
