@@ -526,6 +526,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
     bridge.set_gaze_calibrator(gaze_calibrator)
     fusion.set_gaze_calibrator(gaze_calibrator)
+    whisper.set_gaze_calibration_trigger(bridge.start_gaze_calibration_from_voice)
 
     # Wire acoustic drift → bridge recalibration request (thread-safe)
     _loop = asyncio.get_event_loop()

@@ -32,6 +32,7 @@ Message types — 29 total:
   pain_day_override      →  BehavioralTwinState.set_manual_pain_day(); relaxes VAD threshold
   calibration_start      →  spawns VoiceCalibrator session task; streams progress to iPad
   calibration_cancel     →  VoiceCalibrator.stop()
+  gaze_calibration_start →  spawns 5-dot monitor calibration session; sends gaze_calibration_next per dot
   ipad_log               →  structured log entries forwarded to AgentDB ipad_logs table
 
 Usage:
@@ -143,6 +144,11 @@ class IPadBridge:
 
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
+
+        # Gaze monitor calibration session state
+        # One asyncio.Queue slot; the active session awaits it per dot.
+        self._gaze_cal_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self._gaze_cal_active: bool = False
 
     # ---------------------------------------------------------------------- #
     # Wiring (called by main.py before run())
@@ -466,7 +472,7 @@ class IPadBridge:
             return
 
         if msg_type == "gaze_calibration_sample":
-            # iPad sends this when user dwells on a calibration dot (Sprint G3).
+            # iPad sends this when user taps Capture on MonitorCalibrationSheet.
             # Payload: {dot_index, px_x, px_y, ray_dx, ray_dy, ray_dz}
             try:
                 dot_idx = int(msg.get("dot_index", -1))
@@ -480,6 +486,14 @@ class IPadBridge:
                         (ray_dx, ray_dy, ray_dz), px_x, px_y, dot_index=dot_idx
                     )
                     log.info("ipad_bridge: gaze calibration sample %d added", dot_idx)
+                # Feed active session loop (non-blocking; drops if no session waiting)
+                if self._gaze_cal_active:
+                    try:
+                        self._gaze_cal_queue.put_nowait(
+                            (dot_idx, px_x, px_y, (ray_dx, ray_dy, ray_dz))
+                        )
+                    except asyncio.QueueFull:
+                        log.debug("ipad_bridge: gaze_cal_queue full — duplicate sample ignored")
             except (ValueError, TypeError) as exc:
                 log.debug("Bad gaze_calibration_sample: %s", exc)
             await self._ack(ws, msg.get("id"), "ok", "sample recorded")
@@ -500,6 +514,12 @@ class IPadBridge:
             if self._coordinator and self._coordinator._calibrator:
                 self._coordinator._calibrator.stop()
             await self._ack(ws, msg.get("id"), "ok", "calibration cancelled")
+            return
+
+        if msg_type == "gaze_calibration_start":
+            log.info("ipad_bridge: gaze_calibration_start received")
+            asyncio.create_task(self._run_gaze_calibration_session(ws))
+            await self._ack(ws, msg.get("id"), "ok", "gaze calibration started")
             return
 
         if msg_type == "audio_stream":
@@ -583,6 +603,123 @@ class IPadBridge:
             })
         finally:
             calibrator._speak_safe = original_speak
+
+    # ---------------------------------------------------------------------- #
+    # Gaze monitor calibration — PC drives 5-dot session, iPad confirms each
+    # ---------------------------------------------------------------------- #
+
+    _DOT_LABELS = ["TOP-LEFT", "TOP-RIGHT", "CENTER", "BOTTOM-LEFT", "BOTTOM-RIGHT"]
+
+    async def _run_gaze_calibration_session(self, ws: web.WebSocketResponse) -> None:
+        """Run the 5-dot monitor calibration sequence.
+
+        Shows CalibrationOverlay on PC, sends gaze_calibration_next per dot,
+        waits for gaze_calibration_sample from iPad, solves, and reports.
+        """
+        if self._gaze_cal_active:
+            await ws.send_json({"type": "gaze_calibration_error",
+                                "message": "A calibration session is already active"})
+            return
+
+        if not self._gaze_calibrator:
+            await ws.send_json({"type": "gaze_calibration_error",
+                                "message": "GazeCalibrator not wired"})
+            return
+
+        from calibration_overlay import CalibrationOverlay
+        try:
+            import pyautogui as _pag
+            _sw, _sh = _pag.size()
+        except Exception:
+            _sw, _sh = 1920, 1080
+        overlay = CalibrationOverlay(screen_w=_sw, screen_h=_sh)
+
+        self._gaze_cal_active = True
+        # Drain any stale sample that might be sitting in the queue
+        while not self._gaze_cal_queue.empty():
+            self._gaze_cal_queue.get_nowait()
+
+        overlay.start()
+        log.info("ipad_bridge: gaze calibration session started (%d dots)", 5)
+
+        try:
+            for dot_idx in range(5):
+                target = overlay.current_target()
+                if target is None:
+                    break
+                px_x, px_y = target
+                label = self._DOT_LABELS[dot_idx]
+
+                await ws.send_json({
+                    "type":      "gaze_calibration_next",
+                    "dot_index": dot_idx,
+                    "px_x":      px_x,
+                    "px_y":      px_y,
+                    "total":     5,
+                    "label":     label,
+                })
+                log.info("ipad_bridge: waiting for dot %d/%d (%s) at (%d,%d)",
+                         dot_idx + 1, 5, label, px_x, px_y)
+
+                try:
+                    # Wait up to 60 s per dot
+                    sample = await asyncio.wait_for(self._gaze_cal_queue.get(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    log.warning("ipad_bridge: gaze calibration timed out at dot %d", dot_idx)
+                    overlay.cancel()
+                    await ws.send_json({"type": "gaze_calibration_error",
+                                        "message": f"Timeout waiting for dot {dot_idx + 1}"})
+                    return
+
+                # sample = (dot_idx, px_x, px_y, (dx, dy, dz)) — already added to calibrator
+                log.info("ipad_bridge: dot %d captured", dot_idx + 1)
+                overlay.advance()
+
+            # Solve
+            success = await asyncio.to_thread(self._gaze_calibrator.solve)
+            status = self._gaze_calibrator.get_status()
+            residual = round(status.get("residual_px", 0.0), 1)
+
+            if success:
+                log.info("ipad_bridge: gaze calibration solved  residual=%.1f px", residual)
+                # JSON sidecar already saved by solve(); persist history to DB (best-effort)
+                try:
+                    if self._agent_db and self._agent_db.available:
+                        await self._gaze_calibrator.save_to_db(
+                            self._agent_db, session_id=self._session_id
+                        )
+                except Exception as exc:
+                    log.warning("ipad_bridge: gaze calibration save error: %s", exc)
+                await ws.send_json({
+                    "type":       "gaze_calibration_complete",
+                    "residual_px": residual,
+                    "success":    True,
+                })
+            else:
+                log.warning("ipad_bridge: gaze calibration solve failed (collinear samples?)")
+                await ws.send_json({
+                    "type":    "gaze_calibration_complete",
+                    "success": False,
+                    "message": "Solve failed — samples may be collinear. Try again.",
+                })
+
+        except Exception as exc:
+            log.error("ipad_bridge: gaze calibration error: %s", exc)
+            overlay.cancel()
+            try:
+                await ws.send_json({"type": "gaze_calibration_error", "message": str(exc)})
+            except Exception:
+                pass
+        finally:
+            self._gaze_cal_active = False
+
+    async def start_gaze_calibration_from_voice(self) -> None:
+        """Voice-triggered entry point — uses first connected iPad client."""
+        if not self._clients:
+            log.warning("ipad_bridge: voice gaze calibration trigger — no iPad connected")
+            return
+        ws = next(iter(self._clients))
+        await self._run_gaze_calibration_session(ws)
 
     # ---------------------------------------------------------------------- #
     # touch_command — routed through FusionEngine (priority 1)
