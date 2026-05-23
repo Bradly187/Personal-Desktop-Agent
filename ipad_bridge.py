@@ -3,26 +3,36 @@
 Listens on port 8765 for messages from the iPad app and dispatches them
 to FusionEngine, CommandExecutor, or directly to pyautogui.
 
-Message types — 19 total:
-  touch_command     →  CommandExecutor (action routing; priority 1)
-  trackpad          →  direct pyautogui (mouse/scroll; no LLM)
-  handwriting_image →  pix2tex OCR → handwriting_result reply
-  tilt_position     →  FusionEngine.on_tilt_position() (absolute positioning)
-  tilt              →  FusionEngine.on_tilt() (legacy velocity mode)
-  tilt_tap          →  FusionEngine.on_touch() (when wired)
-  tilt_ratchet      →  FusionEngine.on_tilt_ratchet() (re-center neutral point)
-  sensor_switch     →  FusionEngine.on_sensor_switch() (mutual-exclusion toggle)
-  cursor_pause      →  FusionEngine.on_cursor_pause() (quick-pause all cursor sensors)
-  cursor_resume     →  FusionEngine.on_cursor_resume() (resume cursor sensors)
-  gaze              →  FusionEngine.on_gaze() (when wired)
-  gaze_delta        →  FusionEngine.on_gaze_delta() (relative eye movement → cursor)
-  gaze_dwell        →  FusionEngine.on_gaze_dwell() (when wired)
-  head_pose         →  FusionEngine.on_head() (when wired)
-  keyword           →  FusionEngine.on_keyword() (when wired)
-  sound_action      →  FusionEngine.on_sound_action() (when wired)
-  depth_frame       →  LiDARReceiver.on_depth_frame() (when wired)
-  camera_frame      →  GestureProcessor.on_camera_frame() (when wired)
-  audio_stream      →  WhisperStream.on_audio_chunk() (VAD + Whisper transcription)
+Message types — 29 total:
+  touch_command          →  CommandExecutor (action routing; priority 1)
+  trackpad               →  direct pyautogui (mouse/scroll; no LLM)
+  handwriting_image      →  pix2tex OCR → handwriting_result reply
+  ping                   →  immediate pong echo (latency measurement)
+  tilt_position          →  FusionEngine.on_tilt_position() (absolute positioning)
+  tilt                   →  FusionEngine.on_tilt() (legacy velocity mode)
+  tilt_tap               →  FusionEngine.on_touch() (when wired)
+  tilt_ratchet           →  FusionEngine.on_tilt_ratchet() (re-center neutral point)
+  sensor_switch          →  FusionEngine.on_sensor_switch() (mutual-exclusion toggle)
+  cursor_pause           →  FusionEngine.on_cursor_pause() (quick-pause all cursor sensors)
+  cursor_resume          →  FusionEngine.on_cursor_resume() (resume cursor sensors)
+  gaze                   →  FusionEngine.on_gaze() (when wired)
+  gaze_delta             →  FusionEngine.on_gaze_delta() (relative eye movement → cursor)
+  gaze_ray               →  stores world-space unit vector; attached to next gaze_dwell for GazeCalibrator
+  gaze_dwell             →  FusionEngine.on_gaze_dwell() with optional calibrated ray
+  gaze_calibration_sample →  GazeCalibrator.add_sample() (Sprint G3)
+  head_pose              →  FusionEngine.on_head() (when wired)
+  keyword                →  FusionEngine.on_keyword() (when wired)
+  sound_action           →  FusionEngine.on_sound_action() (when wired)
+  depth_frame            →  LiDARReceiver.on_depth_frame() (when wired)
+  camera_frame           →  GestureProcessor.on_camera_frame() (when wired)
+  audio_stream           →  WhisperStream.on_audio_chunk() (VAD + Whisper transcription)
+  set_dwell_action       →  updates active dwell action type (left_click, right_click, etc.)
+  set_feature_toggle     →  updates FusionEngine feature toggle (gaze_cursor_mode, edge_scroll, etc.)
+  gesture_assessment     →  sets disabled gesture list in GestureProcessor
+  pain_day_override      →  BehavioralTwinState.set_manual_pain_day(); relaxes VAD threshold
+  calibration_start      →  spawns VoiceCalibrator session task; streams progress to iPad
+  calibration_cancel     →  VoiceCalibrator.stop()
+  ipad_log               →  structured log entries forwarded to AgentDB ipad_logs table
 
 Usage:
   python ipad_bridge.py [--port 8765] [--no-mdns] [--debug]
@@ -37,6 +47,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import socket
 import sys
 import time
@@ -116,6 +127,20 @@ class IPadBridge:
         self._agent_db = None
         self._session_id: int = -1
 
+        # Most recent world-space gaze ray from iPad (updated at ~10 Hz).
+        # Attached to gaze_dwell messages so FusionEngine can use calibrated
+        # absolute pixel positioning. Tuple: (dx, dy, dz) unit vector.
+        self._latest_gaze_ray: Optional[tuple[float, float, float]] = None
+        self._latest_gaze_ray_ts: float = 0.0
+
+        # GazeCalibrator — wired by main.py
+        self._gaze_calibrator = None
+
+        # Tracked DB writer tasks: keeps fire-and-forget create_task() refs alive
+        # until completion (otherwise Python may GC them) and surfaces exceptions
+        # via _on_ipad_log_task_done. Mirrors the FusionEngine._route_tasks pattern.
+        self._ipad_log_tasks: set[asyncio.Task] = set()
+
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
 
@@ -144,6 +169,9 @@ class IPadBridge:
     def set_agent_db(self, agent_db, session_id: int) -> None:
         self._agent_db = agent_db
         self._session_id = session_id
+
+    def set_gaze_calibrator(self, calibrator) -> None:
+        self._gaze_calibrator = calibrator
 
     # ---------------------------------------------------------------------- #
     # Startup
@@ -337,6 +365,19 @@ class IPadBridge:
                 log.debug("Bad gaze_delta data: %s", exc)
             return
 
+        if msg_type == "gaze_ray":
+            try:
+                dx = float(msg.get("dx", 0.0))
+                dy = float(msg.get("dy", 0.0))
+                dz = float(msg.get("dz", 0.0))
+                mag = (dx*dx + dy*dy + dz*dz) ** 0.5
+                if mag > 1e-9:
+                    self._latest_gaze_ray = (dx/mag, dy/mag, dz/mag)
+                    self._latest_gaze_ray_ts = time.monotonic()
+            except (ValueError, TypeError) as exc:
+                log.debug("Bad gaze_ray data: %s", exc)
+            return
+
         if msg_type == "gaze_dwell":
             try:
                 if self._fusion:
@@ -344,7 +385,12 @@ class IPadBridge:
                     y = float(msg.get("y", 0.5))
                     # Use action_type from message, fall back to stored active dwell action
                     action_type = msg.get("action_type") or self._active_dwell_action
-                    self._fusion.on_gaze_dwell(x, y, action_type)
+                    # Attach most recent gaze ray if fresh (< 300ms old)
+                    ray_dir = None
+                    if (self._latest_gaze_ray is not None
+                            and time.monotonic() - self._latest_gaze_ray_ts < 0.3):
+                        ray_dir = self._latest_gaze_ray
+                    self._fusion.on_gaze_dwell(x, y, action_type, ray_dir=ray_dir)
             except (ValueError, TypeError) as exc:
                 log.debug("Bad gaze_dwell data: %s", exc)
             return
@@ -417,6 +463,26 @@ class IPadBridge:
                 log.info("ipad_bridge: VAD %s to %.3f",
                          "relaxed" if active else "restored", vad)
             await self._ack(ws, msg.get("id"), "ok", "pain_day_override applied")
+            return
+
+        if msg_type == "gaze_calibration_sample":
+            # iPad sends this when user dwells on a calibration dot (Sprint G3).
+            # Payload: {dot_index, px_x, px_y, ray_dx, ray_dy, ray_dz}
+            try:
+                dot_idx = int(msg.get("dot_index", -1))
+                px_x    = int(msg.get("px_x", 0))
+                px_y    = int(msg.get("px_y", 0))
+                ray_dx  = float(msg.get("ray_dx", 0.0))
+                ray_dy  = float(msg.get("ray_dy", 0.0))
+                ray_dz  = float(msg.get("ray_dz", 0.0))
+                if self._gaze_calibrator and dot_idx >= 0:
+                    self._gaze_calibrator.add_sample(
+                        (ray_dx, ray_dy, ray_dz), px_x, px_y, dot_index=dot_idx
+                    )
+                    log.info("ipad_bridge: gaze calibration sample %d added", dot_idx)
+            except (ValueError, TypeError) as exc:
+                log.debug("Bad gaze_calibration_sample: %s", exc)
+            await self._ack(ws, msg.get("id"), "ok", "sample recorded")
             return
 
         if msg_type == "calibration_start":
@@ -737,6 +803,25 @@ class IPadBridge:
         "fault":   logging.CRITICAL,
     }
 
+    # Whitelist for the iPad-controlled `subsystem` field. The full string is
+    # interpolated into a Python logger name; without bounding it, a malicious
+    # client on the LAN could spam loggerDict and grow unbounded. Length-capped
+    # to 32, character class to ASCII identifier-safe.
+    _IPAD_SUBSYSTEM_RE = re.compile(r"^[A-Za-z0-9_.]{1,32}$")
+
+    def _sanitize_subsystem(self, subsystem: object) -> str:
+        if isinstance(subsystem, str) and self._IPAD_SUBSYSTEM_RE.match(subsystem):
+            return subsystem
+        return "unknown"
+
+    def _on_ipad_log_task_done(self, task: asyncio.Task) -> None:
+        self._ipad_log_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.warning("ipad_log DB write failed: %s", exc)
+
     async def _handle_ipad_log(self, msg: dict) -> None:
         """Handle an ipad_log batch message.
 
@@ -754,7 +839,7 @@ class IPadBridge:
             if not isinstance(entry, dict):
                 continue
             level_str = entry.get("level", "info")
-            subsystem = entry.get("subsystem", "unknown")
+            subsystem = self._sanitize_subsystem(entry.get("subsystem", "unknown"))
             text = entry.get("msg", "")
             py_level = self._IPAD_LOG_LEVELS.get(level_str, logging.INFO)
             logging.getLogger(f"ipad.{subsystem}").log(py_level, "%s", text)
@@ -762,9 +847,11 @@ class IPadBridge:
                 db_entries.append(entry)
 
         if db_entries and self._agent_db and self._session_id >= 0:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._agent_db.log_ipad_events(self._session_id, db_entries)
             )
+            self._ipad_log_tasks.add(task)
+            task.add_done_callback(self._on_ipad_log_task_done)
 
     async def _send_status(self, ws: web.WebSocketResponse) -> None:
         from tools import windows as win_tools

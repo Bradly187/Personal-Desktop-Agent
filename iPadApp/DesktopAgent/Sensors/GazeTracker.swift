@@ -40,6 +40,18 @@ final class GazeTracker: NSObject, ObservableObject {
     nonisolated(unsafe) private var saccadeExitStart: CFTimeInterval?
     nonisolated(unsafe) private var consecutiveNilFrames: Int = 0
 
+    /// Most recent world-space gaze ray in ARKit device-fixed coordinates.
+    /// Updated every frame alongside delta computation. All reads and writes
+    /// happen on `processQueue` (a single serial dispatch queue), so no atomicity
+    /// is required — the 24-byte tuple write would NOT be atomic if accessed
+    /// off-queue, so do not read this field from MainActor or other threads.
+    /// Used by whoever fires sendGazeDwell to attach calibration ray data.
+    nonisolated(unsafe) var currentWorldRay: (origin: simd_float3, dir: simd_float3)?
+
+    // Rate-limit gaze_ray WebSocket messages to ~10 Hz (every 6th frame at 60 Hz)
+    nonisolated(unsafe) private var rayFrameCounter: Int = 0
+    private static let rayFrameInterval: Int = 6
+
     // Saccade detection state machine
     private enum SaccadeState {
         case tracking       // Normal output
@@ -148,6 +160,20 @@ final class GazeTracker: NSObject, ObservableObject {
 
         let gazeDir = extractGazeDirection(from: anchor)
 
+        // World-space ray: faceAnchor.transform places the face in ARKit device-fixed
+        // coordinates (the iPad is stationary on the desk, so this IS world-fixed).
+        // Eye transforms are relative to the face anchor — premultiply to get world space.
+        let leftEyeWorld  = anchor.transform * anchor.leftEyeTransform
+        let rightEyeWorld = anchor.transform * anchor.rightEyeTransform
+        let leftPos  = simd_float3(leftEyeWorld.columns.3.x,  leftEyeWorld.columns.3.y,  leftEyeWorld.columns.3.z)
+        let rightPos = simd_float3(rightEyeWorld.columns.3.x, rightEyeWorld.columns.3.y, rightEyeWorld.columns.3.z)
+        let eyeMidpoint = (leftPos + rightPos) / 2
+        // ARKit eye transforms: forward direction = -Z column
+        let leftFwd  = simd_float3(-leftEyeWorld.columns.2.x,  -leftEyeWorld.columns.2.y,  -leftEyeWorld.columns.2.z)
+        let rightFwd = simd_float3(-rightEyeWorld.columns.2.x, -rightEyeWorld.columns.2.y, -rightEyeWorld.columns.2.z)
+        let worldGazeDir = simd_normalize((leftFwd + rightFwd) / 2)
+        currentWorldRay = (origin: eyeMidpoint, dir: worldGazeDir)
+
         // Blink/tracking-loss detection
         guard let gazeDir else {
             consecutiveNilFrames += 1
@@ -254,6 +280,24 @@ final class GazeTracker: NSObject, ObservableObject {
         let sensitivity = gazeSensitivity
         let dx = scaledDx * sensitivity
         let dy = scaledDy * sensitivity
+
+        // Send world-space gaze ray at ~10 Hz (every 6th frame) for monitor calibration.
+        // MUST run BEFORE the delta-zero guard below — during dwell the user holds
+        // their gaze still, dx/dy collapse to ~0, and the guard returns. If we sent
+        // gaze_ray after the guard, the PC's `_latest_gaze_ray_ts` would go stale
+        // exactly when GazeCalibrator.project() needs a fresh ray for the dwell click.
+        rayFrameCounter += 1
+        if rayFrameCounter >= Self.rayFrameInterval {
+            rayFrameCounter = 0
+            if let ray = currentWorldRay {
+                ws?.sendGazeRay(
+                    dx: Double(ray.dir.x),
+                    dy: Double(ray.dir.y),
+                    dz: Double(ray.dir.z),
+                    confidence: confidence
+                )
+            }
+        }
 
         // Only suppress truly zero output to avoid unnecessary WebSocket traffic.
         guard abs(dx) > 0.01 || abs(dy) > 0.01 else { return }

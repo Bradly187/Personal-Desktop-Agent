@@ -201,11 +201,28 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
         avail = p.is_available()
         return ("OK", "UIA COM available") if avail else ("WARN", "UIA COM unavailable (comtypes?)")
 
+    def _check_gaze_calibration():
+        from gaze_calibrator import GazeCalibrator, _JSON_PATH
+        if not _JSON_PATH.exists():
+            return "WARN", "not calibrated — say 'hey agent calibrate monitor'"
+        cal = GazeCalibrator()
+        if cal.load():
+            status = cal.get_status()
+            residual = status["residual_px"]
+            calibrated_at = status["calibrated_at"]
+            if calibrated_at > 0:
+                import time as _t
+                age_days = (_t.time() - calibrated_at) / 86400
+                return "OK", f"residual={residual:.1f}px  age={age_days:.0f}d"
+            return "OK", f"residual={residual:.1f}px  age=unknown"
+        return "WARN", "calibration file unreadable"
+
     check("GPU / VRAM (pynvml)",            _check_pynvml)
     check("Ollama LLM server",              _check_ollama)
     check("Whisper (faster-whisper)",       _check_whisper)
     check("Acoustic profiler",              _check_acoustic_profiler)
     check("UIAutomation (Win32)",           _check_uiautomation)
+    check("Gaze monitor calibration",      _check_gaze_calibration)
     check("MiniLM (sentence-transformers)", _check_sentence_transformers)
     check("Screen OCR (tesseract)",         _check_tesseract)
     check("Handwriting OCR (pix2tex)",      _check_pix2tex)
@@ -315,27 +332,24 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
     """
     import urllib.request as _ureq
 
+    _WATCHDOG_PERIOD_S = 60.0
+    _OLLAMA_CHECK_EVERY = 10  # cycles → every 10 min
+
     _last_tick_count = getattr(fusion, "_tick_count", None)
-    _ollama_check_interval = 10  # every N watchdog cycles (= 10 min)
     _cycle = 0
 
-    # Patch tick counter onto FusionEngine if absent (safe — only used here)
-    if not hasattr(fusion, "_tick_count"):
-        fusion._tick_count = 0
-        _orig_tick = fusion._tick.__func__ if hasattr(fusion._tick, "__func__") else None
-
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(_WATCHDOG_PERIOD_S)
         _cycle += 1
 
         # --- Tick rate ---
         current_ticks = getattr(fusion, "_tick_count", 0)
         if _last_tick_count is not None:
-            hz = current_ticks - _last_tick_count
-            if hz < 50:
-                log.warning("WATCHDOG: FusionEngine tick rate LOW: %d Hz (expected 60)", hz)
+            hz = (current_ticks - _last_tick_count) / _WATCHDOG_PERIOD_S
+            if hz < 50.0:
+                log.warning("WATCHDOG: FusionEngine tick rate LOW: %.1f Hz (expected 60)", hz)
             else:
-                log.info("WATCHDOG: FusionEngine %.0f Hz  route_tasks_inflight=%d",
+                log.info("WATCHDOG: FusionEngine %.1f Hz  route_tasks_inflight=%d",
                          hz, len(getattr(fusion, "_route_tasks", set())))
         _last_tick_count = current_ticks
 
@@ -351,7 +365,7 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
                 log.error("WATCHDOG: WhisperStream VAD thread is DEAD (session %d)", session_id)
 
         # --- Ollama + VRAM (every 10 min) ---
-        if _cycle % _ollama_check_interval == 0:
+        if _cycle % _OLLAMA_CHECK_EVERY == 0:
             try:
                 with _ureq.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
                     r.read()
@@ -395,6 +409,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from audit_log import AuditLog
     from content_filter import ContentFilter
     from mcp_trust_classifier import MCPTrustClassifier
+    from gaze_calibrator import GazeCalibrator
 
     if args.safe_mode:
         os.environ["SAFE_MODE"] = "1"
@@ -495,6 +510,13 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if twin_state:
         twin_state.set_acoustic_profiler(profiler)
 
+    # --- Gaze calibrator (load persisted calibration if available) ---
+    gaze_calibrator = GazeCalibrator(screen_w=sw, screen_h=sh)
+    gaze_calibrator.load()
+    if gaze_calibrator.is_calibrated:
+        log.info("GazeCalibrator: loaded persisted calibration  residual=%.1f px",
+                 gaze_calibrator.get_status()["residual_px"])
+
     bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
@@ -502,6 +524,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_whisper_stream(whisper)
     bridge.set_coordinator(coordinator)  # needed for pain_day_override message
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
+    bridge.set_gaze_calibrator(gaze_calibrator)
+    fusion.set_gaze_calibrator(gaze_calibrator)
 
     # Wire acoustic drift → bridge recalibration request (thread-safe)
     _loop = asyncio.get_event_loop()
@@ -617,6 +641,24 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _raise_windows_timer_resolution() -> None:
+    """Boost Windows timer resolution from the 15.6 ms default to 1 ms.
+
+    Without this, asyncio.sleep(1/60) rounds up to ~31 ms on Windows because the
+    OS scheduler quantum is 15.6 ms. The FusionEngine 60 Hz loop then actually
+    runs at ~32 Hz. timeBeginPeriod(1) is process-scoped on Windows 10 2004+
+    and is released automatically on process exit.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.WinDLL("winmm").timeBeginPeriod(1)
+        log.info("Windows timer resolution raised to 1 ms (60 Hz loops now achievable)")
+    except OSError as exc:
+        log.warning("timeBeginPeriod(1) failed: %s — FusionEngine will run at ~32 Hz", exc)
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -625,6 +667,8 @@ def main() -> None:
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    _raise_windows_timer_resolution()
 
     # Task 4.2 — early exit path
     if args.measure_vram:

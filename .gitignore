@@ -35,6 +35,8 @@ _archive/
 
 # Runtime data — databases and legacy flat files (all replaced by agent.db / analytics.duckdb)
 agent.db
+agent.db-shm
+agent.db-wal
 analytics.duckdb
 trainer.db
 few_shot_memory.db
