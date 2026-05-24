@@ -259,8 +259,18 @@ class WhisperStream:
                 compute_type=self._compute_type,
             )
         except Exception as exc:
-            log.error("WhisperStream: model load failed — %s", exc)
-            return
+            log.warning("WhisperStream: %s model load failed (%s) — retrying on CPU/int8",
+                        self._device, exc)
+            try:
+                self._model = await asyncio.to_thread(
+                    WhisperModel, self._model_size, device="cpu", compute_type="int8"
+                )
+                self._device = "cpu"
+                self._compute_type = "int8"
+                log.info("WhisperStream: running on CPU (int8) as fallback")
+            except Exception as cpu_exc:
+                log.error("WhisperStream: CPU fallback also failed — voice disabled: %s", cpu_exc)
+                return
         self.available = True
         self._running = True
         self._task = asyncio.create_task(self._loop())
@@ -327,7 +337,7 @@ class WhisperStream:
             if self._buffer_start_ts is None:
                 self._buffer_start_ts = time.monotonic()
         except Exception as exc:
-            log.debug("WhisperStream.on_audio_chunk decode error: %s", exc)
+            log.warning("WhisperStream.on_audio_chunk decode error: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Background transcription loop
@@ -336,6 +346,10 @@ class WhisperStream:
     async def _loop(self) -> None:
         while self._running:
             await asyncio.sleep(self._poll_s)
+            # Auto-expire clarification gate so silence never locks voice input forever.
+            if self._awaiting_clarification and time.monotonic() >= self._clarification_deadline:
+                log.info("WhisperStream: clarification timed out — re-enabling wake gate")
+                self._awaiting_clarification = False
             try:
                 await self._maybe_transcribe()
             except Exception as exc:
