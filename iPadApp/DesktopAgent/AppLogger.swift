@@ -153,16 +153,19 @@ final class AppLogger: @unchecked Sendable {
 
     private func flush() {
         guard !pending.isEmpty, let ws = wsManager else { return }
-        let batch = pending
-        pending.removeAll()
 
-        let entries: [[String: Any]] = batch.map { e in
+        // G6: Only flush when connected. If not connected, keep pending entries
+        // so startup logs (permissions, sensor init) are not silently dropped.
+        // The next 500ms flush cycle will retry.
+        let entries: [[String: Any]] = pending.map { e in
             ["ts": e.ts, "level": e.level.rawValue, "subsystem": e.subsystem, "msg": e.msg]
         }
-
-        // WebSocketManager.send() requires @MainActor; hop there safely.
-        Task { @MainActor [weak ws] in
-            ws?.sendLogBatch(entries)
+        Task { @MainActor [weak self, weak ws] in
+            guard let ws else { return }
+            guard case .connected = ws.state else { return }  // retry next cycle if not connected
+            ws.sendLogBatch(entries)
+            // Only clear after confirmed delivery attempt
+            self?.batchQueue.async { self?.pending.removeAll() }
         }
     }
 }

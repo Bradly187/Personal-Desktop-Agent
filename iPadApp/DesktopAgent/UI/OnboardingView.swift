@@ -229,6 +229,9 @@ private struct ConnectionStep: View {
     @ObservedObject var serviceDiscovery: ServiceDiscovery
 
     @Environment(\.appTheme) private var theme
+    // G10: show "Continue offline" after 30 s with no connection
+    @State private var searchSeconds: Int = 0
+    @State private var searchTimer: Timer? = nil
 
     var body: some View {
         VStack(spacing: DesignTokens.Spacing.xl) {
@@ -321,11 +324,43 @@ private struct ConnectionStep: View {
             }
             .padding(.horizontal, DesignTokens.Spacing.xl)
 
+            // G10: After 30 s without a connection, offer an offline path.
+            // The user can still complete onboarding; PC-dependent calibrations
+            // will be locked or skipped.
+            if searchSeconds >= 30 && wsManager.state != .connected {
+                VStack(spacing: DesignTokens.Spacing.sm) {
+                    Text("Can't find the PC bridge.")
+                        .font(DesignTokens.Typography.body.weight(.semibold))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("You can continue and complete sensor calibration later. PC-dependent steps (voice calibration, monitor mapping) will be locked until connected.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(DesignTokens.Spacing.lg)
+                .background(theme.surfaceSecondary)
+                .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+
             Spacer()
         }
         .padding(DesignTokens.Spacing.xl)
+        .animation(.easeInOut(duration: 0.3), value: searchSeconds >= 30)
         .onAppear {
             serviceDiscovery.startBrowsing()
+            // G10: Start 30-second timeout timer
+            searchSeconds = 0
+            searchTimer?.invalidate()
+            searchTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+                if wsManager.state != .connected { searchSeconds += 1 }
+                else { searchTimer?.invalidate() }
+            }
+        }
+        .onDisappear {
+            searchTimer?.invalidate()
+            searchTimer = nil
         }
     }
 }

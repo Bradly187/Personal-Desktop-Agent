@@ -117,6 +117,22 @@ final class SensorManager: ObservableObject {
         }
     }
 
+    /// G4: Stop only non-audio sensors for background mode.
+    /// ARKit (gaze/head), Core Motion (tilt), LiDAR all require foreground.
+    /// Audio sensors (keyword, sound, audioStream) can continue in background
+    /// when the app has UIBackgroundModes: ["audio"] entitlement.
+    func stopNonAudioSensors() {
+        tiltSensor.stop()
+        gazeTracker.stop()
+        headTracker.stop()
+        lidarStreamer.stop()
+        _updateState(id: "tilt", isRunning: false)
+        _updateState(id: "gaze", isRunning: false)
+        _updateState(id: "head", isRunning: false)
+        _updateState(id: "lidar", isRunning: false)
+        // keyword, sound, audio remain running
+    }
+
     /// Stops all sensors and releases all hardware resources.
     func stopAll() {
         tiltSensor.stop()

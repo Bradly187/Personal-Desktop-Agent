@@ -90,6 +90,18 @@ final class WebSocketManager: ObservableObject {
     // Fix #9: Serial send queue preserves message ordering for delta-based messages.
     private let sendQueue = DispatchQueue(label: "ws.send.serial", qos: .userInitiated)
 
+    // G3: Backpressure — track approximate queue depth to drop stale sensor frames.
+    // Sensor streams (tilt, gaze_delta, head) are sampled, not queued: only the
+    // latest value matters. Non-sensor messages always pass through.
+    private var _sendQueueDepth: Int = 0
+    private let _maxSensorQueueDepth = 15
+    private static let _sensorFrameTypes: Set<String> = [
+        "tilt", "tilt_position", "gaze_delta", "gaze", "gaze_ray", "head_pose"
+    ]
+
+    // G2: Pending gesture assessment — queued when not connected, flushed on reconnect.
+    private var _pendingGestureAssessment: [String]? = nil
+
     // MARK: — Public API
 
     func connect() {
@@ -114,9 +126,19 @@ final class WebSocketManager: ObservableObject {
 
     func send(_ payload: [String: Any]) {
         guard let task, state == .connected else { return }
+
+        // G3: Drop stale sensor frames when the send queue is backed up.
+        // Only the latest reading matters for sensor streams.
+        let msgType = payload["type"] as? String ?? ""
+        if WebSocketManager._sensorFrameTypes.contains(msgType) && _sendQueueDepth > _maxSensorQueueDepth {
+            return
+        }
+
         // Fix #9: Serialize on a dedicated serial queue to guarantee ordering.
+        _sendQueueDepth += 1
         let capturedTask = task
-        sendQueue.async {
+        sendQueue.async { [weak self] in
+            defer { Task { @MainActor [weak self] in self?._sendQueueDepth -= 1 } }
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let text = String(data: data, encoding: .utf8) else { return }
             capturedTask.send(.string(text)) { error in
@@ -198,6 +220,7 @@ final class WebSocketManager: ObservableObject {
                     self.state = .connected
                     self.reconnectAttempt = 0
                     self._startPingTimer()
+                    self._flushPendingGestureAssessment()  // G2
                 }
                 self._handleReceived(message: firstMessage)
                 try await self._receiveLoop(task: wsTask)
@@ -525,8 +548,21 @@ extension WebSocketManager {
 
     /// Send the user's gesture capability assessment so GestureProcessor
     /// can skip gestures marked "Can't do this" in onboarding.
+    /// G2: queued and retried on reconnect so offline assessments are not lost.
     func sendGestureAssessment(disabled: [String]) {
-        send(["type": "gesture_assessment", "disabled": disabled])
+        if state == .connected {
+            send(["type": "gesture_assessment", "disabled": disabled])
+            _pendingGestureAssessment = nil
+        } else {
+            _pendingGestureAssessment = disabled   // last-write-wins
+        }
+    }
+
+    /// G2: Flush pending gesture assessment on reconnect.
+    private func _flushPendingGestureAssessment() {
+        guard let pending = _pendingGestureAssessment else { return }
+        send(["type": "gesture_assessment", "disabled": pending])
+        _pendingGestureAssessment = nil
     }
 
     /// Forward a batch of structured log entries to the PC bridge.

@@ -13,6 +13,12 @@ struct SettingsView: View {
     @State private var newSoundAction = ""
     @State private var newKeyword = ""
     @State private var showMonitorCalSheet = false
+    // G1: voice calibration sheets
+    @State private var showVoiceProfilingSheet = false
+    @State private var showVoiceCalibrationSheet = false
+    // G7: command button export
+    @State private var showExportShareSheet = false
+    @State private var exportURL: URL? = nil
 
     var body: some View {
         NavigationStack {
@@ -275,6 +281,71 @@ struct SettingsView: View {
                 } header: {
                     DASectionHeader(title: "Sound Mappings")
                 }
+
+                // G1: Voice Calibration — G11: distinguish the two flows clearly
+                Section {
+                    // Acoustic Profiling: local measurement, no PC round-trip
+                    Button("Acoustic Profile (offline)") {
+                        showVoiceProfilingSheet = true
+                    }
+                    .accessibilityHint("Measures your voice volume and clarity using the iPad mic. No PC connection needed.")
+
+                    Text("Records baseline RMS and confidence from 10 phrases spoken into the iPad. Used to set your VAD threshold.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
+
+                    Divider()
+
+                    // Guided Calibration: PC-driven, pronunciation correction
+                    Button("Guided Calibration (requires PC)") {
+                        showVoiceCalibrationSheet = true
+                    }
+                    .disabled(wsManager.state != .connected)
+                    .accessibilityHint("PC-driven session: corrects pronunciation errors and adapts recognition to today's condition.")
+
+                    Text("PC plays prompts, scores your speech, and saves per-condition corrections (good day / flare / allergy / SVT). Requires bridge connection.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
+
+                    // G5: show and allow changing the current voice condition
+                    LabeledContent("Active condition") {
+                        Picker("", selection: $settings.voiceCondition) {
+                            Text("Good day").tag("good_day")
+                            Text("Flare day").tag("flare_day")
+                            Text("Allergy day").tag("allergy_day")
+                            Text("SVT attack").tag("svt_attack")
+                        }
+                        .pickerStyle(.menu)
+                    }
+                } header: {
+                    DASectionHeader(title: "Voice Calibration")
+                }
+                .sheet(isPresented: $showVoiceProfilingSheet) {
+                    VoiceProfilingSheet(settings: settings)
+                }
+                .sheet(isPresented: $showVoiceCalibrationSheet) {
+                    VoiceCalibrationSheet(wsManager: wsManager)
+                }
+
+                // G7: Command Button backup
+                Section {
+                    Button("Export Command Buttons…") {
+                        if let url = settings.exportCommandButtons() {
+                            exportURL = url
+                            showExportShareSheet = true
+                        }
+                    }
+                    Text("Saves your command button layout as command_buttons.json in the Files app. Import on a new device to restore.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
+                } header: {
+                    DASectionHeader(title: "Command Buttons Backup")
+                }
+                .sheet(isPresented: $showExportShareSheet) {
+                    if let url = exportURL {
+                        ShareSheet(items: [url])
+                    }
+                }
             }
             .navigationTitle("Settings")
         }
@@ -286,4 +357,18 @@ struct SettingsView: View {
         settings.keywordList.append(trimmed)
         newKeyword = ""
     }
+}
+
+// MARK: - ShareSheet helper (G7)
+
+import UIKit
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

@@ -8,11 +8,14 @@ struct CommandPadView: View {
     @EnvironmentObject var settings: SettingsStore
 
     @Environment(\.appTheme) private var theme
+    // G12: adapt column count to orientation
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    private let columns = [
-        GridItem(.adaptive(minimum: DesignTokens.Size.touchTargetMin, maximum: 160),
-                 spacing: DesignTokens.Spacing.md)
-    ]
+    private var columns: [GridItem] {
+        // Landscape / regular width: use a wider minimum so buttons fill naturally
+        let minWidth: CGFloat = horizontalSizeClass == .regular ? 120 : DesignTokens.Size.touchTargetMin
+        return [GridItem(.adaptive(minimum: minWidth, maximum: 160), spacing: DesignTokens.Spacing.md)]
+    }
 
     var body: some View {
         NavigationStack {
