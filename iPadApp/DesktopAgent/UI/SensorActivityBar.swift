@@ -78,7 +78,6 @@ private struct SensorActivityDot: View {
         case "keyword": return "text.bubble"
         case "sound": return "mouth"
         case "audio": return "mic"
-        case "lidar": return "sensor.tag.radiowaves.forward"
         default: return "circle.fill"
         }
     }
@@ -91,7 +90,6 @@ private struct SensorActivityDot: View {
         case "keyword": return "Keywords"
         case "sound": return "Sound"
         case "audio": return "Audio"
-        case "lidar": return "LiDAR"
         default: return state.id
         }
     }

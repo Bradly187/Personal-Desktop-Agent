@@ -3,7 +3,7 @@ import Combine
 import CoreMotion
 import Foundation
 
-/// Centralized lifecycle controller for all 7 sensors.
+/// Centralized lifecycle controller for all 6 sensors.
 ///
 /// Observes SettingsStore `@Published` toggles via Combine and reactively
 /// starts/stops sensors when their toggle changes. Owns the SharedAudioSession
@@ -25,7 +25,6 @@ final class SensorManager: ObservableObject {
     let keywordListener: KeywordListener
     let soundDetector: SoundDetector
     let audioStreamer: AudioStreamer
-    let lidarStreamer: LiDARStreamer
 
     // MARK: - Shared Dependencies
 
@@ -54,9 +53,6 @@ final class SensorManager: ObservableObject {
     /// Whether ARKit face tracking is supported (TrueDepth camera) for GazeTracker/HeadTracker.
     private let isFaceTrackingAvailable: Bool
 
-    /// Whether this device has a LiDAR scanner (iPad Pro 2020+, iPhone 12 Pro+).
-    private let isLiDARAvailable: Bool
-
     // MARK: - Initialization (3.1)
 
     init(ws: WebSocketManager, settings: SettingsStore) {
@@ -75,16 +71,14 @@ final class SensorManager: ObservableObject {
         let motionManager = CMMotionManager()
         self.isTiltAvailable = motionManager.isDeviceMotionAvailable
         self.isFaceTrackingAvailable = ARFaceTrackingConfiguration.isSupported
-        self.isLiDARAvailable = LiDARStreamer.isSupported
 
-        // Instantiate all 7 sensors with shared dependencies
+        // Instantiate all 6 sensors with shared dependencies
         self.tiltSensor = TiltSensor(ws: ws, settings: settings)
         self.gazeTracker = GazeTracker(ws: ws, settings: settings, sharedFaceSession: faceSession)
         self.headTracker = HeadTracker(ws: ws, settings: settings, sharedFaceSession: faceSession)
         self.keywordListener = KeywordListener(ws: ws, settings: settings, sharedAudioSession: audioSession)
         self.soundDetector = SoundDetector(ws: ws, settings: settings, sharedAudioSession: audioSession)
         self.audioStreamer = AudioStreamer(ws: ws, settings: settings, sharedAudioSession: audioSession)
-        self.lidarStreamer = LiDARStreamer(ws: ws)
 
         // Initialize sensor states
         self.sensorStates = _buildInitialStates()
@@ -122,24 +116,19 @@ final class SensorManager: ObservableObject {
         if settings.audioStreamEnabled {
             _startAudioStream()
         }
-        if settings.lidarEnabled {
-            _startLiDAR()
-        }
     }
 
     /// G4: Stop only non-audio sensors for background mode.
-    /// ARKit (gaze/head), Core Motion (tilt), LiDAR all require foreground.
+    /// ARKit (gaze/head) and Core Motion (tilt) require foreground.
     /// Audio sensors (keyword, sound, audioStream) can continue in background
     /// when the app has UIBackgroundModes: ["audio"] entitlement.
     func stopNonAudioSensors() {
         tiltSensor.stop()
         gazeTracker.stop()
         headTracker.stop()
-        lidarStreamer.stop()
         _updateState(id: "tilt", isRunning: false)
         _updateState(id: "gaze", isRunning: false)
         _updateState(id: "head", isRunning: false)
-        _updateState(id: "lidar", isRunning: false)
         // keyword, sound, audio remain running
     }
 
@@ -151,7 +140,6 @@ final class SensorManager: ObservableObject {
         keywordListener.stop()
         soundDetector.stop()
         audioStreamer.stop()
-        lidarStreamer.stop()
 
         _updateState(id: "tilt", isRunning: false)
         _updateState(id: "gaze", isRunning: false)
@@ -159,7 +147,6 @@ final class SensorManager: ObservableObject {
         _updateState(id: "keyword", isRunning: false)
         _updateState(id: "sound", isRunning: false)
         _updateState(id: "audio", isRunning: false)
-        _updateState(id: "lidar", isRunning: false)
     }
 
     // MARK: - Individual Sensor Start/Stop
@@ -237,21 +224,6 @@ final class SensorManager: ObservableObject {
     private func _stopAudioStream() {
         audioStreamer.stop()
         _updateState(id: "audio", isRunning: false)
-    }
-
-    private func _startLiDAR() {
-        guard isLiDARAvailable else {
-            AppLogger.shared.warning("SensorManager", "LiDARStreamer unavailable — device has no LiDAR scanner")
-            _updateState(id: "lidar", isAvailable: false, lastError: "LiDAR scanner not available on this device")
-            return
-        }
-        lidarStreamer.start()
-        _updateState(id: "lidar", isRunning: true)
-    }
-
-    private func _stopLiDAR() {
-        lidarStreamer.stop()
-        _updateState(id: "lidar", isRunning: false)
     }
 
     // MARK: - Combine Subscriptions (3.4)
@@ -407,20 +379,6 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // LiDAR toggle
-        settings.$lidarEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                guard let self else { return }
-                self._updateState(id: "lidar", isEnabled: enabled)
-                if enabled {
-                    self._startLiDAR()
-                } else {
-                    self._stopLiDAR()
-                }
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Sensor State Management (3.6)
@@ -469,13 +427,6 @@ final class SensorManager: ObservableObject {
                 isAvailable: true, // Microphone available on all iPads
                 lastError: nil
             ),
-            SensorState(
-                id: "lidar",
-                isEnabled: settings.lidarEnabled,
-                isRunning: false,
-                isAvailable: isLiDARAvailable,
-                lastError: isLiDARAvailable ? nil : "LiDAR scanner not available on this device"
-            ),
         ]
     }
 
@@ -492,7 +443,7 @@ final class SensorManager: ObservableObject {
 
 /// Represents the observable state of a single sensor for UI consumption.
 struct SensorState: Identifiable {
-    let id: String          // "tilt", "gaze", "head", "keyword", "sound", "audio", "lidar"
+    let id: String          // "tilt", "gaze", "head", "keyword", "sound", "audio"
     var isEnabled: Bool     // from SettingsStore toggle
     var isRunning: Bool     // actual runtime state
     var isAvailable: Bool   // hardware capability check

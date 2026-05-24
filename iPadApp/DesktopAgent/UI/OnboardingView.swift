@@ -372,7 +372,6 @@ private struct HardwareStep: View {
 
     private let hasTrueDepth = ARFaceTrackingConfiguration.isSupported
     private let hasMotion = CMMotionManager().isDeviceMotionAvailable
-    private let hasLiDAR = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
 
     var body: some View {
         VStack(spacing: DesignTokens.Spacing.xl) {
@@ -395,7 +394,6 @@ private struct HardwareStep: View {
                 sensorRow(name: "Accelerometer & Gyroscope", detail: "Tilt navigation", available: hasMotion)
                 sensorRow(name: "TrueDepth Camera", detail: "Eye gaze & head tracking", available: hasTrueDepth)
                 sensorRow(name: "Microphone", detail: "Voice commands & sound actions", available: true)
-                sensorRow(name: "LiDAR Scanner", detail: "Hand gesture recognition", available: hasLiDAR)
                 sensorRow(name: "Multi-Touch Display", detail: "Trackpad & handwriting", available: true)
             }
             .padding(DesignTokens.Spacing.lg)

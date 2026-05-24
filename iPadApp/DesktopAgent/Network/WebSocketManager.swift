@@ -598,27 +598,6 @@ extension WebSocketManager {
         send(["type": "ipad_log", "entries": entries])
     }
 
-    func sendDepthFrame(width: Int, height: Int, depthB64: String, confB64: String, ts: Double) {
-        send([
-            "type": "depth_frame",
-            "ts": ts,
-            "width": width,
-            "height": height,
-            "depth_b64": depthB64,
-            "conf_b64": confB64,
-        ])
-    }
-
-    func sendCameraFrame(width: Int, height: Int, imageB64: String, ts: Double) {
-        send([
-            "type": "camera_frame",
-            "ts": ts,
-            "width": width,
-            "height": height,
-            "image_b64": imageB64,
-        ])
-    }
-
     /// Trigger a 5-dot monitor calibration session on the PC.
     func sendGazeCalibrationStart() {
         msgCounter += 1

@@ -39,7 +39,7 @@ struct GestureAssessmentSheet: View {
             icon: "hand.pinch",
             title: "Pinch",
             instruction: "Touch your thumb and index finger together, then release.",
-            whyMatters: "Used for precise selections and depth-confirmed clicks via LiDAR."
+            whyMatters: "Used for precise selections."
         ),
         GestureDef(
             name: "OPEN_PALM",

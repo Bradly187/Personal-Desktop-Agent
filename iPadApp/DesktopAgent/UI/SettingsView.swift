@@ -222,22 +222,6 @@ struct SettingsView: View {
                     DASectionHeader(title: "Audio Streaming")
                 }
 
-                // LiDAR + Camera Streaming
-                Section {
-                    Toggle("Stream LiDAR + Camera to PC", isOn: $settings.lidarEnabled)
-                        .disabled(!LiDARStreamer.isSupported)
-                    Text("Enables hand gesture recognition (MediaPipe Hands) and depth-based pinch confirmation on the PC. Uses the rear LiDAR scanner and camera at 5 fps depth / 10 fps camera.")
-                        .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(theme.textSecondary)
-                    if !LiDARStreamer.isSupported {
-                        Label("LiDAR not available on this device", systemImage: "exclamationmark.triangle.fill")
-                            .font(DesignTokens.Typography.caption)
-                            .foregroundStyle(.orange)
-                    }
-                } header: {
-                    DASectionHeader(title: "LiDAR & Gesture Streaming")
-                }
-
                 // Sound mappings
                 Section {
                     ForEach(settings.soundMappings.keys.sorted(), id: \.self) { sound in

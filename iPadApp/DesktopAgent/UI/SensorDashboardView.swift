@@ -1,16 +1,13 @@
 import SwiftUI
 
-/// Sensor Status Dashboard — shows all 7 sensors with live status,
+/// Sensor Status Dashboard — shows all 6 sensors with live status,
 /// quick-enable toggles, and expandable detail panels.
 ///
-/// Replaces the previous LiDAR-only "Sensors" tab with a unified view
-/// of all sensor activity. Each sensor card shows:
+/// Each sensor card shows:
 /// - Running/stopped/error state (color-coded dot)
 /// - Hardware availability
 /// - Quick toggle to enable/disable
 /// - Tap to expand for sensor-specific live data
-///
-/// LiDAR detail panel preserves the original camera + depth feed view.
 struct SensorDashboardView: View {
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var sensorManager: SensorManager
@@ -110,7 +107,6 @@ struct SensorDashboardView: View {
                 settings.soundMappings = [:]
             }
         case "audio": settings.audioStreamEnabled.toggle()
-        case "lidar": settings.lidarEnabled.toggle()
         default: break
         }
     }
@@ -132,7 +128,6 @@ struct SensorDashboardView: View {
         case "keyword": KeywordDetailView(listener: sensorManager.keywordListener)
         case "sound": SoundDetailView()
         case "audio": AudioDetailView(streamer: sensorManager.audioStreamer)
-        case "lidar": LiDARDetailView(streamer: sensorManager.lidarStreamer)
         default: EmptyView()
         }
     }
@@ -246,7 +241,6 @@ private struct SensorCard<Detail: View>: View {
         case "keyword": return "Voice Keywords"
         case "sound": return "Sound Actions"
         case "audio": return "Audio Stream"
-        case "lidar": return "LiDAR & Camera"
         default: return state.id.capitalized
         }
     }
@@ -259,7 +253,6 @@ private struct SensorCard<Detail: View>: View {
         case "keyword": return "text.bubble"
         case "sound": return "mouth"
         case "audio": return "mic.badge.plus"
-        case "lidar": return "sensor.tag.radiowaves.forward"
         default: return "questionmark"
         }
     }
@@ -475,61 +468,6 @@ private struct AudioDetailView: View {
             .sheet(isPresented: $showVoiceCalibration) {
                 VoiceCalibrationSheet(wsManager: wsManager)
             }
-        }
-    }
-}
-
-private struct LiDARDetailView: View {
-    @ObservedObject var streamer: LiDARStreamer
-    @Environment(\.appTheme) private var theme
-
-    var body: some View {
-        VStack(spacing: DesignTokens.Spacing.md) {
-            // Stats row
-            HStack(spacing: DesignTokens.Spacing.lg) {
-                statCell(label: "Depth", value: String(format: "%.0f fps", streamer.depthFps))
-                statCell(label: "Camera", value: String(format: "%.0f fps", streamer.cameraFps))
-                statCell(label: "Valid", value: String(format: "%.0f%%", streamer.validPixelPct))
-                statCell(label: "Range", value: String(format: "%.1f–%.1fm", streamer.depthRangeMin, streamer.depthRangeMax))
-            }
-
-            // Camera preview (compact)
-            if let img = streamer.latestCameraImage {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 120)
-                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
-                    .accessibilityLabel("Rear camera feed")
-            }
-
-            // Depth preview (compact)
-            if let img = streamer.latestDepthImage {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxHeight: 120)
-                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
-                    .accessibilityLabel("Depth map visualization")
-            }
-
-            if !streamer.isRunning && LiDARStreamer.isSupported {
-                Text("Enable to stream depth + camera to PC for hand gesture recognition.")
-                    .font(DesignTokens.Typography.caption)
-                    .foregroundStyle(theme.textSecondary)
-            }
-        }
-    }
-
-    private func statCell(label: String, value: String) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textPrimary)
-                .monospacedDigit()
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundStyle(theme.textSecondary)
         }
     }
 }

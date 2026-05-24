@@ -8,7 +8,7 @@ import os
 /// capture during soak testing.
 ///
 /// Usage (from any thread or actor):
-///   AppLogger.shared.warning("LiDARStreamer", "ARSession error — \(error)")
+///   AppLogger.shared.warning("TiltSensor", "CMMotionManager error — \(error)")
 ///   AppLogger.shared.info("WebSocketManager",  "Connected to \(url)")
 ///
 /// Replaces all bare print() calls in sensor and network classes.
