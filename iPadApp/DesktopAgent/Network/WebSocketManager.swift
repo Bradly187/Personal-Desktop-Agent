@@ -95,6 +95,10 @@ final class WebSocketManager: ObservableObject {
     // latest value matters. Non-sensor messages always pass through.
     private var _sendQueueDepth: Int = 0
     private let _maxSensorQueueDepth = 15
+    // M3: audio_stream gets a higher threshold (~3s of 50ms chunks) because
+    // dropping audio mid-utterance corrupts Whisper transcription. We tolerate
+    // brief slowness but cap the buildup to prevent unbounded memory growth.
+    private let _maxAudioQueueDepth = 60
     private static let _sensorFrameTypes: Set<String> = [
         "tilt", "tilt_position", "gaze_delta", "gaze", "gaze_ray", "head_pose"
     ]
@@ -133,16 +137,38 @@ final class WebSocketManager: ObservableObject {
         if WebSocketManager._sensorFrameTypes.contains(msgType) && _sendQueueDepth > _maxSensorQueueDepth {
             return
         }
+        // M3: bound audio_stream depth so a slow WebSocket can't OOM the iPad.
+        if msgType == "audio_stream" && _sendQueueDepth > _maxAudioQueueDepth {
+            AppLogger.shared.warning("WebSocketManager", "Audio stream backpressure — dropping chunk (depth=\(_sendQueueDepth))")
+            return
+        }
 
         // Fix #9: Serialize on a dedicated serial queue to guarantee ordering.
         _sendQueueDepth += 1
         let capturedTask = task
         sendQueue.async { [weak self] in
             defer { Task { @MainActor [weak self] in self?._sendQueueDepth -= 1 } }
-            guard let data = try? JSONSerialization.data(withJSONObject: payload),
-                  let text = String(data: data, encoding: .utf8) else { return }
+            // E2: surface non-encodable payloads instead of silently dropping
+            let data: Data
+            do {
+                data = try JSONSerialization.data(withJSONObject: payload)
+            } catch {
+                AppLogger.shared.warning("WebSocketManager",
+                    "JSON encode failed for type=\(msgType): \(error.localizedDescription)")
+                return
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
+                AppLogger.shared.warning("WebSocketManager", "Non-UTF8 payload dropped for type=\(msgType)")
+                return
+            }
             capturedTask.send(.string(text)) { error in
                 if let error {
+                    // E5: capture rich error info before triggering reconnect
+                    let nsErr = error as NSError
+                    AppLogger.shared.warning(
+                        "WebSocketManager",
+                        "send failed (domain=\(nsErr.domain) code=\(nsErr.code)): \(error.localizedDescription)"
+                    )
                     Task { @MainActor [weak self] in
                         self?._handleDisconnect(error: error)
                     }

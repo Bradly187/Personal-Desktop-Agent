@@ -34,6 +34,11 @@ final class LiDARStreamer: NSObject, ObservableObject {
     @Published private(set) var depthRangeMax: Double = 0
     @Published private(set) var isRunning = false
 
+    /// C2: True only when LiDARDebugView is visible — controls whether preview
+    /// UIImages are generated. When false, frames are still streamed to the PC
+    /// but not decoded for local display, saving ~5 MB of RAM at 10 fps.
+    @Published var previewEnabled: Bool = false
+
     // MARK: - Static capability check
 
     static var isSupported: Bool {
@@ -60,12 +65,32 @@ final class LiDARStreamer: NSObject, ObservableObject {
 
     // MARK: - Init
 
+    /// M1: Memory warning observer — releases preview UIImages immediately.
+    private var memoryWarningObserver: NSObjectProtocol?
+
     init(ws: WebSocketManager, depthFps: Double = 5, cameraFps: Double = 10) {
         self.ws = ws
         self.depthInterval = 1.0 / depthFps
         self.cameraInterval = 1.0 / cameraFps
         super.init()
         session.delegate = self
+
+        // M1: respond to system memory warnings by dropping preview frames.
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.latestCameraImage = nil
+            self.latestDepthImage = nil
+            AppLogger.shared.info("LiDARStreamer", "Released preview frames on memory warning")
+        }
+    }
+
+    deinit {
+        if let observer = memoryWarningObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: - Lifecycle
@@ -264,7 +289,12 @@ private extension LiDARStreamer {
         // Only hop to MainActor for UI state updates
         Task { @MainActor [weak self] in
             guard let self, self.isRunning else { return }
-            if let img = depthImage { latestDepthImage = img }
+            // C2: only retain the decoded depth image when the debug view is showing
+            if self.previewEnabled, let img = depthImage {
+                self.latestDepthImage = img
+            } else if self.latestDepthImage != nil {
+                self.latestDepthImage = nil
+            }
             validPixelPct = validPct
             depthRangeMin = finalMin
             depthRangeMax = finalMax
@@ -300,7 +330,12 @@ private extension LiDARStreamer {
         // Only hop to MainActor for UI state
         Task { @MainActor [weak self] in
             guard let self, self.isRunning else { return }
-            latestCameraImage = uiImg
+            // C2: only retain the camera UIImage when the debug view is showing
+            if self.previewEnabled {
+                self.latestCameraImage = uiImg
+            } else if self.latestCameraImage != nil {
+                self.latestCameraImage = nil
+            }
         }
     }
 }

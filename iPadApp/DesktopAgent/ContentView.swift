@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var wsManager: WebSocketManager
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var screenshotStore: ScreenshotStore
+    @EnvironmentObject var sensorManager: SensorManager
 
     @Environment(\.appTheme) private var theme
 
@@ -56,6 +57,24 @@ struct ContentView: View {
                 .allowsHitTesting(conflictActive)
 
             ScreenshotOverlayView()
+
+            // E3: Camera permission failure banner (shown when ARKit gives up).
+            if let msg = sensorManager.cameraPermissionMessage {
+                HStack(alignment: .top, spacing: DesignTokens.Spacing.sm) {
+                    Image(systemName: "video.slash.fill")
+                        .foregroundStyle(theme.warning)
+                    Text(msg)
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textPrimary)
+                        .multilineTextAlignment(.leading)
+                }
+                .padding(DesignTokens.Spacing.md)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
+                .padding(.horizontal, DesignTokens.Spacing.lg)
+                .padding(.top, 100)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             // ── Custom tab bar with drag-to-switch ───────────────────────────
             customTabBar

@@ -36,6 +36,10 @@ final class SharedFaceSession: NSObject {
     /// Fix #4: Error callback for consumers to observe session failures.
     var onError: ((Error) -> Void)?
 
+    /// E3: Published message when ARKit fails permanently due to a permission
+    /// issue (camera access denied/revoked). UI observes this to show a banner.
+    @Published private(set) var permissionFailureMessage: String? = nil
+
     // MARK: - Private
 
     private let session = ARSession()
@@ -161,10 +165,19 @@ extension SharedFaceSession: ARSessionDelegate {
     /// Fix #4: On error, notify consumers and attempt automatic recovery.
     nonisolated func session(_ session: ARSession, didFailWithError error: Error) {
         AppLogger.shared.error("SharedFaceSession", "ARSession error — \(error.localizedDescription)")
+        // E3: detect permanent permission failures so we can surface them to UI.
+        let nsErr = error as NSError
+        let isPermission = (nsErr.domain == ARErrorDomain && nsErr.code == 103)  // .cameraUnauthorized
+            || nsErr.localizedDescription.lowercased().contains("camera access")
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.isRunning = false
             self.onError?(error)
+            if isPermission {
+                self.permissionFailureMessage = "Camera access denied. Enable in Settings → Desktop Agent → Camera to restore gaze and head tracking."
+                AppLogger.shared.error("SharedFaceSession", "Permission denied — recovery suppressed")
+                return  // don't retry; the user has to grant permission
+            }
             self._attemptRecovery()
         }
     }
