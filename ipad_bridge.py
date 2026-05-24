@@ -1086,7 +1086,7 @@ class IPadBridge:
         )
         try:
             self._zeroconf = AsyncZeroconf()
-            await self._zeroconf.async_register_service(info)
+            await self._zeroconf.async_register_service(info, allow_name_change=True)
             log.info("mDNS: %s._desktop-agent._tcp.local. → %s:%d",
                      hostname, local_ip, self.port)
         except Exception as exc:
