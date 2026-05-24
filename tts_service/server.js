@@ -22,7 +22,6 @@
  */
 
 import express from "express";
-import { Readable } from "stream";
 import {
   PollyClient,
   StartSpeechSynthesisStreamCommand,
@@ -79,14 +78,12 @@ async function synthesize(
   languageCode = "en-US"
 ) {
   // Input event stream: one TextEvent then CloseStreamEvent.
-  // Wrapped with Readable.from() because the SDK v3 event stream middleware
-  // expects a Node.js Readable stream, not a bare async generator.
-  const actionStream = Readable.from(
-    (async function* () {
-      yield { TextEvent: { Text: text } };
-      yield { CloseStreamEvent: {} };
-    })()
-  );
+  // SDK v3 ≥ 3.800 event-stream serialization accepts an AsyncIterable directly;
+  // wrapping with Readable.from() breaks the internal check across ESM/CJS boundaries.
+  const actionStream = (async function* () {
+    yield { TextEvent: { Text: text } };
+    yield { CloseStreamEvent: {} };
+  })();
 
   const command = new StartSpeechSynthesisStreamCommand({
     Engine:       engine,
