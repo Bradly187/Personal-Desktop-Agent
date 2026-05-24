@@ -156,16 +156,24 @@ final class AppLogger: @unchecked Sendable {
 
         // G6: Only flush when connected. If not connected, keep pending entries
         // so startup logs (permissions, sensor init) are not silently dropped.
-        // The next 500ms flush cycle will retry.
-        let entries: [[String: Any]] = pending.map { e in
+        // The next 500 ms flush cycle will retry.
+        //
+        // Concurrency Bug 1 fix: snapshot the count and remove ONLY that many
+        // when delivery completes. New entries that arrived on batchQueue between
+        // the snapshot and the clear must survive — they go out in the next flush.
+        let snapshotCount = pending.count
+        let entries: [[String: Any]] = pending.prefix(snapshotCount).map { e in
             ["ts": e.ts, "level": e.level.rawValue, "subsystem": e.subsystem, "msg": e.msg]
         }
         Task { @MainActor [weak self, weak ws] in
             guard let ws else { return }
-            guard case .connected = ws.state else { return }  // retry next cycle if not connected
+            guard case .connected = ws.state else { return }
             ws.sendLogBatch(entries)
-            // Only clear after confirmed delivery attempt
-            self?.batchQueue.async { self?.pending.removeAll() }
+            self?.batchQueue.async { [weak self] in
+                guard let self else { return }
+                let removeCount = min(snapshotCount, self.pending.count)
+                self.pending.removeFirst(removeCount)
+            }
         }
     }
 }
