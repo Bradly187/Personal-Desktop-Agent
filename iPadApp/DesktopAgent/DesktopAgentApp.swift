@@ -75,7 +75,9 @@ struct RootView: View {
     @EnvironmentObject var sensorManager: SensorManager
     @EnvironmentObject var serviceDiscovery: ServiceDiscovery
 
-    @State private var onboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
+    // Use @AppStorage so the "Re-run Onboarding" button in SettingsView can
+    // flip this flag and have RootView immediately re-render to OnboardingView.
+    @AppStorage("onboardingComplete") private var onboardingComplete = false
 
     var body: some View {
         if onboardingComplete {

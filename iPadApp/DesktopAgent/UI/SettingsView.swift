@@ -19,6 +19,10 @@ struct SettingsView: View {
     // G7: command button export
     @State private var showExportShareSheet = false
     @State private var exportURL: URL? = nil
+    // Re-run onboarding confirmation
+    @State private var showRerunOnboardingAlert = false
+    @AppStorage("onboardingComplete") private var onboardingComplete = false
+    @AppStorage("onboardingCurrentStep") private var onboardingCurrentStep = 0
 
     var body: some View {
         NavigationStack {
@@ -345,6 +349,32 @@ struct SettingsView: View {
                     if let url = exportURL {
                         ShareSheet(items: [url])
                     }
+                }
+
+                // Re-run onboarding — for TestFlight updates that preserve
+                // UserDefaults across reinstalls, so the wizard would otherwise
+                // never appear again after the first completion.
+                Section {
+                    Button("Re-run Onboarding…") {
+                        showRerunOnboardingAlert = true
+                    }
+                    .foregroundStyle(theme.accent)
+                    .accessibilityHint("Restarts the 11-step calibration wizard from step 1.")
+
+                    Text("Restarts the full calibration wizard (welcome → tilt → gaze → voice → gesture → flare → sound → touch → monitor → summary). Existing calibrations and settings are kept.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
+                } header: {
+                    DASectionHeader(title: "Onboarding")
+                }
+                .alert("Re-run Onboarding?", isPresented: $showRerunOnboardingAlert) {
+                    Button("Cancel", role: .cancel) {}
+                    Button("Restart", role: .destructive) {
+                        onboardingCurrentStep = 0
+                        onboardingComplete = false
+                    }
+                } message: {
+                    Text("The calibration wizard will reopen on the next screen. Your saved settings and calibrations are not erased.")
                 }
             }
             .navigationTitle("Settings")
