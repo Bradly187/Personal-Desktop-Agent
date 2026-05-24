@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -34,6 +36,44 @@ from typing import TYPE_CHECKING, Optional
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CUDA DLL search path — must be registered before ctranslate2 / faster-whisper
+# are imported so ctranslate2's dynamic LoadLibrary calls find cublas64_12.dll.
+#
+# Python 3.8+ restricts DLL search for extension modules to explicitly
+# registered directories (os.add_dll_directory), not the process PATH.
+# ctranslate2 also loads CUDA libs at runtime, which goes through LoadLibraryW
+# and therefore also benefits from add_dll_directory on Windows.
+#
+# The DLL directory is the torch\lib folder from a CUDA-enabled torch install.
+# If torch gets reinstalled with CUDA the new path will be torch\lib (no tilde);
+# we probe both so the code stays correct after a reinstall.
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    _SITE_PACKAGES = Path(os.path.expandvars(
+        r"%APPDATA%\Python\Python314\site-packages"
+    ))
+    _CUDA_DLL_CANDIDATES = [
+        _SITE_PACKAGES / "torch" / "lib",       # proper CUDA torch install
+        _SITE_PACKAGES / "~orch" / "lib",        # DLLs left by previous CUDA torch
+        Path(r"C:\Users\bradt\AppData\Local\Programs\Ollama\lib\ollama\cuda_v12"),
+    ]
+    for _candidate in _CUDA_DLL_CANDIDATES:
+        if (_candidate / "cublas64_12.dll").exists():
+            try:
+                os.add_dll_directory(str(_candidate))
+                log.info("Registered CUDA DLL directory: %s", _candidate)
+            except OSError as _e:
+                log.warning("Could not register CUDA DLL dir %s: %s", _candidate, _e)
+            break
+    else:
+        log.warning(
+            "cublas64_12.dll not found in any candidate directory — "
+            "faster-whisper GPU inference will fail. Install CUDA toolkit 12.x "
+            "or reinstall torch with CUDA: pip install torch --index-url "
+            "https://download.pytorch.org/whl/cu124"
+        )
 
 try:
     import numpy as np
