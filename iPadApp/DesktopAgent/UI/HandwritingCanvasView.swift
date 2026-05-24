@@ -82,6 +82,14 @@ struct HandwritingCanvasView: View {
                 vm.handleResult(latex: latex, unicode: unicode, error: error)
             }
         }
+        .onChange(of: wsManager.state) { _, newState in
+            // If the bridge disconnects while OCR is in-flight, the result will
+            // never arrive — clear the spinner so the user can retry.
+            if newState == .disconnected && vm.isRecognizing {
+                vm.handleResult(latex: nil, unicode: nil,
+                                error: "Connection lost — please try again")
+            }
+        }
     }
 
     // MARK: — Canvas controls (bottom-right overlay)
