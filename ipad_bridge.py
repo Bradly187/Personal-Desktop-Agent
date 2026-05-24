@@ -79,7 +79,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 try:
-    from zeroconf import ServiceInfo, Zeroconf
+    from zeroconf import ServiceInfo
+    from zeroconf.asyncio import AsyncZeroconf
     _ZEROCONF_AVAILABLE = True
 except ImportError:
     _ZEROCONF_AVAILABLE = False
@@ -1071,7 +1072,7 @@ class IPadBridge:
     # mDNS
     # ---------------------------------------------------------------------- #
 
-    def _start_mdns(self) -> None:
+    async def _start_mdns(self) -> None:
         if not _ZEROCONF_AVAILABLE:
             return
         hostname = socket.gethostname()
@@ -1084,17 +1085,19 @@ class IPadBridge:
             properties={"version": "1", "name": "Personal Desktop Agent"},
         )
         try:
-            self._zeroconf = Zeroconf()
-            self._zeroconf.register_service(info)
+            self._zeroconf = AsyncZeroconf()
+            await self._zeroconf.async_register_service(info)
             log.info("mDNS: %s._desktop-agent._tcp.local. → %s:%d",
                      hostname, local_ip, self.port)
         except Exception as exc:
-            log.warning("mDNS registration failed (non-fatal): %s", exc)
+            log.warning("mDNS registration failed (non-fatal): %r", exc, exc_info=True)
+            if self._zeroconf:
+                await self._zeroconf.async_close()
             self._zeroconf = None
 
-    def _stop_mdns(self) -> None:
+    async def _stop_mdns(self) -> None:
         if self._zeroconf:
-            self._zeroconf.close()
+            await self._zeroconf.async_close()
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -1104,7 +1107,7 @@ class IPadBridge:
         await self._resolve_screen_size()
 
         if not no_mdns:
-            self._start_mdns()
+            await self._start_mdns()
 
         # Prevent Windows from sleeping while bridge is active
         self._prevent_sleep()
@@ -1132,7 +1135,7 @@ class IPadBridge:
             await asyncio.Event().wait()
         finally:
             self._allow_sleep()
-            self._stop_mdns()
+            await self._stop_mdns()
             await runner.cleanup()
 
     def _prevent_sleep(self) -> None:
