@@ -93,7 +93,10 @@ final class KeywordListener: NSObject, ObservableObject {
                     self._checkKeywords(in: result.bestTranscription.formattedString)
                 }
                 if error != nil || (result?.isFinal ?? false) {
-                    // Recognition ended (timeout or error) — restart with backoff
+                    if let error {
+                        AppLogger.shared.error("KeywordListener",
+                            "Recognition ended with error: \(error.localizedDescription)")
+                    }
                     self.stop()
                     self._restartWithBackoff()
                 }
@@ -101,12 +104,12 @@ final class KeywordListener: NSObject, ObservableObject {
         }
     }
 
-    /// Fix #18: Restart with exponential backoff to prevent infinite loop on persistent errors.
-    /// Resets backoff counter after 10s of stable operation.
+    /// Restart with exponential backoff to prevent infinite loop on persistent errors.
+    /// Resets counter only after 10s of stable operation, so the delay actually escalates.
     private func _restartWithBackoff() {
         let now = Date()
 
-        // Reset counter if last restart was >10s ago (stable operation)
+        // Reset counter only when last restart was >10s ago (stable operation window)
         if let last = lastRestartTime, now.timeIntervalSince(last) > 10.0 {
             consecutiveRestarts = 0
         }
@@ -115,22 +118,25 @@ final class KeywordListener: NSObject, ObservableObject {
         lastRestartTime = now
 
         if consecutiveRestarts > maxConsecutiveRestarts {
-            // De-duplicate: a single recognition failure can fan out into
-            // several near-simultaneous _restartWithBackoff() calls (handler
-            // fires multiple times as the task tears down). Only log + arm a
-            // single 5s backoff window per cycle so we don't drown the log in
-            // four "backing off 5s" lines every five seconds.
-            if !isBackingOff {
-                isBackingOff = true
-                AppLogger.shared.warning("KeywordListener",
-                    "Too many consecutive restarts (\(consecutiveRestarts)), backing off 5s")
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    guard let self else { return }
-                    self.consecutiveRestarts = 0
-                    self.isBackingOff = false
-                    self._startRecognition()
-                }
+            // De-duplicate: SFSpeechRecognitionTask can deliver several terminal
+            // callbacks in rapid succession (isFinal + error). Only arm one backoff
+            // Task per cycle.
+            guard !isBackingOff else { return }
+            isBackingOff = true
+
+            // Exponential backoff: 5 → 10 → 20 → 40 → 60s cap
+            let exponent = consecutiveRestarts - maxConsecutiveRestarts - 1
+            let delay = min(60.0, 5.0 * pow(2.0, Double(max(0, exponent))))
+            AppLogger.shared.warning("KeywordListener",
+                "Too many consecutive restarts (\(consecutiveRestarts)), backing off \(Int(delay))s")
+
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self else { return }
+                self.isBackingOff = false
+                // Do NOT reset consecutiveRestarts here — only the 10s stable check
+                // above should reset it, so delays continue escalating on a broken mic.
+                self._startRecognition()
             }
             return
         }
@@ -138,9 +144,8 @@ final class KeywordListener: NSObject, ObservableObject {
         _startRecognition()
     }
 
-    /// True while a 5s backoff Task is pending — prevents duplicate warnings
-    /// and duplicate restart attempts when several handler callbacks fire in
-    /// rapid succession during a recognition failure.
+    /// True while a backoff Task is pending — prevents duplicate log spam and
+    /// duplicate restart attempts when several handler callbacks fire at once.
     private var isBackingOff = false
 
     private func _checkKeywords(in transcript: String) {
