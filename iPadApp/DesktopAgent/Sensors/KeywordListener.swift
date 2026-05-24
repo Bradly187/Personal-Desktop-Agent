@@ -115,19 +115,33 @@ final class KeywordListener: NSObject, ObservableObject {
         lastRestartTime = now
 
         if consecutiveRestarts > maxConsecutiveRestarts {
-            AppLogger.shared.warning("KeywordListener", "Too many consecutive restarts (\(consecutiveRestarts)), backing off 5s")
-            // Wait 5 seconds before trying again
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard let self else { return }
-                self.consecutiveRestarts = 0
-                self._startRecognition()
+            // De-duplicate: a single recognition failure can fan out into
+            // several near-simultaneous _restartWithBackoff() calls (handler
+            // fires multiple times as the task tears down). Only log + arm a
+            // single 5s backoff window per cycle so we don't drown the log in
+            // four "backing off 5s" lines every five seconds.
+            if !isBackingOff {
+                isBackingOff = true
+                AppLogger.shared.warning("KeywordListener",
+                    "Too many consecutive restarts (\(consecutiveRestarts)), backing off 5s")
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    guard let self else { return }
+                    self.consecutiveRestarts = 0
+                    self.isBackingOff = false
+                    self._startRecognition()
+                }
             }
             return
         }
 
         _startRecognition()
     }
+
+    /// True while a 5s backoff Task is pending — prevents duplicate warnings
+    /// and duplicate restart attempts when several handler callbacks fire in
+    /// rapid succession during a recognition failure.
+    private var isBackingOff = false
 
     private func _checkKeywords(in transcript: String) {
         guard let settings else { return }

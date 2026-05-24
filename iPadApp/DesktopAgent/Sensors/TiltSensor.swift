@@ -54,6 +54,9 @@ final class TiltSensor: ObservableObject {
     private var diagSendsAttempted: Int = 0
     private var diagSendsSuppressed: Int = 0
     private var diagWsNilCount: Int = 0
+    /// Max instantaneous angular velocity seen in the diag window (rad/s).
+    /// Tells us if the user is actually moving the iPad or if it's stationary.
+    private var diagMaxAngVel: Double = 0
 
     // MARK: — Snapshotted settings (avoids cross-isolation reads at 60Hz)
     private var snapshotTiltEnabled: Bool = true
@@ -261,11 +264,27 @@ final class TiltSensor: ObservableObject {
 
             // --- Stationary lock ---
             // Uses CACurrentMediaTime() instead of Date() for cheaper monotonic timing.
+            //
+            // Threshold was 0.01 rad/s (~0.57°/s) which is below the noise floor
+            // of normal hand-tilt motion — the lock would engage during active
+            // tilting and freeze the cursor at the initial neutral position
+            // forever (suppression filter then ate every send). Raised to
+            // 0.05 rad/s (~2.9°/s) so the lock only fires when the iPad is
+            // genuinely resting still on a surface, while still letting normal
+            // tilt motion register. Use OR not AND so that motion on either
+            // axis alone defeats the lock.
             let rot = data.rotationRate
             let angularVelX = abs(rot.x)
             let angularVelY = abs(rot.y)
-            let isStationary = angularVelX <= 0.01 && angularVelY <= 0.01
+            let stationaryThreshold = 0.05  // rad/s, ~2.9°/s
+            let isStationary = angularVelX <= stationaryThreshold
+                            && angularVelY <= stationaryThreshold
             let now = CACurrentMediaTime()
+
+            // Track peak rotation for the diagnostic line so we can see whether
+            // the user is genuinely tilting or the iPad is sitting still.
+            let peakAngVel = max(angularVelX, angularVelY)
+            if peakAngVel > diagMaxAngVel { diagMaxAngVel = peakAngVel }
 
             if isStationary {
                 if stationaryStartTime == nil {
@@ -352,12 +371,18 @@ final class TiltSensor: ObservableObject {
             return
         }
         guard now - diagLastReportTime >= 1.0 else { return }
-        let summary = "handler=\(diagHandlerCalls)/s sends=\(diagSendsAttempted) suppressed=\(diagSendsSuppressed) wsNil=\(diagWsNilCount) enabled=\(snapshotTiltEnabled) posMode=\(snapshotTiltPositionMode) locked=\(lockedCoords != nil)"
+        let summary = String(
+            format: "handler=%d/s sends=%d suppressed=%d wsNil=%d enabled=%@ posMode=%@ locked=%@ peakAngVel=%.3f rad/s",
+            diagHandlerCalls, diagSendsAttempted, diagSendsSuppressed, diagWsNilCount,
+            snapshotTiltEnabled.description, snapshotTiltPositionMode.description,
+            (lockedCoords != nil).description, diagMaxAngVel
+        )
         AppLogger.shared.info("TiltSensor", summary)
         diagLastReportTime = now
         diagHandlerCalls = 0
         diagSendsAttempted = 0
         diagSendsSuppressed = 0
         diagWsNilCount = 0
+        diagMaxAngVel = 0
     }
 }
