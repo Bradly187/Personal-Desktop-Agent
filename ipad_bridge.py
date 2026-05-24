@@ -1161,16 +1161,40 @@ class IPadBridge:
     async def _health_handler(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "desktop-agent-bridge"})
 
+    @staticmethod
+    def _detect_lan_ip() -> str:
+        """Return the LAN IP the OS would use to reach the default gateway.
+
+        Falls back to socket.gethostbyname(hostname) and finally 'localhost' if
+        neither works. The default-route trick is necessary on Windows machines
+        with active VPN / Tailscale / WireGuard / Hyper-V interfaces, where
+        gethostbyname(gethostname()) commonly returns the VPN address (10.x.x.x
+        or similar) instead of the actual LAN IP the iPad needs to reach.
+        """
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # No packet is actually sent; this just asks the OS which
+                # interface it would use to route to a public address.
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                if ip and not ip.startswith("127."):
+                    return ip
+            finally:
+                s.close()
+        except Exception:
+            pass
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return "localhost"
+
     def _print_qr(self) -> None:
         """Print connection info to the terminal (QR code if qrcode installed)."""
         if self.host != "0.0.0.0":
             local_ip = self.host
         else:
-            hostname = socket.gethostname()
-            try:
-                local_ip = socket.gethostbyname(hostname)
-            except Exception:
-                local_ip = "localhost"
+            local_ip = self._detect_lan_ip()
         url = f"ws://{local_ip}:{self.port}/ws"
         print(f"\n  Connect iPad to:  {url}\n")
         try:
