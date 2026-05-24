@@ -444,6 +444,20 @@ CREATE TABLE IF NOT EXISTS gaze_monitor_calibration (
     created_at   REAL    NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_gmc_created ON gaze_monitor_calibration(created_at);
+
+-- D5: Adaptation effectiveness log — records pre/post metrics for each
+-- training adaptation so the trainer can detect and roll back bad changes.
+CREATE TABLE IF NOT EXISTS adaptation_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL    NOT NULL,
+    component     TEXT    NOT NULL,   -- 'gate1' | 'gesture_floor' | 'velocity_floor'
+    metric_before REAL,               -- threshold value before this adaptation
+    metric_after  REAL,               -- threshold value after this adaptation
+    cloud_rate    REAL,               -- cloud escalation rate at time of adaptation
+    failure_rate  REAL,               -- pipeline failure rate at time of adaptation
+    rolled_back   INTEGER DEFAULT 0   -- 1 if this change was subsequently rolled back
+);
+CREATE INDEX IF NOT EXISTS idx_al_component ON adaptation_log(component, ts);
 """
 
 
@@ -1466,6 +1480,102 @@ class AgentDB:
             await self._conn.commit()
         except Exception as exc:
             log.warning("AgentDB.insert_sensor_event failed: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # D4: sensor_rom read (onboarding ROM bounds → runtime calibration)
+    # ---------------------------------------------------------------------- #
+
+    async def get_sensor_rom(self, sensor: str) -> dict[str, dict]:
+        """Return the most recent range-of-motion row per direction for a sensor.
+
+        Returns dict keyed by direction, each value is
+        {max_value, comfortable_value, unit}.
+        """
+        if not self._conn:
+            return {}
+        try:
+            async with self._conn.execute(
+                """SELECT direction, max_value, comfortable_value, unit
+                   FROM sensor_rom
+                   WHERE sensor = ?
+                   GROUP BY direction
+                   HAVING ts = MAX(ts)""",
+                (sensor,),
+            ) as cur:
+                rows = await cur.fetchall()
+            return {
+                r["direction"]: {
+                    "max_value": r["max_value"],
+                    "comfortable_value": r["comfortable_value"],
+                    "unit": r["unit"],
+                }
+                for r in rows
+                if r["direction"] is not None
+            }
+        except Exception as exc:
+            log.warning("AgentDB.get_sensor_rom failed: %s", exc)
+            return {}
+
+    # ---------------------------------------------------------------------- #
+    # D5: Adaptation effectiveness log
+    # ---------------------------------------------------------------------- #
+
+    async def log_adaptation(
+        self,
+        component: str,
+        metric_before: float,
+        metric_after: float,
+        cloud_rate: float = 0.0,
+        failure_rate: float = 0.0,
+    ) -> int:
+        """Insert one adaptation_log row. Returns the new row id."""
+        if not self._conn:
+            return -1
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO adaptation_log
+                   (ts, component, metric_before, metric_after, cloud_rate, failure_rate)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (time.time(), component, metric_before, metric_after,
+                 cloud_rate, failure_rate),
+            )
+            await self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
+        except Exception as exc:
+            log.warning("AgentDB.log_adaptation failed: %s", exc)
+            return -1
+
+    async def get_recent_adaptation_log(
+        self, component: str, limit: int = 5
+    ) -> list[dict]:
+        """Return the most recent adaptation_log rows for a component."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT id, ts, metric_before, metric_after,
+                          cloud_rate, failure_rate, rolled_back
+                   FROM adaptation_log
+                   WHERE component = ?
+                   ORDER BY ts DESC LIMIT ?""",
+                (component, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_recent_adaptation_log failed: %s", exc)
+            return []
+
+    async def mark_adaptation_rolled_back(self, row_id: int) -> None:
+        """Set rolled_back=1 for the given adaptation_log row."""
+        if not self._conn or row_id < 0:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE adaptation_log SET rolled_back=1 WHERE id=?", (row_id,)
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.mark_adaptation_rolled_back failed: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Behavioral twin queries

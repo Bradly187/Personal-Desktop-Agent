@@ -332,6 +332,12 @@ final class SettingsStore: ObservableObject {
         !gazeDwellDragEnabled
     }
 
+    // MARK: — Voice condition (G5: persist last-declared condition so it survives reconnects)
+    /// Last condition the user declared: "good_day" | "flare_day" | "allergy_day" | "svt_attack"
+    @Published var voiceCondition: String {
+        didSet { defaults.set(voiceCondition, forKey: "voiceCondition") }
+    }
+
     // MARK: — Audio Streaming (iPad mic → PC Whisper)
     @Published var audioStreamEnabled: Bool {
         didSet { defaults.set(audioStreamEnabled, forKey: "audioStreamEnabled") }
@@ -447,6 +453,7 @@ final class SettingsStore: ObservableObject {
         edgeScrollEnabled = defaults.object(forKey: "edgeScrollEnabled") as? Bool ?? true
         gazeCursorModeEnabled = defaults.object(forKey: "gazeCursorModeEnabled") as? Bool ?? true
 
+        voiceCondition = defaults.string(forKey: "voiceCondition") ?? "good_day"
         audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false
         lidarEnabled = defaults.object(forKey: "lidarEnabled") as? Bool ?? false
 
@@ -495,6 +502,34 @@ struct CommandButton: Identifiable, Codable {
         CommandButton(label: "Escape", action: "HOTKEY", params: ["keys": "escape"]),
         CommandButton(label: "Space", action: "HOTKEY", params: ["keys": "space"]),
     ]
+}
+
+// MARK: — CommandButton export/import (G7: survive device reset without iCloud entitlement)
+
+extension SettingsStore {
+
+    /// Export command buttons as JSON to the app's Documents directory.
+    /// Returns the file URL on success so the caller can present a share sheet.
+    @discardableResult
+    func exportCommandButtons() -> URL? {
+        guard let data = try? JSONEncoder().encode(commandButtons) else { return nil }
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("command_buttons.json")
+        try? data.write(to: url, options: .atomic)
+        return url
+    }
+
+    /// Import command buttons from a JSON file URL. Returns true on success.
+    @discardableResult
+    func importCommandButtons(from url: URL) -> Bool {
+        guard url.startAccessingSecurityScopedResource() else { return false }
+        defer { url.stopAccessingSecurityScopedResource() }
+        guard let data = try? Data(contentsOf: url),
+              let buttons = try? JSONDecoder().decode([CommandButton].self, from: data)
+        else { return false }
+        commandButtons = buttons
+        return true
+    }
 }
 
 private extension Int {

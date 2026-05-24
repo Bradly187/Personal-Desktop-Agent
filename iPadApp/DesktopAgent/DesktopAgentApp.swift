@@ -44,8 +44,12 @@ struct DesktopAgentApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
-                sensorManager.stopAll()
-                wsManager.disconnect()
+                // G4: Keep audio sensors running in background so voice commands
+                // still reach the PC when the screen locks. Camera/tilt/LiDAR stop
+                // (ARKit and Core Motion require foreground). WebSocket stays up.
+                // NOTE: requires UIBackgroundModes: ["audio"] in Info.plist and
+                // AVAudioSession category .playAndRecord with .mixWithOthers option.
+                sensorManager.stopNonAudioSensors()
             case .active:
                 // Only auto-start if onboarding is complete
                 if UserDefaults.standard.bool(forKey: "onboardingComplete") {

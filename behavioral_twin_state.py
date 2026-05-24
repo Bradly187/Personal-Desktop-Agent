@@ -78,6 +78,30 @@ class ActionStats:
     # Running Welford accumulators (avoids storing all samples)
     _conf_sum: float = field(default=0.0, repr=False)
     _lat_sum: float = field(default=0.0, repr=False)
+    # D7: Welford online variance for gesture confidence
+    _conf_m2: float = field(default=0.0, repr=False)
+    # D7: Split good-day vs pain-day confidence baselines
+    good_day_conf_sum: float = field(default=0.0, repr=False)
+    good_day_conf_count: int = field(default=0, repr=False)
+    pain_day_conf_sum: float = field(default=0.0, repr=False)
+    pain_day_conf_count: int = field(default=0, repr=False)
+
+    @property
+    def conf_variance(self) -> float:
+        """Welford online variance of confidence samples."""
+        return self._conf_m2 / max(self.frequency - 1, 1)
+
+    @property
+    def good_day_mean_confidence(self) -> float:
+        if self.good_day_conf_count == 0:
+            return self.mean_confidence
+        return self.good_day_conf_sum / self.good_day_conf_count
+
+    @property
+    def pain_day_mean_confidence(self) -> float:
+        if self.pain_day_conf_count == 0:
+            return self.mean_confidence
+        return self.pain_day_conf_sum / self.pain_day_conf_count
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +134,7 @@ class PreferenceModel:
         source: str,
         ts: float,
         success: bool,
+        pain_day: bool = False,
     ) -> None:
         """Record one observation. Updates action_stats, time_buckets, source_counts."""
         # 1. Get or create ActionStats entry for action_verb
@@ -123,9 +148,20 @@ class PreferenceModel:
         # 3. Update last-used timestamp
         stats.last_used_ts = ts
 
-        # 4. Update running mean for confidence
+        # 4. Update running mean for confidence + D7 Welford online variance
+        old_mean = stats.mean_confidence
         stats._conf_sum += confidence
         stats.mean_confidence = stats._conf_sum / stats.frequency
+        # Welford: M2 += (x - old_mean) * (x - new_mean)
+        stats._conf_m2 += (confidence - old_mean) * (confidence - stats.mean_confidence)
+
+        # D7: split into good-day / pain-day baselines
+        if pain_day:
+            stats.pain_day_conf_sum += confidence
+            stats.pain_day_conf_count += 1
+        else:
+            stats.good_day_conf_sum += confidence
+            stats.good_day_conf_count += 1
 
         # 5. Update running mean for latency
         stats._lat_sum += latency_ms
@@ -174,6 +210,12 @@ class PreferenceModel:
                 "last_used_ts": stats.last_used_ts,
                 "_conf_sum": stats._conf_sum,
                 "_lat_sum": stats._lat_sum,
+                # D7: variance and day-split fields
+                "_conf_m2": stats._conf_m2,
+                "good_day_conf_sum": stats.good_day_conf_sum,
+                "good_day_conf_count": stats.good_day_conf_count,
+                "pain_day_conf_sum": stats.pain_day_conf_sum,
+                "pain_day_conf_count": stats.pain_day_conf_count,
             }
             for verb, stats in self.action_stats.items()
         }
@@ -208,6 +250,12 @@ class PreferenceModel:
                 last_used_ts=d["last_used_ts"],
                 _conf_sum=d["_conf_sum"],
                 _lat_sum=d["_lat_sum"],
+                # D7: backward-compatible defaults for models serialised before this fix
+                _conf_m2=d.get("_conf_m2", 0.0),
+                good_day_conf_sum=d.get("good_day_conf_sum", 0.0),
+                good_day_conf_count=d.get("good_day_conf_count", 0),
+                pain_day_conf_sum=d.get("pain_day_conf_sum", 0.0),
+                pain_day_conf_count=d.get("pain_day_conf_count", 0),
             )
             action_stats[verb] = stats
 
@@ -448,7 +496,7 @@ class BehavioralTwinState:
             success = True
             text = getattr(cmd, 'text', '')
 
-            # 2. Update PreferenceModel
+            # 2. Update PreferenceModel (D7: pass current pain_day state)
             self._preference_model.update(
                 action_verb=action_verb,
                 confidence=confidence,
@@ -456,6 +504,7 @@ class BehavioralTwinState:
                 source=source,
                 ts=ts,
                 success=success,
+                pain_day=self._pain_day_active,
             )
 
             # 3. Update session signal accumulators
@@ -581,16 +630,21 @@ class BehavioralTwinState:
         # Signal 2: clarify ratio
         signal_2 = self._session_clarify_count / total
 
-        # Signal 3: gesture confidence drop (vs 30-day baseline from working set)
-        baseline_confs = [
-            r.get("gesture_confidence", 0.0)
-            for r in self._working_set
-            if r.get("source") == "gesture" and r.get("gesture_confidence", 0.0) > 0
+        # Signal 3: gesture confidence drop vs good-day baseline (D7).
+        # Uses the per-action good_day_mean_confidence from PreferenceModel
+        # rather than the pooled working-set mean, which included pain-day
+        # observations that were artificially lowering the baseline over time.
+        gesture_stats = [
+            s for s in self._preference_model.action_stats.values()
+            if s.good_day_conf_count > 0
         ]
-        if baseline_confs and self._session_gesture_confs:
-            baseline_conf = sum(baseline_confs) / len(baseline_confs)
+        good_day_baseline = (
+            sum(s.good_day_mean_confidence for s in gesture_stats) / len(gesture_stats)
+            if gesture_stats else 0.0
+        )
+        if good_day_baseline > 0 and self._session_gesture_confs:
             current_conf = sum(self._session_gesture_confs) / len(self._session_gesture_confs)
-            signal_3 = max(0.0, (baseline_conf - current_conf) / baseline_conf) if baseline_conf > 0 else 0.0
+            signal_3 = max(0.0, (good_day_baseline - current_conf) / good_day_baseline)
         else:
             signal_3 = 0.0
 

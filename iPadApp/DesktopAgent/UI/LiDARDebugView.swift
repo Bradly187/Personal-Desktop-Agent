@@ -54,6 +54,9 @@ struct LiDARDebugView: View {
                     unavailableOverlay
                 }
             }
+            // C2: only generate preview UIImages while this view is on screen
+            .onAppear { streamer.previewEnabled = true }
+            .onDisappear { streamer.previewEnabled = false }
         }
     }
 

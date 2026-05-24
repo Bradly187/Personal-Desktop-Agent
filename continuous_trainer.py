@@ -69,6 +69,9 @@ class ContinuousTrainer:
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        # D9: intra-session velocity calibration trigger
+        self._velocity_sample_counter: int = 0
+        self._velocity_intra_session_threshold: int = 20
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -112,7 +115,7 @@ class ContinuousTrainer:
         if self._twin:
             await self._twin.observe(cmd, action_str)
 
-        # Gesture confidence and velocity tracking
+        # Gesture confidence tracking
         if cmd.source == "gesture":
             gesture = cmd.params.get("gesture", "UNKNOWN")
             lidar_depth = cmd.params.get("lidar_depth_m")
@@ -122,17 +125,36 @@ class ContinuousTrainer:
                 command_id=command_id,
             )
 
-        # Drain velocity samples queued by GestureProcessor
-        if self._gesture_proc is not None:
-            pain_day = False
-            if self._twin:
-                try:
-                    snap = await self._twin.get_snapshot()
-                    pain_day = snap.pain_day_active
-                except Exception:
-                    pass
-            for g_name, vel in self._gesture_proc.drain_velocity_samples():
-                await self._db.record_gesture_velocity(g_name, vel, pain_day=pain_day)
+    async def drain_and_persist_velocity(self, pain_day: bool = False) -> None:
+        """Drain velocity samples from GestureProcessor and persist to DB.
+
+        D3: Called for every gesture command that clears Gate 1, not only on
+        full-pipeline success. This prevents velocity calibration from becoming
+        biased toward gestures that happened to hit valid targets.
+
+        D9: Triggers an intra-session velocity calibration pass after every
+        _velocity_intra_session_threshold samples without waiting for the 300s
+        timer.
+        """
+        if self._gesture_proc is None:
+            return
+        new_samples = 0
+        for g_name, vel in self._gesture_proc.drain_velocity_samples():
+            await self._db.record_gesture_velocity(g_name, vel, pain_day=pain_day)
+            new_samples += 1
+
+        if new_samples == 0:
+            return
+
+        # D9: trigger intra-session calibration when enough samples accumulate
+        self._velocity_sample_counter += new_samples
+        if self._velocity_sample_counter >= self._velocity_intra_session_threshold:
+            self._velocity_sample_counter = 0
+            await self._update_gesture_velocity_calibration(pain_day_active=pain_day)
+            log.debug(
+                "ContinuousTrainer: intra-session velocity calibration triggered "
+                "(%d new samples)", new_samples,
+            )
 
     async def get_few_shot_examples(
         self,
@@ -195,12 +217,12 @@ class ContinuousTrainer:
                 log.warning("ContinuousTrainer: twin snapshot failed: %s", exc)
         entries = await self._db.get_recent_routing_stats(limit=1000)
         if entries:
-            self._adapt_gate1_threshold(entries, pain_day_active=snapshot.pain_day_active)
+            await self._adapt_gate1_threshold(entries, pain_day_active=snapshot.pain_day_active)
         await self._db.promote_hotwords(self._hotword_threshold)
         await self._update_gesture_calibration(pain_day_active=snapshot.pain_day_active)
         await self._update_gesture_velocity_calibration(pain_day_active=snapshot.pain_day_active)
 
-    def _adapt_gate1_threshold(self, entries: list[dict], pain_day_active: bool = False) -> None:
+    async def _adapt_gate1_threshold(self, entries: list[dict], pain_day_active: bool = False) -> None:
         """Requirement 14.3 — relax Gate 1 when cloud escalation is high."""
         if not self._config:
             return
@@ -215,20 +237,60 @@ class ContinuousTrainer:
         )
         failure_rate = error_count / len(entries) if entries else 0.0
 
+        await self._adapt_gate1_with_log(cloud_rate, failure_rate, pain_day_active)
+
+    async def _adapt_gate1_with_log(
+        self,
+        cloud_rate: float,
+        failure_rate: float,
+        pain_day_active: bool,
+    ) -> None:
+        """D5: Inner gate1 adaptation with effectiveness logging and rollback."""
+        if not self._config:
+            return
+
+        # D5: check last 2 passes — if cloud_rate increased both times, roll back
+        try:
+            if self._db and self._db.available:
+                history = await self._db.get_recent_adaptation_log("gate1", limit=2)
+                if len(history) >= 2:
+                    if (history[0]["cloud_rate"] > history[1]["cloud_rate"]
+                            and history[1]["cloud_rate"] > (history[1].get("metric_before") or 0.0)):
+                        log.warning(
+                            "Gate 1: cloud_rate increased in 2 consecutive passes "
+                            "(%.0f%% → %.0f%%) — rolling back last threshold change",
+                            history[1]["cloud_rate"] * 100, history[0]["cloud_rate"] * 100,
+                        )
+                        if history[0].get("metric_before") is not None:
+                            self._config.whisper_logprob_min = history[0]["metric_before"]
+                        await self._db.mark_adaptation_rolled_back(history[0]["id"])
+                        return
+        except Exception as exc:
+            log.debug("Gate 1 rollback check skipped: %s", exc)
+
         if cloud_rate > self._cloud_limit and failure_rate < self._failure_limit:
             if pain_day_active:
-                log.info("Gate 1 tightening suppressed (pain day active)")
-                return  # skip tightening on pain days
+                log.info("Gate 1 threshold relaxation suppressed (pain day active)")
+                return
             old = self._config.whisper_logprob_min
-            self._config.whisper_logprob_min = min(
-                -0.1, old + self._gate1_step
-            )
+            self._config.whisper_logprob_min = max(-1.5, old - self._gate1_step)
             log.info(
-                "Gate 1 threshold relaxed: %.2f → %.2f "
+                "Gate 1 threshold loosened: %.2f → %.2f "
                 "(cloud_rate=%.0f%% failure_rate=%.0f%%)",
                 old, self._config.whisper_logprob_min,
                 cloud_rate * 100, failure_rate * 100,
             )
+            try:
+                if self._db and self._db.available:
+                    await self._db.log_adaptation(
+                        component="gate1",
+                        metric_before=old,
+                        metric_after=self._config.whisper_logprob_min,
+                        cloud_rate=cloud_rate,
+                        failure_rate=failure_rate,
+                    )
+            except Exception as exc:
+                log.debug("Gate 1 adaptation log skipped: %s", exc)
 
     async def _update_gesture_calibration(self, pain_day_active: bool = False) -> None:
         """Requirement 14.5 — set gesture floor to p10(observed) - 0.05."""

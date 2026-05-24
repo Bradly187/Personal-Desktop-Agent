@@ -181,15 +181,28 @@ struct GazeCalibrationSheet: View {
                         .background(theme.success)
                         .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                 }
-                Button("Retry") {
-                    phase = .intro
-                    samples = []
-                    maxDeltaX = 0
-                    maxDeltaY = 0
-                    baselineJitter = 0
+                HStack(spacing: DesignTokens.Spacing.md) {
+                    Button("Retry") {
+                        phase = .intro
+                        samples = []
+                        maxDeltaX = 0
+                        maxDeltaY = 0
+                        baselineJitter = 0
+                    }
+                    .font(DesignTokens.Typography.body)
+                    .foregroundStyle(theme.accent)
+
+                    Text("·").foregroundStyle(theme.textSecondary)
+
+                    // G9: reset to factory defaults if calibration produced bad values
+                    Button("Reset to defaults") {
+                        settings.gazeSensitivity = 200.0
+                        settings.gazeStabilityThreshold = 0.04
+                        dismiss()
+                    }
+                    .font(DesignTokens.Typography.body)
+                    .foregroundStyle(theme.textSecondary)
                 }
-                .font(DesignTokens.Typography.body)
-                .foregroundStyle(theme.accent)
             }
         }
     }
