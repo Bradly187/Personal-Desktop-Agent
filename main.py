@@ -364,28 +364,39 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
             if vad_alive is not None and not vad_alive.is_alive():
                 log.error("WATCHDOG: WhisperStream VAD thread is DEAD (session %d)", session_id)
 
-        # --- Ollama + VRAM (every 10 min) ---
+        # --- Ollama + VRAM (every 10 min) — run in thread to avoid blocking event loop ---
         if _cycle % _OLLAMA_CHECK_EVERY == 0:
-            try:
-                with _ureq.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
-                    r.read()
-                log.info("WATCHDOG: Ollama reachable")
-            except Exception as exc:
-                log.warning("WATCHDOG: Ollama unreachable: %s", exc)
+            def _check_ollama_and_vram() -> tuple[str, str]:
+                ollama_msg = ""
+                vram_msg = ""
+                try:
+                    with _ureq.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
+                        r.read()
+                    ollama_msg = "ok"
+                except Exception as exc:
+                    ollama_msg = f"unreachable: {exc}"
+                try:
+                    import pynvml as nvml
+                    nvml.nvmlInit()
+                    h = nvml.nvmlDeviceGetHandleByIndex(0)
+                    info = nvml.nvmlDeviceGetMemoryInfo(h)
+                    nvml.nvmlShutdown()
+                    vram_msg = f"{info.free / (1024**3):.1f} GB free"
+                except Exception:
+                    pass
+                return ollama_msg, vram_msg
 
-            try:
-                import pynvml as nvml
-                nvml.nvmlInit()
-                h = nvml.nvmlDeviceGetHandleByIndex(0)
-                info = nvml.nvmlDeviceGetMemoryInfo(h)
-                nvml.nvmlShutdown()
-                free_gb = info.free / (1024 ** 3)
+            ollama_status, vram_status = await asyncio.to_thread(_check_ollama_and_vram)
+            if ollama_status == "ok":
+                log.info("WATCHDOG: Ollama reachable")
+            else:
+                log.warning("WATCHDOG: Ollama %s", ollama_status)
+            if vram_status:
+                free_gb = float(vram_status.split()[0])
                 if free_gb < 2.0:
-                    log.warning("WATCHDOG: GPU VRAM critically low: %.1f GB free", free_gb)
+                    log.warning("WATCHDOG: GPU VRAM critically low: %s", vram_status)
                 else:
-                    log.info("WATCHDOG: GPU VRAM %.1f GB free", free_gb)
-            except Exception:
-                pass
+                    log.info("WATCHDOG: GPU VRAM %s", vram_status)
 
 
 # ---------------------------------------------------------------------------

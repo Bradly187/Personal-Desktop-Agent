@@ -1466,6 +1466,7 @@ class FusionEngine:
         # _tick_count is initialised in __init__ (moved for D2 sensor sampling)
         interval = 1.0 / self._cfg.tick_hz
         log.info("FusionEngine running at %.0f Hz", self._cfg.tick_hz)
+        _slow_tick_threshold = interval * 2  # warn if tick body takes > 2× the interval
         while self._running:
             t0 = time.monotonic()
             try:
@@ -1473,7 +1474,11 @@ class FusionEngine:
                 self._tick_count += 1
             except Exception as exc:
                 log.error("FusionEngine tick error: %s", exc)
-            await asyncio.sleep(max(0.0, interval - (time.monotonic() - t0)))
+            elapsed = time.monotonic() - t0
+            if elapsed > _slow_tick_threshold:
+                log.warning("FusionEngine slow tick: %.1f ms (budget %.1f ms)",
+                            elapsed * 1000, interval * 1000)
+            await asyncio.sleep(max(0.0, interval - elapsed))
 
     def stop(self) -> None:
         self._running = False
