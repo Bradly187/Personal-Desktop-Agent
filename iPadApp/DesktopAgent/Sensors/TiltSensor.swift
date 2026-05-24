@@ -46,6 +46,15 @@ final class TiltSensor: ObservableObject {
     private var lastTapFireTime: CFTimeInterval = 0
     private let tapCooldownDuration: Double = 0.25
 
+    // Diagnostic counters — logged once per second by `handle()` so we can verify
+    // from the PC's ipad_logs table whether the motion handler is alive, what
+    // its current snapshot says, and how many sends it actually performed.
+    private var diagLastReportTime: CFTimeInterval = 0
+    private var diagHandlerCalls: Int = 0
+    private var diagSendsAttempted: Int = 0
+    private var diagSendsSuppressed: Int = 0
+    private var diagWsNilCount: Int = 0
+
     // MARK: — Snapshotted settings (avoids cross-isolation reads at 60Hz)
     private var snapshotTiltEnabled: Bool = true
     private var snapshotTiltPositionMode: Bool = true
@@ -100,6 +109,8 @@ final class TiltSensor: ObservableObject {
             self.handle(data)
         }
         isRunning = true
+        AppLogger.shared.info("TiltSensor",
+            "start: snapshotTiltEnabled=\(snapshotTiltEnabled) positionMode=\(snapshotTiltPositionMode) range=\(snapshotTiltRange) deadZone=\(snapshotTiltDeadZone) inverted=\(snapshotTiltInverted) wsAttached=\(ws != nil)")
     }
 
     func stop() {
@@ -239,6 +250,9 @@ final class TiltSensor: ObservableObject {
     // MARK: — Processing (runs on serial OperationQueue, not MainActor)
 
     private func handle(_ data: CMDeviceMotion) {
+        diagHandlerCalls += 1
+        _emitDiagIfDue()
+
         guard snapshotTiltEnabled else { return }
 
         if snapshotTiltPositionMode {
@@ -273,8 +287,14 @@ final class TiltSensor: ObservableObject {
             // --- Message suppression ---
             if abs(x - lastSentX) < 0.001 && abs(y - lastSentY) < 0.001 {
                 // Suppress — no meaningful change
+                diagSendsSuppressed += 1
             } else {
-                ws?.sendTiltPosition(x: x, y: y)
+                if let wsRef = ws {
+                    wsRef.sendTiltPosition(x: x, y: y)
+                    diagSendsAttempted += 1
+                } else {
+                    diagWsNilCount += 1
+                }
                 lastSentX = x
                 lastSentY = y
             }
@@ -319,5 +339,25 @@ final class TiltSensor: ObservableObject {
             lastTapFireTime = now
         }
         prevAccelMag = mag
+    }
+
+    /// Emits a structured log line once per second so the PC's ipad_logs table
+    /// reflects whether the handler is alive, what its snapshot says, and how
+    /// many sends actually completed. Cheap when called at 60 Hz: a single
+    /// CACurrentMediaTime() read plus a comparison.
+    private func _emitDiagIfDue() {
+        let now = CACurrentMediaTime()
+        if diagLastReportTime == 0 {
+            diagLastReportTime = now
+            return
+        }
+        guard now - diagLastReportTime >= 1.0 else { return }
+        let summary = "handler=\(diagHandlerCalls)/s sends=\(diagSendsAttempted) suppressed=\(diagSendsSuppressed) wsNil=\(diagWsNilCount) enabled=\(snapshotTiltEnabled) posMode=\(snapshotTiltPositionMode) locked=\(lockedCoords != nil)"
+        AppLogger.shared.info("TiltSensor", summary)
+        diagLastReportTime = now
+        diagHandlerCalls = 0
+        diagSendsAttempted = 0
+        diagSendsSuppressed = 0
+        diagWsNilCount = 0
     }
 }

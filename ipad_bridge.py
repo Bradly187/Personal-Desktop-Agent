@@ -517,6 +517,15 @@ class IPadBridge:
             return
 
         if msg_type == "gaze_calibration_start":
+            # Idempotent: if a session is already in flight, ack and ignore
+            # instead of spawning a second task that will fail the active-guard
+            # check and bubble back to the iPad as "Calibration Failed". SwiftUI
+            # .onAppear can fire multiple times on body re-evaluation; the iPad
+            # also has its own guard now, but defend in depth.
+            if self._gaze_cal_active:
+                log.info("ipad_bridge: gaze_calibration_start ignored — session already active")
+                await self._ack(ws, msg.get("id"), "ok", "gaze calibration already active")
+                return
             log.info("ipad_bridge: gaze_calibration_start received")
             asyncio.create_task(self._run_gaze_calibration_session(ws))
             await self._ack(ws, msg.get("id"), "ok", "gaze calibration started")

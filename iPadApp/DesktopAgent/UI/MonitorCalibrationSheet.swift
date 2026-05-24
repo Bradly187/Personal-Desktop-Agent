@@ -28,6 +28,11 @@ struct MonitorCalibrationSheet: View {
     @State private var phase: Phase = .waiting
     @State private var resultMessage: String = ""
     @State private var captureFeedback: String = ""
+    // Guards against duplicate sendGazeCalibrationStart() — SwiftUI may fire
+    // .onAppear multiple times when the body re-evaluates after a phase change,
+    // and each duplicate start would race the bridge's _gaze_cal_active guard
+    // and produce a spurious "Calibration Failed" error.
+    @State private var hasRequestedStart: Bool = false
 
     private var cancellables = CancelBag()
 
@@ -71,6 +76,9 @@ struct MonitorCalibrationSheet: View {
             }
         }
         .onAppear {
+            // Only send the start command on first appearance — see hasRequestedStart docstring.
+            guard !hasRequestedStart else { return }
+            hasRequestedStart = true
             wsManager.sendGazeCalibrationStart()
         }
         .onReceive(wsManager.gazeCalibrationFeed) { event in
@@ -192,6 +200,7 @@ struct MonitorCalibrationSheet: View {
                     dotIndex = 0
                     dotLabel = "Waiting for PC…"
                     resultMessage = ""
+                    hasRequestedStart = true   // we are about to send manually
                     wsManager.sendGazeCalibrationStart()
                 }
                 DAButton(label: "Close", icon: "xmark") {
