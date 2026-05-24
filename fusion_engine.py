@@ -330,6 +330,12 @@ class FusionEngine:
         self._voice_local: Optional[str] = None                  # keyword text
         self._voice: Optional[Command] = None
         self._tilt: Optional[tuple[float, float]] = None          # (rx, ry) rad/s
+        # D2: last-known sensor values for throttled DB sampling (~1 Hz)
+        self._last_tilt_sample: Optional[tuple[float, float]] = None
+        self._last_gaze_delta_sample: Optional[tuple[float, float, float]] = None  # dx, dy, conf
+        self._last_head_sample: Optional[tuple[float, float]] = None
+        self._tick_count: int = 0   # moved here from run() so D2 sampling works
+        self._db = None             # set via set_agent_db()
         self._tilt_filter_x: OneEuroFilter = OneEuroFilter(       # 1-Euro filter for tilt velocity X
             min_cutoff=self._cfg.tilt_vel_min_cutoff,
             beta=self._cfg.tilt_vel_beta,
@@ -434,6 +440,37 @@ class FusionEngine:
     def set_gaze_calibrator(self, calibrator) -> None:
         self._gaze_calibrator = calibrator
         log.info("FusionEngine: GazeCalibrator wired (calibrated=%s)", calibrator.is_calibrated)
+
+    def set_agent_db(self, db) -> None:
+        """Wire AgentDB for throttled sensor-stream persistence (D2, ~1 Hz)."""
+        self._db = db
+
+    async def load_rom_calibration(self, db) -> None:
+        """D4: Load sensor range-of-motion from onboarding assessment.
+
+        Applies the user's comfortable tilt range as the dead-zone inner
+        threshold when no learned calibration has overridden the default.
+        Only runs if the current config value is still at its factory default
+        so it never clobbers a value already adapted by the trainer.
+        """
+        try:
+            rom = await db.get_sensor_rom("tilt")
+            default_cfg = FusionConfig()
+            if "neutral" in rom:
+                comfortable = rom["neutral"].get("comfortable_value")
+                if comfortable and abs(
+                    self._cfg.dead_zone_inner - default_cfg.dead_zone_inner
+                ) < 0.001:
+                    from dataclasses import replace as _dc_replace
+                    self._cfg = _dc_replace(
+                        self._cfg, dead_zone_inner=float(comfortable)
+                    )
+                    log.info(
+                        "FusionEngine: ROM tilt dead_zone_inner set to %.3f from onboarding",
+                        comfortable,
+                    )
+        except Exception as exc:
+            log.debug("FusionEngine.load_rom_calibration failed (non-fatal): %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Pain-day threshold adaptation
@@ -557,6 +594,7 @@ class FusionEngine:
         self._gaze_delta = (dx, dy)
         self._gaze_delta_conf = conf
         self._gaze_delta_saccade = saccade
+        self._last_gaze_delta_sample = (dx, dy, conf)  # D2: cache for DB sampling
 
     def on_gaze_dwell(
         self,
@@ -577,6 +615,7 @@ class FusionEngine:
 
     def on_tilt(self, rx: float, ry: float) -> None:
         self._tilt = (rx, ry)
+        self._last_tilt_sample = (rx, ry)  # D2: cache for DB sampling
 
     def on_tilt_position(self, x: float, y: float) -> None:
         """Receive absolute position from iPad tilt sensor (position-mapped mode)."""
@@ -665,6 +704,7 @@ class FusionEngine:
 
     def on_head(self, pitch: float, yaw: float) -> None:
         self._head = (pitch, yaw)
+        self._last_head_sample = (pitch, yaw)  # D2: cache for DB sampling
 
     def on_keyword(self, word: str, conf: float) -> None:
         self._voice_local = word
@@ -1200,6 +1240,28 @@ class FusionEngine:
             cmd, self._voice = self._voice, None
             await self._emit(cmd)
 
+        # D2: throttled sensor-stream persistence (~1 Hz = every 60 ticks).
+        # Uses fire-and-forget asyncio.ensure_future so DB writes never stall
+        # the 60 Hz tick loop. Caches are updated by on_tilt/on_gaze_delta/on_head.
+        if self._db is not None and self._db.available and self._tick_count % 60 == 0:
+            if self._last_tilt_sample is not None:
+                rx, ry = self._last_tilt_sample
+                asyncio.ensure_future(
+                    self._db.insert_sensor_event("tilt", x=rx, y=ry)
+                )
+            if self._last_gaze_delta_sample is not None:
+                dx, dy, conf = self._last_gaze_delta_sample
+                asyncio.ensure_future(
+                    self._db.insert_sensor_event(
+                        "gaze_delta", x=dx, y=dy, confidence=conf
+                    )
+                )
+            if self._last_head_sample is not None:
+                pitch, yaw = self._last_head_sample
+                asyncio.ensure_future(
+                    self._db.insert_sensor_event("head", x=pitch, y=yaw)
+                )
+
     async def _emit(self, cmd: Command) -> None:
         if self._coordinator:
             # Fire-and-forget: prevents 200-600ms LLM inference from blocking the 60Hz tick loop.
@@ -1401,7 +1463,7 @@ class FusionEngine:
 
     async def run(self) -> None:
         self._running = True
-        self._tick_count: int = 0
+        # _tick_count is initialised in __init__ (moved for D2 sensor sampling)
         interval = 1.0 / self._cfg.tick_hz
         log.info("FusionEngine running at %.0f Hz", self._cfg.tick_hz)
         while self._running:

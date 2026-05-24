@@ -184,6 +184,10 @@ class AcousticProfiler:
         self._last_calibration_ts: float = 0.0   # unix time of last cal
         self._drift_callbacks: list = []          # callable(DriftResult)
 
+        # D6: provisional VAD relaxation on drift (before recalibration completes)
+        self._whisper_ref = None          # set via set_whisper_ref()
+        self._pre_drift_vad: float = 0.0  # saved threshold to restore after recal
+
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     # ── Drift callback registration ────────────────────────────────────────
@@ -196,11 +200,56 @@ class AcousticProfiler:
         """
         self._drift_callbacks.append(cb)
 
+    def set_whisper_ref(self, whisper) -> None:
+        """Wire WhisperStream so VAD threshold changes propagate immediately."""
+        self._whisper_ref = whisper
+
+    def apply_provisional_vad_relaxation(self, factor: float = 0.7) -> None:
+        """Immediately loosen VAD threshold by `factor` when drift is detected.
+
+        The pre-drift value is saved so restore_vad_from_profile() can undo
+        the provisional change after the user completes recalibration.
+        """
+        self._pre_drift_vad = self._vad_threshold
+        self._vad_threshold = max(VAD_THRESHOLD_MIN, self._vad_threshold * factor)
+        log.info(
+            "AcousticProfiler: provisional VAD relaxation %.3f → %.3f (drift detected)",
+            self._pre_drift_vad, self._vad_threshold,
+        )
+        self._push_vad_to_whisper()
+
+    def restore_vad_from_profile(self) -> None:
+        """Re-derive thresholds from the updated healthy samples after recalibration.
+
+        Called after a guided voice calibration session completes so the
+        corrected profile replaces both the provisional value and the old baseline.
+        """
+        self._recompute()
+        log.info(
+            "AcousticProfiler: VAD restored to %.3f after recalibration",
+            self._vad_threshold,
+        )
+        self._push_vad_to_whisper()
+
+    def _push_vad_to_whisper(self) -> None:
+        """Push current VAD threshold to the wired WhisperStream immediately."""
+        if self._whisper_ref is not None:
+            try:
+                self._whisper_ref._silence_thresh = self._vad_threshold
+                log.debug(
+                    "AcousticProfiler: pushed VAD %.3f to WhisperStream",
+                    self._vad_threshold,
+                )
+            except Exception as exc:
+                log.debug("AcousticProfiler._push_vad_to_whisper failed: %s", exc)
+
     def mark_calibrated(self) -> None:
         """Call after a calibration session to reset the drift baseline."""
         self._last_calibration_ts = time.time()
         # Promote recent healthy-day samples as the new baseline
         self._healthy_samples = list(self._healthy_samples[-40:])
+        # D6: re-derive thresholds from updated samples and push to WhisperStream
+        self.restore_vad_from_profile()
         log.info("AcousticProfiler: marked as freshly calibrated")
         if self._db.available and self._event_loop:
             fut = asyncio.run_coroutine_threadsafe(
@@ -219,6 +268,33 @@ class AcousticProfiler:
                 lambda f: log.error("AcousticProfiler: upsert_voice_profile failed: %s", f.exception())
                 if f.exception() else None
             )
+
+    async def load_rom_bounds(self, db) -> None:
+        """D4: Apply voice range-of-motion from onboarding as initial VAD bounds.
+
+        Used only when the profiler has fewer than MIN_CALIBRATED_SAMPLES, so
+        the user has a reasonable starting threshold even before passive
+        calibration accumulates enough data.
+        """
+        if self._calibrated:
+            return  # already have learned data — don't override
+        try:
+            rom = await db.get_sensor_rom("voice")
+            rms_row = rom.get("rms")
+            if rms_row:
+                comfortable_rms = rms_row.get("comfortable_value")
+                if comfortable_rms and comfortable_rms > 0:
+                    derived_vad = max(
+                        VAD_THRESHOLD_MIN,
+                        min(VAD_THRESHOLD_MAX, comfortable_rms * VAD_FRACTION),
+                    )
+                    self._vad_threshold = derived_vad
+                    log.info(
+                        "AcousticProfiler: ROM voice VAD set to %.3f from onboarding",
+                        derived_vad,
+                    )
+        except Exception as exc:
+            log.debug("AcousticProfiler.load_rom_bounds failed (non-fatal): %s", exc)
 
     async def load(self, condition: str | None = None) -> None:
         """Load stored profile from AgentDB and apply thresholds.

@@ -87,9 +87,9 @@ def _make_trainer(config=None, gesture_samples=None, gesture_floors=None):
 # Feature: behavioral-twin-state, Property 13: Gate 1 tightening suppressed on pain day
 # Validates: Requirements 5.5, 6.3
 def test_gate1_tightening_suppressed_on_pain_day():
-    """When pain_day_active=True, Gate 1 threshold must NOT be raised.
+    """When pain_day_active=True, Gate 1 threshold must NOT be changed.
 
-    Conditions that would normally trigger tightening:
+    Conditions that would normally trigger loosening:
       - cloud_rate > 30%  (n_cloud=20, n_local=5 → 80%)
       - failure_rate < 10% (0 CLARIFY)
     """
@@ -99,7 +99,7 @@ def test_gate1_tightening_suppressed_on_pain_day():
     entries = _make_routing_entries(n_local=5, n_cloud=20, n_clarify=0)
     original_threshold = config.whisper_logprob_min
 
-    trainer._adapt_gate1_threshold(entries, pain_day_active=True)
+    asyncio.run(trainer._adapt_gate1_threshold(entries, pain_day_active=True))
 
     assert config.whisper_logprob_min == original_threshold, (
         f"Gate 1 threshold was changed during pain day: "
@@ -120,7 +120,7 @@ def test_gate1_tightening_suppressed_on_pain_day_pbt(n_local, n_cloud, initial_t
     trainer = _make_trainer(config=config)
 
     entries = _make_routing_entries(n_local=n_local, n_cloud=n_cloud, n_clarify=0)
-    trainer._adapt_gate1_threshold(entries, pain_day_active=True)
+    asyncio.run(trainer._adapt_gate1_threshold(entries, pain_day_active=True))
 
     assert config.whisper_logprob_min == initial_threshold, (
         f"Gate 1 threshold was modified despite pain_day_active=True: "
@@ -129,21 +129,23 @@ def test_gate1_tightening_suppressed_on_pain_day_pbt(n_local, n_cloud, initial_t
 
 
 def test_gate1_tightening_allowed_without_pain_day():
-    """Control: Gate 1 DOES tighten when pain_day_active=False and conditions are met."""
+    """D1 fix: Gate 1 LOOSENS (floor goes more negative) when cloud escalation is
+    high and pain_day_active=False. Verifies the direction inversion is corrected."""
     config = MockCoordinatorConfig(whisper_logprob_min=-0.5)
     trainer = _make_trainer(config=config)
 
     entries = _make_routing_entries(n_local=5, n_cloud=20, n_clarify=0)
     original_threshold = config.whisper_logprob_min
 
-    trainer._adapt_gate1_threshold(entries, pain_day_active=False)
+    asyncio.run(trainer._adapt_gate1_threshold(entries, pain_day_active=False))
 
     assert config.whisper_logprob_min != original_threshold, (
-        "Gate 1 threshold was NOT changed when conditions require tightening "
+        "Gate 1 threshold was NOT changed when conditions require loosening "
         "and pain_day_active=False"
     )
-    assert config.whisper_logprob_min > original_threshold, (
-        f"Expected threshold to increase (relax), got {config.whisper_logprob_min}"
+    # D1 fix: threshold must DECREASE (more negative = more permissive locally)
+    assert config.whisper_logprob_min < original_threshold, (
+        f"Expected threshold to decrease (loosen gate), got {config.whisper_logprob_min}"
     )
 
 

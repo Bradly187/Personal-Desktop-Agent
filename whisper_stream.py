@@ -173,6 +173,9 @@ class WhisperStream:
         self._profiler = None
         self._logprob_floor_override: float | None = None
         self._gaze_cal_trigger = None  # callable: () → None, set by main.py
+        # D8: correction detection state — tracks last command outcome
+        self._last_command_status: str = ""   # "ok" | "CLARIFY" | "failed"
+        self._last_command_text: str = ""     # text of previous command
 
     # ---------------------------------------------------------------------- #
     # Wiring
@@ -209,6 +212,12 @@ class WhisperStream:
     def set_gaze_calibration_trigger(self, callback) -> None:
         """Set callable to invoke when 'calibrate monitor' is spoken after wake phrase."""
         self._gaze_cal_trigger = callback
+
+    def set_last_command_status(self, status: str, text: str) -> None:
+        """D8: Called by HybridCoordinator after each route() so the next
+        utterance can be detected as a correction if the previous command failed."""
+        self._last_command_status = status
+        self._last_command_text = text
 
     def set_lecture_mode(self, enabled: bool) -> None:
         """Enable/disable lecture mode — stores non-command audio to AgentDB."""
@@ -547,6 +556,36 @@ class WhisperStream:
                 return
 
             log.info("WhisperStream: wake phrase detected, command: %r", text)
+
+            # D8: correction detection — "no/wait/actually <new command>" after
+            # a failed or CLARIFY outcome re-routes as a voice_correction.
+            _CORRECTION_OPENERS = ("no ", "no,", "wait ", "wait,",
+                                   "actually ", "actually,")
+            _text_lower = text.lower()
+            if (self._last_command_status in ("CLARIFY", "failed", "error")
+                    and any(_text_lower.startswith(op) for op in _CORRECTION_OPENERS)):
+                # Strip the correction opener word(s)
+                corrected = _re.sub(r'^(no|wait|actually)[,\s]+', '', text,
+                                    flags=_re.IGNORECASE).strip()
+                if corrected:
+                    log.info(
+                        "WhisperStream: correction detected — %r → %r",
+                        self._last_command_text, corrected,
+                    )
+                    from command_executor import Command as _Cmd
+                    correction_cmd = _Cmd(
+                        text=corrected,
+                        action="DICTATE",
+                        source="voice_correction",
+                        whisper_logprob=avg_logprob,
+                        params={
+                            **params,
+                            "original_text": self._last_command_text,
+                            "original_status": self._last_command_status,
+                        },
+                    )
+                    self._fusion.on_voice(correction_cmd)
+                    return
 
             # Intercept "calibrate monitor" before it reaches the LLM pipeline.
             if text.lower().startswith("calibrate monitor") and self._gaze_cal_trigger:

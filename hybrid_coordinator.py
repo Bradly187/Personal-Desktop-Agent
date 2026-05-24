@@ -390,6 +390,9 @@ class HybridCoordinator:
         self._lecture_mode: bool = False
         self._profiler = None    # set via set_profiler()
         self._calibrator = None  # set via set_calibrator()
+        # D8: correction tracking
+        self._last_executed_action: str = ""
+        self._last_command_id: int = -1
 
         # Gate 3 VRAM cache — avoid calling pynvml on every command
         self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
@@ -680,6 +683,25 @@ class HybridCoordinator:
                     cmd, action_str, command_id=command_id
                 )
 
+            # D3: drain gesture velocity samples after every gesture command
+            # that cleared Gate 1, regardless of execution outcome.
+            if self._trainer and cmd.source == "gesture":
+                await self._trainer.drain_and_persist_velocity(
+                    pain_day=snapshot.pain_day_active
+                )
+
+            # D8: handle voice corrections — record the right action for
+            # commands where the user said "no/wait/actually <new command>"
+            if cmd.source == "voice_correction" and self._trainer:
+                await self._on_correction(cmd, action_str)
+
+            # D8: record action/status so WhisperStream can detect next correction
+            self._last_executed_action = action_str or ""
+            self._last_command_id = command_id
+            if self._whisper:
+                status_str = "ok" if success else ("CLARIFY" if action_str == "CLARIFY" else "failed")
+                self._whisper.set_last_command_status(status_str, cmd.text)
+
             # Advance acoustic profiler command counter (seasonal drift check)
             if self._whisper and hasattr(self._whisper, "_profiler") \
                     and self._whisper._profiler:
@@ -699,6 +721,29 @@ class HybridCoordinator:
     # ---------------------------------------------------------------------- #
     # Gate implementations
     # ---------------------------------------------------------------------- #
+
+    async def _on_correction(self, cmd: Command, correct_action: str) -> None:
+        """D8: Record a voice correction as a few-shot example.
+
+        Called when the user says "no/wait/actually <new command>" after a
+        failed or CLARIFY outcome.  The corrected text becomes the canonical
+        example for future routing of similar commands.
+        """
+        if not self._trainer:
+            return
+        try:
+            await self._trainer.record_correction(
+                cmd=cmd,
+                wrong_action=self._last_executed_action,
+                correct_action=correct_action,
+                command_id=self._last_command_id,
+            )
+            log.info(
+                "HybridCoordinator: correction recorded %r → %r",
+                self._last_executed_action, correct_action,
+            )
+        except Exception as exc:
+            log.warning("HybridCoordinator._on_correction failed: %s", exc)
 
     def _gate0(self, cmd: Command) -> bool:
         """Gate 0 — Privacy. True = pass (safe to consider cloud).

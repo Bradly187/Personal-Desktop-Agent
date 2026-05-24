@@ -526,11 +526,19 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
     bridge.set_gaze_calibrator(gaze_calibrator)
     fusion.set_gaze_calibrator(gaze_calibrator)
+    fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
+    await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
+    await profiler.load_rom_bounds(agent_db)       # D4: ROM → initial VAD bounds
     whisper.set_gaze_calibration_trigger(bridge.start_gaze_calibration_from_voice)
 
-    # Wire acoustic drift → bridge recalibration request (thread-safe)
+    # D6: wire profiler → WhisperStream so VAD changes push immediately
+    profiler.set_whisper_ref(whisper)
+
+    # Wire acoustic drift → provisional VAD relaxation + bridge recalibration request
     _loop = asyncio.get_event_loop()
     def _on_drift(drift):
+        # D6: apply provisional relaxation immediately (before recal completes)
+        profiler.apply_provisional_vad_relaxation(factor=0.7)
         asyncio.run_coroutine_threadsafe(
             bridge.send_recalibration_request(
                 reason=drift.reason,
