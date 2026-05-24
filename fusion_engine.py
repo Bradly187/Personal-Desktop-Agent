@@ -889,8 +889,11 @@ class FusionEngine:
         # Gaze-to-cursor: move cursor to smoothed gaze position.
         # Capture return value — if True, suppress gaze-delta below to prevent
         # double cursor movement (absolute moveTo then relative moveRel in same tick).
+        # Gated by cursor_paused and switch_hold_active so gaze respects the same
+        # pause semantics as tilt and head (previously it bypassed them).
         _gaze_cursor_moved = False
-        if self._feature_toggles.get("gaze_cursor_mode", False):
+        if (self._feature_toggles.get("gaze_cursor_mode", False)
+                and not self._cursor_paused and not switch_hold_active):
             if gaze_is_recent:
                 _gaze_cursor_moved = await self._apply_gaze_cursor(
                     latest_gaze.x, latest_gaze.y, self._gaze_buf._last_conf
@@ -906,7 +909,7 @@ class FusionEngine:
         # Includes fixation slowdown and confidence freeze (Req 15).
         # BUG FIX: skip if gaze-to-cursor already fired a moveTo this tick —
         # prevents absolute + relative compound displacement in the same frame.
-        if self._gaze_delta and not _gaze_cursor_moved:
+        if self._gaze_delta and not _gaze_cursor_moved and not self._cursor_paused and not switch_hold_active:
             dx, dy = self._gaze_delta
             conf = self._gaze_delta_conf
             self._gaze_delta = None
@@ -1029,13 +1032,14 @@ class FusionEngine:
         # --- Pause / Switch hold guard for cursor-driving sensors ---
         # When paused or during sensor switch, discard all cursor sensor data
         # (tilt, head, gaze delta) without accumulating state.
+        # Note: gaze_delta is consumed earlier and already gated above;
+        # this block clears residual tilt/head state only.
         if self._cursor_paused or switch_hold_active:
             # Consume and discard cursor sensor inputs
             self._tilt_position = None
             self._tilt = None
             self._head = None
-            if self._gaze_delta:
-                self._gaze_delta = None
+            self._gaze_delta = None  # belt-and-suspenders: already gated before this point
             # Reset accumulators to prevent drift buildup
             self._tilt_accum_x = 0.0
             self._tilt_accum_y = 0.0
