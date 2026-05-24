@@ -1071,47 +1071,39 @@ class FusionEngine:
                 filtered_x = self._tilt_pos_filter_x(x, timestamp=now)
                 filtered_y = self._tilt_pos_filter_y(y, timestamp=now)
 
-                # Ratchet: hold cursor until displacement exceeds dead zone
+                # Ratchet: hold cursor until displacement from new neutral exceeds dead zone.
+                # When active, suppress tilt movement but fall through to Rules 7-10 so
+                # voice and gesture commands still fire (previously an early return silenced them).
                 if self._ratchet_active:
-                    # Check if displacement from center (new neutral) exceeds threshold
-                    # Dead zone in position mode: 2° / tilt_range mapped to normalized units
-                    dead_zone_norm = 2.0 / (self._cfg.tilt_pos_alpha * 60.0) if hasattr(self._cfg, 'tilt_pos_alpha') else 0.08
-                    # Simple check: displacement from center > threshold
                     disp = math.hypot(filtered_x - 0.5, filtered_y - 0.5)
-                    if disp < 0.04:  # ~2° at 25° range
-                        # Still within dead zone — hold cursor
-                        if self._ratchet_held_pos:
-                            await asyncio.to_thread(
-                                pyautogui.moveTo,
-                                self._ratchet_held_pos[0],
-                                self._ratchet_held_pos[1],
-                                duration=0,
-                            )
-                        return
+                    if disp < 0.04:  # ~2° at 25° range — still within dead zone
+                        pass  # skip cursor movement; fall through to voice/gesture rules
                     else:
-                        # Exceeded dead zone — deactivate ratchet, resume normal
+                        # Exceeded dead zone — deactivate and apply movement below
                         self._ratchet_active = False
                         self._ratchet_held_pos = None
                         log.info("Ratchet deactivated — tilt exceeded dead zone")
 
-                # Power curve on displacement from center (per-axis)
-                dx = filtered_x - 0.5
-                dy = filtered_y - 0.5
-                exp = cfg.tilt_pos_exponent
-                # Normalize to [-1, 1], apply power curve, denormalize back to [0, 1]
-                curved_x = 0.5 + power_curve(dx / 0.5, exp) * 0.5 if dx != 0.0 else 0.5
-                curved_y = 0.5 + power_curve(dy / 0.5, exp) * 0.5 if dy != 0.0 else 0.5
+                if not self._ratchet_active:
+                    # Power curve on displacement from center (per-axis)
+                    dx = filtered_x - 0.5
+                    dy = filtered_y - 0.5
+                    exp = cfg.tilt_pos_exponent
+                    # Normalize to [-1, 1], apply power curve, denormalize back to [0, 1]
+                    curved_x = 0.5 + power_curve(dx / 0.5, exp) * 0.5 if dx != 0.0 else 0.5
+                    curved_y = 0.5 + power_curve(dy / 0.5, exp) * 0.5 if dy != 0.0 else 0.5
 
-                # Convert to pixels
-                px_x = round(curved_x * self._w)
-                px_y = round(curved_y * self._h)
+                    # Convert to pixels
+                    px_x = round(curved_x * self._w)
+                    px_y = round(curved_y * self._h)
 
-                # Clamp to screen bounds
-                px_x = max(0, min(self._w - 1, px_x))
-                px_y = max(0, min(self._h - 1, px_y))
+                    # Clamp to screen bounds
+                    px_x = max(0, min(self._w - 1, px_x))
+                    px_y = max(0, min(self._h - 1, px_y))
 
-                await asyncio.to_thread(pyautogui.moveTo, px_x, px_y, duration=0)
-                return
+                    await asyncio.to_thread(pyautogui.moveTo, px_x, px_y, duration=0)
+                    return
+                # Ratchet hold: no cursor movement — fall through to Rules 7-10
 
         # Rule 6b — Legacy tilt navigation (velocity-based, no Command, no LLM)
         if self._tilt:
