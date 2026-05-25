@@ -40,4 +40,10 @@ jobs:
           pip install -r requirements.txt
       - name: Run full test suite
         run: |
-          pytest -q
+          pytest -q --junitxml=report.xml
+      - name: Publish test results and annotate
+        uses: dorny/test-reporter@v1
+        with:
+          name: pytest
+          path: report.xml
+          reporter: junit
