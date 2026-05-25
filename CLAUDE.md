@@ -12,7 +12,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/`
 
-## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 + G1–G4 + iPad logging (2026-05-22)
+## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 + G1–G5 + iPad logging + 2026-05-24 fixes (2026-05-24)
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 

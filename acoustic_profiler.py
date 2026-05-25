@@ -58,7 +58,7 @@ RECOMPUTE_EVERY = 10
 VAD_FRACTION = 0.35
 
 # Minimum / maximum bounds for the computed VAD threshold
-VAD_THRESHOLD_MIN = 0.008
+VAD_THRESHOLD_MIN = 0.020
 VAD_THRESHOLD_MAX = 0.06
 
 # Gate 1 logprob floor: add this to the median baseline logprob.

@@ -1,83 +1,66 @@
-# Virtual environments
-.venv/
-agentcore_fallback/.venv/
+﻿# Databases
+*.db
+*.db-shm
+*.db-wal
+*.duckdb
+chroma_db/
+
+# Apple credentials and certificates
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+*.certSigningRequest
+
+# iOS builds
+*.ipa
+
+# Secrets and API keys
+*.txt
+*.key
+*.pem
+*.env
+.env*
+
+# Calibration data files
+gaze_calibration.json
 
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+.venv/
+venv/
 *.egg-info/
 dist/
 build/
 
-# IDE / Editor
-.vscode/
-.claude/
-*.swp
-*.swo
-
-# Node.js
-node_modules/
-
-# Large binaries — do not commit
-*.zip
-*.tar.gz
-files/
-files.zip
-codemagic.yaml
-
-# Runtime logs and test artefacts — generated locally, never commit
-bridge.log
-bridge_err.log
+# Logs
+logs/
 *.log
-test_results.txt
+
+# Model weights and large binaries
+*.task
+*.onnx
+*.pt
+*.bin
+*.safetensors
+
+# Misc large/generated
+tts_service/node_modules/
+files/
 _archive/
 
-# Runtime data — databases and legacy flat files (all replaced by agent.db / analytics.duckdb)
-agent.db
-agent.db-shm
-agent.db-wal
-analytics.duckdb
-trainer.db
-few_shot_memory.db
-routing_log.jsonl
-benchmark_results.json
-gesture_calibration.json
-hotwords.txt
-# Audit DB (append-only, written at runtime)
-audit.db
-audit.db-shm
-audit.db-wal
-# ChromaDB persistent store (written at runtime by SemanticMemory)
-chroma_db/
-
 # OS
-Thumbs.db
-Desktop.ini
 .DS_Store
+Thumbs.db
+desktop.ini
 
-# Docs — large binaries (keep markdown docs)
-docs/*.pdf
-docs/*.ipa
-docs/*.exe
-docs/*.xip
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
 
-# Signing — NEVER commit these
-docs/distribution.key
-docs/distribution.pem
-docs/distribution.p12
-docs/distribution.cer
-docs/ios_development.cer
-docs/CertificateSigningRequest.certSigningRequest
-docs/cert_base64.txt
-docs/profile_base64.txt
-docs/*.mobileprovision
-docs/*.p8
-
-# Sensitive account files — NEVER commit these
-docs/Apple Account Recovery_Key.txt
-
-# Photos / screenshots — binary blobs, not useful in git history
-docs/*.jpeg
-docs/*.jpg
-docs/*.png
+# Claude Code local config and memory
+.claude/
