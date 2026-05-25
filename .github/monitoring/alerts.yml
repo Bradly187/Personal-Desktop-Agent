@@ -1,0 +1,47 @@
+﻿groups:
+  - name: personal-desktop-agent-alerts
+    rules:
+      - alert: MetricsEndpointDown
+        expr: up{job="personal_desktop_agent"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Metrics endpoint is down for personal_desktop_agent"
+          description: "Prometheus cannot scrape the agent's /metrics endpoint for more than 2 minutes. Check service and network."
+
+      - alert: HighHybridRouteLatency
+        expr: avg_over_time(hybrid_route_latency_ms[5m]) > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hybrid route latency high"
+          description: "Average hybrid route latency > 500ms over 5m. Investigate network/cloud routing and downstream services."
+
+      - alert: LowAdaptationRate
+        expr: increase(continuous_trainer_adaptation_pass_total[10m]) < 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Adaptation loop stalled"
+          description: "Fewer than 1 adaptation pass in the last 10 minutes. Check ContinuousTrainer health and DB connectivity."
+
+      - alert: HighGate1FailureRate
+        expr: continuous_trainer_gate1_failure_rate > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gate1 failure rate high"
+          description: "Gate1 failure rate exceeded 10% for 10 minutes. Check cloud gateway and Whisper transcriptions."
+
+      - alert: LowGestureSamples
+        expr: increase(gesture_velocity_samples_total[30m]) < 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low gesture sample rate"
+          description: "Very few gesture velocity samples in 30m; sensors may be disconnected or misconfigured."
