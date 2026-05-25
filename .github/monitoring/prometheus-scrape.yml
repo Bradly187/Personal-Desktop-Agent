@@ -1,0 +1,22 @@
+﻿# Prometheus scrape config example for Personal Desktop Agent
+# Place this file on the Prometheus server and include it from prometheus.yml
+
+scrape_configs:
+  - job_name: 'personal_desktop_agent'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['localhost:8000']
+        labels:
+          service: personal_desktop_agent
+          env: development
+    # Relabel the address into 'instance' for clearer identification in Grafana
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "(.+):8000"
+        replacement: "$1"
+        target_label: instance
+
+# Notes:
+# - Adjust targets to point to the host/IP where the agent runs (e.g., 10.0.0.5:8000)
+# - For production, add a job per environment and configure proper scrape_interval/timeout
+# - If running many agents, replace static_configs with file_sd_configs or DNS/Consul service discovery

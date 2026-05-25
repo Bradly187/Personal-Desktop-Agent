@@ -1,0 +1,54 @@
+﻿{
+  "dashboard": {
+    "id": null,
+    "uid": null,
+    "title": "Personal Desktop Agent - Metrics",
+    "schemaVersion": 30,
+    "version": 1,
+    "panels": [
+      {
+        "id": 1,
+        "type": "stat",
+        "title": "Adaptation Passes",
+        "targets": [ { "expr": "continuous_trainer_adaptation_pass_total" } ],
+        "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 }
+      },
+      {
+        "id": 2,
+        "type": "graph",
+        "title": "Gate1: Cloud Rate / Failure / Whisper Logprob",
+        "targets": [
+          { "expr": "continuous_trainer_gate1_cloud_rate" },
+          { "expr": "continuous_trainer_gate1_failure_rate" },
+          { "expr": "continuous_trainer_gate1_whisper_logprob" }
+        ],
+        "gridPos": { "x": 6, "y": 0, "w": 12, "h": 6 }
+      },
+      {
+        "id": 3,
+        "type": "graph",
+        "title": "Hybrid Route Latency (ms)",
+        "targets": [ { "expr": "hybrid_route_latency_ms" } ],
+        "gridPos": { "x": 0, "y": 4, "w": 9, "h": 6 }
+      },
+      {
+        "id": 4,
+        "type": "graph",
+        "title": "Hybrid Route Count (per route)",
+        "targets": [ { "expr": "hybrid_route_total" } ],
+        "gridPos": { "x": 9, "y": 4, "w": 9, "h": 6 }
+      },
+      {
+        "id": 5,
+        "type": "table",
+        "title": "Gesture Floors and Samples",
+        "targets": [
+          { "expr": "gesture_confidence_floor" },
+          { "expr": "gesture_velocity_floor" },
+          { "expr": "gesture_velocity_samples_total" }
+        ],
+        "gridPos": { "x": 0, "y": 10, "w": 18, "h": 6 }
+      }
+    ]
+  }
+}
