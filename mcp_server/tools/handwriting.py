@@ -153,7 +153,18 @@ def recognize_math(png_bytes: bytes) -> dict:
 
     try:
         from PIL import Image
-        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        raw = Image.open(io.BytesIO(png_bytes))
+        # PKDrawing.image(from:scale:) produces a transparent-background PNG.
+        # PIL's default .convert("RGB") composites alpha against black, making
+        # dark ink invisible. Composite against white so pix2tex sees dark-on-white.
+        bg = Image.new("RGB", raw.size, (255, 255, 255))
+        if raw.mode in ("RGBA", "LA"):
+            bg.paste(raw, mask=raw.split()[-1])
+        elif raw.mode == "P" and "transparency" in raw.info:
+            bg.paste(raw.convert("RGBA"), mask=raw.convert("RGBA").split()[-1])
+        else:
+            bg.paste(raw.convert("RGB"))
+        img = bg
     except Exception as exc:
         return {"error": f"Failed to decode image: {exc}"}
 

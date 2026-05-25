@@ -82,6 +82,14 @@ struct HandwritingCanvasView: View {
                 vm.handleResult(latex: latex, unicode: unicode, error: error)
             }
         }
+        .onChange(of: wsManager.state) { _, newState in
+            // If the bridge disconnects while OCR is in-flight, the result will
+            // never arrive — clear the spinner so the user can retry.
+            if newState == .disconnected && vm.isRecognizing {
+                vm.handleResult(latex: nil, unicode: nil,
+                                error: "Connection lost — please try again")
+            }
+        }
     }
 
     // MARK: — Canvas controls (bottom-right overlay)
@@ -304,9 +312,13 @@ final class HandwritingViewModel: ObservableObject {
         let scale = UIScreen.main.scale
 
         Task.detached(priority: .userInitiated) {
-            let bounds = drawingCopy.bounds.insetBy(dx: -20, dy: -20)
+            // Larger padding (40pt vs 20pt) prevents Vision from clipping ascenders/
+            // descenders at the crop boundary.
+            let bounds = drawingCopy.bounds.insetBy(dx: -40, dy: -40)
             let uiImage = drawingCopy.image(from: bounds, scale: scale)
-            guard let cgImage = uiImage.cgImage else {
+            // Preprocess to help with tremor: fill gaps in shaky strokes.
+            let processed = Self.preprocessForTremor(uiImage)
+            guard let cgImage = processed.cgImage else {
                 await MainActor.run { self.isRecognizing = false }
                 return
             }
@@ -341,6 +353,38 @@ final class HandwritingViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Morphological preprocessing for tremor handwriting.
+    ///
+    /// RA / unsteady-hand strokes are continuous at the intent level but arrive
+    /// as jagged, fragmented pixel paths — Vision sees disconnected noise.
+    /// CIMorphologyMinimum (erosion of the bright background) expands dark ink
+    /// pixels outward, filling the sub-pixel gaps tremor leaves between stroke
+    /// segments. A light Gaussian blur then smooths the rough dilated edges so
+    /// Vision doesn't read them as texture noise.
+    ///
+    /// Falls back silently to the original image if Core Image fails.
+    private static func preprocessForTremor(_ input: UIImage) -> UIImage {
+        guard let cgInput = input.cgImage else { return input }
+        let ci = CIImage(cgImage: cgInput)
+
+        // Erosion expands dark ink pixels outward, filling the sub-pixel gaps
+        // tremor leaves between stroke segments. Light blur then smooths the
+        // rough dilated edges. Radius 3: fills typical tremor gaps without
+        // merging adjacent letters.
+        let processed = ci
+            .applyingFilter("CIMorphologyMinimum",
+                            parameters: [kCIInputRadiusKey: 3.0])
+            .applyingFilter("CIGaussianBlur",
+                            parameters: [kCIInputRadiusKey: 0.8])
+            .applyingFilter("CIColorControls",
+                            parameters: [kCIInputContrastKey: 1.15])
+
+        let ctx = CIContext(options: [.useSoftwareRenderer: false])
+        guard let cgOut = ctx.createCGImage(processed, from: ci.extent) else { return input }
+        return UIImage(cgImage: cgOut, scale: input.scale,
+                       orientation: input.imageOrientation)
     }
 }
 

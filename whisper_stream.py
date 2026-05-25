@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -34,6 +36,44 @@ from typing import TYPE_CHECKING, Optional
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CUDA DLL search path — must be registered before ctranslate2 / faster-whisper
+# are imported so ctranslate2's dynamic LoadLibrary calls find cublas64_12.dll.
+#
+# Python 3.8+ restricts DLL search for extension modules to explicitly
+# registered directories (os.add_dll_directory), not the process PATH.
+# ctranslate2 also loads CUDA libs at runtime, which goes through LoadLibraryW
+# and therefore also benefits from add_dll_directory on Windows.
+#
+# The DLL directory is the torch\lib folder from a CUDA-enabled torch install.
+# If torch gets reinstalled with CUDA the new path will be torch\lib (no tilde);
+# we probe both so the code stays correct after a reinstall.
+# ---------------------------------------------------------------------------
+if sys.platform == "win32":
+    _SITE_PACKAGES = Path(os.path.expandvars(
+        r"%APPDATA%\Python\Python314\site-packages"
+    ))
+    _CUDA_DLL_CANDIDATES = [
+        _SITE_PACKAGES / "torch" / "lib",       # proper CUDA torch install
+        _SITE_PACKAGES / "~orch" / "lib",        # DLLs left by previous CUDA torch
+        Path(r"C:\Users\bradt\AppData\Local\Programs\Ollama\lib\ollama\cuda_v12"),
+    ]
+    for _candidate in _CUDA_DLL_CANDIDATES:
+        if (_candidate / "cublas64_12.dll").exists():
+            try:
+                os.add_dll_directory(str(_candidate))
+                log.info("Registered CUDA DLL directory: %s", _candidate)
+            except OSError as _e:
+                log.warning("Could not register CUDA DLL dir %s: %s", _candidate, _e)
+            break
+    else:
+        log.warning(
+            "cublas64_12.dll not found in any candidate directory — "
+            "faster-whisper GPU inference will fail. Install CUDA toolkit 12.x "
+            "or reinstall torch with CUDA: pip install torch --index-url "
+            "https://download.pytorch.org/whl/cu124"
+        )
 
 try:
     import numpy as np
@@ -259,8 +299,18 @@ class WhisperStream:
                 compute_type=self._compute_type,
             )
         except Exception as exc:
-            log.error("WhisperStream: model load failed — %s", exc)
-            return
+            log.warning("WhisperStream: %s model load failed (%s) — retrying on CPU/int8",
+                        self._device, exc)
+            try:
+                self._model = await asyncio.to_thread(
+                    WhisperModel, self._model_size, device="cpu", compute_type="int8"
+                )
+                self._device = "cpu"
+                self._compute_type = "int8"
+                log.info("WhisperStream: running on CPU (int8) as fallback")
+            except Exception as cpu_exc:
+                log.error("WhisperStream: CPU fallback also failed — voice disabled: %s", cpu_exc)
+                return
         self.available = True
         self._running = True
         self._task = asyncio.create_task(self._loop())
@@ -327,7 +377,7 @@ class WhisperStream:
             if self._buffer_start_ts is None:
                 self._buffer_start_ts = time.monotonic()
         except Exception as exc:
-            log.debug("WhisperStream.on_audio_chunk decode error: %s", exc)
+            log.warning("WhisperStream.on_audio_chunk decode error: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Background transcription loop
@@ -336,6 +386,10 @@ class WhisperStream:
     async def _loop(self) -> None:
         while self._running:
             await asyncio.sleep(self._poll_s)
+            # Auto-expire clarification gate so silence never locks voice input forever.
+            if self._awaiting_clarification and time.monotonic() >= self._clarification_deadline:
+                log.info("WhisperStream: clarification timed out — re-enabling wake gate")
+                self._awaiting_clarification = False
             try:
                 await self._maybe_transcribe()
             except Exception as exc:

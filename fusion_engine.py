@@ -889,8 +889,11 @@ class FusionEngine:
         # Gaze-to-cursor: move cursor to smoothed gaze position.
         # Capture return value — if True, suppress gaze-delta below to prevent
         # double cursor movement (absolute moveTo then relative moveRel in same tick).
+        # Gated by cursor_paused and switch_hold_active so gaze respects the same
+        # pause semantics as tilt and head (previously it bypassed them).
         _gaze_cursor_moved = False
-        if self._feature_toggles.get("gaze_cursor_mode", False):
+        if (self._feature_toggles.get("gaze_cursor_mode", False)
+                and not self._cursor_paused and not switch_hold_active):
             if gaze_is_recent:
                 _gaze_cursor_moved = await self._apply_gaze_cursor(
                     latest_gaze.x, latest_gaze.y, self._gaze_buf._last_conf
@@ -906,7 +909,7 @@ class FusionEngine:
         # Includes fixation slowdown and confidence freeze (Req 15).
         # BUG FIX: skip if gaze-to-cursor already fired a moveTo this tick —
         # prevents absolute + relative compound displacement in the same frame.
-        if self._gaze_delta and not _gaze_cursor_moved:
+        if self._gaze_delta and not _gaze_cursor_moved and not self._cursor_paused and not switch_hold_active:
             dx, dy = self._gaze_delta
             conf = self._gaze_delta_conf
             self._gaze_delta = None
@@ -1029,13 +1032,14 @@ class FusionEngine:
         # --- Pause / Switch hold guard for cursor-driving sensors ---
         # When paused or during sensor switch, discard all cursor sensor data
         # (tilt, head, gaze delta) without accumulating state.
+        # Note: gaze_delta is consumed earlier and already gated above;
+        # this block clears residual tilt/head state only.
         if self._cursor_paused or switch_hold_active:
             # Consume and discard cursor sensor inputs
             self._tilt_position = None
             self._tilt = None
             self._head = None
-            if self._gaze_delta:
-                self._gaze_delta = None
+            self._gaze_delta = None  # belt-and-suspenders: already gated before this point
             # Reset accumulators to prevent drift buildup
             self._tilt_accum_x = 0.0
             self._tilt_accum_y = 0.0
@@ -1071,47 +1075,39 @@ class FusionEngine:
                 filtered_x = self._tilt_pos_filter_x(x, timestamp=now)
                 filtered_y = self._tilt_pos_filter_y(y, timestamp=now)
 
-                # Ratchet: hold cursor until displacement exceeds dead zone
+                # Ratchet: hold cursor until displacement from new neutral exceeds dead zone.
+                # When active, suppress tilt movement but fall through to Rules 7-10 so
+                # voice and gesture commands still fire (previously an early return silenced them).
                 if self._ratchet_active:
-                    # Check if displacement from center (new neutral) exceeds threshold
-                    # Dead zone in position mode: 2° / tilt_range mapped to normalized units
-                    dead_zone_norm = 2.0 / (self._cfg.tilt_pos_alpha * 60.0) if hasattr(self._cfg, 'tilt_pos_alpha') else 0.08
-                    # Simple check: displacement from center > threshold
                     disp = math.hypot(filtered_x - 0.5, filtered_y - 0.5)
-                    if disp < 0.04:  # ~2° at 25° range
-                        # Still within dead zone — hold cursor
-                        if self._ratchet_held_pos:
-                            await asyncio.to_thread(
-                                pyautogui.moveTo,
-                                self._ratchet_held_pos[0],
-                                self._ratchet_held_pos[1],
-                                duration=0,
-                            )
-                        return
+                    if disp < 0.04:  # ~2° at 25° range — still within dead zone
+                        pass  # skip cursor movement; fall through to voice/gesture rules
                     else:
-                        # Exceeded dead zone — deactivate ratchet, resume normal
+                        # Exceeded dead zone — deactivate and apply movement below
                         self._ratchet_active = False
                         self._ratchet_held_pos = None
                         log.info("Ratchet deactivated — tilt exceeded dead zone")
 
-                # Power curve on displacement from center (per-axis)
-                dx = filtered_x - 0.5
-                dy = filtered_y - 0.5
-                exp = cfg.tilt_pos_exponent
-                # Normalize to [-1, 1], apply power curve, denormalize back to [0, 1]
-                curved_x = 0.5 + power_curve(dx / 0.5, exp) * 0.5 if dx != 0.0 else 0.5
-                curved_y = 0.5 + power_curve(dy / 0.5, exp) * 0.5 if dy != 0.0 else 0.5
+                if not self._ratchet_active:
+                    # Power curve on displacement from center (per-axis)
+                    dx = filtered_x - 0.5
+                    dy = filtered_y - 0.5
+                    exp = cfg.tilt_pos_exponent
+                    # Normalize to [-1, 1], apply power curve, denormalize back to [0, 1]
+                    curved_x = 0.5 + power_curve(dx / 0.5, exp) * 0.5 if dx != 0.0 else 0.5
+                    curved_y = 0.5 + power_curve(dy / 0.5, exp) * 0.5 if dy != 0.0 else 0.5
 
-                # Convert to pixels
-                px_x = round(curved_x * self._w)
-                px_y = round(curved_y * self._h)
+                    # Convert to pixels
+                    px_x = round(curved_x * self._w)
+                    px_y = round(curved_y * self._h)
 
-                # Clamp to screen bounds
-                px_x = max(0, min(self._w - 1, px_x))
-                px_y = max(0, min(self._h - 1, px_y))
+                    # Clamp to screen bounds
+                    px_x = max(0, min(self._w - 1, px_x))
+                    px_y = max(0, min(self._h - 1, px_y))
 
-                await asyncio.to_thread(pyautogui.moveTo, px_x, px_y, duration=0)
-                return
+                    await asyncio.to_thread(pyautogui.moveTo, px_x, px_y, duration=0)
+                    return
+                # Ratchet hold: no cursor movement — fall through to Rules 7-10
 
         # Rule 6b — Legacy tilt navigation (velocity-based, no Command, no LLM)
         if self._tilt:
@@ -1466,6 +1462,7 @@ class FusionEngine:
         # _tick_count is initialised in __init__ (moved for D2 sensor sampling)
         interval = 1.0 / self._cfg.tick_hz
         log.info("FusionEngine running at %.0f Hz", self._cfg.tick_hz)
+        _slow_tick_threshold = interval * 2  # warn if tick body takes > 2× the interval
         while self._running:
             t0 = time.monotonic()
             try:
@@ -1473,7 +1470,11 @@ class FusionEngine:
                 self._tick_count += 1
             except Exception as exc:
                 log.error("FusionEngine tick error: %s", exc)
-            await asyncio.sleep(max(0.0, interval - (time.monotonic() - t0)))
+            elapsed = time.monotonic() - t0
+            if elapsed > _slow_tick_threshold:
+                log.warning("FusionEngine slow tick: %.1f ms (budget %.1f ms)",
+                            elapsed * 1000, interval * 1000)
+            await asyncio.sleep(max(0.0, interval - elapsed))
 
     def stop(self) -> None:
         self._running = False
