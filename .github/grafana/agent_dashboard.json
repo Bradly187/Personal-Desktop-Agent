@@ -97,6 +97,71 @@
                                                          "w":  18,
                                                          "h":  6
                                                      }
+                                     },
+                                     {
+                                         "gridPos":  {
+                                                         "y":  16,
+                                                         "w":  6,
+                                                         "h":  4,
+                                                         "x":  0
+                                                     },
+                                         "title":  "Process CPU (sec rate)",
+                                         "id":  6,
+                                         "type":  "stat",
+                                         "targets":  [
+                                                         {
+                                                             "expr":  "rate(process_cpu_seconds_total{instance=\"$instance\"}[1m])"
+                                                         }
+                                                     ]
+                                     },
+                                     {
+                                         "gridPos":  {
+                                                         "y":  16,
+                                                         "w":  6,
+                                                         "h":  4,
+                                                         "x":  6
+                                                     },
+                                         "title":  "Process Resident Memory (bytes)",
+                                         "id":  7,
+                                         "type":  "stat",
+                                         "targets":  [
+                                                         {
+                                                             "expr":  "process_resident_memory_bytes{instance=\"$instance\"}"
+                                                         }
+                                                     ]
+                                     },
+                                     {
+                                         "gridPos":  {
+                                                         "y":  16,
+                                                         "w":  6,
+                                                         "h":  4,
+                                                         "x":  12
+                                                     },
+                                         "title":  "Process Restart Count (approx)",
+                                         "id":  8,
+                                         "type":  "stat",
+                                         "targets":  [
+                                                         {
+                                                             "expr":  "changes(process_start_time_seconds{instance=\"$instance\"}[1h])"
+                                                         }
+                                                     ]
+                                     },
+                                     {
+                                         "id":  9,
+                                         "gridPos":  {
+                                                         "y":  20,
+                                                         "w":  18,
+                                                         "h":  8,
+                                                         "x":  0
+                                                     },
+                                         "targets":  [
+                                                         {
+                                                             "expr":  "{job=\"personal_desktop_agent\"}"
+                                                         }
+                                                     ],
+                                         "datasource":  "$loki",
+                                         "type":  "logs",
+                                         "title":  "Agent Logs (Loki)"
                                      }
                                  ]
                   }

@@ -1,0 +1,21 @@
+﻿server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://LOKI_HOST:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: personal_desktop_agent_logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: personal_desktop_agent
+          __path__: C:/path/to/agent/logs/*.log
+
+# Notes:
+# - Adjust __path__ to the agent log directory. On Windows, promtail supports winlog as a target as well.

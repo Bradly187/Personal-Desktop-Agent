@@ -1,0 +1,19 @@
+﻿receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/tempo]
+
+# Notes:
+# - Run an OpenTelemetry Collector to accept OTLP from instrumented apps and forward traces to Tempo.
+# - Instrument adaptation paths with OpenTelemetry spans (python opentelemetry sdk) to correlate decisions.
