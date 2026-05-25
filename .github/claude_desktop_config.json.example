@@ -1,0 +1,12 @@
+# Example claude_desktop_config.json for registering an MCP server locally
+# Copy this to %USERPROFILE%\.claude\claude_desktop_config.json (Windows) or ~/.claude/claude_desktop_config.json (Unix)
+# Replace the path to the python executable/desktop_mcp_server.py as needed for your environment.
+
+{
+  "mcpServers": {
+    "desktop-agent": {
+      "command": "python",
+      "args": ["E:/Personal_Desktop_Agent/mcp_server/desktop_mcp_server.py"]
+    }
+  }
+}

@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from dev_agent import DevAgent
 
 log = logging.getLogger(__name__)
+import metrics
 
 # Cloud system prompt — mirrors local _SYSTEM_PROMPT but adds misrecognition
 # guidance specific to voice+accessibility input.  Kept separate so we can
@@ -676,6 +677,13 @@ class HybridCoordinator:
                     )
                 except Exception as db_exc:
                     log.warning("AgentDB.insert_command failed: %s", db_exc)
+
+            # Emit routing metrics (Prometheus)
+            try:
+                metrics.route_counter.labels(route=route_label).inc()
+                metrics.route_latency_ms.labels(route=route_label).set(latency_ms)
+            except Exception:
+                pass
 
             # Record successful local executions for few-shot learning
             if (self._trainer and route_label == "local" and success):

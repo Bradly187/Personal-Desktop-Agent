@@ -21,6 +21,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 log = logging.getLogger(__name__)
+import metrics
 
 if TYPE_CHECKING:
     from behavioral_twin_state import BehavioralTwinState
@@ -141,6 +142,11 @@ class ContinuousTrainer:
         new_samples = 0
         for g_name, vel in self._gesture_proc.drain_velocity_samples():
             await self._db.record_gesture_velocity(g_name, vel, pain_day=pain_day)
+            # increment Prometheus counter per-gesture
+            try:
+                metrics.gesture_velocity_samples_total.labels(gesture=g_name).inc()
+            except Exception:
+                pass
             new_samples += 1
 
         if new_samples == 0:
@@ -208,6 +214,10 @@ class ContinuousTrainer:
 
     async def _adapt(self) -> None:
         log.debug("ContinuousTrainer: running adaptation pass")
+        try:
+            metrics.adaptation_pass_counter.inc()
+        except Exception:
+            pass
         from behavioral_twin_state import _DEFAULT_SNAPSHOT
         snapshot = _DEFAULT_SNAPSHOT
         if self._twin:
@@ -268,6 +278,14 @@ class ContinuousTrainer:
         except Exception as exc:
             log.debug("Gate 1 rollback check skipped: %s", exc)
 
+        # Export Gate-1 metrics to Prometheus (if available)
+        try:
+            metrics.gate1_cloud_rate.set(cloud_rate)
+            metrics.gate1_failure_rate.set(failure_rate)
+            metrics.gate1_whisper_logprob.set(self._config.whisper_logprob_min)
+        except Exception:
+            pass
+
         if cloud_rate > self._cloud_limit and failure_rate < self._failure_limit:
             if pain_day_active:
                 log.info("Gate 1 threshold relaxation suppressed (pain day active)")
@@ -309,11 +327,16 @@ class ContinuousTrainer:
             await self._db.update_gesture_calibration(
                 gesture, floor, len(samples), p10
             )
-            if abs(floor - old_floor) > 0.001:
-                log.info(
-                    "Gesture %s confidence floor: %.3f → %.3f (%d samples)",
-                    gesture, old_floor, floor, len(samples),
-                )
+                # Export metric for per-gesture confidence floor
+                try:
+                    metrics.gesture_confidence_floor.labels(gesture=gesture).set(floor)
+                except Exception:
+                    pass
+                if abs(floor - old_floor) > 0.001:
+                    log.info(
+                        "Gesture %s confidence floor: %.3f → %.3f (%d samples)",
+                        gesture, old_floor, floor, len(samples),
+                    )
 
     async def _update_gesture_velocity_calibration(
         self, pain_day_active: bool = False
@@ -352,6 +375,11 @@ class ContinuousTrainer:
             await self._db.update_gesture_velocity_calibration(
                 gesture, floor, len(samples), p10
             )
+            # Export metric for per-gesture velocity floor
+            try:
+                metrics.gesture_velocity_floor.labels(gesture=gesture).set(floor)
+            except Exception:
+                pass
             # Group swipes and push/pull under canonical keys for GestureProcessor
             if "SWIPE" in gesture:
                 calibrated["SWIPE"] = min(calibrated.get("SWIPE", floor), floor)

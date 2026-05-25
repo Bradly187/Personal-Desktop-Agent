@@ -677,6 +677,15 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    # Start Prometheus metrics endpoint (optional). Port configurable via METRICS_PORT env var.
+    try:
+        import metrics
+        port = int(os.environ.get("METRICS_PORT", "8000"))
+        metrics.start_metrics_server(port=port)
+        log.info("Metrics server started on :%d", port)
+    except Exception:
+        log.debug("Metrics server not available or failed to start")
+
     _raise_windows_timer_resolution()
 
     # Task 4.2 — early exit path
