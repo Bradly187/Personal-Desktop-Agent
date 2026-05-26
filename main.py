@@ -228,9 +228,41 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
         import duckdb  # noqa: F401
         return "OK", f"v{duckdb.__version__}  (session analytics)"
 
+    def _check_kiro():
+        import urllib.request as _ur
+        # Try a quick HTTP ping to the WebSocket port to see if extension is running
+        try:
+            _ur.urlopen("http://127.0.0.1:8767/", timeout=1)
+        except Exception as exc:
+            msg = str(exc)
+            if "Connection refused" in msg or "actively refused" in msg:
+                return "WARN", "extension not running — install kiro-extension/ and reload Kiro"
+            # Any HTTP response (even 400/404) means the server is up
+            return "OK", "bridge extension running on ws://127.0.0.1:8767"
+        return "OK", "bridge extension running on ws://127.0.0.1:8767"
+
+    def _check_llamacpp():
+        import urllib.request as _ur
+        try:
+            with _ur.urlopen("http://localhost:8080/health", timeout=2) as r:
+                r.read()
+            return "OK", "llama-server reachable on :8080"
+        except Exception:
+            return "WARN", "llama-server not running (needed for --backend llamacpp)"
+
+    def _check_vllm():
+        try:
+            import vllm  # noqa: F401
+            return "OK", f"vllm v{vllm.__version__} installed (activate with --backend vllm)"
+        except ImportError:
+            return "WARN", "not installed — run vllm_setup.bat to fix CUDA wheels"
+
     check("Metrics (in-process)",           lambda: ("OK", "metrics.py singleton ready"))
     check("ChromaDB RAG (codebase index)",  _check_chromadb)
     check("DuckDB (session analytics)",     _check_duckdb)
+    check("Kiro/VS Code bridge",            _check_kiro)
+    check("llama.cpp server (:8080)",       _check_llamacpp)
+    check("vLLM",                           _check_vllm)
     check("GPU / VRAM (pynvml)",            _check_pynvml)
     check("Ollama LLM server",              _check_ollama)
     check("Whisper (faster-whisper)",       _check_whisper)
@@ -420,7 +452,7 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
 async def _run_pipeline(args: argparse.Namespace) -> None:
     from command_executor import CommandExecutor
     from db import AgentDB
-    from local_inference import OllamaInference
+    from local_inference import OllamaInference, LlamaCppInference, VLLMInference
     from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
     from behavioral_twin_state import BehavioralTwinState
     from fusion_engine import FusionEngine, FusionConfig
@@ -481,7 +513,22 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Build components ---
     cfg = CoordinatorConfig()
-    local = OllamaInference()
+
+    # Backend selection (--backend flag)
+    _backend = args.backend.lower() if hasattr(args, "backend") else "ollama"
+    if _backend == "llamacpp":
+        local = LlamaCppInference(
+            model=getattr(args, "llamacpp_model", "local-model"),
+            host=getattr(args, "llamacpp_host", "http://localhost:8080"),
+        )
+        log.info("Using llama.cpp backend (llama-server on %s)", local.host)
+    elif _backend == "vllm":
+        local = VLLMInference(
+            model=getattr(args, "vllm_model", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
+        )
+        log.info("Using vLLM backend — model will load on first inference request")
+    else:
+        local = OllamaInference()
 
     # GestureProcessor created first so trainer can hold a reference for
     # calibrated threshold push-back.
@@ -506,6 +553,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         agent_db=agent_db,
     )
     coordinator.set_dev_agent(dev_agent)
+
+    # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────
+    if getattr(args, "kiro", False):
+        try:
+            from kiro_client import KiroClient
+            kiro = KiroClient()
+            dev_agent.set_kiro(kiro)
+            log.info("KiroClient: wired to DevAgent (ws://127.0.0.1:8767)")
+        except Exception as _kiro_exc:
+            log.warning("KiroClient: failed to initialise: %s", _kiro_exc)
 
     # ── Metrics singleton — wire to all pipeline components ────────────────
     m = get_metrics()
@@ -595,6 +652,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                 _idx_stats = await indexer.index()
                 log.info("CodebaseIndexer: %s", _idx_stats)
                 dev_agent.set_indexer(indexer)
+                # Start file watcher for continuous incremental indexing
+                if getattr(args, "watch", False):
+                    if indexer.start_watching():
+                        log.info("CodebaseIndexer: file watcher active")
+                    else:
+                        log.info("CodebaseIndexer: file watcher unavailable (pip install watchdog)")
             else:
                 log.warning("CodebaseIndexer: ChromaDB unavailable — RAG disabled")
                 indexer = None
@@ -752,6 +815,24 @@ def _parse_args() -> argparse.Namespace:
                    help="Index Python/Swift source + docs PDFs into ChromaDB RAG at startup")
     p.add_argument("--metrics-port", type=int, default=0,
                    help="Expose /metrics JSON endpoint on this port (0 = disabled)")
+    # ── Backend selection (roadmap item #1, #6) ──────────────────────────────
+    p.add_argument("--backend", type=str, default="ollama",
+                   choices=["ollama", "vllm", "llamacpp"],
+                   help="LLM inference backend: ollama (default), vllm, llamacpp")
+    p.add_argument("--vllm-model", type=str,
+                   default="meta-llama/Meta-Llama-3.1-8B-Instruct",
+                   help="HuggingFace model ID for vLLM backend")
+    p.add_argument("--llamacpp-model", type=str, default="local-model",
+                   help="Model name label for llama.cpp backend (informational only)")
+    p.add_argument("--llamacpp-host", type=str, default="http://localhost:8080",
+                   help="llama-server base URL for llama.cpp backend")
+    # ── Kiro/VS Code bridge (roadmap item #2) ────────────────────────────────
+    p.add_argument("--kiro", action="store_true",
+                   help="Connect to Kiro/VS Code bridge extension on ws://127.0.0.1:8767")
+    # ── File watcher (roadmap item #5) ───────────────────────────────────────
+    p.add_argument("--watch", action="store_true",
+                   help="Enable continuous file watcher for incremental RAG re-indexing "
+                        "(requires --index-codebase and pip install watchdog)")
     return p.parse_args()
 
 

@@ -42,9 +42,26 @@ if TYPE_CHECKING:
     from continuous_trainer import ContinuousTrainer
     from db import AgentDB
     from hybrid_coordinator import HybridCoordinator
+    from kiro_client import KiroClient
     from mcp_server.tools import screen as screen_tools
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# HTML text extraction helper
+# ---------------------------------------------------------------------------
+
+def _strip_html(html: str) -> str:
+    """Very simple HTML → plain text: strip tags, collapse whitespace."""
+    # Remove script/style blocks entirely
+    clean = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    # Strip remaining tags
+    clean = re.sub(r"<[^>]+>", " ", clean)
+    # Collapse whitespace
+    clean = re.sub(r"[ \t]+", " ", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean.strip()
 
 # ---------------------------------------------------------------------------
 # Step model
@@ -55,13 +72,20 @@ _PLAN_ACTIONS = {
     "WRITE_FILE", "RUN_TERMINAL", "CLICK", "OPEN", "HOTKEY",
     "EXPLAIN", "SEARCH_WEB", "READ_SCREEN", "READ_FILE", "GREP",
     "SCROLL", "TYPE",
+    # Git-native verbs (item #3 / #8 in roadmap)
+    "GIT_STATUS", "GIT_DIFF", "GIT_COMMIT", "GIT_CHECKOUT",
+    # GitHub integration
+    "GITHUB_PR",
+    # Web retrieval (replaces browser-open SEARCH_WEB for context injection)
+    "FETCH_URL",
 }
 
 _STEP_PATTERN = re.compile(
     r"^\s*(?:Step\s*\d+[:.]\s*)?"          # optional "Step N:"
     r"\[?"                                   # optional [
     r"(WRITE_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
-    r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE)"
+    r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE"
+    r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL)"
     r"(?:\s+([^\]]*?))?"                    # optional args
     r"\]?",                                 # optional ]
     re.IGNORECASE,
@@ -154,10 +178,15 @@ class DevAgent:
         self._context: list[str] = session_context or []
         self._results_log: list[AgentResult] = []  # kept for get_last_result()
         self._indexer: Optional["CodebaseIndexer"] = None   # set via set_indexer()
+        self._kiro: Optional["KiroClient"] = None            # set via set_kiro()
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
         self._indexer = indexer
+
+    def set_kiro(self, kiro: "KiroClient") -> None:
+        """Wire a KiroClient for IDE context (cursor, file, git, diagnostics)."""
+        self._kiro = kiro
 
     # ---------------------------------------------------------------------- #
     # Primary entry point
@@ -245,11 +274,16 @@ class DevAgent:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
-        # Step 1: Generate plan — inject RAG context so planner sees relevant code
+        # Step 1: Generate plan — inject RAG context + git/IDE context
         extra_ctx = self._format_context()
         rag = await self._rag_context(goal, n=4)
         if rag:
             extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
+
+        # Git context injection (item #8): gives LLM branch/diff awareness
+        git_ctx = await self._git_context()
+        if git_ctx:
+            extra_ctx = f"{git_ctx}\n\n{extra_ctx}" if extra_ctx else git_ctx
 
         plan_result = await self._router.infer(
             domain="plan",
@@ -402,6 +436,46 @@ class DevAgent:
             search_path = parts[1].strip() if len(parts) > 1 else "."
             return await asyncio.to_thread(self._grep, pattern, search_path)
 
+        # ── Git-native verbs (roadmap item #3) ──────────────────────────────
+
+        if action == "GIT_STATUS":
+            return await asyncio.to_thread(self._git_status)
+
+        if action == "GIT_DIFF":
+            # args: optional "--staged" or a file path
+            flags = (step.args or "").strip()
+            return await asyncio.to_thread(self._git_diff, flags)
+
+        if action == "GIT_COMMIT":
+            # args: commit message
+            msg = (step.args or step.body or "").strip()
+            if not msg:
+                raise ValueError("GIT_COMMIT requires a commit message")
+            return await asyncio.to_thread(self._git_commit, msg)
+
+        if action == "GIT_CHECKOUT":
+            # args: [-b] <branch>
+            branch_args = (step.args or "").strip()
+            return await asyncio.to_thread(self._git_checkout, branch_args)
+
+        # ── GitHub integration (roadmap item #3) ────────────────────────────
+
+        if action == "GITHUB_PR":
+            # args: title  body: PR description
+            title = (step.args or "").strip()
+            body = (step.body or "").strip()
+            if not title:
+                raise ValueError("GITHUB_PR requires a title in args")
+            return await asyncio.to_thread(self._github_pr, title, body)
+
+        # ── Web retrieval (roadmap item #3) ─────────────────────────────────
+
+        if action == "FETCH_URL":
+            url = (step.args or step.body or "").strip()
+            if not url:
+                raise ValueError("FETCH_URL requires a URL")
+            return await self._fetch_url(url)
+
         # Fall through: accessibility verbs → CommandExecutor
         if self._coordinator:
             from command_executor import Command
@@ -512,6 +586,137 @@ class DevAgent:
         if result.returncode != 0:
             raise RuntimeError(f"Command failed ({status}): {output[:200]}")
         return output or status
+
+    # ── Git implementations ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _git_status() -> str:
+        result = subprocess.run(
+            ["git", "status", "--short", "--branch"],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = result.stdout.strip()
+        if result.returncode != 0:
+            raise RuntimeError(f"git status failed: {result.stderr.strip()[:200]}")
+        return out or "(nothing to commit, working tree clean)"
+
+    @staticmethod
+    def _git_diff(flags: str = "", max_chars: int = 8000) -> str:
+        cmd = ["git", "diff"]
+        if flags:
+            cmd.extend(flags.split())
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git diff failed: {result.stderr.strip()[:200]}")
+        out = result.stdout.strip()
+        if len(out) > max_chars:
+            out = out[:max_chars] + f"\n… [truncated at {max_chars} chars]"
+        return out or "(no diff)"
+
+    @staticmethod
+    def _git_commit(message: str) -> str:
+        # Stage all tracked changes then commit
+        subprocess.run(["git", "add", "-u"], check=True, timeout=10)
+        result = subprocess.run(
+            ["git", "commit", "-m", message],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git commit failed: {result.stderr.strip()[:200]}")
+        out = result.stdout.strip()
+        log.info("DevAgent: git commit — %s", out[:100])
+        return out
+
+    @staticmethod
+    def _git_checkout(branch_args: str) -> str:
+        cmd = ["git", "checkout"] + branch_args.split()
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git checkout failed: {result.stderr.strip()[:200]}")
+        return result.stdout.strip() or result.stderr.strip() or "ok"
+
+    @staticmethod
+    def _github_pr(title: str, body: str) -> str:
+        """Create a GitHub PR using the gh CLI and return the PR URL."""
+        cmd = ["gh", "pr", "create", "--title", title]
+        if body:
+            cmd.extend(["--body", body])
+        else:
+            cmd.extend(["--body", "Created by Personal Desktop Agent via voice command."])
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"gh pr create failed: {result.stderr.strip()[:200]}")
+        url = result.stdout.strip()
+        log.info("DevAgent: PR created — %s", url)
+        return url
+
+    async def _fetch_url(self, url: str, max_chars: int = 6000) -> str:
+        """Fetch a URL and return extracted text (replaces browser-open SEARCH_WEB)."""
+        try:
+            import aiohttp
+        except ImportError:
+            # Fall back to webbrowser open (old behaviour)
+            await asyncio.to_thread(webbrowser.open, url)
+            return f"Opened browser: {url}"
+
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; DesktopAgent/1.0)"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10.0),
+                ) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"HTTP {resp.status}")
+                    content_type = resp.content_type or ""
+                    if "html" in content_type:
+                        html = await resp.text(errors="replace")
+                        text = _strip_html(html)
+                    else:
+                        text = await resp.text(errors="replace")
+                    if len(text) > max_chars:
+                        text = text[:max_chars] + f"\n… [truncated at {max_chars}]"
+                    log.info("DevAgent: fetched %s (%d chars)", url, len(text))
+                    return text
+        except Exception as exc:
+            raise RuntimeError(f"FETCH_URL {url} failed: {exc}") from exc
+
+    # ── Context helpers ──────────────────────────────────────────────────────
+
+    async def _git_context(self) -> Optional[str]:
+        """Fetch git state for plan prompt injection.
+
+        Tries KiroClient first (richer VS Code git data), falls back to
+        subprocess git commands directly.
+        """
+        # Try Kiro first
+        if self._kiro is not None:
+            git = await self._kiro.get_git_context()
+            if git and "error" not in git:
+                return self._kiro.format_git_context_for_prompt(git)
+
+        # Subprocess fallback
+        try:
+            result = await asyncio.to_thread(
+                lambda: subprocess.run(
+                    ["git", "status", "--short", "--branch"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                out = result.stdout.strip()
+                return f"```git-context\n{out}\n```"
+        except Exception as exc:
+            log.debug("DevAgent._git_context() subprocess fallback failed: %s", exc)
+
+        return None
 
     @staticmethod
     async def _capture_screenshot() -> Optional[str]:
@@ -638,6 +843,9 @@ class DevAgent:
                 "wired" if (self._indexer and self._indexer.available)
                 else "not wired" if self._indexer is None
                 else "unavailable"
+            ),
+            "kiro_bridge": (
+                self._kiro.get_status() if self._kiro is not None else "not wired"
             ),
         }
 

@@ -1,0 +1,53 @@
+{
+  "name": "desktop-agent-bridge",
+  "displayName": "Desktop Agent Bridge",
+  "description": "Exposes IDE context (cursor, file, diagnostics, git) to the Personal Desktop Agent Python backend over WebSocket on port 8767.",
+  "version": "0.1.0",
+  "publisher": "personal-desktop-agent",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "desktopAgent.restartBridge",
+        "title": "Desktop Agent: Restart Bridge Server"
+      },
+      {
+        "command": "desktopAgent.showStatus",
+        "title": "Desktop Agent: Show Bridge Status"
+      }
+    ],
+    "configuration": {
+      "title": "Desktop Agent Bridge",
+      "properties": {
+        "desktopAgent.port": {
+          "type": "number",
+          "default": 8767,
+          "description": "WebSocket port for the Python backend bridge."
+        },
+        "desktopAgent.contextLines": {
+          "type": "number",
+          "default": 50,
+          "description": "Lines of context above/below cursor to send."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}

@@ -388,3 +388,179 @@ class VLLMInference(LocalInference):
 # llama3.1:8b is the default and fits easily on RTX 5090 — no VRAM pressure justifies
 # switching to a model with 25% accuracy. Re-evaluate if a higher-accuracy Nemotron
 # model becomes available via Ollama.
+
+
+# ---------------------------------------------------------------------------
+# LlamaCppInference — llama.cpp server backend (OpenAI-compatible API)
+# ---------------------------------------------------------------------------
+
+class LlamaCppInference(LocalInference):
+    """Connects to a running llama-server (llama.cpp) via its OpenAI-compatible HTTP API.
+
+    llama.cpp gives access to models that can be split across VRAM and RAM via
+    --n-gpu-layers, enabling 27B–72B models alongside Whisper on the RTX 5090.
+
+    Recommended model: Qwen3.6-27B-Q4_K_M (17 GB VRAM, 68.9% SWE-Bench Verified,
+    ~158 tok/s on RTX 5090, fully in VRAM at Q4_K_M).
+
+    Server launch (run in a separate terminal):
+        llama-server \\
+            --model /path/to/Qwen3.6-27B-Q4_K_M.gguf \\
+            --n-gpu-layers 999 \\
+            --ctx-size 16384 \\
+            --port 8080
+
+    Activate via:
+        python main.py --backend llamacpp
+
+    See docs/llama_server_setup.md for full setup instructions.
+    """
+
+    _API_PATH = "/v1/chat/completions"
+
+    def __init__(
+        self,
+        model: str = "local-model",    # name shown in logs; server ignores it
+        host: str = "http://localhost:8080",
+        timeout: float = 30.0,
+    ) -> None:
+        self.model = model
+        self.host = host.rstrip("/")
+        self.timeout = timeout
+        self._available: bool | None = None
+
+    async def infer(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ) -> str:
+        try:
+            import aiohttp
+        except ImportError:
+            return "CLARIFY aiohttp not installed"
+
+        # Build OpenAI-compatible chat messages from the shared prompt builder
+        system_prompt = _SYSTEM_PROMPT
+        user_content = _build_user_content(cmd, few_shot_examples)
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 64,
+        }
+
+        t0 = time.monotonic()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.host}{self._API_PATH}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                ) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"llama-server HTTP {resp.status}")
+                    data = await resp.json()
+                    action = (
+                        data["choices"][0]["message"]["content"]
+                        .strip()
+                        .splitlines()[0]
+                        .strip()
+                    )
+                    latency_ms = (time.monotonic() - t0) * 1000
+                    log.info("LlamaCppInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
+                    self._available = True
+                    return action
+        except Exception as exc:
+            self._available = False
+            log.error("LlamaCppInference failed: %s", exc)
+            return f"CLARIFY inference error: {exc}"
+
+    async def infer_stream(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ):
+        """Stream tokens via llama-server's OpenAI-compatible SSE stream."""
+        try:
+            import aiohttp
+        except ImportError:
+            yield "CLARIFY aiohttp not installed"
+            return
+
+        system_prompt = _SYSTEM_PROMPT
+        user_content = _build_user_content(cmd, few_shot_examples)
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 512,
+            "stream": True,
+        }
+
+        t0 = time.monotonic()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.host}{self._API_PATH}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60.0),
+                ) as resp:
+                    if resp.status != 200:
+                        yield f"CLARIFY llama-server HTTP {resp.status}"
+                        return
+                    async for raw_line in resp.content:
+                        line = raw_line.decode().strip()
+                        if not line or line == "data: [DONE]":
+                            continue
+                        if line.startswith("data: "):
+                            try:
+                                chunk = __import__("json").loads(line[6:])
+                                token = (
+                                    chunk.get("choices", [{}])[0]
+                                    .get("delta", {})
+                                    .get("content", "")
+                                )
+                                if token:
+                                    yield token
+                            except Exception:
+                                continue
+            latency_ms = (time.monotonic() - t0) * 1000
+            log.info("LlamaCppInference.stream: %r complete (%.0f ms)", cmd.text[:40], latency_ms)
+            self._available = True
+        except Exception as exc:
+            self._available = False
+            log.error("LlamaCppInference.stream failed: %s", exc)
+            yield f"CLARIFY inference error: {exc}"
+
+    def get_status(self) -> dict:
+        return {
+            "backend": "llamacpp",
+            "model": self.model,
+            "host": self.host,
+            "available": self._available,
+        }
+
+
+def _build_user_content(cmd: Command, few_shot_examples: list[dict] | None) -> str:
+    """Build the user message content (system prompt is passed separately for chat models)."""
+    parts: list[str] = []
+
+    if few_shot_examples:
+        parts.append("Examples:")
+        for ex in few_shot_examples:
+            parts.append(f'User: {ex["command_text"]}\nAssistant: {ex["action_text"]}')
+
+    if cmd.session_context:
+        context = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
+        parts.append(f"Recent commands:\n{context}")
+
+    parts.append(f"User: {cmd.text}")
+    return "\n".join(parts) if parts else cmd.text
