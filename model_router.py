@@ -4,13 +4,20 @@ Maps each domain to a specialist Ollama model with a domain-tuned system
 prompt. Handles the different output formats each model produces (structured
 verb-first for the command classifier, free-form for reasoning/code/vision).
 
-Model lineup (RTX 5090, 32 GB VRAM):
+Model lineup (RTX 5090, 32 GB VRAM — updated 2026-05-25):
   command  → llama3.1:8b      (4.6 GB)  fast action classifier, verb-first output, 100% accuracy
-  code     → qwen3-coder:30b  (18 GB)   code generation, ML/QC frameworks
-  math     → deepseek-r1:8b   (5.2 GB)  chain-of-thought reasoning, proofs
-  vision   → qwen3-vl:30b     (19 GB)   screenshot analysis, diagram reading
-  plan     → llama3.1:8b      (4.6 GB)  project decomposition, structured plans
-  general  → llama3.1:8b      (4.6 GB)  explanation, research synthesis
+  code     → qwen3-coder:30b  (17.3 GB) MoE (3.3B active/token); thinking mode ON; code gen, ML/QC
+  math     → deepseek-r1:8b   (4.9 GB)  R1-distill-Qwen3-8B; chain-of-thought reasoning, proofs
+  vision   → qwen3-vl:30b     (18.2 GB) multimodal; screenshot analysis, diagram reading
+  plan     → qwen3-coder:30b  (17.3 GB) thinking mode ON; far better plans than 8B; stays warm
+  general  → gemma3:27b       (16.2 GB) dense 27B, 128K ctx; research synthesis, explanation
+
+Key decisions:
+  - plan uses qwen3-coder:30b (not gemma3:27b) so code+plan share one loaded model → fewer swaps
+  - general uses gemma3:27b (dense, broader knowledge) rather than the coding-specialist qwen3
+  - thinking mode enabled for code and plan (qwen3-coder native support via RENDERER qwen3-coder)
+  - deepseek-r1:8b is Qwen3-arch (DeepSeek-R1-Distill-Qwen-8B); family=qwen3 in Ollama
+  - Removed from router: gpt-oss:20b (0% accuracy), nemotron-mini (25%), qwen2.5-coder:1.5b-base (base)
 
 Each specialist model uses a domain-specific system prompt calibrated for
 ML/agentic AI, quantum computing, and software development contexts.
@@ -93,27 +100,55 @@ When analysing:
 - If you see a plot or diagram, describe axes, data, and what it represents"""
 
 _PLAN_PROMPT = """\
-You are a software project architect helping a graduate ML/QC researcher plan and execute \
-complex development tasks.
+You are a senior software architect and ML/QC research engineer helping a graduate researcher \
+plan and autonomously execute complex development tasks. Think through the task carefully before \
+producing the plan.
 
-When given a goal, produce a concrete numbered action plan. Each step must be one of:
-  [WRITE_FILE <path>] — create or edit a file (follow with the content)
-  [RUN_TERMINAL <cmd>] — execute a shell command
-  [CLICK <target>] — click a UI element
-  [OPEN <app>] — open an application
-  [SEARCH_WEB <query>] — search the web
-  [EXPLAIN <text>] — note something for the user
+When given a goal, produce a concrete numbered action plan. Each step must use exactly one \
+of the following action verbs:
+
+File operations:
+  [WRITE_FILE <path>]        — create or overwrite a file (put content on the next lines)
+  [READ_FILE <path>]         — read an existing file into context
+  [GREP <pattern> [<path>]]  — search for a pattern across the codebase
+
+Shell / terminal:
+  [RUN_TERMINAL <command>]   — execute a shell command; capture stdout/stderr
+
+Git operations:
+  [GIT_STATUS]               — show working tree status (staged/unstaged files, branch)
+  [GIT_DIFF [--staged|<file>]] — show diff of working changes
+  [GIT_COMMIT <message>]     — stage all tracked changes and commit
+  [GIT_CHECKOUT [-b] <branch>] — checkout or create a branch
+
+GitHub:
+  [GITHUB_PR <title>]        — create a pull request (put PR body on the next lines)
+
+Web / research:
+  [FETCH_URL <url>]          — fetch URL and extract text for context
+  [SEARCH_WEB <query>]       — open browser with search (use FETCH_URL for programmatic retrieval)
+
+Desktop / UI:
+  [CLICK <target>]           — click a named UI element
+  [OPEN <app>]               — launch an application
+  [HOTKEY <keys>]            — press a keyboard shortcut
+
+Output / explain:
+  [EXPLAIN <text>]           — note something for the user (no action taken)
+  [READ_SCREEN]              — take a screenshot and analyse it
 
 Rules:
-- Be specific: include exact file paths, exact commands, exact content
-- One action per step
-- Cover the full task end to end
-- Prefer: uv/pip for Python packages, git for version control, pytest for tests
-- Default Python environment: Windows, .venv, pyproject.toml
+- Think step by step before producing the plan
+- Be specific: exact file paths, exact commands, exact content
+- One action per numbered step; content (file body, PR description) follows the step line
+- Cover the full task end to end, including tests and git commit when appropriate
+- Python environment: Windows, .venv, pytest, pyproject.toml or requirements.txt
+- For ML tasks: default to PyTorch unless JAX/Qiskit/PennyLane is explicitly needed
+- For git tasks: run GIT_STATUS first, commit at the end
 
 Format:
 Step 1: [ACTION args]
-<any file content or detail needed>
+<optional content / detail for this step>
 Step 2: [ACTION args]
 ..."""
 
@@ -121,10 +156,19 @@ _GENERAL_PROMPT = """\
 You are a knowledgeable research assistant for a graduate student in machine learning, \
 agentic AI, quantum computing, and applied mathematics.
 
-Be technically precise, concise, and assume graduate-level background.
-Use LaTeX for math ($...$ inline, $$...$$ display).
-Cite relevant papers, frameworks, or tools when applicable.
-If asked to compare approaches, be opinionated about tradeoffs."""
+Core expertise:
+- ML/AI: deep learning theory, transformers, diffusion models, RL, LLM alignment, agentic systems
+- Quantum computing: gate-based QC, VQE, QAOA, quantum error correction, Clifford circuits
+- Math: linear algebra, probability, information theory, convex optimisation, differential geometry
+- Systems: Python, Rust, CUDA, async architecture, cloud ML (AWS, GCP)
+
+Style:
+- Technically precise; assume graduate-level background
+- Use LaTeX for math ($...$ inline, $$...$$ display)
+- Cite relevant papers (arXiv, conference proceedings) when applicable
+- If comparing approaches, give a direct opinionated recommendation with tradeoff reasoning
+- For "how does X work" questions: explain the mechanism, not just the definition
+- Concise — skip preamble and caveats unless they materially affect the answer"""
 
 
 # ---------------------------------------------------------------------------
@@ -139,16 +183,21 @@ class ModelProfile:
     vram_gb: float
     max_tokens: int = 1024
     supports_images: bool = False
-    # For models that wrap reasoning in tags (deepseek-r1)
+    # For models that wrap reasoning in tags (deepseek-r1 / qwen3 thinking)
     strip_thinking: bool = False
     # Models that don't follow strict verb-first format
     free_form: bool = False
+    # Enable Qwen3-native thinking mode (RENDERER qwen3-coder / qwen3)
+    # Passes {"think": true} in Ollama options — produces <think>...</think> prefix
+    thinking: bool = False
 
     def __str__(self) -> str:
-        return f"{self.name} ({self.domain}, {self.vram_gb}GB)"
+        think_flag = " [thinking]" if self.thinking else ""
+        return f"{self.name} ({self.domain}, {self.vram_gb}GB{think_flag})"
 
 
 _PROFILES: dict[str, ModelProfile] = {
+    # ── Fast command classifier ────────────────────────────────────────────
     "command": ModelProfile(
         name="llama3.1:8b",
         domain="command",
@@ -156,59 +205,82 @@ _PROFILES: dict[str, ModelProfile] = {
         vram_gb=4.6,
         max_tokens=32,
         free_form=False,
+        # Benchmarked: 100% accuracy on 12-prompt suite, 373ms warm p50
     ),
+    # ── Code specialist: Qwen3-Coder 30B MoE, thinking ON ─────────────────
+    # qwen3-coder:30b is MoE (30.5B params, ~3.3B active/token).
+    # Thinking mode via RENDERER qwen3-coder — passes think=True to Ollama.
+    # Stays warm between code and plan requests → no VRAM swap penalty.
     "code": ModelProfile(
         name="qwen3-coder:30b",
         domain="code",
         system_prompt=_CODE_PROMPT,
-        vram_gb=18.0,
-        max_tokens=2048,
+        vram_gb=17.3,
+        max_tokens=4096,
         free_form=True,
+        thinking=True,       # native Qwen3 thinking mode; strips <think> for code output
+        strip_thinking=True, # remove <think> block from final response (keep the answer only)
     ),
+    # ── Math: DeepSeek-R1-Distill-Qwen3-8B ───────────────────────────────
+    # Family = qwen3 (Qwen3 architecture, R1 distillation). Keep reasoning visible.
     "math": ModelProfile(
         name="deepseek-r1:8b",
         domain="math",
         system_prompt=_MATH_PROMPT,
-        vram_gb=5.2,
-        max_tokens=2048,
-        strip_thinking=False,  # Keep reasoning for math — it's the value
+        vram_gb=4.9,
+        max_tokens=4096,
+        strip_thinking=False,  # Keep the chain-of-thought — it IS the math value
         free_form=True,
     ),
+    # ── Vision: Qwen3-VL 30B ─────────────────────────────────────────────
     "vision": ModelProfile(
         name="qwen3-vl:30b",
         domain="vision",
         system_prompt=_VISION_PROMPT,
-        vram_gb=19.0,
-        max_tokens=1024,
+        vram_gb=18.2,
+        max_tokens=2048,
         supports_images=True,
         free_form=True,
     ),
+    # ── Plan: Qwen3-Coder 30B MoE, thinking ON ───────────────────────────
+    # Same model as code — stays warm → zero model-swap cost when code was recent.
+    # Thinking mode produces dramatically better multi-step plans than 8B without thinking.
+    # Updated prompt includes all current verbs: GIT_STATUS, GITHUB_PR, FETCH_URL, etc.
     "plan": ModelProfile(
-        name="llama3.1:8b",
+        name="qwen3-coder:30b",
         domain="plan",
         system_prompt=_PLAN_PROMPT,
-        vram_gb=4.6,
-        max_tokens=2048,
+        vram_gb=17.3,
+        max_tokens=4096,
         free_form=True,
+        thinking=True,
+        strip_thinking=True,  # plan response = the steps, not the reasoning trace
     ),
+    # ── General: Gemma 3 27B (dense, 128K ctx) ───────────────────────────
+    # Dense 27B vs MoE 30B: Gemma 3 is better for broad research synthesis,
+    # explanation, and cross-domain questions where depth > code specialisation.
+    # 16.2 GB — fits with 8+ GB headroom alongside Whisper (4.2 GB).
     "general": ModelProfile(
-        name="llama3.1:8b",
+        name="gemma3:27b",
         domain="general",
         system_prompt=_GENERAL_PROMPT,
-        vram_gb=4.6,
-        max_tokens=1024,
+        vram_gb=16.2,
+        max_tokens=2048,
         free_form=True,
     ),
 }
 
-# Fallback chain per domain when preferred model won't fit in VRAM
+# Fallback chain per domain when preferred model won't fit in VRAM.
+# Ordered: preferred → smaller capable → smallest available.
+# Removed from all chains: gpt-oss:20b (0% accuracy), nemotron-mini (25%),
+# qwen2.5-coder:1.5b-base (base model, no instruction following).
 _FALLBACK: dict[str, list[str]] = {
-    "code":    ["qwen3-coder:30b", "llama3.1:8b", "llama3.2:3b"],
-    "math":    ["deepseek-r1:8b",  "llama3.1:8b", "llama3.2:3b"],
-    "vision":  ["qwen3-vl:30b",   "llama3.1:8b", "llama3.2:3b"],
-    "plan":    ["llama3.1:8b",    "llama3.2:3b"],
-    "general": ["llama3.1:8b",    "llama3.2:3b"],
-    "command": ["llama3.1:8b",    "llama3.2:3b"],
+    "code":    ["qwen3-coder:30b", "gemma3:27b",   "llama3.1:8b", "llama3.2:3b"],
+    "math":    ["deepseek-r1:8b",  "llama3.1:8b",  "llama3.2:3b"],
+    "vision":  ["qwen3-vl:30b",    "gemma3:27b",   "llama3.1:8b", "llama3.2:3b"],
+    "plan":    ["qwen3-coder:30b", "gemma3:27b",   "llama3.1:8b", "llama3.2:3b"],
+    "general": ["gemma3:27b",      "llama3.1:8b",  "llama3.2:3b"],
+    "command": ["llama3.1:8b",     "llama3.2:3b"],
 }
 
 
@@ -340,14 +412,22 @@ class ModelRouter:
         prompt: str,
         screenshot_b64: Optional[str],
     ) -> str:
+        options: dict = {
+            "temperature": 0.0 if not profile.free_form else 0.3,
+            "num_predict": profile.max_tokens,
+        }
+
+        # Qwen3 native thinking mode — supported by qwen3-coder:30b (RENDERER qwen3-coder).
+        # Ollama passes this as an option to the model; the model emits <think>...</think>
+        # before its answer. We strip or keep the think block per profile.strip_thinking.
+        if profile.thinking:
+            options["think"] = True
+
         payload: dict = {
             "model": profile.name,
             "prompt": prompt,
             "stream": False,
-            "options": {
-                "temperature": 0.0 if not profile.free_form else 0.3,
-                "num_predict": profile.max_tokens,
-            },
+            "options": options,
         }
         if screenshot_b64 and profile.supports_images:
             payload["images"] = [screenshot_b64]
@@ -364,14 +444,16 @@ class ModelRouter:
 
         raw = data.get("response", "").strip()
 
-        # Strip deepseek-r1 thinking tags only for non-math domains
-        # (for math we keep the reasoning; for command/plan we don't want it)
-        if "<think>" in raw and profile.domain not in ("math",):
+        # Strip <think>...</think> blocks when profile.strip_thinking is True.
+        # Keep them for math (the chain-of-thought IS the answer).
+        # Also strip any partial open tag if model was cut short.
+        if profile.strip_thinking and "<think>" in raw:
             raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            raw = re.sub(r"<think>.*$", "", raw, flags=re.DOTALL).strip()
 
-        # Take first non-empty line for command domain
+        # Take first non-empty line for command domain (verb-first format)
         if not profile.free_form:
-            lines = [l.strip() for l in raw.splitlines() if l.strip()]
+            lines = [line.strip() for line in raw.splitlines() if line.strip()]
             return lines[0] if lines else ""
 
         return raw
@@ -395,7 +477,7 @@ class ModelRouter:
     def get_status(self) -> dict:
         free = _free_vram_gb()
         available = {
-            domain: p.name
+            domain: str(p)
             for domain, p in self._profiles.items()
             if p.vram_gb <= free + 2.0
         }
