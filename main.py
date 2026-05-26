@@ -217,6 +217,20 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
             return "OK", f"residual={residual:.1f}px  age=unknown"
         return "WARN", "calibration file unreadable"
 
+    def _check_chromadb():
+        import chromadb  # noqa: F401
+        from chromadb.utils.embedding_functions import (  # noqa: F401
+            SentenceTransformerEmbeddingFunction,
+        )
+        return "OK", "ChromaDB + MiniLM available (codebase RAG)"
+
+    def _check_duckdb():
+        import duckdb  # noqa: F401
+        return "OK", f"v{duckdb.__version__}  (session analytics)"
+
+    check("Metrics (in-process)",           lambda: ("OK", "metrics.py singleton ready"))
+    check("ChromaDB RAG (codebase index)",  _check_chromadb)
+    check("DuckDB (session analytics)",     _check_duckdb)
     check("GPU / VRAM (pynvml)",            _check_pynvml)
     check("Ollama LLM server",              _check_ollama)
     check("Whisper (faster-whisper)",       _check_whisper)
@@ -421,6 +435,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from content_filter import ContentFilter
     from mcp_trust_classifier import MCPTrustClassifier
     from gaze_calibrator import GazeCalibrator
+    from metrics import get_metrics
+    from session_analyzer import SessionAnalyzer
 
     if args.safe_mode:
         os.environ["SAFE_MODE"] = "1"
@@ -490,8 +506,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         agent_db=agent_db,
     )
     coordinator.set_dev_agent(dev_agent)
+
+    # ── Metrics singleton — wire to all pipeline components ────────────────
+    m = get_metrics()
+    fusion_pre = None   # FusionEngine created below; wire metrics after
+    coordinator.set_metrics(m)
+
     fusion = FusionEngine(screen_width=sw, screen_height=sh)
     fusion.set_coordinator(coordinator)
+    fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
+    fusion.set_session_id(session_id)
 
     from acoustic_profiler import AcousticProfiler
     profiler = AcousticProfiler(agent_db=agent_db, session_id=session_id)
@@ -501,6 +525,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     whisper.set_fusion_engine(fusion)
     whisper.set_agent_db(agent_db, session_id=session_id)
     whisper.set_acoustic_profiler(profiler)
+    whisper.set_metrics(m)          # wire metrics to WhisperStream (latency + hallucinations)
     coordinator.set_whisper_stream(whisper)
     coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
     coordinator.set_profiler(profiler)
@@ -559,13 +584,57 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         )
     profiler.add_drift_callback(_on_drift)
 
-    # Optional sensor viewer window
+    # ── Optional codebase RAG index ────────────────────────────────────────
+    indexer = None
+    if args.index_codebase:
+        try:
+            from codebase_indexer import CodebaseIndexer
+            _project_root = str(Path(__file__).parent)
+            indexer = CodebaseIndexer(project_root=_project_root)
+            if await indexer.start():
+                _idx_stats = await indexer.index()
+                log.info("CodebaseIndexer: %s", _idx_stats)
+                dev_agent.set_indexer(indexer)
+            else:
+                log.warning("CodebaseIndexer: ChromaDB unavailable — RAG disabled")
+                indexer = None
+        except Exception as _idx_exc:
+            log.warning("CodebaseIndexer: failed to start: %s", _idx_exc)
+            indexer = None
+
+    # ── Start VRAM poller + optional /metrics HTTP endpoint ────────────────
+    await m.start_vram_poller(interval_s=60.0)
+
+    if args.metrics_port:
+        try:
+            from aiohttp import web as _aio_web
+            _metrics_app = _aio_web.Application()
+            _metrics_app.router.add_get("/metrics", m.aiohttp_handler)
+            _metrics_runner = _aio_web.AppRunner(_metrics_app)
+            await _metrics_runner.setup()
+            _metrics_site = _aio_web.TCPSite(_metrics_runner, "0.0.0.0", args.metrics_port)
+            await _metrics_site.start()
+            log.info("Metrics endpoint: http://0.0.0.0:%d/metrics", args.metrics_port)
+        except Exception as _me_exc:
+            log.warning("Metrics HTTP endpoint failed: %s", _me_exc)
+
+    # ── Optional sensor viewer window ──────────────────────────────────────
     viewer = None
     if args.viewer:
         from sensor_viewer import SensorViewer
         viewer = SensorViewer()
         bridge.set_viewer(viewer)
         viewer.start()
+
+    # ── Optional live dashboard ────────────────────────────────────────────
+    dashboard_obj = None
+    if args.dashboard:
+        try:
+            from dashboard import Dashboard
+            dashboard_obj = Dashboard(metrics=m, interval=1.0)
+            await dashboard_obj.start()
+        except Exception as _dash_exc:
+            log.warning("Dashboard failed to start: %s", _dash_exc)
 
     shutdown = _ShutdownController()
     shutdown.register(fusion, gesture, whisper)
@@ -601,6 +670,25 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             await t
         except (asyncio.CancelledError, Exception):
             pass
+
+    # Stop dashboard + indexer before shutdown flushes DB
+    if dashboard_obj is not None:
+        dashboard_obj.stop()
+    m.stop_vram_poller()
+
+    # Run session analytics and persist summary to DB
+    if session_id >= 0:
+        try:
+            analyzer = SessionAnalyzer(agent_db_path=str(Path("agent.db")))
+            summary = await analyzer.run_and_persist(session_id, agent_db)
+            analyzer.close()
+            report = analyzer.format_report(summary)
+            log.info("Session summary:\n%s", report)
+        except Exception as _sa_exc:
+            log.warning("SessionAnalyzer failed: %s", _sa_exc)
+
+    if indexer is not None:
+        await indexer.stop()
 
     await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
     await audit.log_session_stop(reason="normal")
@@ -658,6 +746,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Open a desktop window showing iPad camera + LiDAR feeds")
     p.add_argument("--viewer-only", action="store_true",
                    help="Run only the bridge + viewer (no inference pipeline)")
+    p.add_argument("--dashboard", action="store_true",
+                   help="Show live TUI metrics dashboard in the terminal")
+    p.add_argument("--index-codebase", action="store_true",
+                   help="Index Python/Swift source + docs PDFs into ChromaDB RAG at startup")
+    p.add_argument("--metrics-port", type=int, default=0,
+                   help="Expose /metrics JSON endpoint on this port (0 = disabled)")
     return p.parse_args()
 
 

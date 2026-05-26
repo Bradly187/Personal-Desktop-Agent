@@ -37,6 +37,7 @@ from domain_classifier import DomainClassifier
 from model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
+    from codebase_indexer import CodebaseIndexer
     from command_executor import Command, CommandExecutor
     from continuous_trainer import ContinuousTrainer
     from db import AgentDB
@@ -52,13 +53,15 @@ log = logging.getLogger(__name__)
 # Action verbs the planner model is allowed to emit
 _PLAN_ACTIONS = {
     "WRITE_FILE", "RUN_TERMINAL", "CLICK", "OPEN", "HOTKEY",
-    "EXPLAIN", "SEARCH_WEB", "READ_SCREEN", "SCROLL", "TYPE",
+    "EXPLAIN", "SEARCH_WEB", "READ_SCREEN", "READ_FILE", "GREP",
+    "SCROLL", "TYPE",
 }
 
 _STEP_PATTERN = re.compile(
     r"^\s*(?:Step\s*\d+[:.]\s*)?"          # optional "Step N:"
     r"\[?"                                   # optional [
-    r"(WRITE_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB|READ_SCREEN|SCROLL|TYPE)"
+    r"(WRITE_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
+    r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE)"
     r"(?:\s+([^\]]*?))?"                    # optional args
     r"\]?",                                 # optional ]
     re.IGNORECASE,
@@ -150,6 +153,11 @@ class DevAgent:
         self._classifier = DomainClassifier()
         self._context: list[str] = session_context or []
         self._results_log: list[AgentResult] = []  # kept for get_last_result()
+        self._indexer: Optional["CodebaseIndexer"] = None   # set via set_indexer()
+
+    def set_indexer(self, indexer: "CodebaseIndexer") -> None:
+        """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
+        self._indexer = indexer
 
     # ---------------------------------------------------------------------- #
     # Primary entry point
@@ -186,12 +194,18 @@ class DevAgent:
             # Auto-capture screen for vision queries
             screenshot_b64 = await self._capture_screenshot()
 
-        # Single-turn specialist inference
+        # Single-turn specialist inference — inject RAG context for dev domains
+        extra_ctx = self._format_context()
+        if domain in ("code", "math", "vision", "general", "plan"):
+            rag = await self._rag_context(text, n=3)
+            if rag:
+                extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
+
         router_result = await self._router.infer(
             domain=domain,
             user_text=text,
             screenshot_b64=screenshot_b64,
-            context=self._format_context(),
+            context=extra_ctx,
         )
 
         self._push_context(f"User: {text}\nAssistant ({router_result.model}): {router_result.text[:200]}")
@@ -231,11 +245,16 @@ class DevAgent:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
-        # Step 1: Generate plan
+        # Step 1: Generate plan — inject RAG context so planner sees relevant code
+        extra_ctx = self._format_context()
+        rag = await self._rag_context(goal, n=4)
+        if rag:
+            extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
+
         plan_result = await self._router.infer(
             domain="plan",
             user_text=goal,
-            context=self._format_context(),
+            context=extra_ctx,
         )
         if not plan_result.ok:
             return AgentResult(
@@ -268,11 +287,13 @@ class DevAgent:
             step.latency_ms = (time.monotonic() - step_t0) * 1000
             executed.append(step)
 
-            # Optional reflection: take screenshot and check progress
-            # (lightweight — only for WRITE_FILE and RUN_TERMINAL)
             if step.action in ("RUN_TERMINAL",) and not step.success:
                 log.warning("DevAgent: step %d failed, stopping plan", i + 1)
                 break
+
+        # Step 3: Reflect — ask the model to summarise what was accomplished
+        # and surface any problems from step outputs.
+        reflect_text = await self._reflect(goal, executed, plan_result.model)
 
         self._push_context(f"Completed plan: {goal}\n"
                            + "\n".join(f"  {s.action} → {'ok' if s.success else 'failed'}"
@@ -283,13 +304,60 @@ class DevAgent:
             domain="plan",
             model_used=plan_result.model,
             steps=executed,
-            response_text=plan_result.text,
+            response_text=reflect_text or plan_result.text,
             success=all(s.success for s in executed),
             total_latency_ms=(time.monotonic() - t0) * 1000,
         )
         self._results_log.append(result)
         await self._persist_run(result, command_id=None)
         return result
+
+    async def _reflect(
+        self, goal: str, steps: list[AgentStep], model: str
+    ) -> Optional[str]:
+        """Reflect on executed steps: summarise outcomes, flag failures.
+
+        Sends a lightweight prompt that includes each step's action + result
+        so the model can reason about what was actually accomplished.
+        Returns the reflection text, or None on failure.
+        """
+        if not steps:
+            return None
+
+        # Build step summary — include full result for failed steps so the
+        # model can diagnose; truncate successes to avoid prompt bloat.
+        lines = [f"Goal: {goal}", "", "Steps executed:"]
+        for i, s in enumerate(steps, 1):
+            status = "✓" if s.success else "✗"
+            result_snippet = (s.result or "")
+            if s.success:
+                result_snippet = result_snippet[:200]
+            else:
+                result_snippet = result_snippet[:600]   # full error for failures
+            lines.append(
+                f"  {i}. {status} {s.action} {s.args[:60]}\n"
+                f"     → {result_snippet}"
+            )
+
+        lines += [
+            "",
+            "Briefly summarise: what was accomplished, what (if anything) failed,"
+            " and what the user should know or do next.",
+        ]
+        reflect_prompt = "\n".join(lines)
+
+        try:
+            r = await self._router.infer(
+                domain="general",
+                user_text=reflect_prompt,
+                context=None,
+            )
+            if r.ok and r.text:
+                log.info("DevAgent: reflection — %s", r.text[:120])
+                return r.text
+        except Exception as exc:
+            log.debug("DevAgent._reflect() failed: %s", exc)
+        return None
 
     # ---------------------------------------------------------------------- #
     # Step execution
@@ -323,6 +391,17 @@ class DevAgent:
                 return r.text
             return "Screenshot captured"
 
+        if action == "READ_FILE":
+            path_str = step.args or step.body
+            return await asyncio.to_thread(self._read_file, path_str.strip())
+
+        if action == "GREP":
+            # args format: "PATTERN [PATH]"  — path optional, defaults to project root
+            parts = step.args.split(None, 1)
+            pattern = parts[0] if parts else step.body
+            search_path = parts[1].strip() if len(parts) > 1 else "."
+            return await asyncio.to_thread(self._grep, pattern, search_path)
+
         # Fall through: accessibility verbs → CommandExecutor
         if self._coordinator:
             from command_executor import Command
@@ -348,6 +427,73 @@ class DevAgent:
         path.write_text(content, encoding="utf-8")
         log.info("DevAgent: wrote %d bytes to %s", len(content), path)
         return f"Written {len(content)} bytes to {path}"
+
+    @staticmethod
+    def _read_file(path_str: str, max_chars: int = 8000) -> str:
+        """Read a file and return its contents (truncated to max_chars)."""
+        path = Path(path_str.strip("'\""))
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n… [truncated at {max_chars} chars]"
+        log.info("DevAgent: read %d chars from %s", len(text), path)
+        return text
+
+    @staticmethod
+    def _grep(pattern: str, search_path: str, max_lines: int = 100) -> str:
+        """Search for a regex pattern in files under search_path.
+
+        Returns matching lines as a string (file:line: content format).
+        Uses Python re for portability — no dependency on system grep.
+        """
+        import os as _os
+
+        root = Path(search_path)
+        if not root.exists():
+            return f"Path does not exist: {search_path}"
+
+        compiled = re.compile(pattern)
+        results: list[str] = []
+        extensions = {".py", ".swift", ".md", ".txt", ".json", ".yaml", ".yml"}
+
+        def _search_file(fp: Path) -> None:
+            if len(results) >= max_lines:
+                return
+            try:
+                for lineno, line in enumerate(
+                    fp.read_text(encoding="utf-8", errors="replace").splitlines(),
+                    start=1,
+                ):
+                    if compiled.search(line):
+                        results.append(f"{fp}:{lineno}: {line.rstrip()}")
+                        if len(results) >= max_lines:
+                            break
+            except OSError:
+                pass
+
+        if root.is_file():
+            _search_file(root)
+        else:
+            for dirpath, dirnames, filenames in _os.walk(root):
+                # Prune excluded directories in-place
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in {"__pycache__", ".git", "node_modules",
+                                 "venv", ".venv", "chroma_db", "DerivedData"}
+                ]
+                for fname in filenames:
+                    if Path(fname).suffix in extensions:
+                        _search_file(Path(dirpath) / fname)
+                    if len(results) >= max_lines:
+                        break
+
+        if not results:
+            return f"No matches for pattern {pattern!r} in {search_path}"
+        summary = f"Found {len(results)} match(es)"
+        if len(results) >= max_lines:
+            summary += f" (truncated at {max_lines})"
+        return summary + "\n" + "\n".join(results)
 
     @staticmethod
     def _run_terminal(cmd: str) -> str:
@@ -446,6 +592,38 @@ class DevAgent:
             return None
         return "\n".join(self._context[-5:])
 
+    async def _rag_context(self, query: str, n: int = 3) -> Optional[str]:
+        """Fetch top-n relevant source chunks from CodebaseIndexer for `query`.
+
+        Returns a formatted string block suitable for injection as extra context
+        in the system/user prompt, or None if the indexer is unavailable or returns
+        no useful hits.
+        """
+        if self._indexer is None or not self._indexer.available:
+            return None
+        try:
+            hits = await self._indexer.query_combined(query, n=n)
+            if not hits:
+                return None
+            lines = ["[Relevant codebase context]"]
+            for h in hits:
+                if h.get("chunk_type") == "page":
+                    lines.append(
+                        f"# {h['file']} p.{h.get('page')} (score={h.get('score', 0):.2f})"
+                    )
+                else:
+                    lines.append(
+                        f"# {h['file']}::{h.get('name')} [{h.get('chunk_type')}]"
+                        f" line {h.get('start_line', '?')} (score={h.get('score', 0):.2f})"
+                    )
+                snippet = (h.get("text") or "")[:600]
+                lines.append(snippet)
+                lines.append("")
+            return "\n".join(lines)
+        except Exception as exc:
+            log.debug("DevAgent._rag_context() failed: %s", exc)
+            return None
+
     # ---------------------------------------------------------------------- #
     # Status / introspection
     # ---------------------------------------------------------------------- #
@@ -456,6 +634,11 @@ class DevAgent:
             "router": self._router.get_status(),
             "context_entries": len(self._context),
             "tasks_completed": len(self._results_log),
+            "rag_indexer": (
+                "wired" if (self._indexer and self._indexer.available)
+                else "not wired" if self._indexer is None
+                else "unavailable"
+            ),
         }
 
     def get_last_result(self) -> Optional[AgentResult]:

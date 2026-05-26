@@ -211,6 +211,7 @@ class WhisperStream:
         self._event_loop = None
         self._calibration_capture = None
         self._profiler = None
+        self._metrics = None   # set via set_metrics()
         self._logprob_floor_override: float | None = None
         self._gaze_cal_trigger = None  # callable: () → None, set by main.py
         # D8: correction detection state — tracks last command outcome
@@ -223,6 +224,10 @@ class WhisperStream:
 
     def set_fusion_engine(self, fusion: "FusionEngine") -> None:
         self._fusion = fusion
+
+    def set_metrics(self, metrics) -> None:
+        """Wire the global Metrics singleton for whisper latency + hallucination tracking."""
+        self._metrics = metrics
 
     def set_acoustic_profiler(self, profiler) -> None:
         """Wire AcousticProfiler for per-user adaptive thresholds."""
@@ -435,6 +440,7 @@ class WhisperStream:
         initial_prompt = ", ".join(all_hotwords) if all_hotwords else None
 
         try:
+            _t_transcribe = time.monotonic()
             segments_iter, info = self._model.transcribe(
                 audio,
                 language="en",
@@ -447,6 +453,12 @@ class WhisperStream:
                 initial_prompt=initial_prompt,
             )
             segments = list(segments_iter)
+            _whisper_latency_ms = (time.monotonic() - _t_transcribe) * 1000
+            if self._metrics is not None:
+                try:
+                    self._metrics.record_whisper_latency(_whisper_latency_ms)
+                except Exception:
+                    pass
         except Exception as exc:
             log.error("WhisperStream transcription error: %s", exc)
             return
@@ -465,6 +477,11 @@ class WhisperStream:
                     "WhisperStream: dropping hallucination (no_speech_prob=%.2f): %r",
                     s.no_speech_prob, s.text.strip(),
                 )
+                if self._metrics is not None:
+                    try:
+                        self._metrics.inc("whisper_hallucinations")
+                    except Exception:
+                        pass
                 continue
             if s.avg_logprob < self.AVG_LOGPROB_FLOOR:
                 log.debug(

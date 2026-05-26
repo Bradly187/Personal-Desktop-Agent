@@ -84,6 +84,17 @@ bedrock-agentcore==1.10.0
 # Falls back to AgentDB Jaccard scoring when unavailable.
 chromadb==1.5.9
 
+# ── PDF parsing for codebase_indexer.py document collection ──────────────────
+# pdfplumber is the primary parser (richer layout-aware extraction).
+# pypdf is a lighter fallback if pdfplumber is unavailable.
+pdfplumber==0.11.6
+pypdf==5.6.0
+
+# ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
+# windows-curses provides the stdlib curses module on Windows.
+# On Linux/macOS the curses module ships with Python; this is a no-op there.
+windows-curses==2.4.1; sys_platform == "win32"
+
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.3.0
 

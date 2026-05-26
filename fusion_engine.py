@@ -425,6 +425,11 @@ class FusionEngine:
         # --- Wired components ---
         self._coordinator: Optional["HybridCoordinator"] = None
         self._gaze_calibrator = None   # GazeCalibrator — wired by main.py
+        self._metrics = None           # metrics.Metrics — wired by main.py
+        self._session_id: int = -1     # set via set_session_id()
+        self._last_active_source: Optional[str] = None   # tracks most recent source for telemetry
+        self._last_gesture_conf: Optional[float] = None  # last gesture confidence for telemetry
+        self._acoustic_profiler = None  # AcousticProfiler — wired by main.py for rms_ambient
         self._running = False
         # Tracked set prevents fire-and-forget tasks from being GC'd before completion
         # and surfaces unhandled exceptions via the done-callback log.
@@ -442,8 +447,20 @@ class FusionEngine:
         log.info("FusionEngine: GazeCalibrator wired (calibrated=%s)", calibrator.is_calibrated)
 
     def set_agent_db(self, db) -> None:
-        """Wire AgentDB for throttled sensor-stream persistence (D2, ~1 Hz)."""
+        """Wire AgentDB for throttled sensor-stream persistence (~1 Hz)."""
         self._db = db
+
+    def set_metrics(self, metrics) -> None:
+        """Wire Metrics singleton for real-time counter/gauge updates."""
+        self._metrics = metrics
+
+    def set_session_id(self, session_id: int) -> None:
+        """Set current session ID for telemetry rows."""
+        self._session_id = session_id
+
+    def set_acoustic_profiler(self, profiler) -> None:
+        """Wire AcousticProfiler so rms_ambient is included in telemetry."""
+        self._acoustic_profiler = profiler
 
     async def load_rom_calibration(self, db) -> None:
         """D4: Load sensor range-of-motion from onboarding assessment.
@@ -1236,29 +1253,77 @@ class FusionEngine:
             cmd, self._voice = self._voice, None
             await self._emit(cmd)
 
-        # D2: throttled sensor-stream persistence (~1 Hz = every 60 ticks).
-        # Uses fire-and-forget asyncio.ensure_future so DB writes never stall
-        # the 60 Hz tick loop. Caches are updated by on_tilt/on_gaze_delta/on_head.
+        # Telemetry sampler: ~1 Hz rich snapshot (every 60 ticks at 60 Hz).
+        # Writes to sensor_telemetry table — one row captures ALL active sensor
+        # channels plus cursor position and pain-day state. This is the primary
+        # dataset for future ML (fatigue detection, ROM drift, pain-onset classifiers).
+        # Fire-and-forget: DB writes must never stall the 60 Hz tick loop.
         if self._db is not None and self._db.available and self._tick_count % 60 == 0:
+            _tilt_rx = _tilt_ry = None
+            _gaze_dx = _gaze_dy = _gaze_conf = None
+            _head_pitch = _head_yaw = None
+            _cursor_x = _cursor_y = None
+            _rms = None
+
             if self._last_tilt_sample is not None:
-                rx, ry = self._last_tilt_sample
+                _tilt_rx, _tilt_ry = self._last_tilt_sample
+            if self._last_gaze_delta_sample is not None:
+                _gaze_dx, _gaze_dy, _gaze_conf = self._last_gaze_delta_sample
+            if self._last_head_sample is not None:
+                _head_pitch, _head_yaw = self._last_head_sample
+            if self._acoustic_profiler is not None:
+                _rms = getattr(self._acoustic_profiler, "_last_rms", None)
+
+            # Cursor position — read pyautogui off the event loop to avoid latency
+            try:
+                import pyautogui as _pag
+                _pos = _pag.position()
+                _cursor_x, _cursor_y = int(_pos.x), int(_pos.y)
+            except Exception:
+                pass
+
+            asyncio.ensure_future(
+                self._db.insert_sensor_telemetry(
+                    self._session_id,
+                    time.time(),
+                    tilt_rx=_tilt_rx,
+                    tilt_ry=_tilt_ry,
+                    gaze_dx=_gaze_dx,
+                    gaze_dy=_gaze_dy,
+                    gaze_conf=_gaze_conf,
+                    head_pitch=_head_pitch,
+                    head_yaw=_head_yaw,
+                    cursor_x=_cursor_x,
+                    cursor_y=_cursor_y,
+                    pain_day_active=self._pain_day_active,
+                    active_source=self._last_active_source,
+                    gesture_conf=self._last_gesture_conf,
+                    rms_ambient=_rms,
+                )
+            )
+            # Also push legacy sensor_events for backward-compat DuckDB queries
+            if self._last_tilt_sample is not None:
                 asyncio.ensure_future(
-                    self._db.insert_sensor_event("tilt", x=rx, y=ry)
+                    self._db.insert_sensor_event("tilt", x=_tilt_rx, y=_tilt_ry)
                 )
             if self._last_gaze_delta_sample is not None:
-                dx, dy, conf = self._last_gaze_delta_sample
                 asyncio.ensure_future(
                     self._db.insert_sensor_event(
-                        "gaze_delta", x=dx, y=dy, confidence=conf
+                        "gaze_delta", x=_gaze_dx, y=_gaze_dy, confidence=_gaze_conf
                     )
                 )
             if self._last_head_sample is not None:
-                pitch, yaw = self._last_head_sample
                 asyncio.ensure_future(
-                    self._db.insert_sensor_event("head", x=pitch, y=yaw)
+                    self._db.insert_sensor_event("head", x=_head_pitch, y=_head_yaw)
                 )
 
     async def _emit(self, cmd: Command) -> None:
+        # Track last active source for telemetry and metrics
+        self._last_active_source = cmd.source
+        if cmd.source == "gesture" and cmd.gesture_confidence is not None:
+            self._last_gesture_conf = cmd.gesture_confidence
+        if self._metrics is not None:
+            self._metrics.record_command_routed(cmd.source)
         if self._coordinator:
             # Fire-and-forget: prevents 200-600ms LLM inference from blocking the 60Hz tick loop.
             task = asyncio.create_task(self._coordinator.route(cmd))

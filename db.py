@@ -458,6 +458,64 @@ CREATE TABLE IF NOT EXISTS adaptation_log (
     rolled_back   INTEGER DEFAULT 0   -- 1 if this change was subsequently rolled back
 );
 CREATE INDEX IF NOT EXISTS idx_al_component ON adaptation_log(component, ts);
+
+-- ── Continuous sensor telemetry — 1 Hz ambient snapshot (ML dataset) ──────
+-- One row per second regardless of whether a command fired.
+-- Provides continuous signal for fatigue detection, pain-day onset, ROM drift.
+-- tilt_rx/ry: gyro velocity rad/s (velocity mode) or None if sensor inactive.
+-- gaze_dx/dy/conf: last received gaze-delta values (relative movement, pixels).
+-- head_pitch/yaw: ARKit head pose degrees (None if inactive).
+-- cursor_x/y: actual screen cursor position in pixels at sample time.
+-- pain_day_active: 1 when PainDayEngine threshold is exceeded or override set.
+-- active_source: last sensor that drove a cursor move or command this second.
+-- gesture_conf: confidence of last gesture event in this window (NULL if none).
+-- rms_ambient: AcousticProfiler RMS of last voice utterance (NULL if silent).
+CREATE TABLE IF NOT EXISTS sensor_telemetry (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       INTEGER REFERENCES sessions(id),
+    ts               REAL    NOT NULL,
+    tilt_rx          REAL,
+    tilt_ry          REAL,
+    gaze_dx          REAL,
+    gaze_dy          REAL,
+    gaze_conf        REAL,
+    head_pitch       REAL,
+    head_yaw         REAL,
+    cursor_x         INTEGER,
+    cursor_y         INTEGER,
+    pain_day_active  INTEGER NOT NULL DEFAULT 0,
+    active_source    TEXT,
+    gesture_conf     REAL,
+    rms_ambient      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_st_session ON sensor_telemetry(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_st_ts      ON sensor_telemetry(ts);
+
+-- ── Session summaries — written at session close by SessionAnalyzer ────────
+-- Aggregated KPIs over one agent run. Primary table for dashboard queries.
+CREATE TABLE IF NOT EXISTS session_summaries (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id            INTEGER UNIQUE REFERENCES sessions(id),
+    ts                    REAL    NOT NULL,
+    duration_s            REAL,
+    total_commands        INTEGER NOT NULL DEFAULT 0,
+    success_rate          REAL,           -- fraction 0.0–1.0
+    cloud_escalation_rate REAL,           -- fraction of commands routed to Bedrock
+    gate0_blocks          INTEGER DEFAULT 0,
+    gate1_blocks          INTEGER DEFAULT 0,
+    gate2_blocks          INTEGER DEFAULT 0,
+    gate3_blocks          INTEGER DEFAULT 0,
+    gate4_blocks          INTEGER DEFAULT 0,
+    latency_p50_ms        REAL,
+    latency_p95_ms        REAL,
+    pain_day_pct          REAL,           -- fraction of session where pain_day_active=1
+    corrections_count     INTEGER DEFAULT 0,
+    avg_whisper_logprob   REAL,
+    avg_gesture_conf      REAL,
+    source_breakdown      TEXT,           -- JSON {voice:N, gesture:N, touch:N, ...}
+    domain_breakdown      TEXT,           -- JSON {command:N, code:N, math:N, ...}
+    top_actions           TEXT            -- JSON [[action, count], ...]
+);
 """
 
 
@@ -597,6 +655,99 @@ class AgentDB:
             rows,
         )
         await self._conn.commit()
+
+    # ---------------------------------------------------------------------- #
+    # Sensor telemetry (1 Hz ambient snapshots)
+    # ---------------------------------------------------------------------- #
+
+    async def insert_sensor_telemetry(
+        self,
+        session_id: int,
+        ts: float,
+        *,
+        tilt_rx: Optional[float] = None,
+        tilt_ry: Optional[float] = None,
+        gaze_dx: Optional[float] = None,
+        gaze_dy: Optional[float] = None,
+        gaze_conf: Optional[float] = None,
+        head_pitch: Optional[float] = None,
+        head_yaw: Optional[float] = None,
+        cursor_x: Optional[int] = None,
+        cursor_y: Optional[int] = None,
+        pain_day_active: bool = False,
+        active_source: Optional[str] = None,
+        gesture_conf: Optional[float] = None,
+        rms_ambient: Optional[float] = None,
+    ) -> None:
+        """Write one 1-Hz sensor telemetry row. Non-fatal on any error."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                """INSERT INTO sensor_telemetry
+                   (session_id, ts, tilt_rx, tilt_ry, gaze_dx, gaze_dy, gaze_conf,
+                    head_pitch, head_yaw, cursor_x, cursor_y,
+                    pain_day_active, active_source, gesture_conf, rms_ambient)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    session_id, ts,
+                    tilt_rx, tilt_ry,
+                    gaze_dx, gaze_dy, gaze_conf,
+                    head_pitch, head_yaw,
+                    cursor_x, cursor_y,
+                    int(pain_day_active),
+                    active_source,
+                    gesture_conf, rms_ambient,
+                ),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.debug("insert_sensor_telemetry failed (non-fatal): %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # Session summaries
+    # ---------------------------------------------------------------------- #
+
+    async def insert_session_summary(self, summary: dict) -> None:
+        """Upsert a session summary row (keyed on session_id)."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                """INSERT OR REPLACE INTO session_summaries
+                   (session_id, ts, duration_s, total_commands, success_rate,
+                    cloud_escalation_rate, gate0_blocks, gate1_blocks,
+                    gate2_blocks, gate3_blocks, gate4_blocks,
+                    latency_p50_ms, latency_p95_ms, pain_day_pct,
+                    corrections_count, avg_whisper_logprob, avg_gesture_conf,
+                    source_breakdown, domain_breakdown, top_actions)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    summary.get("session_id"),
+                    summary.get("ts", time.time()),
+                    summary.get("duration_s"),
+                    summary.get("total_commands", 0),
+                    summary.get("success_rate"),
+                    summary.get("cloud_escalation_rate"),
+                    summary.get("gate0_blocks", 0),
+                    summary.get("gate1_blocks", 0),
+                    summary.get("gate2_blocks", 0),
+                    summary.get("gate3_blocks", 0),
+                    summary.get("gate4_blocks", 0),
+                    summary.get("latency_p50_ms"),
+                    summary.get("latency_p95_ms"),
+                    summary.get("pain_day_pct"),
+                    summary.get("corrections_count", 0),
+                    summary.get("avg_whisper_logprob"),
+                    summary.get("avg_gesture_conf"),
+                    summary.get("source_breakdown"),
+                    summary.get("domain_breakdown"),
+                    summary.get("top_actions"),
+                ),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.debug("insert_session_summary failed (non-fatal): %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Commands

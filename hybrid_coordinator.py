@@ -397,6 +397,7 @@ class HybridCoordinator:
         # Gate 3 VRAM cache — avoid calling pynvml on every command
         self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
         self._vram_cache_ttl: float = 2.0  # seconds
+        self._metrics = None   # set via set_metrics()
 
     # ---------------------------------------------------------------------- #
     # Public entry point
@@ -413,6 +414,10 @@ class HybridCoordinator:
 
     def set_calibrator(self, calibrator) -> None:
         self._calibrator = calibrator
+
+    def set_metrics(self, metrics) -> None:
+        """Wire the global Metrics singleton for real-time observability."""
+        self._metrics = metrics
 
     def add_personal_corrections(self, corrections: dict) -> None:
         """Merge condition-specific corrections into the live _VOICE_CORRECTIONS map."""
@@ -715,6 +720,21 @@ class HybridCoordinator:
         finally:
             latency_ms = (time.monotonic() - t0) * 1000
             self._update_ema(latency_ms)
+            # Record outcome in metrics singleton (non-fatal)
+            if self._metrics is not None:
+                try:
+                    self._metrics.record_command_outcome(
+                        success=success,
+                        action=action_str or "",
+                        latency_ms=latency_ms,
+                        route=route_label,
+                        domain=getattr(cmd, "domain", None),
+                        gate=gate_that_decided,
+                        whisper_logprob=cmd.params.get("whisper_logprob") if cmd.params else None,
+                        gesture_conf=cmd.params.get("gesture_conf") if cmd.params else None,
+                    )
+                except Exception:
+                    pass
 
         return result
 

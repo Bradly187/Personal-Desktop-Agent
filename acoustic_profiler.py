@@ -381,6 +381,8 @@ class AcousticProfiler:
         DB writes are scheduled thread-safely via the captured event loop.
         """
         metrics = _compute_metrics(audio, sr, avg_logprob)
+        # Expose most-recent RMS so FusionEngine telemetry sampler can read it
+        self._last_rms: float = metrics.rms_amplitude
 
         # Update ring buffers
         ring = self._flare_samples if is_flare_day else self._healthy_samples
