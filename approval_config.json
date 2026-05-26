@@ -20,7 +20,7 @@
     "ToolSearch":  "silent"
   },
 
-  "tts_backend":              "polly",
+  "tts_backend":              "chatterbox",
   "chatterbox_exaggeration":  0.5,
   "chatterbox_cfg_weight":    0.5,
   "chatterbox_voice_ref":     null,
