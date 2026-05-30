@@ -85,26 +85,18 @@ WRITE_FILE <path> | RUN_TERMINAL <cmd> | EXPLAIN <text> | SEARCH_WEB <query> | R
 Reply with ONLY the action string. No explanation."""
 
 _CODE_PROMPT = """\
-You are an expert software engineer specialising in machine learning, agentic AI, \
-quantum computing, and scientific computing. Your user is a graduate researcher in these fields.
+You are an expert software engineer for a graduate researcher in ML/AI, quantum computing, \
+and scientific computing. You are fluent in PyTorch, JAX, HuggingFace, vLLM, Qiskit, PennyLane, \
+Cirq, NumPy/SciPy/Sympy/Pandas, Rust, C++, CUDA, Triton, and async Python.
 
-Domains you are fluent in:
-- ML/AI: PyTorch, JAX, Flax, HuggingFace Transformers, vLLM, LangChain, LangGraph, \
-  AutoGen, diffusion models, RL (stable-baselines3, Gymnasium)
-- Quantum: Qiskit, PennyLane, Cirq, quantum gates, variational algorithms (VQE, QAOA), \
-  quantum error correction, Clifford circuits
-- Scientific: NumPy, SciPy, Matplotlib, Sympy, Pandas, NetworkX
-- Systems: Rust, C++, CUDA, Triton, async Python, Docker
-
-When writing code:
-- Prefer modern idiomatic patterns (dataclasses, type hints, async where appropriate)
-- Include brief inline comments only for non-obvious logic
-- Default to PyTorch for ML unless otherwise specified
-- Output a single clean code block unless explicitly asked for explanation
-
-When explaining:
-- Be technically precise; assume graduate-level background
-- Use LaTeX notation for math (wrap in $ or $$)"""
+OUTPUT RULES (strict — follow exactly):
+- Reply with ONE code block and nothing else. No preamble, no postamble, no commentary.
+- Do NOT explain, justify, or describe the code unless the user EXPLICITLY asks to \
+"explain", "why", or "walk through" — then add a short note after the code block.
+- Use the SIMPLEST correct approach. Do not over-engineer or suggest advanced/alternative \
+algorithms unless the user asks for them.
+- Modern idiomatic style: type hints, dataclasses, async where appropriate. Default to PyTorch for ML.
+- Inline comments only for genuinely non-obvious logic; keep them terse."""
 
 _MATH_PROMPT = """\
 You are a mathematical reasoning assistant for a graduate researcher in machine learning \
@@ -258,44 +250,49 @@ _PROFILES: dict[str, ModelProfile] = {
     # Note: Gemma 4 thinking API needs validation against vLLM — may require
     #       a different parameter. strip_thinking handles <thinking>...</thinking>
     #       (Gemma 4) and <think>...</think> (Qwen3/DeepSeek) tag formats.
+    # Latency tuning (measured 2026-05-30): thinking-mode generation of the 26B
+    # dominates dev latency (~78s even warm) — far more than the engine reload.
+    # So thinking is ON only where the reasoning trace IS the value (math, plan);
+    # OFF for routine generation (code, general, vision). Token budgets capped to
+    # bound worst-case latency (gen rate ~50 tok/s on eager-mode 26B MoE).
     "code": ModelProfile(
         name="gemma4:31b",
         domain="code",
         system_prompt=_CODE_PROMPT,
         vram_gb=16.0,
-        max_tokens=4096,
+        max_tokens=1536,       # code answers are short; was 4096
         free_form=True,
-        thinking=True,
-        strip_thinking=True,   # keep answer, discard reasoning trace
+        thinking=False,        # was True — thinking added ~60s for little code-gen gain
+        strip_thinking=True,   # safety net if a trace still appears
     ),
     "math": ModelProfile(
         name="gemma4:31b",
         domain="math",
         system_prompt=_MATH_PROMPT,
         vram_gb=16.0,
-        max_tokens=4096,
+        max_tokens=2048,       # was 4096 — bound latency while keeping room for CoT
         free_form=True,
-        thinking=True,
-        strip_thinking=False,  # chain-of-thought IS the math answer
+        thinking=True,         # KEEP: chain-of-thought IS the math answer
+        strip_thinking=False,
     ),
     "vision": ModelProfile(
         name="gemma4:31b",
         domain="vision",
         system_prompt=_VISION_PROMPT,
         vram_gb=16.0,
-        max_tokens=2048,
+        max_tokens=1024,       # grounding answers are short; was 2048
         supports_images=True,
         free_form=True,
-        thinking=False,        # vision queries don't benefit from thinking overhead
+        thinking=False,
     ),
     "plan": ModelProfile(
         name="gemma4:31b",
         domain="plan",
         system_prompt=_PLAN_PROMPT,
         vram_gb=16.0,
-        max_tokens=4096,
+        max_tokens=2048,       # was 4096 — multi-step plans rarely need more
         free_form=True,
-        thinking=True,
+        thinking=True,         # KEEP: planning benefits from reasoning
         strip_thinking=True,
     ),
     "general": ModelProfile(
@@ -303,7 +300,7 @@ _PROFILES: dict[str, ModelProfile] = {
         domain="general",
         system_prompt=_GENERAL_PROMPT,
         vram_gb=16.0,
-        max_tokens=2048,
+        max_tokens=1536,       # was 2048
         free_form=True,
         thinking=False,        # general Q&A: speed > deep reasoning trace
     ),
@@ -558,8 +555,10 @@ class VLLMSpecialistPool:
         # field).  Pass enable_thinking through chat_template_kwargs; vLLM ignores
         # unknown template kwargs for models whose template doesn't use them.
         chat_kwargs: dict[str, Any] = dict(sampling_params=sampling, use_tqdm=False)
-        if profile.thinking:
-            chat_kwargs["chat_template_kwargs"] = {"enable_thinking": True}
+        # Pass enable_thinking EXPLICITLY (both True and False). Omitting it lets
+        # Gemma 4's chat template default to thinking-on, whose long reasoning
+        # trace dominates latency (~78s even warm). Explicit False disables it.
+        chat_kwargs["chat_template_kwargs"] = {"enable_thinking": profile.thinking}
 
         t0 = time.monotonic()
         try:
