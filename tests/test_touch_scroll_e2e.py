@@ -32,7 +32,7 @@ except ImportError as exc:
     print(f"ERROR: {exc}. Run: pip install aiohttp")
     sys.exit(1)
 
-from ipad_bridge import IPadBridge
+from core.ipad_bridge import IPadBridge
 
 BRIDGE_PORT = 8767  # Unique port to avoid conflicts
 
@@ -207,7 +207,7 @@ async def run_tests() -> int:
 
     # Patch where the functions are looked up: command_executor imports `mouse` module
     # so we patch the functions on that module object.
-    import command_executor
+    import core.command_executor
     with patch.object(command_executor.mouse, "mouse_scroll") as mock_scroll, \
          patch.object(command_executor.mouse, "mouse_click") as mock_click, \
          patch("pyautogui.position", return_value=(960, 540)):

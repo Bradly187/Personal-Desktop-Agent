@@ -30,10 +30,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from command_executor import Command
-from fusion_engine import FusionEngine, FusionConfig
-from hybrid_coordinator import CoordinatorConfig, HybridCoordinator
-from whisper_stream import WhisperStream
+from core.command_executor import Command
+from core.fusion_engine import FusionEngine, FusionConfig
+from core.hybrid_coordinator import CoordinatorConfig, HybridCoordinator
+from sensors.whisper_stream import WhisperStream
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ async def test_voice_e2e_latency_under_600ms() -> tuple[bool, str]:
     t0 = time.monotonic()
     with patch("pyautogui.moveRel"), \
          patch("pyautogui.size", return_value=(1920, 1080)), \
-         patch("command_executor.keyboard.keyboard_hotkey", return_value={}), \
+         patch("core.command_executor.keyboard.keyboard_hotkey", return_value={}), \
          patch("pyautogui.hotkey"):
         await fusion._tick()
     elapsed_ms = (time.monotonic() - t0) * 1000

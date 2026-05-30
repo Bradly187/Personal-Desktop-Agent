@@ -10,9 +10,9 @@ import inside _tick). We test the components and their composition directly.
 
 import pytest
 
-from fusion_engine import FusionConfig, FusionEngine, dead_zone_ramp, power_curve
-from gyro_bias_calibrator import BiasState
-from one_euro_filter import OneEuroFilter
+from core.fusion_engine import FusionConfig, FusionEngine, dead_zone_ramp, power_curve
+from calibration.gyro_bias_calibrator import BiasState
+from sensors.one_euro_filter import OneEuroFilter
 
 
 class TestTiltVelocityPipelineLogic:
@@ -20,7 +20,7 @@ class TestTiltVelocityPipelineLogic:
 
     def test_bias_subtraction_removes_drift(self):
         """After calibration, bias is subtracted from raw values."""
-        from gyro_bias_calibrator import GyroBiasCalibrator
+        from calibration.gyro_bias_calibrator import GyroBiasCalibrator
 
         # Use a calibrator with shorter settings for testing
         cal = GyroBiasCalibrator(

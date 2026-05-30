@@ -31,7 +31,7 @@ from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fusion_engine import FusionEngine, FusionConfig
+from core.fusion_engine import FusionEngine, FusionConfig
 
 
 SCREEN_W = 1920

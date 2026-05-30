@@ -28,7 +28,7 @@ from tests.conftest import (
 
 def make_processor(confidence_min=0.65, debounce_s=0.80):
     """Return a GestureProcessor with _available forced True and Hands mocked."""
-    import gesture_processor as gp_mod
+    import sensors.gesture_processor as gp_mod
     gp_mod._MP_AVAILABLE = True
     gp_mod._CV2_AVAILABLE = True
     # When mediapipe is not installed, mp is undefined; stub it so _process_frame
@@ -36,7 +36,7 @@ def make_processor(confidence_min=0.65, debounce_s=0.80):
     if not hasattr(gp_mod, 'mp') or gp_mod.mp is None:
         gp_mod.mp = MagicMock()
         gp_mod.mp.ImageFormat.SRGB = MagicMock()
-    from gesture_processor import GestureProcessor
+    from sensors.gesture_processor import GestureProcessor
     proc = GestureProcessor(confidence_min=confidence_min, debounce_s=debounce_s)
     proc._available = True
     return proc
@@ -57,8 +57,8 @@ def run_with_mock_hands(proc, lm_mock, score=0.90, msg=None):
 # ---------------------------------------------------------------------------
 
 def test_gp01_mp_unavailable_returns_none():
-    import gesture_processor as gp_mod
-    from gesture_processor import GestureProcessor
+    import sensors.gesture_processor as gp_mod
+    from sensors.gesture_processor import GestureProcessor
     original = gp_mod._MP_AVAILABLE
     try:
         gp_mod._MP_AVAILABLE = False
@@ -212,7 +212,7 @@ def test_gp12_debounce_suppresses_second_call():
 # ---------------------------------------------------------------------------
 
 def test_gp13_debounce_expires_allows_refire():
-    import gesture_processor as gp_mod
+    import sensors.gesture_processor as gp_mod
     proc = make_processor(debounce_s=0.80)
 
     # Use return_value (not side_effect) so every monotonic() call within a
@@ -331,7 +331,7 @@ def test_gp19_lidar_one_none_falls_back():
 # ---------------------------------------------------------------------------
 
 def test_gp20_status_lidar_wired():
-    from gesture_processor import GestureProcessor
+    from sensors.gesture_processor import GestureProcessor
     proc = GestureProcessor()
     proc._available = True
     status = proc.get_status()
@@ -347,7 +347,7 @@ def test_gp20_status_lidar_wired():
 # ---------------------------------------------------------------------------
 
 def test_gp21_close_cleans_up():
-    from gesture_processor import GestureProcessor
+    from sensors.gesture_processor import GestureProcessor
     proc = GestureProcessor()
     mock_hands = MagicMock()
     proc._hands = mock_hands

@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 
-from command_executor import Command
-from fusion_engine import FusionEngine, FusionConfig
+from core.command_executor import Command
+from core.fusion_engine import FusionEngine, FusionConfig
 
 SCREEN_W = 1920
 SCREEN_H = 1080

@@ -14,7 +14,7 @@ class TestHeadTrackerAxisMapping:
 
     def test_positive_pitch_produces_positive_dy(self):
         """Forward head tilt (chin to chest, positive pitch) → cursor down (positive dy)."""
-        from fusion_engine import FusionConfig
+        from core.fusion_engine import FusionConfig
 
         cfg = FusionConfig()
         # Simulate what Rule 7 does: dy = int(pitch * head_sensitivity)
@@ -24,7 +24,7 @@ class TestHeadTrackerAxisMapping:
 
     def test_negative_pitch_produces_negative_dy(self):
         """Backward head tilt (head back, negative pitch) → cursor up (negative dy)."""
-        from fusion_engine import FusionConfig
+        from core.fusion_engine import FusionConfig
 
         cfg = FusionConfig()
         pitch = -2.0  # degrees, backward tilt
@@ -33,7 +33,7 @@ class TestHeadTrackerAxisMapping:
 
     def test_positive_yaw_produces_positive_dx(self):
         """Turn head right (positive yaw) → cursor right (positive dx)."""
-        from fusion_engine import FusionConfig
+        from core.fusion_engine import FusionConfig
 
         cfg = FusionConfig()
         yaw = 2.0  # degrees, turn right
@@ -42,7 +42,7 @@ class TestHeadTrackerAxisMapping:
 
     def test_negative_yaw_produces_negative_dx(self):
         """Turn head left (negative yaw) → cursor left (negative dx)."""
-        from fusion_engine import FusionConfig
+        from core.fusion_engine import FusionConfig
 
         cfg = FusionConfig()
         yaw = -2.0  # degrees, turn left

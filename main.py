@@ -192,17 +192,17 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
         return "OK", "MiniLM available (loads on first few-shot query)"
 
     def _check_acoustic_profiler():
-        from acoustic_profiler import AcousticProfiler  # noqa: F401
+        from calibration.acoustic_profiler import AcousticProfiler  # noqa: F401
         return "OK", "acoustic profiler available"
 
     def _check_uiautomation():
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         p = UIAutomationProvider()
         avail = p.is_available()
         return ("OK", "UIA COM available") if avail else ("WARN", "UIA COM unavailable (comtypes?)")
 
     def _check_gaze_calibration():
-        from gaze_calibrator import GazeCalibrator, _JSON_PATH
+        from calibration.gaze_calibrator import GazeCalibrator, _JSON_PATH
         if not _JSON_PATH.exists():
             return "WARN", "not calibrated — say 'hey agent calibrate monitor'"
         cal = GazeCalibrator()
@@ -228,9 +228,41 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
         import duckdb  # noqa: F401
         return "OK", f"v{duckdb.__version__}  (session analytics)"
 
+    def _check_kiro():
+        import urllib.request as _ur
+        # Try a quick HTTP ping to the WebSocket port to see if extension is running
+        try:
+            _ur.urlopen("http://127.0.0.1:8767/", timeout=1)
+        except Exception as exc:
+            msg = str(exc)
+            if "Connection refused" in msg or "actively refused" in msg:
+                return "WARN", "extension not running — install kiro-extension/ and reload Kiro"
+            # Any HTTP response (even 400/404) means the server is up
+            return "OK", "bridge extension running on ws://127.0.0.1:8767"
+        return "OK", "bridge extension running on ws://127.0.0.1:8767"
+
+    def _check_llamacpp():
+        import urllib.request as _ur
+        try:
+            with _ur.urlopen("http://localhost:8080/health", timeout=2) as r:
+                r.read()
+            return "OK", "llama-server reachable on :8080"
+        except Exception:
+            return "WARN", "llama-server not running (needed for --backend llamacpp)"
+
+    def _check_vllm():
+        try:
+            import vllm  # noqa: F401
+            return "OK", f"vllm v{vllm.__version__} installed (activate with --backend vllm)"
+        except ImportError:
+            return "WARN", "not installed — run vllm_setup.bat to fix CUDA wheels"
+
     check("Metrics (in-process)",           lambda: ("OK", "metrics.py singleton ready"))
     check("ChromaDB RAG (codebase index)",  _check_chromadb)
     check("DuckDB (session analytics)",     _check_duckdb)
+    check("Kiro/VS Code bridge",            _check_kiro)
+    check("llama.cpp server (:8080)",       _check_llamacpp)
+    check("vLLM",                           _check_vllm)
     check("GPU / VRAM (pynvml)",            _check_pynvml)
     check("Ollama LLM server",              _check_ollama)
     check("Whisper (faster-whisper)",       _check_whisper)
@@ -418,25 +450,25 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 async def _run_pipeline(args: argparse.Namespace) -> None:
-    from command_executor import CommandExecutor
-    from db import AgentDB
-    from local_inference import OllamaInference
-    from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
-    from behavioral_twin_state import BehavioralTwinState
-    from fusion_engine import FusionEngine, FusionConfig
-    from ipad_bridge import IPadBridge
-    from continuous_trainer import ContinuousTrainer
-    from lidar_receiver import LiDARReceiver
-    from gesture_processor import GestureProcessor
-    from model_router import ModelRouter
-    from dev_agent import DevAgent
-    from whisper_stream import WhisperStream
-    from audit_log import AuditLog
-    from content_filter import ContentFilter
-    from mcp_trust_classifier import MCPTrustClassifier
-    from gaze_calibrator import GazeCalibrator
-    from metrics import get_metrics
-    from session_analyzer import SessionAnalyzer
+    from core.command_executor import CommandExecutor
+    from storage.db import AgentDB
+    from inference.local_inference import OllamaInference, LlamaCppInference, VLLMInference, VLLMEmbedder
+    from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+    from adaptive.behavioral_twin_state import BehavioralTwinState
+    from core.fusion_engine import FusionEngine, FusionConfig
+    from core.ipad_bridge import IPadBridge
+    from adaptive.continuous_trainer import ContinuousTrainer
+    from sensors.lidar_receiver import LiDARReceiver
+    from sensors.gesture_processor import GestureProcessor
+    from inference.model_router import ModelRouter, VLLMSpecialistPool
+    from inference.dev_agent import DevAgent
+    from sensors.whisper_stream import WhisperStream
+    from storage.audit_log import AuditLog
+    from adaptive.content_filter import ContentFilter
+    from adaptive.mcp_trust_classifier import MCPTrustClassifier
+    from calibration.gaze_calibrator import GazeCalibrator
+    from monitoring.metrics import get_metrics
+    from storage.session_analyzer import SessionAnalyzer
 
     if args.safe_mode:
         os.environ["SAFE_MODE"] = "1"
@@ -481,7 +513,59 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Build components ---
     cfg = CoordinatorConfig()
-    local = OllamaInference()
+
+    # Backend selection (--backend flag)
+    _backend = args.backend.lower() if hasattr(args, "backend") else "ollama"
+    if _backend == "llamacpp":
+        local = LlamaCppInference(
+            model=getattr(args, "llamacpp_model", "local-model"),
+            host=getattr(args, "llamacpp_host", "http://localhost:8080"),
+        )
+        log.info("Using llama.cpp backend (llama-server on %s)", local.host)
+    elif _backend == "vllm":
+        _vllm_speculative = getattr(args, "speculative", False)
+        local = VLLMInference(
+            model=getattr(args, "vllm_model", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
+            speculative_model="llama3.1:8b" if _vllm_speculative else None,
+        )
+        log.info(
+            "Using vLLM backend (LLM class) — model loads on first inference request%s",
+            " [speculative decoding enabled]" if _vllm_speculative else "",
+        )
+    else:
+        local = OllamaInference()
+
+    # ── vLLM specialist pool (--vllm-pool) ────────────────────────────────
+    # Architecture 2: INT4 AWQ specialists in vLLM, TTL-slept between requests.
+    # Requires --backend vllm (command model) + WSL2 with vllm installed.
+    # Ollama remains the automatic fallback if the pool raises.
+    _vllm_pool: Optional[VLLMSpecialistPool] = None
+    if getattr(args, "vllm_pool", False):
+        if _backend != "vllm":
+            log.warning("--vllm-pool requires --backend vllm; specialist pool disabled")
+        else:
+            # Pass the command engine so the pool can sleep it before waking a
+            # 30B-class specialist (they can't co-reside with Whisper on 32 GB).
+            _vllm_pool = VLLMSpecialistPool(command_engine=local)
+            # Mutual exclusion the other way: when the command engine wakes, sleep
+            # any awake specialist first.
+            if hasattr(local, "set_pre_wake_hook"):
+                local.set_pre_wake_hook(_vllm_pool.sleep_all_specialists)
+            await _vllm_pool.start()
+            log.info("VLLMSpecialistPool: started (INT4 AWQ specialists) — "
+                     "command<->specialist mutual-exclusion wired")
+
+    # ── vLLM embedder (--vllm-embed) ──────────────────────────────────────
+    # Replaces sentence-transformers in SemanticMemory / CodebaseIndexer.
+    _vllm_embedder: Optional[VLLMEmbedder] = None
+    if getattr(args, "vllm_embed", False):
+        if _backend != "vllm":
+            log.warning("--vllm-embed requires --backend vllm; using sentence-transformers")
+        else:
+            _vllm_embedder = VLLMEmbedder(
+                model=getattr(args, "embed_model", "nomic-ai/nomic-embed-text-v1.5")
+            )
+            log.info("VLLMEmbedder: will activate on first encode() call")
 
     # GestureProcessor created first so trainer can hold a reference for
     # calibrated threshold push-back.
@@ -489,12 +573,29 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     gesture = GestureProcessor()
     gesture.set_lidar(lidar)
 
+    # D7: FlickEngine — wired if not in safe mode
+    if not args.safe_mode:
+        try:
+            from desktop.flick_engine import FlickEngine
+            from desktop.snap_zones import get_snap_zones, move_window_drag
+            _flick_engine = FlickEngine(
+                screen_w=sw, screen_h=sh,
+                snap_zones_fn=get_snap_zones,
+                move_window_fn=move_window_drag,
+            )
+            gesture.set_flick_engine(_flick_engine)
+            log.info("FlickEngine: initialised  screen=%dx%d", sw, sh)
+        except Exception as _fe_exc:
+            log.warning("FlickEngine: could not initialise (%s) — flick-to-snap disabled", _fe_exc)
+
     trainer = ContinuousTrainer(
         agent_db=agent_db, config=cfg, twin_state=twin_state,
         gesture_processor=gesture,          # receives calibrated velocity thresholds
     )
 
     router = ModelRouter()
+    if _vllm_pool is not None:
+        router.set_vllm_pool(_vllm_pool)
     coordinator = HybridCoordinator(
         local=local, config=cfg, trainer=trainer,
         agent_db=agent_db, session_id=session_id,
@@ -507,6 +608,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     )
     coordinator.set_dev_agent(dev_agent)
 
+    # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────
+    if getattr(args, "kiro", False):
+        try:
+            from inference.kiro_client import KiroClient
+            kiro = KiroClient()
+            dev_agent.set_kiro(kiro)
+            log.info("KiroClient: wired to DevAgent (ws://127.0.0.1:8767)")
+        except Exception as _kiro_exc:
+            log.warning("KiroClient: failed to initialise: %s", _kiro_exc)
+
     # ── Metrics singleton — wire to all pipeline components ────────────────
     m = get_metrics()
     fusion_pre = None   # FusionEngine created below; wire metrics after
@@ -517,7 +628,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
     fusion.set_session_id(session_id)
 
-    from acoustic_profiler import AcousticProfiler
+    from calibration.acoustic_profiler import AcousticProfiler
     profiler = AcousticProfiler(agent_db=agent_db, session_id=session_id)
     await profiler.load()
 
@@ -531,9 +642,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     coordinator.set_profiler(profiler)
 
     # Wire VoiceCalibrator
-    from voice_calibrator import VoiceCalibrator
+    from calibration.voice_calibrator import VoiceCalibrator
     try:
-        from polly_stream import get_client as _get_tts
+        from tts.polly_stream import get_client as _get_tts
         _speak_fn = _get_tts().speak_sync
     except Exception:
         _speak_fn = None
@@ -541,6 +652,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if _speak_fn:
         calibrator.set_tts(_speak_fn)
     coordinator.set_calibrator(calibrator)
+
+    # Wire profiler into fusion engine for rms_ambient telemetry
+    fusion.set_acoustic_profiler(profiler)
 
     # Wire profiler into twin state for voice clarity pain signal
     if twin_state:
@@ -561,6 +675,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_coordinator(coordinator)  # needed for pain_day_override message
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
     bridge.set_gaze_calibrator(gaze_calibrator)
+    if _speak_fn:
+        bridge.set_speak_fn(_speak_fn)
     fusion.set_gaze_calibrator(gaze_calibrator)
     fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
     await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
@@ -588,13 +704,22 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     indexer = None
     if args.index_codebase:
         try:
-            from codebase_indexer import CodebaseIndexer
+            from inference.codebase_indexer import CodebaseIndexer
             _project_root = str(Path(__file__).parent)
-            indexer = CodebaseIndexer(project_root=_project_root)
+            indexer = CodebaseIndexer(
+                project_root=_project_root,
+                embedder=_vllm_embedder,   # None → falls back to sentence-transformers
+            )
             if await indexer.start():
                 _idx_stats = await indexer.index()
                 log.info("CodebaseIndexer: %s", _idx_stats)
                 dev_agent.set_indexer(indexer)
+                # Start file watcher for continuous incremental indexing
+                if getattr(args, "watch", False):
+                    if indexer.start_watching():
+                        log.info("CodebaseIndexer: file watcher active")
+                    else:
+                        log.info("CodebaseIndexer: file watcher unavailable (pip install watchdog)")
             else:
                 log.warning("CodebaseIndexer: ChromaDB unavailable — RAG disabled")
                 indexer = None
@@ -621,16 +746,22 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # ── Optional sensor viewer window ──────────────────────────────────────
     viewer = None
     if args.viewer:
-        from sensor_viewer import SensorViewer
+        from sensors.sensor_viewer import SensorViewer
         viewer = SensorViewer()
         bridge.set_viewer(viewer)
+        if hasattr(gesture, "set_viewer"):
+            gesture.set_viewer(viewer)
+        if args.viewer and not args.safe_mode and hasattr(gesture, "_flick_engine"):
+            fe = getattr(gesture, "_flick_engine", None)
+            if fe is not None:
+                viewer.set_flick_engine(fe)
         viewer.start()
 
     # ── Optional live dashboard ────────────────────────────────────────────
     dashboard_obj = None
     if args.dashboard:
         try:
-            from dashboard import Dashboard
+            from monitoring.dashboard import Dashboard
             dashboard_obj = Dashboard(metrics=m, interval=1.0)
             await dashboard_obj.start()
         except Exception as _dash_exc:
@@ -671,6 +802,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
+    # Stop vLLM specialist pool watchdog
+    if _vllm_pool is not None:
+        await _vllm_pool.stop()
+
     # Stop dashboard + indexer before shutdown flushes DB
     if dashboard_obj is not None:
         dashboard_obj.stop()
@@ -701,8 +836,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
 async def _run_viewer_only(args: argparse.Namespace) -> None:
     """Run just the bridge and sensor viewer — no LLM, no gesture, no whisper."""
-    from ipad_bridge import IPadBridge
-    from sensor_viewer import SensorViewer
+    from core.ipad_bridge import IPadBridge
+    from sensors.sensor_viewer import SensorViewer
 
     log.info("Starting in viewer-only mode (no inference pipeline)")
 
@@ -752,6 +887,40 @@ def _parse_args() -> argparse.Namespace:
                    help="Index Python/Swift source + docs PDFs into ChromaDB RAG at startup")
     p.add_argument("--metrics-port", type=int, default=0,
                    help="Expose /metrics JSON endpoint on this port (0 = disabled)")
+    # ── Backend selection (roadmap item #1, #6) ──────────────────────────────
+    p.add_argument("--backend", type=str, default="ollama",
+                   choices=["ollama", "vllm", "llamacpp"],
+                   help="LLM inference backend: ollama (default), vllm, llamacpp")
+    p.add_argument("--vllm-model", type=str,
+                   default="meta-llama/Meta-Llama-3.1-8B-Instruct",
+                   help="HuggingFace model ID for vLLM backend")
+    p.add_argument("--speculative", action="store_true",
+                   help="Enable speculative decoding (roadmap #9): passes "
+                        "--speculative-model llama3.1:8b to vLLM at startup. "
+                        "Requires --backend vllm. Acceptance rate ~60-80%% on code.")
+    p.add_argument("--llamacpp-model", type=str, default="local-model",
+                   help="Model name label for llama.cpp backend (informational only)")
+    p.add_argument("--llamacpp-host", type=str, default="http://localhost:8080",
+                   help="llama-server base URL for llama.cpp backend")
+    # ── vLLM Architecture 2: INT4 specialist pool + embedding ────────────────
+    p.add_argument("--vllm-pool", action="store_true",
+                   help="Enable vLLM INT4 specialist pool (requires --backend vllm). "
+                        "Routes code/math/vision/plan/general through in-process vLLM "
+                        "LLM instances with TTL sleep; 3-8s wake vs Ollama's 60s cold load. "
+                        "Needs AWQ checkpoints on HuggingFace (see model_router.py header).")
+    p.add_argument("--vllm-embed", action="store_true",
+                   help="Use VLLMEmbedder (nomic-embed-text-v1.5) for RAG instead of "
+                        "sentence-transformers. Requires --backend vllm.")
+    p.add_argument("--embed-model", type=str,
+                   default="nomic-ai/nomic-embed-text-v1.5",
+                   help="HuggingFace embedding model for --vllm-embed")
+    # ── Kiro/VS Code bridge (roadmap item #2) ────────────────────────────────
+    p.add_argument("--kiro", action="store_true",
+                   help="Connect to Kiro/VS Code bridge extension on ws://127.0.0.1:8767")
+    # ── File watcher (roadmap item #5) ───────────────────────────────────────
+    p.add_argument("--watch", action="store_true",
+                   help="Enable continuous file watcher for incremental RAG re-indexing "
+                        "(requires --index-codebase and pip install watchdog)")
     return p.parse_args()
 
 

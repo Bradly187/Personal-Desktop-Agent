@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from model_router import ModelRouter, ModelProfile, _free_vram_gb, _FALLBACK
+from inference.model_router import ModelRouter, ModelProfile, _free_vram_gb, _FALLBACK
 
 
 # ---------------------------------------------------------------------------

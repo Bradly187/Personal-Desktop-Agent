@@ -27,13 +27,13 @@ def _tiny_png_b64() -> str:
 
 class TestVisionGrounderBasics:
     def test_ground_returns_none_on_empty_inputs(self):
-        from vision_grounder import VisionGrounder
+        from desktop.vision_grounder import VisionGrounder
         vg = VisionGrounder()
         assert vg.ground("", "somebase64") is None
         assert vg.ground("submit button", "") is None
 
     def test_ground_cache_hit_returns_result(self):
-        from vision_grounder import VisionGrounder, GroundingResult
+        from desktop.vision_grounder import VisionGrounder, GroundingResult
         import time
         vg = VisionGrounder()
         # Seed the cache directly
@@ -46,7 +46,7 @@ class TestVisionGrounderBasics:
         assert result.source == "vision_cache"
 
     def test_ground_cache_expired_does_not_hit(self):
-        from vision_grounder import VisionGrounder
+        from desktop.vision_grounder import VisionGrounder
         import time
         vg = VisionGrounder()
         vg._cache["old button"] = (400, 300, time.monotonic() - 5.0)  # expired
@@ -57,7 +57,7 @@ class TestVisionGrounderBasics:
         assert result is None  # expired cache → fresh call → failed → None
 
     def test_get_client_raises_when_anthropic_missing(self):
-        from vision_grounder import VisionGrounder
+        from desktop.vision_grounder import VisionGrounder
         vg = VisionGrounder()
         with patch.dict("sys.modules", {"anthropic": None}):
             with pytest.raises(RuntimeError, match="anthropic package"):
@@ -87,7 +87,7 @@ class TestVisionGrounderBasics:
     def test_parse_null_coords_returns_none(self):
         """JSON with null coords returns None without raising."""
         import json
-        from vision_grounder import VisionGrounder
+        from desktop.vision_grounder import VisionGrounder
 
         raw = '{"x": null, "y": null, "confidence": 0.0}'
         data = json.loads(raw)
@@ -105,7 +105,7 @@ class TestVisionGrounderBasics:
 
     def test_low_confidence_returns_none(self):
         """Results below GROUNDING_MIN_CONFIDENCE must return None."""
-        from vision_grounder import VisionGrounder, GROUNDING_MIN_CONFIDENCE
+        from desktop.vision_grounder import VisionGrounder, GROUNDING_MIN_CONFIDENCE
         vg = VisionGrounder()
 
         with patch.object(vg, "_get_client", return_value=MagicMock()), \
@@ -116,7 +116,7 @@ class TestVisionGrounderBasics:
 
     def test_high_confidence_returns_result(self):
         """Results at or above GROUNDING_MIN_CONFIDENCE must return GroundingResult."""
-        from vision_grounder import VisionGrounder, GroundingResult, GROUNDING_MIN_CONFIDENCE
+        from desktop.vision_grounder import VisionGrounder, GroundingResult, GROUNDING_MIN_CONFIDENCE
         vg = VisionGrounder()
 
         with patch.object(vg, "_get_client", return_value=MagicMock()), \
@@ -130,7 +130,7 @@ class TestVisionGrounderBasics:
 
     def test_successful_ground_populates_cache(self):
         """A successful grounding result must be cached for 2 seconds."""
-        from vision_grounder import VisionGrounder, GROUNDING_MIN_CONFIDENCE
+        from desktop.vision_grounder import VisionGrounder, GROUNDING_MIN_CONFIDENCE
         import time
         vg = VisionGrounder()
 
@@ -146,7 +146,7 @@ class TestVisionGrounderBasics:
 
     def test_api_exception_returns_none(self):
         """API errors must degrade gracefully to None."""
-        from vision_grounder import VisionGrounder
+        from desktop.vision_grounder import VisionGrounder
         vg = VisionGrounder()
 
         with patch.object(vg, "_get_client", return_value=MagicMock()), \
@@ -156,7 +156,7 @@ class TestVisionGrounderBasics:
         assert result is None
 
     def test_get_status_returns_dict(self):
-        from vision_grounder import VisionGrounder
+        from desktop.vision_grounder import VisionGrounder
         vg = VisionGrounder()
         status = vg.get_status()
         assert "model" in status

@@ -32,13 +32,13 @@ from tools import keyboard, mouse, screen, windows
 # Trust classifier — scans tool outputs for injection patterns before returning to LLM
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    from mcp_trust_classifier import MCPTrustClassifier, RiskLevel
+    from adaptive.mcp_trust_classifier import MCPTrustClassifier, RiskLevel
     _trust_classifier = MCPTrustClassifier()
 except ImportError:
     _trust_classifier = None
 
 try:
-    from audit_log import AuditLog
+    from storage.audit_log import AuditLog
     _audit_available = True
 except ImportError:
     _audit_available = False

@@ -28,8 +28,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from command_executor import Command
-from fusion_engine import FusionEngine, FusionConfig, _GazeBuffer, _GazeSample
+from core.command_executor import Command
+from core.fusion_engine import FusionEngine, FusionConfig, _GazeBuffer, _GazeSample
 
 
 # ---------------------------------------------------------------------------

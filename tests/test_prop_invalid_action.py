@@ -22,8 +22,8 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 
-from command_executor import Command
-from fusion_engine import FusionEngine, FusionConfig
+from core.command_executor import Command
+from core.fusion_engine import FusionEngine, FusionConfig
 
 SCREEN_W = 1920
 SCREEN_H = 1080
@@ -83,7 +83,7 @@ class TestInvalidActionTypeRejection:
         engine = _make_engine()
 
         # Use a fresh handler per iteration to avoid fixture-scope issues
-        logger = logging.getLogger("fusion_engine")
+        logger = logging.getLogger("core.fusion_engine")
         handler = logging.handlers.MemoryHandler(capacity=100)
         handler.setLevel(logging.WARNING)
         logger.addHandler(handler)

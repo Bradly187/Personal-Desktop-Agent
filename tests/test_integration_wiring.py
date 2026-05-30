@@ -22,8 +22,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from behavioral_twin_state import BehavioralTwinState, TwinSnapshot, _DEFAULT_SNAPSHOT
-from continuous_trainer import ContinuousTrainer
+from adaptive.behavioral_twin_state import BehavioralTwinState, TwinSnapshot, _DEFAULT_SNAPSHOT
+from adaptive.continuous_trainer import ContinuousTrainer
 
 
 # ---------------------------------------------------------------------------
@@ -205,11 +205,11 @@ def test_15_2_hybrid_coordinator_calls_get_snapshot():
 
         # Import HybridCoordinator — it may have heavy deps; we mock them
         try:
-            from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+            from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
         except ImportError:
             pytest.skip("HybridCoordinator not importable in this environment")
 
-        from command_executor import Command
+        from core.command_executor import Command
 
         config = CoordinatorConfig()
         # Mock out the local inference and DB so route() doesn't actually call LLMs

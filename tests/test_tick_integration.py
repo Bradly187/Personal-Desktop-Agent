@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from command_executor import Command
-from fusion_engine import FusionConfig, FusionEngine
+from core.command_executor import Command
+from core.fusion_engine import FusionConfig, FusionEngine
 
 
 @pytest.fixture

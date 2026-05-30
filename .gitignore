@@ -31,9 +31,14 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.venv-wsl/
 *.egg-info/
 dist/
 build/
+
+# WSL / CUDA install artifacts (not source)
+*.deb
+cuda-keyring_*
 
 # Logs
 logs/
@@ -48,8 +53,13 @@ logs/
 
 # Misc large/generated
 tts_service/node_modules/
-files/
 _archive/
+
+# Certificates and sensitive credentials (keep out of git entirely)
+docs/certs/
+
+# Local research PDFs dropped into docs/ (not intended for repo)
+docs/agentOS_Ppaer.pdf
 
 # OS
 .DS_Store

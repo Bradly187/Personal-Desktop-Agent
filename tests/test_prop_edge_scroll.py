@@ -25,7 +25,7 @@ from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fusion_engine import FusionConfig, FusionEngine
+from core.fusion_engine import FusionConfig, FusionEngine
 
 
 # ---------------------------------------------------------------------------

@@ -18,13 +18,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from command_executor import Command
+from core.command_executor import Command
 
 
 @pytest.mark.asyncio
 async def test_coordinator_correct_calls_trainer():
     """Verify HybridCoordinator.correct() calls the trainer."""
-    from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+    from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
 
     mock_trainer = MagicMock()
     mock_trainer.record_correction = AsyncMock()
@@ -52,7 +52,7 @@ async def test_coordinator_correct_calls_trainer():
 @pytest.mark.asyncio
 async def test_coordinator_correct_no_trainer():
     """Verify HybridCoordinator.correct() returns ok even with no trainer."""
-    from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+    from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
 
     coordinator = HybridCoordinator(config=CoordinatorConfig())
 
@@ -69,7 +69,7 @@ async def test_coordinator_correct_no_trainer():
 @pytest.mark.asyncio
 async def test_trainer_record_correction_stores_locally():
     """Verify ContinuousTrainer.record_correction() calls AgentDB."""
-    from continuous_trainer import ContinuousTrainer
+    from adaptive.continuous_trainer import ContinuousTrainer
 
     mock_db = AsyncMock()
     mock_db.available = True

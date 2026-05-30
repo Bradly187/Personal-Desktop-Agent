@@ -1,10 +1,17 @@
 import time
 
-import pyautogui
-import win32clipboard
-import win32con
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = True
+except Exception:
+    pyautogui = None
 
-pyautogui.FAILSAFE = True
+try:
+    import win32clipboard
+    import win32con
+except Exception:
+    win32clipboard = None
+    win32con = None
 
 
 def keyboard_type(text: str, interval: float = 0.0) -> dict:

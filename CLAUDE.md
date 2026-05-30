@@ -10,7 +10,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Architecture diagrams (13): `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md`
 - Tech stack: `.kiro/steering/tech.md`
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
-- Daily reviews: `docs/`
+- Daily reviews: `docs/daily/`
 
 ## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 + G1–G5 + iPad logging + 2026-05-24 fixes (2026-05-24)
 
@@ -19,7 +19,7 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 **Done (Phase 2):**
 - `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz; gaze delta cursor integration (relative eye movement → cursor), sound actions, tilt/head direct-to-pyautogui
 - `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
-- `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (production-ready code; needs CUDA 13.x torch wheels to activate on RTX 5090)
+- `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, 373ms warm p50), `VLLMInference` (verified working in Ubuntu WSL2 — vLLM 0.21.0 + torch 2.11.0+cu128; activate with `--backend vllm`)
 - `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
 - `iPadApp/DesktopAgent/` — SwiftUI app (41 Swift source files, 15 Swift test files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `HandwritingCanvasView` (Write tab — Math+Text mode, Click & Send), `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`, `OnboardingView`, `SensorDashboardView`, `SensorActivityBar`, `GazeCalibrationSheet`, `TiltCalibrationSheet`, `SoundTrainingSheet`, `CursorConflictBanner`, `CommandToast`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
 
@@ -212,46 +212,51 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 | File | Purpose |
 |------|---------|
-| `ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 15 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
-| `command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
+| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 15 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
+| `core/command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
 | `mcp_server/desktop_mcp_server.py` | MCP stdio server; 14 tools; `SAFE_MODE` env var |
 | `mcp_server/tools/mouse.py` | move, click, double_click, scroll, drag |
 | `mcp_server/tools/keyboard.py` | type, hotkey, press, paste (unicode via clipboard) |
 | `mcp_server/tools/screen.py` | screenshot (base64 PNG), get_screen_size, find_text_on_screen (OCR) |
 | `mcp_server/tools/windows.py` | get_active_window, list_windows, focus_window (win32gui + psutil) |
 | `mcp_server/tools/handwriting.py` | pix2tex LaTeX OCR; latex_to_unicode fallback converter |
-| `fusion_engine.py` | 60 Hz tick loop; 10-level sensor priority; direct pyautogui for tilt/head |
-| `hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); AWS Bedrock fallback; outcome logger |
-| `local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (complete; needs CUDA 13.x torch to activate) |
-| `continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
-| `lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
-| `behavioral_twin_state.py` | Persistent user behaviour model: `TwinSnapshot`, `PreferenceModel`, `PainDayEngine`; AgentDB + ChromaDB backing; feeds `HybridCoordinator` before every gate decision |
-| `semantic_memory.py` | ChromaDB vector store (all-MiniLM-L6-v2) for semantic few-shot retrieval; Jaccard fallback when chromadb unavailable; `stop()` releases WAL file handles on Windows |
-| `one_euro_filter.py` | Casiez 2012 adaptive low-pass filter (1€); used for tilt velocity, tilt position, gaze delta, head tracking — replaces EMA throughout sensor pipelines |
-| `gyro_bias_calibrator.py` | Gyro bias state machine (UNCALIBRATED→COLLECTING→CALIBRATED→FROZEN); stationary detection + lerp-smoothed bias subtraction for tilt velocity pipeline |
-| `gesture_processor.py` | MediaPipe Tasks API (`HandLandmarker`, `hand_landmarker.task`); peace-sign base pose; 13 gestures (swipe/grab/snap/monitor/push-pull/pinch); 500ms rolling buffer; velocity learning; 800ms debounce |
-| `domain_classifier.py` | Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL |
-| `model_router.py` | VRAM-aware specialist model selection; domain-tuned prompts; Ollama inference |
-| `dev_agent.py` | Plan→execute→reflect agentic loop; 5 dev verbs; session context |
+| `core/fusion_engine.py` | 60 Hz tick loop; 10-level sensor priority; direct pyautogui for tilt/head |
+| `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); AWS Bedrock fallback; outcome logger |
+| `inference/local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (verified in Ubuntu WSL2, vLLM 0.21.0; `--backend vllm`; use `--gpu-memory-utilization 0.65` with Whisper running) |
+| `adaptive/continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
+| `sensors/lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
+| `adaptive/behavioral_twin_state.py` | Persistent user behaviour model: `TwinSnapshot`, `PreferenceModel`, `PainDayEngine`; AgentDB + ChromaDB backing; feeds `HybridCoordinator` before every gate decision |
+| `storage/semantic_memory.py` | ChromaDB vector store (all-MiniLM-L6-v2) for semantic few-shot retrieval; Jaccard fallback when chromadb unavailable; `stop()` releases WAL file handles on Windows |
+| `sensors/one_euro_filter.py` | Casiez 2012 adaptive low-pass filter (1€); used for tilt velocity, tilt position, gaze delta, head tracking — replaces EMA throughout sensor pipelines |
+| `calibration/gyro_bias_calibrator.py` | Gyro bias state machine (UNCALIBRATED→COLLECTING→CALIBRATED→FROZEN); stationary detection + lerp-smoothed bias subtraction for tilt velocity pipeline |
+| `sensors/gesture_processor.py` | MediaPipe Tasks API (`HandLandmarker`, `hand_landmarker.task`); peace-sign base pose; 13 gestures (swipe/grab/snap/monitor/push-pull/pinch); 500ms rolling buffer; velocity learning; 800ms debounce |
+| `core/domain_classifier.py` | Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL |
+| `inference/model_router.py` | VRAM-aware specialist model selection; domain-tuned prompts; Ollama inference |
+| `inference/dev_agent.py` | Plan→execute→reflect agentic loop; 5 dev verbs; session context |
 | `main.py` | Unified entry point; `--measure-vram`; `--viewer`/`--viewer-only`; startup status table; Ctrl-C shutdown |
-| `sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
-| `whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
-| `db.py` | `AgentDB` (aiosqlite, 27 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice + gaze monitor calibration + iPad log tables |
-| `gaze_calibrator.py` | Angular affine mapping from world-space gaze ray → screen pixel; `add_sample()`/`solve()`/`project()`; numpy lstsq; `gaze_calibration.json` + AgentDB persistence |
-| `calibration_overlay.py` | Tkinter full-screen 5-dot calibration overlay; daemon thread; advances/closes via method calls |
+| `sensors/sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
+| `sensors/whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
+| `storage/db.py` | `AgentDB` (aiosqlite, 27 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice + gaze monitor calibration + iPad log tables |
+| `calibration/gaze_calibrator.py` | Angular affine mapping from world-space gaze ray → screen pixel; `add_sample()`/`solve()`/`project()`; numpy lstsq; `gaze_calibration.json` + AgentDB persistence |
+| `calibration/calibration_overlay.py` | Tkinter full-screen 5-dot calibration overlay; daemon thread; advances/closes via method calls |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
-| `polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
-| `chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
+| `tts/polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
+| `tts/chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
 | `tts_service/server.js` | Node.js sidecar (port 8766); calls `StartSpeechSynthesisStream` (AWS SDK v3); returns OGG Vorbis; Python decodes with soundfile |
 | `approval_hook.py` | Claude Code `PreToolUse` gate; Danielle speaks action description; records iPad mic via WhisperStream signal file or PC mic fallback; yes/no → exit 0/2 |
-| `audit_log.py` | Append-only `audit.db` (SQLite WAL); records every MCP tool invocation, session lifecycle event, and security finding; UPDATE/DELETE blocked by triggers |
+| `storage/audit_log.py` | Append-only `audit.db` (SQLite WAL); records every MCP tool invocation, session lifecycle event, and security finding; UPDATE/DELETE blocked by triggers |
 | `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device (`"Microphone (Realtek USB Audio)"`), timeout, tts_backend |
 | `start_agent.bat` | Windows startup script; activates venv and runs `main.py`; logs to `logs/agent_startup.log` |
-| `acoustic_profiler.py` | Per-user VAD threshold + logprob floor from measured RMS/spectral-centroid/Whisper-logprob; passive calibration; drift detection; seasonal re-cal prompt; Signal 5 in PainDayEngine |
-| `voice_calibrator.py` | Guided voice calibration for 4 conditions (good/flare/allergy/SVT); 20 phrases; voice-triggered or iPad Settings tab; writes to `voice_profile` + `voice_phrases` tables |
-| `vision_grounder.py` | Claude vision API resolves named UI targets to pixel coords; confidence ≥0.7; 2s cache; fallback chain: vision → gaze → OCR → CLARIFY |
-| `ui_automation.py` | Win32 UIAutomation BFS tree search; fuzzy name scoring; 0.3s timeout; 1s cache; first fallback in `_resolve_coords` |
-| `action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |
+| `calibration/acoustic_profiler.py` | Per-user VAD threshold + logprob floor from measured RMS/spectral-centroid/Whisper-logprob; passive calibration; drift detection; seasonal re-cal prompt; Signal 5 in PainDayEngine |
+| `calibration/voice_calibrator.py` | Guided voice calibration for 4 conditions (good/flare/allergy/SVT); 20 phrases; voice-triggered or iPad Settings tab; writes to `voice_profile` + `voice_phrases` tables |
+| `desktop/vision_grounder.py` | Local qwen3-vl:30b (Ollama) resolves named UI targets to pixel coords; claude-sonnet-4-6 as fallback; confidence ≥0.7; 2s cache; fallback chain: vision → gaze → OCR → CLARIFY |
+| `desktop/ui_automation.py` | Win32 UIAutomation BFS tree search; fuzzy name scoring; 0.3s timeout; 1s cache; first fallback in `_resolve_coords` |
+| `desktop/action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |
+| `desktop/flick_engine.py` | Flick-to-snap gesture handler; maps GRAB_SNAP_* gestures to window snap zones; uses OneEuroFilter for smoothing |
+| `inference/kiro_client.py` | WebSocket client for Kiro/VS Code bridge extension on ws://127.0.0.1:8767; wired to DevAgent for code edits |
+| `inference/codebase_indexer.py` | ChromaDB RAG index over Python/Swift source + docs PDFs; incremental file watcher; fed to DevAgent for context |
+| `monitoring/metrics.py` | In-process metrics singleton; VRAM poller; optional `/metrics` HTTP endpoint |
+| `storage/session_analyzer.py` | Post-session DuckDB analytics; route distribution, latency percentiles, error modes; summary persisted to AgentDB |
 
 ## Polly TTS Voice
 
@@ -283,10 +288,10 @@ Takes effect immediately — no restart required. The sidecar reads the voice fr
 
 | Path | Engine | Voice source | When |
 |------|--------|-------------|------|
-| `polly_stream.py` → `tts_service/server.js` | Generative 24kHz | `approval_config.json` → POST body | CLARIFY questions, DevAgent EXPLAIN |
-| `chatterbox_tts.py` (via `polly_stream.get_client()`) | Local GPU | exaggeration/cfg in `approval_config.json` | When `tts_backend == "chatterbox"` |
+| `tts/polly_stream.py` → `tts_service/server.js` | Generative 24kHz | `approval_config.json` → POST body | CLARIFY questions, DevAgent EXPLAIN |
+| `tts/chatterbox_tts.py` (via `polly_stream.get_client()`) | Local GPU | exaggeration/cfg in `approval_config.json` | When `tts_backend == "chatterbox"` |
 | `approval_hook.py` `_polly_speak()` | Neural 16kHz | `approval_config.json` `voice_id` | "Approve write to…?" gate |
-| `command_executor.py` `_polly_speak()` | Neural 16kHz | `_POLLY_VOICE` constant | Sidecar-down fallback |
+| `core/command_executor.py` `_polly_speak()` | Neural 16kHz | `_POLLY_VOICE` constant | Sidecar-down fallback |
 
 ### iPad mic approval flow
 
@@ -308,7 +313,7 @@ used instead (4-second recording window, auto-approve on silence).
 
 `touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 10. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `gaze_ray` carries a world-space unit vector `{dx,dy,dz}` at ~10 Hz; `ipad_bridge` stores it and attaches it to the next `gaze_dwell` event so `FusionEngine` can use `GazeCalibrator.project()` for absolute pixel positioning. `gaze_calibration_sample` delivers a dot_index + known pixel + ray during calibration sessions. `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (gaze, head_pose, keyword, etc.) are dispatched to FusionEngine.
 
-## Sensor Priority (FusionEngine — `fusion_engine.py`)
+## Sensor Priority (FusionEngine — `core/fusion_engine.py`)
 
 1. iPad touch command — bypasses LLM entirely
 2. Sound action (mouth sounds via AVFoundation)
@@ -338,7 +343,7 @@ used instead (4-second recording window, auto-approve on silence).
 - Tesseract OCR must be installed system-wide for `find_text_on_screen` to function; the function returns `{"found": false, "error": "pytesseract not installed"}` otherwise.
 - mDNS advertisement requires `zeroconf`; the bridge degrades gracefully without it (logs a warning, still accepts connections).
 - VRAM measured 2026-05-08: baseline 8.3 GB, Whisper +4.2 GB, ~19 GB free for LLM. `llama3.1:70b` does not fit alongside Whisper.
-- Default LLM is `llama3.1:8b` (4.6 GB VRAM) for command, plan, and general domains. `nemotron-mini` scored 25% and is not suitable without fine-tuning. `deepseek-r1:8b` produces reasoning output incompatible with the verb-first format. `gpt-oss:20b` removed from primary profiles (retained in fallback chains only).
+- Default LLM is `llama3.1:8b` (4.6 GB VRAM) for the command domain. Specialist models: `qwen3-coder:30b` (code+plan, thinking ON), `deepseek-r1:8b` (math, chain-of-thought kept), `qwen3-vl:30b` (vision), `gemma3:27b` (general). `nemotron-mini` scored 25% and was removed. `gpt-oss:20b` scored 0% and was removed. `deepseek-r1:8b` reasoning output is kept for math but is incompatible with verb-first command format.
 
 ## MCP Server Registration (Claude Code)
 

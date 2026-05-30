@@ -44,7 +44,7 @@ def _sine_audio(freq_hz: float = 440.0, duration_s: float = 0.5, sr: int = 16_00
 
 class TestAcousticProfilerLoad:
     def test_load_with_no_stored_profile_uses_defaults(self):
-        from acoustic_profiler import AcousticProfiler, VAD_THRESHOLD_MIN, VAD_THRESHOLD_MAX
+        from calibration.acoustic_profiler import AcousticProfiler, VAD_THRESHOLD_MIN, VAD_THRESHOLD_MAX
         db = _make_db()
         profiler = AcousticProfiler(agent_db=db)
         asyncio.run(profiler.load())
@@ -53,7 +53,7 @@ class TestAcousticProfilerLoad:
         assert VAD_THRESHOLD_MIN <= profiler._vad_threshold <= VAD_THRESHOLD_MAX
 
     def test_load_with_stored_profile_applies_thresholds(self):
-        from acoustic_profiler import AcousticProfiler
+        from calibration.acoustic_profiler import AcousticProfiler
         db = _make_db()
         db.get_voice_profile = AsyncMock(return_value={
             "baseline_rms": 0.08,
@@ -74,7 +74,7 @@ class TestAcousticProfilerLoad:
 
 class TestAcousticProfilerRecord:
     def test_record_returns_voice_metrics(self):
-        from acoustic_profiler import AcousticProfiler, VoiceMetrics
+        from calibration.acoustic_profiler import AcousticProfiler, VoiceMetrics
         audio = _sine_audio()
         if audio is None:
             pytest.skip("numpy not available")
@@ -90,7 +90,7 @@ class TestAcousticProfilerRecord:
         assert metrics.avg_logprob == pytest.approx(-0.3)
 
     def test_record_increments_sample_count(self):
-        from acoustic_profiler import AcousticProfiler
+        from calibration.acoustic_profiler import AcousticProfiler
         audio = _sine_audio()
         if audio is None:
             pytest.skip("numpy not available")
@@ -103,7 +103,7 @@ class TestAcousticProfilerRecord:
         assert profiler._sample_count == before + 1
 
     def test_record_updates_healthy_samples(self):
-        from acoustic_profiler import AcousticProfiler
+        from calibration.acoustic_profiler import AcousticProfiler
         audio = _sine_audio()
         if audio is None:
             pytest.skip("numpy not available")
@@ -115,7 +115,7 @@ class TestAcousticProfilerRecord:
         assert len(profiler._healthy_samples) == 1
 
     def test_record_flare_day_goes_to_flare_samples(self):
-        from acoustic_profiler import AcousticProfiler
+        from calibration.acoustic_profiler import AcousticProfiler
         audio = _sine_audio()
         if audio is None:
             pytest.skip("numpy not available")
@@ -130,7 +130,7 @@ class TestAcousticProfilerRecord:
 
 class TestAcousticProfilerThresholds:
     def _seeded_profiler(self, n_samples: int = 20, rms: float = 0.08, logprob: float = -0.30):
-        from acoustic_profiler import AcousticProfiler, VoiceMetrics
+        from calibration.acoustic_profiler import AcousticProfiler, VoiceMetrics
         db = _make_db()
         profiler = AcousticProfiler(agent_db=db)
         profiler._event_loop = asyncio.new_event_loop()
@@ -144,7 +144,7 @@ class TestAcousticProfilerThresholds:
         return profiler
 
     def test_vad_threshold_is_fraction_of_baseline_rms(self):
-        from acoustic_profiler import AcousticProfiler, VAD_FRACTION
+        from calibration.acoustic_profiler import AcousticProfiler, VAD_FRACTION
         profiler = self._seeded_profiler(rms=0.08)
         expected = 0.08 * VAD_FRACTION
         assert profiler._vad_threshold == pytest.approx(expected, abs=0.005)
@@ -157,7 +157,7 @@ class TestAcousticProfilerThresholds:
         assert flare_vad == pytest.approx(normal_vad * profiler._flare_vad_scale)
 
     def test_logprob_floor_below_baseline(self):
-        from acoustic_profiler import LOGPROB_MARGIN
+        from calibration.acoustic_profiler import LOGPROB_MARGIN
         profiler = self._seeded_profiler(logprob=-0.30)
         floor = profiler.get_logprob_floor(pain_day=False)
         assert floor == pytest.approx(-0.30 + LOGPROB_MARGIN, abs=0.01)
@@ -171,13 +171,13 @@ class TestAcousticProfilerThresholds:
 
 class TestAcousticProfilerDrift:
     def test_voice_clarity_zero_when_uncalibrated(self):
-        from acoustic_profiler import AcousticProfiler
+        from calibration.acoustic_profiler import AcousticProfiler
         db = _make_db()
         profiler = AcousticProfiler(agent_db=db)
         assert profiler.voice_clarity_score() == 0.0
 
     def test_voice_clarity_nonzero_on_degradation(self):
-        from acoustic_profiler import AcousticProfiler, VoiceMetrics
+        from calibration.acoustic_profiler import AcousticProfiler, VoiceMetrics
         db = _make_db()
         profiler = AcousticProfiler(agent_db=db)
         profiler._event_loop = asyncio.new_event_loop()
@@ -197,7 +197,7 @@ class TestAcousticProfilerDrift:
         assert clarity > 0.0, "Degraded voice should produce nonzero clarity score"
 
     def test_drift_callback_fired_on_threshold(self):
-        from acoustic_profiler import AcousticProfiler, VoiceMetrics, DRIFT_RECAL_THRESHOLD
+        from calibration.acoustic_profiler import AcousticProfiler, VoiceMetrics, DRIFT_RECAL_THRESHOLD
         db = _make_db()
         profiler = AcousticProfiler(agent_db=db)
         profiler._event_loop = asyncio.new_event_loop()
@@ -224,7 +224,7 @@ class TestAcousticProfilerDrift:
         assert fired[0].needs_recalibration is True
 
     def test_mark_calibrated_resets_last_calibration_ts(self):
-        from acoustic_profiler import AcousticProfiler, VoiceMetrics
+        from calibration.acoustic_profiler import AcousticProfiler, VoiceMetrics
         db = _make_db()
         profiler = AcousticProfiler(agent_db=db)
         profiler._event_loop = asyncio.new_event_loop()

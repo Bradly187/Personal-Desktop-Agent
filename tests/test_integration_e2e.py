@@ -26,9 +26,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from command_executor import Command
-from fusion_engine import FusionConfig, FusionEngine
-from ipad_bridge import IPadBridge
+from core.command_executor import Command
+from core.fusion_engine import FusionConfig, FusionEngine
+from core.ipad_bridge import IPadBridge
 
 
 # ---------------------------------------------------------------------------

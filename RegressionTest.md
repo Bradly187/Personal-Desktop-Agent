@@ -1,173 +1,187 @@
-# Regression Test Report — 2026-05-23
+# Regression Test — 2026-05-27
 
-**Scope:** work performed on **2026-05-22** (uncommitted on master) plus a re-check of the outstanding action items from the 2026-05-22 sweep
-**Reviewer:** automated regression sweep (scheduled task)
-**Suite status:** ✅ `pytest tests/` — **557 passed, 0 failed** in 281.65s (13 warnings, all pre-existing 3rd-party deprecations)
-**Runtime log:** `logs/agent_startup.log` — session 47 started today 08:47, current uptime ~22 min, 0 ERROR/CRITICAL events on the working tree as it stands
+Automated review of the most recent day of commits (2026-05-25; there were no
+commits dated 2026-05-26). Scope: regressions, logic errors, concurrency,
+dependency problems, and security. Logs reviewed: `logs/agent_startup.log`.
+
+## Commits reviewed
+
+| Hash | Summary |
+|------|---------|
+| `9bc6605` | chore: .gitignore, raise VAD floor, docs/diagrams |
+| `f0ed95b` | docs: Azure AI Foundry handoff |
+| `edae1c8` | feat: ML observability + RAG pipeline (metrics, dashboard, analytics, codebase index) |
+| `729afaa` | docs: ML pipeline diagrams |
+| `52dfe58` | feat: hardware + IDE integration (Kiro bridge, llama.cpp, git verbs, file watcher) |
+| `790ad1f` | refactor(model_router): plan→qwen3-coder:30b+thinking, general→gemma3:27b |
+| `570d805` | VisionGrounder→local qwen3-vl:30b; Chatterbox TTS; Continue.dev |
+
+Verification performed: `py_compile` of all 14 changed Python modules (pass),
+runtime import of the 5 new modules (`metrics`, `session_analyzer`, `dashboard`,
+`codebase_indexer`, `kiro_client`) (pass), targeted API checks against the
+installed `websockets` and `concurrent.futures` libraries, and a scan of the
+running agent's startup log.
+
+No fixes were applied — this is a findings report, per the scheduled-task spec.
 
 ---
 
-## Yesterday's Work (2026-05-22)
+## HIGH — functional bugs
 
-There are **no git commits** dated 2026-05-22. All of yesterday's work is still in the working tree (staged for a future commit). It covers the Sprint G1–G4 gaze-to-monitor calibration feature and the housekeeping pass documented in `docs/2026-05-22-daily-review.md`.
-
-| Change | File(s) |
-|---|---|
-| Sprint G1 — angular gaze-to-pixel solver | `gaze_calibrator.py` (NEW, 310 LOC) |
-| Sprint G2 — full-screen 5-dot tkinter overlay | `calibration_overlay.py` (NEW, 213 LOC) |
-| Sprint G3 — `gaze_monitor_calibration` table + upsert/get methods | `db.py` (+82 LOC) |
-| iPad world-ray export at 10 Hz | `iPadApp/.../GazeTracker.swift` (+39 LOC), `WebSocketManager.swift` (+6 LOC) |
-| `gaze_ray` / `gaze_calibration_sample` handlers; ray attachment to `gaze_dwell`; docstring update (19→29 message types) | `ipad_bridge.py` (+102 / -34 LOC) |
-| `FusionEngine.set_gaze_calibrator()`; `on_gaze_dwell(ray_dir=…)` override path | `fusion_engine.py` (+22 LOC) |
-| Calibrator load + startup table row + bridge/fusion wiring | `main.py` (+23 LOC) |
-| 22 new tests for calibrator | `tests/test_gaze_calibrator.py` (NEW) |
-| 29 + 22 tests for UIAutomation + ActionVerifier (carried over from 05-21 work) | `tests/test_ui_automation.py`, `tests/test_action_verifier.py` (NEW) |
-| Housekeeping: docstring 19→29, CLAUDE.md table counts 21→27, status header, WebSocket protocol section rewrite, dead `_GAZE_RAY_MAX_AGE_S` removed | `ipad_bridge.py`, `CLAUDE.md`, `.kiro/specs/.../tasks.md`, `docs/2026-05-21-daily-review.md` |
-
----
-
-## Findings
-
-### A. NEW issues introduced in 2026-05-22 work
-
-#### A1. [iPadApp/DesktopAgent/Sensors/GazeTracker.swift:285–296](iPadApp/DesktopAgent/Sensors/GazeTracker.swift#L285) — `gaze_ray` only fires while the eyes are moving (HIGH, logic error)
-
-The 10 Hz `sendGazeRay()` call is placed **after** the early-return guard:
-
-```swift
-// Only suppress truly zero output to avoid unnecessary WebSocket traffic.
-guard abs(dx) > 0.01 || abs(dy) > 0.01 else { return }
-
-// Send world-space gaze ray at ~10 Hz (every 6th frame) for monitor calibration.
-rayFrameCounter += 1
-if rayFrameCounter >= Self.rayFrameInterval {
-    rayFrameCounter = 0
-    if let ray = currentWorldRay {
-        ws?.sendGazeRay(...)
-    }
-}
-```
-
-When the user **dwells** on a target — exactly the precondition for a `gaze_dwell` event — `dx`/`dy` collapse to near-zero, the guard returns, and `gaze_ray` is never sent. Meanwhile `ipad_bridge.py` only attaches a ray to `gaze_dwell` if the latest sample is **< 300 ms old** ([ipad_bridge.py:382–386](ipad_bridge.py#L382)).
-
-**Net effect:** at the exact moment the calibrated absolute-pixel projection is required, the freshest ray is typically 600 ms – 2 s old and is rejected by the freshness check. The calibration code path is effectively dead in production.
-
-**Fix:** hoist the `rayFrameCounter` block above the delta guard so the ray is sent unconditionally on every 6th frame regardless of whether a `gaze_delta` is emitted.
-
-#### A2. [gaze_calibrator.py:248](gaze_calibrator.py#L248) / [gaze_calibrator.py:220](gaze_calibrator.py#L220) — JSON I/O uses platform default encoding (LOW, portability)
-
+### H1. KiroClient reconnects + leaks a socket on every request (`kiro_client.py`, 52dfe58)
+`_do_request` guards connection reuse with:
 ```python
-_JSON_PATH.write_text(json.dumps(data, indent=2))   # save
-data = json.loads(_JSON_PATH.read_text())           # load
+if self._ws is None or getattr(self._ws, "closed", True):
 ```
+`requirements.txt` pins `websockets==14.2`, but the installed runtime is
+**websockets 16.0**, where `websockets.connect()` returns a
+`websockets.asyncio.client.ClientConnection` that has **no `.closed` attribute**
+(verified: `hasattr(ClientConnection, "closed") == False`; it exposes `.state`
+and `.close_code` instead). `getattr(..., "closed", True)` therefore always
+returns `True`, so:
+- a brand-new WebSocket is opened on *every* `_request`, and
+- the previous connection is dropped without `close()` → socket/task leak.
 
-`Path.write_text` / `read_text` use the OS default encoding (cp1252 on most Windows installs), but JSON is specified as UTF-8. If a future field ever contains non-ASCII (e.g. a comment field or a user note), save/load can break across hosts.
+Only manifests when the Kiro/VS Code bridge extension is actually running on
+:8767 (otherwise `_available` short-circuits). **Fix:** test
+`self._ws is None or self._ws.state is not State.OPEN` (or wrap send/recv and
+reconnect on `ConnectionClosed`), and align the pinned `websockets` version with
+reality.
 
-**Fix:** add `encoding="utf-8"` to both calls.
-
-#### A3. [gaze_calibrator.py:167](gaze_calibrator.py#L167) — Synchronous file I/O inside `solve()` (LOW, concurrency)
-
-`solve()` is documented as CPU-bound and "should be wrapped in `asyncio.to_thread` if called from async context". The call to `self._save_json()` at the end performs disk I/O on the same thread. The docstring is correct; whoever wires the voice-trigger path ("hey agent calibrate monitor") must remember to `to_thread` the whole `solve()` call. **Action:** add a one-line reminder in the eventual wiring code so this doesn't silently block the event loop the day the feature ships.
-
-#### A4. [fusion_engine.py:564–572](fusion_engine.py#L564) — `on_gaze_dwell` normalises pixels back into [0,1] (INFO, design smell)
-
+### H2. Two metrics gauges never populate (`hybrid_coordinator.py`, edae1c8)
+At command-outcome time the coordinator records:
 ```python
-if ray_dir is not None and self._gaze_calibrator is not None:
-    result = self._gaze_calibrator.project(ray_dir)
-    if result is not None:
-        x = result[0] / self._w
-        y = result[1] / self._h
-self._gaze_dwell = (x, y)
+whisper_logprob=cmd.params.get("whisper_logprob") if cmd.params else None,
+gesture_conf=cmd.params.get("gesture_conf")   if cmd.params else None,
 ```
+But these values live on the `Command` **dataclass fields**
+(`cmd.whisper_logprob`, `cmd.gesture_confidence`), not inside `cmd.params`.
+Nothing ever writes the keys `"whisper_logprob"`/`"gesture_conf"` into `params`.
+Result: the `whisper_logprob_ema` and `gesture_conf_ema` gauges (and the
+dashboard "SENSORS" panel that reads them) are permanently `N/A`.
+**Fix:** `getattr(cmd, "whisper_logprob", None)` and
+`getattr(cmd, "gesture_confidence", None)`.
 
-The calibrator returns clamped *integer pixels*; this code immediately divides by `self._w`/`self._h` to fit the dataclass's existing normalised representation, and the consumer presumably re-multiplies further downstream. Not a bug, but each round-trip introduces sub-pixel quantisation. Worth eventually adding a separate `_gaze_dwell_px: Optional[tuple[int,int]]` field to bypass the conversion.
+---
 
-#### A5. [ipad_bridge.py:459–478](ipad_bridge.py#L459) — `gaze_calibration_sample` does no per-session de-dup (LOW)
+## MEDIUM
 
-The handler accepts an unlimited number of samples with the same `dot_index`. If iPad UX retries on a missed dwell, multiple readings for one dot will be silently appended and tilt the least-squares fit. The eventual UI sheet should clear pending samples for the dot before sending a retry, or the bridge should pop/replace by index.
-
-#### A6. [main.py:204–214](main.py#L204) — startup `_check_gaze_calibration` calls `cal.get_status()["calibrated_at"]` even when 0 (TRIVIAL)
-
-If `calibrated_at` was never set (corrupt sidecar that parses but is missing the field, defaulted to 0.0 by `load()`), `age_days = (now - 0)/86400` reports ~20,000 days. Not crash-worthy because the surrounding `check()` wrapper traps exceptions, but the displayed string is misleading. Add a `calibrated_at > 0` check before computing age.
-
-#### A7. [iPadApp/DesktopAgent/Sensors/GazeTracker.swift:46–49](iPadApp/DesktopAgent/Sensors/GazeTracker.swift#L46) — `currentWorldRay` read concurrency (LOW)
-
-```swift
-nonisolated(unsafe) var currentWorldRay: (origin: simd_float3, dir: simd_float3)?
+### M1. Blocking `pyautogui.position()` inside the 60 Hz tick loop (`fusion_engine.py:1277`, edae1c8)
+The new ~1 Hz telemetry sampler reads the cursor with:
+```python
+# Cursor position — read pyautogui off the event loop to avoid latency
+import pyautogui as _pag
+_pos = _pag.position()
 ```
+The comment says "off the event loop," but the call runs **synchronously inside
+the tick loop**. `pyautogui.position()` is a Win32 round-trip and the loop's
+budget is 16.7 ms. The startup log shows two `FusionEngine slow tick`
+warnings (116.6 ms, 231.8 ms) since this landed. **Fix:** move the read into
+`asyncio.to_thread`, or source the cursor position from an already-cached value
+rather than calling Win32 on the hottest loop in the system.
 
-Tuple of two `simd_float3` is **6 floats = 24 bytes**, not a single-word write. The "single-word assignment" claim in the comment is wrong. In practice writes and reads happen on the same `processQueue` serial queue (the comment line below confirms it), so it is safe — but the *justification given* is incorrect. Replace the misleading comment, or wrap the field in an `OSAllocatedUnfairLock` for defence in depth.
+### M2. `rms_ambient` telemetry is always NULL — dead wiring (`main.py` + `fusion_engine.py`, edae1c8)
+`FusionEngine.set_acoustic_profiler()` was added and the telemetry row carries
+an `rms_ambient` column, but `main.py` never calls
+`fusion.set_acoustic_profiler(profiler)` (only `whisper.` and `twin_state.` get
+it). `self._acoustic_profiler` stays `None`, so `rms_ambient` is never written.
+Not a crash; a silent data gap in the new `sensor_telemetry` table that
+`SessionAnalyzer` also reports on (`_mean_rms` → None). **Fix:** add the one
+wiring line in `main.py` next to the other `fusion.set_*` calls.
 
-### B. Items carried over from the 2026-05-22 sweep — still unfixed
+### M3. `--dashboard` never shows the curses TUI; can crash-spam in plain mode (`dashboard.py`, edae1c8)
+`Dashboard.start()` (the in-process path used by `--dashboard`) only ever
+launches `_log_loop()` → `PlainTextRenderer`. The `CursesRenderer` is reachable
+only from the standalone `python dashboard.py` CLI; the `_use_curses` flag is set
+to `None` and never consulted. Separately, `PlainTextRenderer.render` formats
+`f"{g.get('latency_ema_ms', 0):.0f}ms"`, but the gauge is initialised to `None`
+(not absent), so before the first command it raises
+`TypeError: unsupported format string`. It is swallowed by the loop's
+`try/except`, but it logs a warning every tick until a command routes.
+**Fix:** coalesce `None`→0 in the formatters; decide whether `--dashboard` should
+attempt curses.
 
-| # | Item | Status | Evidence |
-|---|---|---|---|
-| 1 | Watchdog Hz unit confusion ([main.py:347](main.py#L347)) — `hz = current_ticks - _last_tick_count` over a 60 s window, mislabelled as Hz | ❌ **Still broken.** Today's log [logs/agent_startup.log:30](logs/agent_startup.log#L30) reads `WATCHDOG: FusionEngine 1922 Hz` consistently; the real tick rate is ~32 Hz, below the 60 Hz target. The 50-Hz guardrail never fires. |
-| 2 | `_ipad_log_tasks` untracked fire-and-forget ([ipad_bridge.py:825](ipad_bridge.py#L825) — pre-yesterday code) | ❌ **Unchanged.** No `add_done_callback` / set tracking added. |
-| 3 | `agent.db-shm`, `agent.db-wal` not in `.gitignore` | ❌ **Confirmed by today's `git status`** — both appear as `??`. |
-| 4 | `subsystem` field on `ipad_log` not whitelisted | ❌ Unchanged. |
-| 5 | `start_agent.bat` log truncate-on-restart | ❌ Unchanged. |
-| 6 | Dead code in `_watchdog` (`_orig_tick`, `hasattr` branch) | ❌ Unchanged. |
-
-### C. Soak / runtime health (POSITIVE)
-
-- Today's session 47 started 08:47 with all uncommitted Sprint G1–G4 code loaded.
-- Startup table now includes a `Gaze monitor calibration` row (renders as `WARN: not calibrated` since `gaze_calibration.json` does not yet exist — expected).
-- `FusionEngine: GazeCalibrator wired (calibrated=False)` log line confirms bridge↔fusion↔calibrator wiring is exercised on every boot.
-- No new exceptions, no Whisper death, no Tracker crashes after wiring the new module paths.
-- GPU VRAM steady at 26.2 GB free across the run.
-- Pre-existing `Ollama unreachable` warning every 10 min — environmental on this host.
-
----
-
-## Security Review (new surface only)
-
-| Concern | Status |
-|---|---|
-| **`gaze_ray` payload validation** ([ipad_bridge.py:362–371](ipad_bridge.py#L362)) | ✅ All three components are `float()`-coerced inside `try/except (ValueError, TypeError)`. Magnitude < 1e-9 guard prevents NaN/inf division. Bridge stores the normalised vector only. |
-| **`gaze_calibration_sample` validation** ([ipad_bridge.py:462–477](ipad_bridge.py#L462)) | ✅ All fields coerced (`int(dot_index)`, `int(px_x/px_y)`, `float(ray_*)`); negative dot_idx silently discarded. Possible abuse vector below ↓ |
-| **No bound on dot_index / per-session sample count** | ⚠️ A LAN attacker could spam thousands of `gaze_calibration_sample` messages and bloat memory in `GazeCalibrator._samples` (Python list, ~80 B per `_CalibSample`). Bounded by `solve()` consuming them on success, but an attacker could indefinitely add samples without ever calling solve. Trust boundary is the iPad WebSocket — acceptable on a single-user LAN but should be hardened (cap `len(self._samples)` at e.g. 50) before any multi-user exposure. |
-| **GazeCalibrator JSON load** ([gaze_calibrator.py:212–234](gaze_calibrator.py#L212)) | ✅ Wraps everything in `try/except`. `json.loads` is safe (no `eval`). No path traversal — `_JSON_PATH` is a module constant. |
-| **`gaze_monitor_calibration` DB insert** ([db.py:807](db.py#L807)) | ✅ All values parameterised; JSON-serialised structures are stored as TEXT. Parameter list matches schema. |
-| **`gaze_ray` does not assert `confidence ∈ [0, 1]`** ([ipad_bridge.py:362](ipad_bridge.py#L362)) | ℹ️ Field is read but not used (only `dx/dy/dz` go into `_latest_gaze_ray`). Not a security concern. |
-
----
-
-## Dependency / Concurrency Audit
-
-| Risk | Verdict |
-|---|---|
-| `gaze_calibrator.py` imports `numpy` lazily inside each method | ✅ Good — module is importable on systems without numpy, fails gracefully at solve/project time. |
-| `calibration_overlay.py` imports `tkinter` lazily inside `_run_tk` | ✅ Good — daemon-thread degradation is correct. |
-| `currentWorldRay` Swift cross-thread write | ⚠️ Comment misleading (see A7) but practically safe (single serial queue). |
-| `_latest_gaze_ray` Python read/write across handlers | ✅ Single asyncio loop, no race. |
-| `solve()` synchronous disk I/O in a future async caller | ⚠️ Not wired yet; flagged for the trigger work (A3). |
-| New tables vs WAL mode | ✅ `gaze_monitor_calibration` declared inside the same `_SCHEMA` string applied at startup; benefits from WAL mode automatically. |
-| `numpy.linalg.lstsq` `rcond=None` | ✅ Correct — silences NumPy 1.14+ FutureWarning and uses the new default. |
-| Test suite | ✅ 557/557 pass. No flakes observed in this run. |
+### M4. New model lineup is a hard runtime dependency that isn't satisfied (790ad1f, 570d805)
+`model_router` now points `code`/`plan`→`qwen3-coder:30b`, `general`→`gemma3:27b`,
+`vision`→`qwen3-vl:30b`, and `VisionGrounder` defaults to local
+`qwen3-vl:30b` over Ollama. The startup log shows **Ollama unreachable**
+(`WinError 10061`, connection refused) repeatedly. If Ollama isn't running or
+those tags aren't pulled, every dev-domain inference and local vision grounding
+fails (vision grounder falls back to Anthropic; the rest return CLARIFY/error).
+Also note VRAM headroom: baseline 8.3 GB + Whisper 4.2 GB leaves ~19 GB, so
+`qwen3-coder:30b` (17.3 GB) or `gemma3:27b` (16.2 GB) fit individually, but
+`code`/`plan` (17.3 GB) and `vision` (18.2 GB) **cannot co-reside** — expect a
+model swap whenever the domain alternates between them. Action: confirm
+`ollama pull` of all four tags and that the Ollama service auto-starts.
 
 ---
 
-## Action Items (prioritised)
+## LOW / observations
 
-1. **[NEW, HIGH] Move the `gaze_ray` sender above the delta-zero guard in `GazeTracker.swift`** — the calibrated dwell path is currently broken when the user actually dwells (A1).
-2. **[carried, HIGH] Fix watchdog Hz math in `main.py:347`** — divide by 60 and re-check threshold; the soak guardrail remains non-functional. *FusionEngine is currently running at ~32 Hz vs configured 60 Hz — investigate cause separately once the watchdog reports honest numbers.*
-3. **[carried, LOW] Track `_ipad_log_tasks`** in `ipad_bridge.py` to prevent GC and silent exception loss.
-4. **[carried, LOW] Add `agent.db-shm` / `agent.db-wal` to `.gitignore`.**
-5. **[NEW, LOW] Add `encoding="utf-8"`** to `gaze_calibrator.py` JSON read/write calls (A2).
-6. **[NEW, LOW] Cap `GazeCalibrator._samples` length** (e.g. 50) and replace-by-`dot_index` instead of append (A5).
-7. **[NEW, TRIVIAL] Guard `calibrated_at > 0`** in `main.py` startup-table age display (A6).
-8. **[NEW, TRIVIAL] Replace the incorrect "single-word assignment" comment** on `currentWorldRay` (A7).
-9. **[carried, LOW] Whitelist iPad-log `subsystem` field** to `[A-Za-z0-9_.]{1,32}`.
-10. **[carried, LOW] Preserve previous startup log** on `start_agent.bat` restart (copy-before-truncate).
-11. **[carried, TRIVIAL] Remove dead code** in `_watchdog` (`_orig_tick`, `hasattr` branch).
+- **L1. VisionGrounder cold-start latency (570d805).** The Ollama path uses a
+  10 s `urllib` timeout (correctly wrapped in `asyncio.to_thread`, so the loop
+  isn't blocked). On a cold `qwen3-vl:30b` load, a CLICK target resolution can
+  stall up to 10 s before falling back. Warm latency (~0.4 s) is fine.
+
+- **L2. Autonomous git/GitHub verbs bypass the approval gate (`dev_agent.py`, 52dfe58).**
+  `GIT_COMMIT` runs `git add -u` + `git commit`, `GITHUB_PR` runs `gh pr create`,
+  driven directly by planner output via `subprocess`. These do **not** pass
+  through `approval_hook.py` (which only gates MCP tool calls). Args are passed
+  as argv lists (no `shell=True`) so there's **no shell-injection risk**, but a
+  voice-misheard plan could commit or open a PR with no confirmation. Consider
+  routing these through the existing voice-approval gate.
+
+- **L3. Kiro bridge has no auth (`kiro-extension/src/extension.ts`, 52dfe58).**
+  The WebSocket server binds to `127.0.0.1:8767` (loopback only — good) but has
+  no token. Any local process can `apply_edit` or `run_terminal`
+  (`terminal.sendText(command)`). Acceptable for a single-user machine; flagged
+  for awareness if the bind host ever changes.
+
+- **L4. `websockets` version drift.** `requirements.txt` pins `14.2`; installed
+  is `16.0`. Beyond H1, pin-vs-reality drift can mask other API changes.
+
+- **L5. KiroClient response correlation.** `_do_request` assumes the first
+  `recv()` is the reply to the request it just sent (no `id` matching). Safe
+  today because an `asyncio.Lock` serialises requests, but fragile if the bridge
+  ever pushes unsolicited messages.
+
+- **L6. `SessionAnalyzer` reads agent.db via DuckDB ATTACH while the aiosqlite
+  connection is still open** (run before `shutdown()`). agent.db is WAL +
+  `busy_timeout=5000`, and the call is wrapped in try/except (non-fatal), so this
+  is tolerable, but it's a known fragility of the DuckDB SQLite reader against a
+  live WAL database.
+
+- **L7. Process pool is never explicitly shut down (`codebase_indexer.py`,
+  52dfe58).** `_CPU_POOL` is a module global reclaimed only at interpreter exit
+  (atexit). Intentional reuse; noted for completeness. The `_broken` private
+  attribute it checks does exist on `ProcessPoolExecutor` (verified), so the
+  guard is safe.
 
 ---
 
-## Regressions Detected
+## Items checked and found OK
 
-**None.** The 557-test pytest suite passes. The runtime agent boots cleanly with all Sprint G1–G4 code wired. The startup table row, fusion log line, and bridge handlers all execute. The watchdog still mislabels Hz exactly as it did before yesterday's work — the bug is **pre-existing**, not new.
+- All 14 changed Python modules compile and the 5 new modules import cleanly.
+- `LlamaCppInference` (new) reuses the existing `_SYSTEM_PROMPT` and few-shot key
+  contract (`command_text`/`action_text`) consistently — no KeyError risk.
+- `dev_agent` git/PR/URL verbs use argv-list `subprocess` calls — no shell
+  injection. `FETCH_URL` strips scripts/styles before returning text.
+- `codebase_indexer` chunking now correctly accumulates real chunk counts
+  (`total_chunks += n`); process-pool chunkers pass picklable `str` args and
+  return picklable `Chunk` dataclasses.
+- `_check_kiro` HTTP-probe logic correctly treats a non-"connection refused"
+  response as "server up."
+- `Metrics` write paths hold a lock; all pipeline call sites wrap metrics calls
+  in try/except (non-fatal).
+- VisionGrounder Ollama→Anthropic fallback chain is correct; blocking call is
+  off-loop via `asyncio.to_thread`.
 
-## Logic Errors Detected
+---
 
-One real logic error (A1) that **silently breaks the calibrated-dwell path** as soon as the user stops moving their eyes — i.e., in the only situation the feature is meant to handle. This was missed because no integration test sends a real-world gaze stream; the unit tests of `GazeCalibrator` exercise the math in isolation. Recommend a future Swift XCTest or Python end-to-end test that drives gaze_delta → idle → gaze_dwell and asserts the bridge's `_latest_gaze_ray_ts` is fresher than 300 ms at the moment of dwell.
+## Recommended fixes (priority order)
+1. **H1** KiroClient `.closed` → `.state`/`ConnectionClosed`; reconcile websockets pin.
+2. **H2** `getattr(cmd, "whisper_logprob"/"gesture_confidence", None)` in `hybrid_coordinator.record_command_outcome`.
+3. **M1** Wrap the tick-loop `pyautogui.position()` in `asyncio.to_thread` (or cache it).
+4. **M2** Add `fusion.set_acoustic_profiler(profiler)` in `main.py`.
+5. **M3** None-coalesce dashboard formatters.
+6. **M4** Verify Ollama is running with all four model tags pulled.

@@ -4,11 +4,13 @@
 # Install all:  pip install -r requirements.txt
 #
 # vLLM: 0.21.0 exists and installs (py3-none-any), but vllm._C CUDA extension
-# is still missing. Requires building from source with CUDA 12.8 torch wheels.
-# torch currently installed reports CUDA 12.8. When ready:
+# is still missing. Requires CUDA 12.8 torch wheels (roadmap item #1).
+# RUN: vllm_setup.bat  (automates the two-step install below)
 #   pip install torch --index-url https://download.pytorch.org/whl/cu128
 #   pip install vllm  (recompiles vllm._C against installed CUDA torch)
-#   Benchmark: python benchmark_models.py --vllm meta-llama/Meta-Llama-3.1-8B-Instruct
+# Then activate: python main.py --backend vllm
+# Benchmark: python benchmark_models.py --vllm meta-llama/Meta-Llama-3.1-8B-Instruct
+# Expected: ~1,186 tok/s for qwen3-coder:30b-AWQ vs ~100-200 tok/s with Ollama.
 #
 # Not-yet-installed (install separately when ready):
 #   ultralytics>=8.0.0         # YOLOv8-pose gesture recognition
@@ -94,6 +96,16 @@ pypdf==5.6.0
 # windows-curses provides the stdlib curses module on Windows.
 # On Linux/macOS the curses module ships with Python; this is a no-op there.
 windows-curses==2.4.1; sys_platform == "win32"
+
+# ── File watcher for incremental RAG indexing (CodebaseIndexer --watch) ───────
+# Provides watchdog.observers.Observer + FileSystemEventHandler.
+# Optional — CodebaseIndexer degrades gracefully without it (one-shot indexing only).
+watchdog==6.0.0
+
+# ── WebSocket client for Kiro/VS Code bridge (KiroClient) ─────────────────────
+# Used by kiro_client.py to connect to the kiro-extension WebSocket server (:8767).
+# Optional — DevAgent degrades gracefully when Kiro is not running.
+websockets==14.2
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.3.0

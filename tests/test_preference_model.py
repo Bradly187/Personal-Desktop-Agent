@@ -13,7 +13,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from behavioral_twin_state import ActionStats, PreferenceModel
+from adaptive.behavioral_twin_state import ActionStats, PreferenceModel
 
 
 # ---------------------------------------------------------------------------

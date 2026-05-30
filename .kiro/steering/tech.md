@@ -18,7 +18,7 @@
 | pynvml | GPU VRAM monitoring |
 | boto3 | AWS SDK (Bedrock, Transcribe, Lex, Lambda) |
 | ollama | Local LLM inference — default backend (`OllamaInference`); llama3.1:8b warm p50 373ms |
-| vllm | Local LLM inference — production target; code complete in `VLLMInference` but blocked at runtime (`vllm._C` CUDA extension absent on RTX 5090); activate when CUDA build available |
+| vllm | Local LLM inference — production target; verified working in Ubuntu WSL2 (vLLM 0.21.0 + torch 2.11.0+cu128 on RTX 5090); activate with `--backend vllm` |
 | aiosqlite | Async SQLite for few-shot memory |
 | aiohttp | iPad touch WebSocket server |
 | pyautogui | Mouse / keyboard execution |
@@ -48,9 +48,11 @@
 |-------|----------|---------|------|
 | Whisper large-v3 | RTX 5090 | < 400 ms | ~4.2 GB |
 | MediaPipe HandLandmarker | CPU | < 5 ms/frame | 0 |
-| Ollama llama3.1:8b | RTX 5090 | 373 ms warm p50 | 4.6 GB |
-| Ollama nemotron-mini | RTX 5090 | < 200 ms target | ~2.7 GB |
-| Ollama qwen3-coder:30b | RTX 5090 | — | 18 GB |
+| Ollama llama3.1:8b (command) | RTX 5090 | 373 ms warm p50 | 4.6 GB |
+| Ollama qwen3-coder:30b (code+plan) | RTX 5090 | — (thinking ON) | 17.3 GB |
+| Ollama deepseek-r1:8b (math) | RTX 5090 | — | 4.9 GB |
+| Ollama qwen3-vl:30b (vision) | RTX 5090 | ~0.4s warm | 18.2 GB |
+| Ollama gemma3:27b (general) | RTX 5090 | — | 16.2 GB |
 | EasyOCR | RTX 5090 | < 200 ms | ~1 GB |
 | Silero VAD | CPU | < 1 ms/chunk | 0 |
 | Chatterbox TTS | RTX 5090 | ~300 ms first token | ~2 GB |
@@ -87,16 +89,19 @@ pip install -r requirements.txt
 python mcp_server/desktop_mcp_server.py
 
 # Run the full pipeline
-python main.py --full
+python main.py [--port 8765] [--debug] [--safe-mode] [--viewer] [--kiro]
 
-# Run budget sensor stack
-python budget_sensor_fusion.py
+# Run with llama.cpp backend
+python main.py --backend llamacpp
 
-# Run iPad bridge
-python ipad_bridge.py
+# Run iPad bridge only (without FusionEngine)
+python -m core.ipad_bridge
 
-# Run gaze calibration
-python budget_sensor_fusion.py --calibrate
+# Measure VRAM usage of all models
+python main.py --measure-vram
+
+# Benchmark models
+python monitoring/benchmark_models.py [--vllm <model-id>]
 
 # iPad app — open in Xcode and build to device
 ```
@@ -112,12 +117,12 @@ class LocalInference(ABC):
     @abstractmethod
     def get_status(self) -> dict: ...
 
-class OllamaInference(LocalInference): ...   # Default — llama3.1:8b, 373 ms warm p50
-class NemotronInference(LocalInference): ... # Fast tier — nemotron-mini 4B, ~2.7 GB VRAM
-class VLLMInference(LocalInference): ...     # Production target — code complete; blocked on CUDA build
+class OllamaInference(LocalInference): ...   # Default — llama3.1:8b command, 373 ms warm p50
+class LlamaCppInference(LocalInference): ... # llama-server HTTP backend (--backend llamacpp)
+class VLLMInference(LocalInference): ...     # Production target — verified in WSL2 (--backend vllm)
 ```
 
-`OllamaInference` with `llama3.1:8b` is the current production default (100% accuracy on command eval, 373 ms warm p50). `VLLMInference` is complete in code but `vllm._C` is missing on the RTX 5090 — activate when CUDA torch wheels are available.
+`OllamaInference` with `llama3.1:8b` is the current production default for the command domain (100% accuracy, 373ms warm p50). Specialist domains (code/plan/math/vision/general) use `ModelRouter` which selects from qwen3-coder:30b, deepseek-r1:8b, qwen3-vl:30b, gemma3:27b based on VRAM. `NemotronInference` was removed (25% accuracy). `VLLMInference` is verified working in Ubuntu WSL2 with vLLM 0.21.0 + torch 2.11.0+cu128 — activate with `--backend vllm`; use `--gpu-memory-utilization 0.65` when Whisper is also loaded.
 
 ## Coding Conventions
 
@@ -126,4 +131,4 @@ class VLLMInference(LocalInference): ...     # Production target — code comple
 - Every sensor class degrades gracefully — `ImportError` and connection failures log a warning, system continues
 - No global state outside dataclass instances — all state lives in class attributes
 - Log levels: DEBUG for per-frame data, INFO for commands/routing, WARNING for sensor failures, ERROR for unrecoverable issues
-- Action vocabulary is constrained to: CLICK, MOUSEDOWN, MOUSEUP, SCROLL, TYPE, OPEN, CLOSE, HOTKEY, DICTATE, CLARIFY, SCREENSHOT
+- Action vocabulary: **Accessibility (11):** CLICK, MOUSEDOWN, MOUSEUP, SCROLL, TYPE, OPEN, CLOSE, HOTKEY, DICTATE, CLARIFY, SCREENSHOT — **Dev-agent (5):** WRITE_FILE, RUN_TERMINAL, EXPLAIN, SEARCH_WEB, READ_SCREEN — **Plan verbs (6, DevAgent only):** GIT_STATUS, GIT_DIFF, GIT_COMMIT, GIT_CHECKOUT, GITHUB_PR, FETCH_URL

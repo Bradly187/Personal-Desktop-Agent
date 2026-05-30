@@ -40,7 +40,7 @@ def engine():
         pya_mod.FAILSAFE = False
         pya_mod.PAUSE = 0
 
-        from fusion_engine import FusionEngine
+        from core.fusion_engine import FusionEngine
         fe = FusionEngine(screen_width=1920, screen_height=1080)
         fe._coordinator = MagicMock()
         fe._coordinator.route = AsyncMock(return_value={"status": "ok"})
@@ -67,7 +67,7 @@ class TestFix1TiltStarvation:
     def test_tilt_sub_dead_zone_falls_through_to_voice(self, engine):
         """Tilt below 0.05 rad/s must not block a queued voice command."""
         fe, pya = engine
-        from command_executor import Command
+        from core.command_executor import Command
 
         # Sub-dead-zone tilt (inner=0.05, this is below it)
         fe.on_tilt(0.01, 0.01)
@@ -89,7 +89,7 @@ class TestFix1TiltStarvation:
     def test_tilt_sub_dead_zone_falls_through_to_gesture(self, engine):
         """Sub-dead-zone tilt must not block a queued gesture command."""
         fe, pya = engine
-        from command_executor import Command
+        from core.command_executor import Command
 
         fe.on_tilt(0.02, 0.02)
 
@@ -108,7 +108,7 @@ class TestFix1TiltStarvation:
     def test_tilt_above_dead_zone_still_moves_cursor(self, engine):
         """Tilt above dead zone still moves cursor and does NOT route voice."""
         fe, pya = engine
-        from command_executor import Command
+        from core.command_executor import Command
 
         # Calibrate gyro first so suppression clears
         fe._tilt_bias_cal._state = "CALIBRATED"
@@ -149,7 +149,7 @@ class TestFix1TiltStarvation:
         """Sub-dead-zone tilt produces no cursor movement in any calibration state,
         and voice must fire via fall-through (the core starvation fix)."""
         fe, pya = engine
-        from command_executor import Command
+        from core.command_executor import Command
 
         # 0.01 rad/s — well below dead_zone_inner=0.05, guaranteed no cursor movement
         fe.on_tilt(0.01, 0.01)
@@ -388,8 +388,8 @@ class TestFix4PainDayFusionConfig:
 
     def test_coordinator_propagates_pain_day_to_fusion(self):
         """HybridCoordinator.route() calls fusion.apply_pain_day(snapshot.pain_day_active)."""
-        from fusion_engine import FusionEngine
-        from hybrid_coordinator import HybridCoordinator
+        from core.fusion_engine import FusionEngine
+        from core.hybrid_coordinator import HybridCoordinator
 
         # Mock fusion engine
         mock_fusion = MagicMock(spec=FusionEngine)
@@ -400,7 +400,7 @@ class TestFix4PainDayFusionConfig:
 
         # Mock twin state returning pain_day_active=True
         mock_twin = AsyncMock()
-        from behavioral_twin_state import _DEFAULT_SNAPSHOT
+        from adaptive.behavioral_twin_state import _DEFAULT_SNAPSHOT
         from dataclasses import replace
         pain_snapshot = replace(_DEFAULT_SNAPSHOT, pain_day_active=True)
         mock_twin.get_snapshot = AsyncMock(return_value=pain_snapshot)
@@ -415,7 +415,7 @@ class TestFix4PainDayFusionConfig:
         coordinator._executor = AsyncMock()
         coordinator._executor.execute = AsyncMock(return_value={"status": "ok"})
 
-        from command_executor import Command
+        from core.command_executor import Command
         cmd = Command(text="click submit", action="DICTATE", source="touch")
         asyncio.run(coordinator.route(cmd))
 

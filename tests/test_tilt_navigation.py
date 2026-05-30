@@ -30,8 +30,8 @@ except ImportError as exc:
     print(f"ERROR: {exc}. Run: pip install aiohttp pyautogui")
     sys.exit(1)
 
-from fusion_engine import FusionEngine, FusionConfig
-from ipad_bridge import IPadBridge
+from core.fusion_engine import FusionEngine, FusionConfig
+from core.ipad_bridge import IPadBridge
 
 BRIDGE_PORT = 8766  # Use a different port to avoid conflict with running bridge
 

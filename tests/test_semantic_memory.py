@@ -31,7 +31,7 @@ import pytest
 from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 
-from semantic_memory import SemanticMemory
+from storage.semantic_memory import SemanticMemory
 
 
 # ===========================================================================
