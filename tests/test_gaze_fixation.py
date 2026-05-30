@@ -2,7 +2,7 @@
 
 import pytest
 
-from fusion_engine import FusionConfig, FusionEngine
+from core.fusion_engine import FusionConfig, FusionEngine
 
 
 class TestGazeFixationSlowdown:

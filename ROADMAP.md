@@ -22,18 +22,16 @@ and commercial gap analysis. Items are ordered by impact-to-effort ratio.
 ### #1 — Fix vLLM CUDA wheels ✅
 **ETA:** 1 hour | **Impact:** ~10× inference throughput (100 → 1,186 tok/s)
 
-vLLM's `_C` CUDA extension requires torch built against CUDA 12.8.
-`VLLMInference` class already exists and is production-ready.
+**Verified 2026-05-29:** vLLM 0.21.0 + torch 2.11.0+cu128 running in Ubuntu WSL2 on RTX 5090 (sm_120).
+`Meta-Llama-3.1-8B-Instruct` serves successfully — cold load 50s, responds correctly.
 
-```bat
-# run vllm_setup.bat or manually:
-pip install torch --index-url https://download.pytorch.org/whl/cu128
-pip install vllm
-# then test: python benchmark_models.py --vllm meta-llama/Meta-Llama-3.1-8B-Instruct
-```
+**Production deployment notes (WSL):**
+- Server must be started from within WSL (automount disabled in `wsl.conf`)
+- `--gpu-memory-utilization 0.65` when Whisper is also loaded (~4.2 GB); `0.75` standalone
+- The ninja JIT build tool must be on PATH — copy is at `~/.local/bin/ninja`
+- Activate with `--backend vllm` flag in `main.py`
 
-Once working, promote with `--backend vllm` flag in `main.py`.
-Speculative decoding (item #9) unlocks automatically after this.
+Speculative decoding (item #9) now unblocked.
 
 ---
 
@@ -132,7 +130,7 @@ Implemented as part of `CodebaseIndexer` (chunking) and `AcousticProfiler` (FFT 
 vLLM server flag: `--speculative-model llama3.1:8b` with qwen3-coder:30b as draft target.
 Acceptance rate for code: 60–80%. Effective throughput: ~2,400–3,500 tok/s.
 
-Requires #1 (vLLM) to be working. Add to `vllm_setup.bat` after baseline test passes.
+Requires #1 (vLLM baseline) to be confirmed working first. Add to `vllm_setup.bat` after baseline test passes.
 
 ---
 
@@ -168,6 +166,5 @@ Requires #1 (vLLM) to be working. Add to `vllm_setup.bat` after baseline test pa
 ## Future Considerations
 
 - **Sandboxed RUN_TERMINAL** — Docker container or restricted PowerShell runspace; voice-approve gate for destructive commands
-- **Qwen3:72b split inference** — llama.cpp CPU+VRAM split (15 GB VRAM + 15 GB RAM at Q3_K_M)
 - **Commercial roadmap** — StoreKit subscription, multi-user support, cloud inference at <$0.10/user/day
 - **Real RealSense D435i** — purchase ~2026-05-31 to replace current iPad LiDAR simulation

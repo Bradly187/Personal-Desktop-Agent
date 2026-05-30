@@ -18,18 +18,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 class TestUIElement:
     def test_center_midpoint(self):
-        from ui_automation import UIElement
+        from desktop.ui_automation import UIElement
         el = UIElement(name="btn", role="Button", bounds=(100, 200, 300, 400))
         assert el.center() == (200, 300)
 
     def test_width_and_height(self):
-        from ui_automation import UIElement
+        from desktop.ui_automation import UIElement
         el = UIElement(name="btn", role="Button", bounds=(10, 20, 110, 70))
         assert el.width() == 100
         assert el.height() == 50
 
     def test_center_integer_division(self):
-        from ui_automation import UIElement
+        from desktop.ui_automation import UIElement
         el = UIElement(name="btn", role="Button", bounds=(0, 0, 101, 51))
         cx, cy = el.center()
         assert cx == 50
@@ -42,27 +42,27 @@ class TestUIElement:
 
 class TestDetectApp:
     def test_vscode(self):
-        from ui_automation import _detect_app
+        from desktop.ui_automation import _detect_app
         assert _detect_app("Code.exe") == "VS Code"
 
     def test_chrome(self):
-        from ui_automation import _detect_app
+        from desktop.ui_automation import _detect_app
         assert _detect_app("chrome.exe") == "Chrome"
 
     def test_kiro(self):
-        from ui_automation import _detect_app
+        from desktop.ui_automation import _detect_app
         assert _detect_app("Kiro.exe") == "Kiro IDE"
 
     def test_windows_terminal(self):
-        from ui_automation import _detect_app
+        from desktop.ui_automation import _detect_app
         assert _detect_app("WindowsTerminal.exe") == "Windows Terminal"
 
     def test_unknown_returns_none(self):
-        from ui_automation import _detect_app
+        from desktop.ui_automation import _detect_app
         assert _detect_app("mspaint.exe") is None
 
     def test_case_insensitive_and_strips_exe(self):
-        from ui_automation import _detect_app
+        from desktop.ui_automation import _detect_app
         assert _detect_app("NOTEPAD.EXE") == "Notepad"
 
 
@@ -72,7 +72,7 @@ class TestDetectApp:
 
 class TestScore:
     def setup_method(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         self.p = UIAutomationProvider()
 
     def test_exact_name_match(self):
@@ -110,25 +110,25 @@ class TestScore:
 
 class TestUIAutomationProvider:
     def test_is_available_false_when_com_unavailable(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         p = UIAutomationProvider()
         with patch.object(p, "_get_uia", return_value=None):
             assert p.is_available() is False
 
     def test_is_available_true_when_com_ready(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         p = UIAutomationProvider()
         with patch.object(p, "_get_uia", return_value=MagicMock()):
             assert p.is_available() is True
 
     def test_find_returns_none_when_unavailable(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         p = UIAutomationProvider()
         with patch.object(p, "_get_uia", return_value=None):
             assert p.find("button") is None
 
     def test_find_cache_hit_skips_uia(self):
-        from ui_automation import UIAutomationProvider, UIElement
+        from desktop.ui_automation import UIAutomationProvider, UIElement
         p = UIAutomationProvider()
         cached = UIElement("Submit", "Button", (0, 0, 100, 50))
         p._cache[("submit", "")] = (cached, time.monotonic() + 10.0)
@@ -139,7 +139,7 @@ class TestUIAutomationProvider:
         assert result is cached
 
     def test_find_expired_cache_bypassed(self):
-        from ui_automation import UIAutomationProvider, UIElement
+        from desktop.ui_automation import UIAutomationProvider, UIElement
         p = UIAutomationProvider()
         stale = UIElement("Old", "Button", (0, 0, 50, 50))
         p._cache[("old button", "")] = (stale, time.monotonic() - 1.0)  # expired
@@ -149,14 +149,14 @@ class TestUIAutomationProvider:
         assert result is None  # expired → fresh attempt → unavailable → None
 
     def test_find_search_exception_returns_none(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         p = UIAutomationProvider()
         with patch.object(p, "_get_uia", return_value=MagicMock()), \
              patch.object(p, "_search", side_effect=RuntimeError("COM crash")):
             assert p.find("broken") is None
 
     def test_find_caches_successful_result(self):
-        from ui_automation import UIAutomationProvider, UIElement
+        from desktop.ui_automation import UIAutomationProvider, UIElement
         p = UIAutomationProvider()
         found = UIElement("Save", "Button", (10, 10, 90, 40))
         with patch.object(p, "_get_uia", return_value=MagicMock()), \
@@ -166,13 +166,13 @@ class TestUIAutomationProvider:
         assert ("save", "") in p._cache
 
     def test_list_clickable_returns_empty_when_unavailable(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         p = UIAutomationProvider()
         with patch.object(p, "_get_uia", return_value=None):
             assert p.list_clickable() == []
 
     def test_get_status_keys_present(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         p = UIAutomationProvider()
         status = p.get_status()
         assert "available" in status
@@ -180,16 +180,16 @@ class TestUIAutomationProvider:
         assert "supported_apps" in status
 
     def test_get_status_cache_count(self):
-        from ui_automation import UIAutomationProvider, UIElement
+        from desktop.ui_automation import UIAutomationProvider, UIElement
         p = UIAutomationProvider()
         p._cache[("btn", "")] = (UIElement("btn", "Button", (0, 0, 1, 1)), time.monotonic() + 5)
         assert p.get_status()["cache_entries"] == 1
 
     def test_role_name_known(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         assert UIAutomationProvider._role_name(50000) == "Button"
         assert UIAutomationProvider._role_name(50002) == "CheckBox"
 
     def test_role_name_unknown_formats_id(self):
-        from ui_automation import UIAutomationProvider
+        from desktop.ui_automation import UIAutomationProvider
         assert UIAutomationProvider._role_name(99999) == "UIA_99999"

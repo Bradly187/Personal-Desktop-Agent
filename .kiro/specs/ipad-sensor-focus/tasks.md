@@ -225,12 +225,6 @@
   - Raw Bedrock (6.1) is the active and permanent cloud path
   - AgentCore LTM memory partially overlaps `ContinuousTrainer` + `semantic_memory.py`; net value too low to re-implement
 
-- [ ] **N.6 Evaluate Nemotron-4 340B with RAM offload (stretch goal)**
-  - 192 GB RAM + 32 GB VRAM on this machine makes llama.cpp offloaded 340B feasible
-  - Adds a third inference tier: fast-small (VRAM-only ≤8B) → slow-large (RAM-offloaded 340B) → cloud
-  - Requires restructuring `HybridCoordinator` to support a ternary local tier choice
-  - Only pursue if nemotron-mini quality proves insufficient for command classification
-
 ---
 
 ## Phase 3 — LiDAR depth integration
@@ -377,7 +371,48 @@ Approach: angular affine mapping (azimuth/elevation offsets from reference gaze 
   - `main.py` — `GazeCalibrator` load at startup; startup table row; wired to bridge + fusion
   - `tests/test_gaze_calibrator.py` — 22 tests (sample management, solve, project, persistence, DB)
 
-- [ ] **G5 Voice trigger + calibration UX (next session)**
+- [x] **G5 Voice trigger + calibration UX (2026-05-30)**
   - Voice command `"hey agent calibrate monitor"` → TTS guidance → `CalibrationOverlay` → 5-dot dwell flow → `solve()` → TTS residual report
-  - `MonitorCalibrationSheet.swift` — iPad Settings UI: calibration status, "Calibrate Monitor" button, progress view
-  - Wire into `OnboardingView` as optional step 11
+  - `MonitorCalibrationSheet.swift` — iPad Settings UI (already existed; wired to SettingsView + OnboardingView step 11)
+  - `ipad_bridge.py` `set_speak_fn()` + TTS calls in `_run_gaze_calibration_session()`
+
+---
+
+## Sprint H — Grab-and-Flick Window Physics + G5 (2026-05-30)
+
+- [x] **H.1 `desktop/flick_engine.py`** — FlickState machine (IDLE/GRABBED/DRAGGING/FLICKING/RESOLVE/SNAPPING/DROP_IN_PLACE/SETTLING)
+  - 1€ filter for live drag; displacement chord (onset→peak) for flick direction
+  - Peak-in-window (5-frame ring buffer) for intent gate (v_on=0.35 normalised/s)
+  - Cosine zone scoring + reach term (λ=0.15); alignment floor τ_cos=0.5
+  - `get_preview_zone()` / `catch()` / `release()` public API
+
+- [x] **H.2 `desktop/snap_zones.py`** — Windows snap grid + Win32 placement
+  - 9 zones: left_half, right_half, top_half, bottom_half, TL/TR/BL/BR quarters, maximize
+  - `get_snap_zones(hwnd)` via `GetMonitorInfoW` (work-area aware, excludes taskbar)
+  - `apply_snap(hwnd, rect)` via `SetWindowPos`; `move_window_drag()` for live drag
+
+- [x] **H.3 GestureProcessor integration** (`sensors/gesture_processor.py`)
+  - `set_flick_engine()` / `set_viewer()`; `_fist()` pose classifier for catch
+  - GRABBED path: forwards wrist position to FlickEngine every frame; emits `SNAP_WINDOW`
+  - Peace sign restores → `engine.release()`; FIST during SNAPPING → `engine.catch()`
+  - Debug push: per-frame wrist speed + zone scores → `viewer.push_flick_debug()`
+
+- [x] **H.4 CommandExecutor + main.py integration**
+  - `SNAP_WINDOW` verb in `CommandExecutor._dispatch()` → `apply_snap()`
+  - `FlickEngine` initialised in `main.py` with `get_snap_zones` + `move_window_drag` callbacks
+  - Disabled in `--safe-mode`
+
+- [x] **H.5 `sensor_viewer.py` FlickEngine debug overlay**
+  - State label (colour-coded), speed gauge bar (green→yellow→red at v_on)
+  - 9-zone score mini-bars: cosine score as bar height, winning zone highlighted cyan
+  - `push_flick_debug()` thread-safe queue; `set_flick_engine()` wiring
+
+- [x] **H.6 `tests/test_flick_engine.py`** — 36 tests passing
+  - FlickState enum, FlickResult, `_flick_dir_from_buf`, `_score_zones`, `_reach_score`
+  - State transitions: IDLE→GRABBED, DRAGGING, FLICKING, RESOLVE→SNAPPING/DROP_IN_PLACE
+  - Catch (FIST during SNAPPING → GRABBED), release from each state
+  - Good rightward flick → right_half zone committed
+
+- [x] **H.7 Speculative decoding flag** (`main.py`, `inference/local_inference.py`, `vllm_setup.bat`)
+  - `--speculative` flag passes `speculative_model="llama3.1:8b"` + `num_speculative_tokens=5` to `VLLMInference`
+  - `vllm_setup.bat` usage note updated

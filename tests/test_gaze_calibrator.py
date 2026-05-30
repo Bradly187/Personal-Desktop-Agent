@@ -19,14 +19,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # ---------------------------------------------------------------------------
 
 def _make_calibrator(screen_w: int = 1920, screen_h: int = 1080):
-    from gaze_calibrator import GazeCalibrator
+    from calibration.gaze_calibrator import GazeCalibrator
     return GazeCalibrator(screen_w=screen_w, screen_h=screen_h)
 
 
 def _synthetic_samples(calibrator, n: int = 5):
     """Add n synthetic samples using a known affine mapping so we can verify recovery."""
     import numpy as np
-    from gaze_calibrator import GazeCalibrator
+    from calibration.gaze_calibrator import GazeCalibrator
 
     screen_w, screen_h = calibrator._screen_w, calibrator._screen_h
 
@@ -120,7 +120,7 @@ class TestInitialState:
 def _no_disk_write(fn):
     """Decorator: suppress JSON writes so solve() tests don't leave files on disk."""
     def wrapper(*args, **kwargs):
-        with patch("gaze_calibrator._JSON_PATH", Path("/dev/null").parent / "gaze_cal_test_noop.json"):
+        with patch("calibration.gaze_calibrator._JSON_PATH", Path("/dev/null").parent / "gaze_cal_test_noop.json"):
             # Patch _save_json to be a no-op so tests stay disk-clean
             target = args[0] if args else kwargs.get("cal")
             orig = target._save_json if hasattr(target, "_save_json") else None
@@ -251,7 +251,7 @@ class TestPersistence:
     def test_save_and_load_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             json_path = Path(tmp) / "gaze_calibration.json"
-            with patch("gaze_calibrator._JSON_PATH", json_path):
+            with patch("calibration.gaze_calibrator._JSON_PATH", json_path):
                 cal1 = _make_calibrator()
                 _synthetic_samples(cal1)
                 cal1.solve()
@@ -265,7 +265,7 @@ class TestPersistence:
     def test_load_returns_false_when_no_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             json_path = Path(tmp) / "missing.json"
-            with patch("gaze_calibrator._JSON_PATH", json_path):
+            with patch("calibration.gaze_calibrator._JSON_PATH", json_path):
                 cal = _make_calibrator()
                 assert cal.load() is False
                 assert cal.is_calibrated is False
@@ -274,7 +274,7 @@ class TestPersistence:
         with tempfile.TemporaryDirectory() as tmp:
             json_path = Path(tmp) / "gaze_calibration.json"
             json_path.write_text("not valid json{{{")
-            with patch("gaze_calibrator._JSON_PATH", json_path):
+            with patch("calibration.gaze_calibrator._JSON_PATH", json_path):
                 cal = _make_calibrator()
                 assert cal.load() is False
 

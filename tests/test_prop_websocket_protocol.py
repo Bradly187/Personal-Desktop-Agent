@@ -28,7 +28,7 @@ from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ipad_bridge import IPadBridge
+from core.ipad_bridge import IPadBridge
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ VALID_DWELL_ACTIONS = ["left_click", "right_click", "double_click", "drag_start"
 @pytest.fixture
 def bridge():
     """Create a fresh IPadBridge instance with mocked CommandExecutor."""
-    with patch("ipad_bridge.CommandExecutor"):
+    with patch("core.ipad_bridge.CommandExecutor"):
         b = IPadBridge(port=9999)
     return b
 
@@ -64,7 +64,7 @@ def mock_ws():
 
 def make_bridge():
     """Create a fresh IPadBridge for use inside Hypothesis tests."""
-    with patch("ipad_bridge.CommandExecutor"):
+    with patch("core.ipad_bridge.CommandExecutor"):
         return IPadBridge(port=9999)
 
 

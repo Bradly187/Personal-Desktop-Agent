@@ -26,8 +26,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from command_executor import Command
-from hybrid_coordinator import (
+from core.command_executor import Command
+from core.hybrid_coordinator import (
     CoordinatorConfig,
     HybridCoordinator,
     _CloudInference,
@@ -171,7 +171,7 @@ async def test_gate0_blocks_cloud_for_sensitive_text() -> tuple[bool, str]:
 async def test_cloud_content_filter_scrubs_secrets() -> tuple[bool, str]:
     """ContentFilter scrubs secrets before cloud transmission."""
     from unittest.mock import AsyncMock as _AM
-    from content_filter import ContentFilter
+    from adaptive.content_filter import ContentFilter
 
     mock_bedrock = _AM(return_value="CLARIFY")
     mock_execute = _AM(return_value={"status": "ok"})

@@ -34,9 +34,9 @@ except ImportError as exc:
     print(f"ERROR: {exc}. Run: pip install aiohttp")
     sys.exit(1)
 
-from ipad_bridge import IPadBridge
-from fusion_engine import FusionEngine, FusionConfig
-from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+from core.ipad_bridge import IPadBridge
+from core.fusion_engine import FusionEngine, FusionConfig
+from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
 
 BRIDGE_PORT = 8768  # Unique port to avoid conflicts with other tests
 SCREEN_W = 1920
@@ -210,7 +210,7 @@ async def run_tests() -> int:
     print("Starting gaze dwell integration test on port %d ..." % BRIDGE_PORT)
 
     # Patch mouse_click in command_executor (where it's actually called)
-    import command_executor
+    import core.command_executor
     with patch.object(command_executor.mouse, "mouse_click") as mock_click, \
          patch("pyautogui.position", return_value=(960, 540)), \
          patch("pyautogui.size", return_value=(SCREEN_W, SCREEN_H)):

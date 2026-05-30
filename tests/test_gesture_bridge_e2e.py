@@ -29,11 +29,11 @@ except ImportError as exc:
     print(f"ERROR: {exc}. Run: pip install aiohttp")
     sys.exit(1)
 
-import command_executor
-from ipad_bridge import IPadBridge
-from fusion_engine import FusionEngine, FusionConfig
-from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
-from command_executor import Command
+import core.command_executor
+from core.ipad_bridge import IPadBridge
+from core.fusion_engine import FusionEngine, FusionConfig
+from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+from core.command_executor import Command
 from tests.conftest import make_depth_msg, make_camera_msg, make_lm_mock, make_hands_result
 
 BRIDGE_PORT = 8770
@@ -177,8 +177,8 @@ def _build_pinch_depth(index_depth, thumb_depth, h=192, w=256, default=1.5):
 
 async def _start_lidar_gesture_bridge(infer_return="CLICK"):
     """Shared bridge setup for GBE-03/04: real LiDAR + real GestureProcessor."""
-    from lidar_receiver import LiDARReceiver
-    from gesture_processor import GestureProcessor
+    from sensors.lidar_receiver import LiDARReceiver
+    from sensors.gesture_processor import GestureProcessor
 
     bridge = IPadBridge(port=BRIDGE_PORT)
     mock_local = MagicMock()

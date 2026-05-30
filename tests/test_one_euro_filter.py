@@ -3,7 +3,7 @@
 import math
 import pytest
 
-from one_euro_filter import OneEuroFilter
+from sensors.one_euro_filter import OneEuroFilter
 
 
 class TestOneEuroFilterBasics:

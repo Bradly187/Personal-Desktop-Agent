@@ -33,11 +33,11 @@ except ImportError as exc:
     print(f"ERROR: {exc}. Run: pip install aiohttp")
     sys.exit(1)
 
-from command_executor import Command
-from fusion_engine import FusionEngine, FusionConfig
-from hybrid_coordinator import HybridCoordinator, CoordinatorConfig
-from ipad_bridge import IPadBridge
-from local_inference import OllamaInference
+from core.command_executor import Command
+from core.fusion_engine import FusionEngine, FusionConfig
+from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+from core.ipad_bridge import IPadBridge
+from inference.local_inference import OllamaInference
 
 BRIDGE_PORT = 8768  # Unique port to avoid conflicts
 SCREEN_W = 1920
@@ -228,7 +228,7 @@ async def run_tests() -> int:
     mock_infer = AsyncMock(return_value="CLICK")
     mock_click = MagicMock(return_value={"clicked": True, "x": 960, "y": 540})
 
-    import command_executor
+    import core.command_executor
     with patch.object(command_executor.mouse, "mouse_click", mock_click), \
          patch("pyautogui.position", return_value=(960, 540)):
 

@@ -3,7 +3,7 @@
 import math
 import pytest
 
-from fusion_engine import dead_zone_ramp, power_curve
+from core.fusion_engine import dead_zone_ramp, power_curve
 
 
 class TestDeadZoneRamp:

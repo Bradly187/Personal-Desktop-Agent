@@ -1,0 +1,752 @@
+"""adaptive.behavioral_twin_state.py — Behavioral Twin State for the Personal Desktop Agent.
+
+Maintains a persistent model of Brad's behavioral patterns: preferred commands,
+time-of-day rhythms, pain-day signals, and cross-session context.
+
+Exposes a queryable async interface consumed by HybridCoordinator (before every
+routing decision) and ContinuousTrainer (for adaptation signals).
+
+Architecture:
+    BehavioralTwinState ← ContinuousTrainer.observe(cmd, action)
+    BehavioralTwinState → HybridCoordinator via TwinSnapshot (frozen)
+
+Backing stores:
+    - AgentDB (aiosqlite SQLite) — structured preference and session data
+    - SemanticMemory (ChromaDB) — vector embeddings for semantic retrieval
+      (optional; degrades to AgentDB-only Jaccard scoring when unavailable)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from storage.db import AgentDB
+    from core.hybrid_coordinator import Command
+
+from storage.semantic_memory import SemanticMemory
+
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# TwinSnapshot — immutable behavioral state snapshot (Requirement 5.2)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TwinSnapshot:
+    """Immutable point-in-time view of Brad's behavioral state.
+
+    Consumed by HybridCoordinator before gate evaluation and by
+    ContinuousTrainer during adaptation passes. Frozen so concurrent
+    reads from multiple pipeline components are safe without locks.
+    """
+
+    pain_day_active: bool                  # PainDayMode currently active
+    preferred_actions: list[str]           # Top-5 action verbs for current time window
+    source_weights: dict[str, float]       # Per-source success ratio (last 7 days)
+    session_context: list[str]             # Last N command texts (20 normal, 10 pain day)
+    command_count_today: int               # Commands executed today
+    pain_day_score: float                  # Current score in [0.0, 1.0]
+    snapshot_ts: float                     # time.monotonic() at creation
+
+
+# Default snapshot returned before start() completes or on any error.
+# Safe to use as a fallback — all fields are empty/zero/False.
+_DEFAULT_SNAPSHOT = TwinSnapshot(
+    pain_day_active=False,
+    preferred_actions=[],
+    source_weights={},
+    session_context=[],
+    command_count_today=0,
+    pain_day_score=0.0,
+    snapshot_ts=0.0,
+)
+
+
+@dataclass
+class ActionStats:
+    frequency: int = 0
+    mean_confidence: float = 0.0
+    mean_latency_ms: float = 0.0
+    last_used_ts: float = 0.0
+    # Running Welford accumulators (avoids storing all samples)
+    _conf_sum: float = field(default=0.0, repr=False)
+    _lat_sum: float = field(default=0.0, repr=False)
+    # D7: Welford online variance for gesture confidence
+    _conf_m2: float = field(default=0.0, repr=False)
+    # D7: Split good-day vs pain-day confidence baselines
+    good_day_conf_sum: float = field(default=0.0, repr=False)
+    good_day_conf_count: int = field(default=0, repr=False)
+    pain_day_conf_sum: float = field(default=0.0, repr=False)
+    pain_day_conf_count: int = field(default=0, repr=False)
+
+    @property
+    def conf_variance(self) -> float:
+        """Welford online variance of confidence samples."""
+        return self._conf_m2 / max(self.frequency - 1, 1)
+
+    @property
+    def good_day_mean_confidence(self) -> float:
+        if self.good_day_conf_count == 0:
+            return self.mean_confidence
+        return self.good_day_conf_sum / self.good_day_conf_count
+
+    @property
+    def pain_day_mean_confidence(self) -> float:
+        if self.pain_day_conf_count == 0:
+            return self.mean_confidence
+        return self.pain_day_conf_sum / self.pain_day_conf_count
+
+
+# ---------------------------------------------------------------------------
+# PreferenceModel — structured preference tracking (Requirement 2.x)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PreferenceModel:
+    """Tracks per-action statistics, time-of-day rhythms, and source reliability.
+
+    Persisted as a JSON blob in AgentDB (settings_versions table,
+    component='preference_model', key='snapshot').
+    """
+
+    # Per-action-verb stats
+    action_stats: dict[str, ActionStats] = field(default_factory=dict)
+    # Time-of-day buckets: 0=00-06, 1=06-12, 2=12-18, 3=18-24
+    # Maps bucket_index → {action_verb: count}
+    time_buckets: dict[int, dict[str, int]] = field(
+        default_factory=lambda: {i: {} for i in range(4)}
+    )
+    # Per-source weights: source → (success_count, total_count)
+    source_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    def update(
+        self,
+        action_verb: str,
+        confidence: float,
+        latency_ms: float,
+        source: str,
+        ts: float,
+        success: bool,
+        pain_day: bool = False,
+    ) -> None:
+        """Record one observation. Updates action_stats, time_buckets, source_counts."""
+        # 1. Get or create ActionStats entry for action_verb
+        if action_verb not in self.action_stats:
+            self.action_stats[action_verb] = ActionStats()
+        stats = self.action_stats[action_verb]
+
+        # 2. Increment frequency
+        stats.frequency += 1
+
+        # 3. Update last-used timestamp
+        stats.last_used_ts = ts
+
+        # 4. Update running mean for confidence + D7 Welford online variance
+        old_mean = stats.mean_confidence
+        stats._conf_sum += confidence
+        stats.mean_confidence = stats._conf_sum / stats.frequency
+        # Welford: M2 += (x - old_mean) * (x - new_mean)
+        stats._conf_m2 += (confidence - old_mean) * (confidence - stats.mean_confidence)
+
+        # D7: split into good-day / pain-day baselines
+        if pain_day:
+            stats.pain_day_conf_sum += confidence
+            stats.pain_day_conf_count += 1
+        else:
+            stats.good_day_conf_sum += confidence
+            stats.good_day_conf_count += 1
+
+        # 5. Update running mean for latency
+        stats._lat_sum += latency_ms
+        stats.mean_latency_ms = stats._lat_sum / stats.frequency
+
+        # 6. Update time_buckets: increment count for this action in the appropriate bucket
+        bucket = PreferenceModel.time_bucket(ts)
+        bucket_dict = self.time_buckets[bucket]
+        bucket_dict[action_verb] = bucket_dict.get(action_verb, 0) + 1
+
+        # 7. Update source_counts: (success_count, total_count)
+        success_count, total_count = self.source_counts.get(source, (0, 0))
+        total_count += 1
+        if success:
+            success_count += 1
+        self.source_counts[source] = (success_count, total_count)
+
+    def top_actions(self, time_bucket: int, n: int = 5) -> list[str]:
+        """Return the top-n action verbs for the given time-of-day bucket."""
+        bucket_dict = self.time_buckets.get(time_bucket, {})
+        sorted_actions = sorted(bucket_dict, key=lambda verb: bucket_dict[verb], reverse=True)
+        return sorted_actions[:n]
+
+    def source_weights(self) -> dict[str, float]:
+        """Return per-source success ratio (success_count / total_count) for all sources."""
+        result: dict[str, float] = {}
+        for source, (success_count, total_count) in self.source_counts.items():
+            weight = success_count / total_count if total_count > 0 else 0.0
+            result[source] = max(0.0, min(1.0, weight))
+        return result
+
+    @staticmethod
+    def time_bucket(ts: float) -> int:
+        """Map a Unix timestamp to a 6-hour bucket index (0–3)."""
+        import datetime
+        hour = datetime.datetime.fromtimestamp(ts).hour
+        return hour // 6
+
+    def to_json(self) -> str:
+        """Serialize this PreferenceModel to a JSON string for AgentDB persistence."""
+        action_stats_dict = {
+            verb: {
+                "frequency": stats.frequency,
+                "mean_confidence": stats.mean_confidence,
+                "mean_latency_ms": stats.mean_latency_ms,
+                "last_used_ts": stats.last_used_ts,
+                "_conf_sum": stats._conf_sum,
+                "_lat_sum": stats._lat_sum,
+                # D7: variance and day-split fields
+                "_conf_m2": stats._conf_m2,
+                "good_day_conf_sum": stats.good_day_conf_sum,
+                "good_day_conf_count": stats.good_day_conf_count,
+                "pain_day_conf_sum": stats.pain_day_conf_sum,
+                "pain_day_conf_count": stats.pain_day_conf_count,
+            }
+            for verb, stats in self.action_stats.items()
+        }
+        # JSON requires string keys; convert int bucket indices to str
+        time_buckets_dict = {
+            str(bucket): counts
+            for bucket, counts in self.time_buckets.items()
+        }
+        # Tuples serialize as lists in JSON; that's fine — from_json converts back
+        source_counts_dict = {
+            source: list(counts)
+            for source, counts in self.source_counts.items()
+        }
+        return json.dumps({
+            "action_stats": action_stats_dict,
+            "time_buckets": time_buckets_dict,
+            "source_counts": source_counts_dict,
+        })
+
+    @classmethod
+    def from_json(cls, data: str) -> "PreferenceModel":
+        """Reconstruct a PreferenceModel from a JSON string produced by to_json()."""
+        raw = json.loads(data)
+
+        # Reconstruct action_stats: dict[str, ActionStats]
+        action_stats: dict[str, ActionStats] = {}
+        for verb, d in raw.get("action_stats", {}).items():
+            stats = ActionStats(
+                frequency=d["frequency"],
+                mean_confidence=d["mean_confidence"],
+                mean_latency_ms=d["mean_latency_ms"],
+                last_used_ts=d["last_used_ts"],
+                _conf_sum=d["_conf_sum"],
+                _lat_sum=d["_lat_sum"],
+                # D7: backward-compatible defaults for models serialised before this fix
+                _conf_m2=d.get("_conf_m2", 0.0),
+                good_day_conf_sum=d.get("good_day_conf_sum", 0.0),
+                good_day_conf_count=d.get("good_day_conf_count", 0),
+                pain_day_conf_sum=d.get("pain_day_conf_sum", 0.0),
+                pain_day_conf_count=d.get("pain_day_conf_count", 0),
+            )
+            action_stats[verb] = stats
+
+        # Reconstruct time_buckets: dict[int, dict[str, int]] — string keys → int
+        time_buckets: dict[int, dict[str, int]] = {i: {} for i in range(4)}
+        for str_bucket, counts in raw.get("time_buckets", {}).items():
+            time_buckets[int(str_bucket)] = dict(counts)
+
+        # Reconstruct source_counts: dict[str, tuple[int, int]] — lists → tuples
+        source_counts: dict[str, tuple[int, int]] = {
+            source: (int(v[0]), int(v[1]))
+            for source, v in raw.get("source_counts", {}).items()
+        }
+
+        model = cls.__new__(cls)
+        model.action_stats = action_stats
+        model.time_buckets = time_buckets
+        model.source_counts = source_counts
+        return model
+
+
+# ---------------------------------------------------------------------------
+# BehavioralTwinState — core class (Requirement 1.x, 2.x, 3.x, 4.x, 5.x, 6.x)
+# ---------------------------------------------------------------------------
+
+class BehavioralTwinState:
+    """Persistent behavioral model for Brad.
+
+    Lifecycle:
+        twin = BehavioralTwinState(agent_db=db)
+        await twin.start()          # concurrent AgentDB + ChromaDB init
+        # ... pipeline runs ...
+        await twin.stop()           # flush tasks, close connections
+
+    Thread safety: all public methods are coroutines safe to call from
+    the single asyncio event loop. TwinSnapshot is frozen — safe for
+    concurrent reads without locks.
+    """
+
+    # ── Class constants ────────────────────────────────────────────────
+    WORKING_SET_SIZE = 500
+    SESSION_HISTORY_MAX = 20
+    SESSION_HISTORY_PAIN_DAY = 10
+    PAIN_DAY_ACTIVATE_THRESHOLD = 0.6
+    PAIN_DAY_DEACTIVATE_THRESHOLD = 0.4
+    PAIN_DAY_MIN_COMMANDS = 5
+    PAIN_DAY_RECOMPUTE_INTERVAL_S = 60.0
+    STARTUP_TIMEOUT_S = 5.0
+
+    def __init__(
+        self,
+        agent_db: "AgentDB",
+        chroma_dir: str = "./chroma_db",
+        encoder=None,
+    ) -> None:
+        # ── Backing stores ─────────────────────────────────────────────
+        self._agent_db = agent_db
+        self._semantic_memory = SemanticMemory(
+            chroma_dir=chroma_dir,
+            agent_db=agent_db,
+            encoder=encoder,
+        )
+        self._preference_model = PreferenceModel()
+
+        # ── Session state ──────────────────────────────────────────────
+        self._session_history: list[str] = []          # command text strings
+        self._working_set: list[dict] = []             # command dicts from AgentDB
+
+        # ── Snapshot cache ─────────────────────────────────────────────
+        self._current_snapshot: TwinSnapshot = _DEFAULT_SNAPSHOT
+
+        # ── Lifecycle flags ────────────────────────────────────────────
+        self._is_ready: bool = False
+
+        # ── Pain day state ─────────────────────────────────────────────
+        self._pain_day_active: bool = False
+        self._pain_day_score: float = 0.0
+        self._pain_day_task: Optional[asyncio.Task] = None
+        self._last_pain_day_recompute: float = 0.0
+
+        # ── Background task tracking ───────────────────────────────────
+        self._pending_tasks: set[asyncio.Task] = set()
+
+        # ── Per-session signal accumulators ────────────────────────────
+        self._session_cmd_count: int = 0        # commands in current session
+        self._session_fail_count: int = 0       # failed commands in current session
+        self._session_clarify_count: int = 0    # CLARIFY responses in current session
+        self._session_gesture_confs: list[float] = []  # gesture confidence values in session
+        self._session_start_ts: float = time.monotonic()  # session start time
+        self._acoustic_profiler = None   # set via set_acoustic_profiler()
+        self._manual_pain_day: bool = False  # user override via "hey agent pain day on"
+
+    # ── Lifecycle ──────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        """Concurrent AgentDB + ChromaDB init via asyncio.gather.
+        Sets is_ready=True on completion. Completes within STARTUP_TIMEOUT_S.
+        """
+        self._is_ready = False
+        try:
+            async with asyncio.timeout(self.STARTUP_TIMEOUT_S):
+                await asyncio.gather(
+                    self._init_agent_db(),
+                    self._init_chroma(),
+                )
+        except asyncio.TimeoutError:
+            log.warning("BehavioralTwinState: startup timed out — ChromaDB may be slow")
+            self._semantic_memory._available = False
+        except Exception as exc:
+            log.warning("BehavioralTwinState: startup error: %s", exc)
+        finally:
+            self._is_ready = True
+            self._pain_day_task = asyncio.create_task(self._pain_day_loop())
+            log.info("BehavioralTwinState ready (chroma=%s)", self._semantic_memory.available)
+
+    async def stop(self) -> None:
+        """Flush all pending background tasks, persist final state, close."""
+        # Cancel pain day recompute loop
+        if self._pain_day_task:
+            self._pain_day_task.cancel()
+            try:
+                await self._pain_day_task
+            except asyncio.CancelledError:
+                pass
+
+        # Flush all pending observe() tasks
+        if self._pending_tasks:
+            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+
+        # Persist final state
+        await self._persist_preference_model()
+        await self._write_session_history()
+
+        # Release ChromaDB file handles (prevents WinError 32 on Windows shutdown)
+        await self._semantic_memory.stop()
+
+        log.info("BehavioralTwinState stopped (%d tasks flushed)", len(self._pending_tasks))
+
+    @property
+    def is_ready(self) -> bool:
+        return self._is_ready
+
+    # ── Public pipeline API ────────────────────────────────────────────
+
+    async def get_snapshot(self) -> TwinSnapshot:
+        """Return current behavioral state. Always returns; never raises.
+        Returns _DEFAULT_SNAPSHOT if not ready or on error.
+        Completes in < 50 ms under normal conditions.
+        """
+        try:
+            if not self._is_ready:
+                return _DEFAULT_SNAPSHOT
+            return self._current_snapshot  # pre-built frozen dataclass
+        except Exception as exc:
+            log.warning("BehavioralTwinState.get_snapshot error: %s", exc)
+            return _DEFAULT_SNAPSHOT
+
+    async def observe(self, cmd: "Command", action_str: str) -> None:
+        """Record a successful command. Non-blocking — schedules background task.
+        Never raises.
+        """
+        try:
+            task = asyncio.create_task(
+                self._persist_observation(cmd, action_str),
+                name=f"twin_observe_{id(cmd)}",
+            )
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
+        except Exception as exc:
+            log.warning("BehavioralTwinState.observe scheduling failed: %s", exc)
+
+    async def query_similar(self, text: str, n: int = 5) -> list[dict]:
+        """Return n most semantically similar past commands. Never raises."""
+        try:
+            return await self._semantic_memory.query_similar(text, n)
+        except Exception as exc:
+            log.warning("BehavioralTwinState.query_similar error: %s", exc)
+            return []
+
+    def get_session_context(self) -> list[str]:
+        """Return current SessionHistory as list[str] for Command.session_context."""
+        return list(self._session_history)
+
+    def set_acoustic_profiler(self, profiler) -> None:
+        """Wire AcousticProfiler so voice clarity feeds into pain detection."""
+        self._acoustic_profiler = profiler
+
+    def set_manual_pain_day(self, active: bool) -> None:
+        """User override — immediately force pain_day_active state."""
+        self._manual_pain_day = active
+        self._pain_day_active = active
+        log.info("BehavioralTwinState: manual pain day %s", "ON" if active else "OFF")
+        if self._agent_db and self._agent_db.available:
+            asyncio.create_task(self._agent_db.set_manual_pain_day(active))
+
+    # ── Internal ───────────────────────────────────────────────────────
+
+    async def _persist_preference_model(self) -> None:
+        """Persist the current PreferenceModel to AgentDB settings_versions."""
+        try:
+            json_data = self._preference_model.to_json()
+            await self._agent_db.log_settings_change(
+                component="preference_model",
+                key="snapshot",
+                old_value=None,
+                new_value=json_data,
+                changed_by="BehavioralTwinState",
+            )
+        except Exception as exc:
+            log.warning("BehavioralTwinState._persist_preference_model failed: %s", exc)
+
+    async def _write_session_history(self) -> None:
+        """Write current session history to AgentDB twin_session_history table."""
+        try:
+            if not self._session_history:
+                return
+            # Use the current session (most recent) from AgentDB
+            session_id = await self._agent_db.get_most_recent_session_id()
+            if session_id is None:
+                return
+            history = [
+                {"ts": time.time(), "cmd_text": text, "action": "", "source": ""}
+                for text in self._session_history
+            ]
+            await self._agent_db.write_session_history(session_id, history)
+        except Exception as exc:
+            log.warning("BehavioralTwinState._write_session_history failed: %s", exc)
+
+    async def _persist_observation(self, cmd: "Command", action_str: str) -> None:
+        """Background task: update PreferenceModel, SessionHistory, SemanticMemory."""
+        try:
+            # 1. Extract fields from cmd
+            action_verb = action_str.split()[0].upper() if action_str else "UNKNOWN"
+            confidence = getattr(cmd, 'whisper_logprob', 0.0)
+            latency_ms = 0.0
+            source = getattr(cmd, 'source', 'unknown')
+            ts = time.time()
+            success = True
+            text = getattr(cmd, 'text', '')
+
+            # 2. Update PreferenceModel (D7: pass current pain_day state)
+            self._preference_model.update(
+                action_verb=action_verb,
+                confidence=confidence,
+                latency_ms=latency_ms,
+                source=source,
+                ts=ts,
+                success=success,
+                pain_day=self._pain_day_active,
+            )
+
+            # 3. Update session signal accumulators
+            self._session_cmd_count += 1
+            if action_str.upper() == "CLARIFY":
+                self._session_clarify_count += 1
+            if source == "gesture" and getattr(cmd, 'gesture_confidence', 0) > 0:
+                self._session_gesture_confs.append(cmd.gesture_confidence)
+
+            # 4. Append to SessionHistory (respecting window size)
+            max_history = self.SESSION_HISTORY_PAIN_DAY if self._pain_day_active else self.SESSION_HISTORY_MAX
+            self._session_history.append(text)
+            if len(self._session_history) > max_history:
+                self._session_history = self._session_history[-max_history:]
+
+            # 5. Add to SemanticMemory
+            await self._semantic_memory.add(
+                text=text,
+                action=action_str,
+                source=source,
+                ts=ts,
+                success=True,
+            )
+
+            # 6. Persist preference model to AgentDB
+            await self._persist_preference_model()
+
+            # 7. Rebuild _current_snapshot
+            self._current_snapshot = self._build_snapshot()
+
+        except Exception as exc:
+            log.warning("BehavioralTwinState._persist_observation failed: %s", exc)
+
+    def _build_snapshot(self) -> TwinSnapshot:
+        """Build a fresh TwinSnapshot from current state."""
+        current_bucket = PreferenceModel.time_bucket(time.time())
+        return TwinSnapshot(
+            pain_day_active=self._pain_day_active,
+            preferred_actions=self._preference_model.top_actions(current_bucket, n=5),
+            source_weights=self._preference_model.source_weights(),
+            session_context=list(self._session_history),
+            command_count_today=self._session_cmd_count,
+            pain_day_score=self._pain_day_score,
+            snapshot_ts=time.monotonic(),
+        )
+
+    async def _load_working_set(self) -> None:
+        """Load 500 most recent successful commands from AgentDB on startup."""
+        try:
+            rows = await self._agent_db.get_recent_successful_commands(limit=self.WORKING_SET_SIZE)
+            self._working_set = rows
+            log.debug("BehavioralTwinState: loaded %d commands into working set", len(rows))
+        except Exception as exc:
+            log.warning("BehavioralTwinState._load_working_set failed: %s", exc)
+            self._working_set = []
+
+    async def _load_preference_model(self) -> None:
+        """Reconstruct PreferenceModel from AgentDB settings_versions.
+
+        Handles the historic double-serialization bug where log_settings_change
+        called json.dumps() on an already-serialized JSON string.  We detect
+        this by checking whether json.loads() returns a str or dict.
+        """
+        try:
+            json_data = await self._agent_db.get_preference_model_snapshot()
+            if json_data:
+                # Safety: un-nest any legacy double-serialized value
+                parsed = json.loads(json_data) if isinstance(json_data, str) else json_data
+                if isinstance(parsed, str):
+                    # Double-serialized row — parse one more time
+                    parsed = json.loads(parsed)
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"Unexpected preference model type: {type(parsed)}")
+                self._preference_model = PreferenceModel.from_json(json.dumps(parsed))
+                log.debug("BehavioralTwinState: loaded PreferenceModel from AgentDB")
+            else:
+                log.debug("BehavioralTwinState: no saved PreferenceModel — using default")
+        except Exception as exc:
+            log.warning("BehavioralTwinState._load_preference_model failed: %s", exc)
+            self._preference_model = PreferenceModel()
+
+    async def _load_session_history(self) -> None:
+        """Populate SessionHistory from most recent prior session in AgentDB.
+        
+        Loads from the most recent prior session, including abnormally terminated
+        sessions with no ended_at timestamp (Requirement 3.6).
+        """
+        try:
+            # Get the most recent prior session (not the current one)
+            # We don't have a current session_id here, so get the most recent
+            prior_session_id = await self._agent_db.get_most_recent_session_id()
+            if prior_session_id is None:
+                log.debug("BehavioralTwinState: no prior session found")
+                return
+            
+            rows = await self._agent_db.read_session_history(
+                session_id=prior_session_id,
+                limit=self.SESSION_HISTORY_MAX,
+            )
+            
+            if rows:
+                self._session_history = [row["cmd_text"] for row in rows]
+                log.debug(
+                    "BehavioralTwinState: loaded %d commands from prior session %d",
+                    len(self._session_history),
+                    prior_session_id,
+                )
+            else:
+                log.debug("BehavioralTwinState: no session history in prior session %d", prior_session_id)
+        except Exception as exc:
+            log.warning("BehavioralTwinState._load_session_history failed: %s", exc)
+            self._session_history = []
+
+    def _recompute_pain_day_score(self) -> float:
+        """Compute pain_day_score from current session signals. Returns [0.0, 1.0]."""
+        total = self._session_cmd_count
+        if total == 0:
+            return 0.0
+
+        # Signal 1: fail ratio
+        signal_1 = self._session_fail_count / total
+
+        # Signal 2: clarify ratio
+        signal_2 = self._session_clarify_count / total
+
+        # Signal 3: gesture confidence drop vs good-day baseline (D7).
+        # Uses the per-action good_day_mean_confidence from PreferenceModel
+        # rather than the pooled working-set mean, which included pain-day
+        # observations that were artificially lowering the baseline over time.
+        gesture_stats = [
+            s for s in self._preference_model.action_stats.values()
+            if s.good_day_conf_count > 0
+        ]
+        good_day_baseline = (
+            sum(s.good_day_mean_confidence for s in gesture_stats) / len(gesture_stats)
+            if gesture_stats else 0.0
+        )
+        if good_day_baseline > 0 and self._session_gesture_confs:
+            current_conf = sum(self._session_gesture_confs) / len(self._session_gesture_confs)
+            signal_3 = max(0.0, (good_day_baseline - current_conf) / good_day_baseline)
+        else:
+            signal_3 = 0.0
+
+        # Signal 4: command rate drop (vs baseline estimated from working set)
+        elapsed_hours = (time.monotonic() - self._session_start_ts) / 3600.0
+        if elapsed_hours > 0 and self._working_set:
+            # Heuristic: working set represents ~8 hours of typical usage
+            baseline_rate = len(self._working_set) / 8.0  # commands per hour
+            current_rate = total / elapsed_hours
+            signal_4 = max(0.0, (baseline_rate - current_rate) / baseline_rate) if baseline_rate > 0 else 0.0
+        else:
+            signal_4 = 0.0
+
+        # Signal 5: voice clarity drop (from AcousticProfiler)
+        # Captures voice softening during RA flares — the most distinctive
+        # early indicator for users like Brad.
+        if self._acoustic_profiler is not None:
+            signal_5 = self._acoustic_profiler.voice_clarity_score()
+        else:
+            signal_5 = 0.0
+
+        # If manual override is active, drive score to 1.0 regardless
+        if self._manual_pain_day:
+            return 1.0
+
+        # Reweight: voice clarity gets 0.15, others compress proportionally
+        score = (
+            0.30 * signal_1 +   # fail ratio
+            0.20 * signal_2 +   # clarify ratio
+            0.15 * signal_3 +   # gesture confidence drop
+            0.20 * signal_4 +   # command rate drop
+            0.15 * signal_5     # voice clarity drop  ← new
+        )
+        return max(0.0, min(1.0, score))
+
+    async def _pain_day_loop(self) -> None:
+        """Background task: recompute pain_day_score every 60 seconds.
+
+        Applies hysteresis:
+        - Activate when score > 0.6 AND session_cmd_count >= PAIN_DAY_MIN_COMMANDS
+        - Deactivate when score < 0.4
+        """
+        while True:
+            try:
+                await asyncio.sleep(self.PAIN_DAY_RECOMPUTE_INTERVAL_S)
+
+                score = self._recompute_pain_day_score()
+                self._pain_day_score = score
+
+                old_active = self._pain_day_active
+
+                # Hysteresis state machine
+                if not self._pain_day_active:
+                    if score > self.PAIN_DAY_ACTIVATE_THRESHOLD and self._session_cmd_count >= self.PAIN_DAY_MIN_COMMANDS:
+                        self._pain_day_active = True
+                        log.info("BehavioralTwinState: PainDayMode ACTIVATED (score=%.3f)", score)
+                else:
+                    if score < self.PAIN_DAY_DEACTIVATE_THRESHOLD:
+                        self._pain_day_active = False
+                        log.info("BehavioralTwinState: PainDayMode DEACTIVATED (score=%.3f)", score)
+
+                # Rebuild snapshot if state changed
+                if old_active != self._pain_day_active:
+                    self._current_snapshot = self._build_snapshot()
+
+                # Log pain day score to AgentDB
+                try:
+                    session_id = await self._agent_db.get_most_recent_session_id()
+                    if session_id is not None:
+                        await self._agent_db.log_pain_day(
+                            session_id=session_id,
+                            score=score,
+                            active=self._pain_day_active,
+                            fail_ratio=self._session_fail_count / max(1, self._session_cmd_count),
+                            clarify_ratio=self._session_clarify_count / max(1, self._session_cmd_count),
+                            gesture_conf_delta=0.0,
+                            cmd_rate_delta=0.0,
+                        )
+                except Exception as exc:
+                    log.warning("BehavioralTwinState._pain_day_loop: log_pain_day failed: %s", exc)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("BehavioralTwinState._pain_day_loop error: %s", exc)
+
+    async def _init_agent_db(self) -> None:
+        """Load working set, preferences, and session history from AgentDB."""
+        await self._load_working_set()
+        await self._load_preference_model()
+        await self._load_session_history()
+
+    async def _init_chroma(self) -> None:
+        """Connect ChromaDB, create/open collection."""
+        try:
+            async with asyncio.timeout(self.STARTUP_TIMEOUT_S):
+                available = await self._semantic_memory.start()
+                if not available:
+                    log.warning("SemanticMemory: ChromaDB unavailable — AgentDB fallback active")
+        except asyncio.TimeoutError:
+            log.warning("SemanticMemory: ChromaDB init timed out — AgentDB fallback active")
+            self._semantic_memory._available = False
+        except Exception as exc:
+            log.warning("SemanticMemory: ChromaDB init error: %s — AgentDB fallback active", exc)
+            self._semantic_memory._available = False

@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 def bridge():
     """Create an IPadBridge instance with mocked dependencies."""
     with patch.dict("sys.modules", {"pyautogui": MagicMock()}):
-        from ipad_bridge import IPadBridge
+        from core.ipad_bridge import IPadBridge
         b = IPadBridge(port=9999)
         # Mock FusionEngine
         b._fusion = MagicMock()
@@ -189,7 +189,7 @@ class TestFusionEngineSetFeatureToggle:
 
     def test_set_valid_feature(self):
         """Setting a valid feature updates the toggle dict."""
-        from fusion_engine import FusionEngine
+        from core.fusion_engine import FusionEngine
         fe = FusionEngine(1920, 1080)
 
         fe.set_feature_toggle("edge_scroll", False)
@@ -200,7 +200,7 @@ class TestFusionEngineSetFeatureToggle:
 
     def test_all_features_default_true(self):
         """All feature toggles default to True."""
-        from fusion_engine import FusionEngine
+        from core.fusion_engine import FusionEngine
         fe = FusionEngine(1920, 1080)
 
         for feature, enabled in fe._feature_toggles.items():
@@ -208,7 +208,7 @@ class TestFusionEngineSetFeatureToggle:
 
     def test_unknown_feature_ignored(self):
         """Setting an unknown feature does not crash or modify state."""
-        from fusion_engine import FusionEngine
+        from core.fusion_engine import FusionEngine
         fe = FusionEngine(1920, 1080)
 
         original = dict(fe._feature_toggles)

@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from lidar_receiver import LiDARReceiver
-from gesture_processor import GestureProcessor
+from sensors.lidar_receiver import LiDARReceiver
+from sensors.gesture_processor import GestureProcessor
 from tests.conftest import make_depth_msg, make_camera_msg, make_hands_result, make_lm_mock
 
 
@@ -40,7 +40,7 @@ def send_depth_and_gesture(lidar, proc, depth_arr, conf_arr, lm_mock, score=0.90
     lidar.on_depth_frame(msg)
 
     # Stub gesture_processor.mp when mediapipe is not installed so mp.Image() doesn't NameError.
-    import gesture_processor as gp_mod
+    import sensors.gesture_processor as gp_mod
     if not hasattr(gp_mod, 'mp') or gp_mod.mp is None:
         gp_mod.mp = MagicMock()
         gp_mod.mp.ImageFormat.SRGB = MagicMock()
@@ -175,7 +175,7 @@ def test_gli04_point_does_not_touch_lidar():
     lidar.get_depth_at = spy
 
     # POINT landmark — stub mp for environments without mediapipe
-    import gesture_processor as gp_mod
+    import sensors.gesture_processor as gp_mod
     if not hasattr(gp_mod, 'mp') or gp_mod.mp is None:
         gp_mod.mp = MagicMock()
         gp_mod.mp.ImageFormat.SRGB = MagicMock()

@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ipad_bridge import IPadBridge
+from core.ipad_bridge import IPadBridge
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ from ipad_bridge import IPadBridge
 @pytest.fixture
 def bridge():
     """Create a fresh IPadBridge instance."""
-    with patch("ipad_bridge.CommandExecutor"):
+    with patch("core.ipad_bridge.CommandExecutor"):
         b = IPadBridge(port=9999)
     return b
 

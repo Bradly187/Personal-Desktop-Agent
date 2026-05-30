@@ -11,7 +11,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from behavioral_twin_state import BehavioralTwinState, _DEFAULT_SNAPSHOT
+from adaptive.behavioral_twin_state import BehavioralTwinState, _DEFAULT_SNAPSHOT
 
 
 # ---------------------------------------------------------------------------

@@ -176,9 +176,9 @@ print("\n-- Stage 5: End-to-end pipeline injection ------------------------")
 
 async def _test_pipeline():
     try:
-        from command_executor import Command
-        from whisper_stream import WhisperStream
-        from fusion_engine import FusionEngine, FusionConfig
+        from core.command_executor import Command
+        from sensors.whisper_stream import WhisperStream
+        from core.fusion_engine import FusionEngine, FusionConfig
 
         received: list[Command] = []
 
@@ -203,7 +203,7 @@ async def _test_pipeline():
         check("WhisperStream.available after start()", True)
 
         # Inject the transcription result directly (bypasses audio → VAD path)
-        from command_executor import Command as Cmd
+        from core.command_executor import Command as Cmd
         test_cmd = Cmd(
             text="click the submit button",
             action="DICTATE",
@@ -241,7 +241,7 @@ print("\n-- Stage 6: Audio chunk decode (simulates iPad audio_stream msg) -")
 
 try:
     import numpy as np
-    from whisper_stream import WhisperStream
+    from sensors.whisper_stream import WhisperStream
 
     ws2 = WhisperStream.__new__(WhisperStream)
     ws2._preserve_audio = False

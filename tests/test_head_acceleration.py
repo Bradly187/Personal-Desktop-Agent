@@ -2,7 +2,7 @@
 
 import pytest
 
-from fusion_engine import head_acceleration_curve, HeadStationaryLock
+from core.fusion_engine import head_acceleration_curve, HeadStationaryLock
 
 
 class TestHeadAccelerationCurve:

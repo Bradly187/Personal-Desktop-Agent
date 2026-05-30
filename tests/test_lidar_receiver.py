@@ -16,7 +16,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from lidar_receiver import LiDARReceiver
+from sensors.lidar_receiver import LiDARReceiver
 from tests.conftest import make_depth_msg
 
 
@@ -264,7 +264,7 @@ def test_lr15_get_status_shape():
 # ---------------------------------------------------------------------------
 
 def test_lr16_numpy_unavailable_graceful():
-    import lidar_receiver as lr_mod
+    import sensors.lidar_receiver as lr_mod
     original = lr_mod._NP_AVAILABLE
     try:
         lr_mod._NP_AVAILABLE = False

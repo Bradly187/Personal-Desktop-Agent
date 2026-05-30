@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from fusion_engine import FusionConfig, FusionEngine
+from core.fusion_engine import FusionConfig, FusionEngine
 
 
 @pytest.fixture
@@ -161,7 +161,7 @@ class TestGazeLostTimeout:
     """Test that gaze lost > 500ms logs a warning."""
 
     @patch("pyautogui.moveTo")
-    @patch("fusion_engine.time.monotonic")
+    @patch("core.fusion_engine.time.monotonic")
     def test_gaze_lost_logs_warning(self, mock_time, mock_move, engine, caplog):
         import logging
 
@@ -181,7 +181,7 @@ class TestGazeLostTimeout:
         assert "gaze lost" in caplog.text.lower()
 
     @patch("pyautogui.moveTo")
-    @patch("fusion_engine.time.monotonic")
+    @patch("core.fusion_engine.time.monotonic")
     def test_gaze_lost_within_timeout_no_warning(self, mock_time, mock_move, engine, caplog):
         import logging
 

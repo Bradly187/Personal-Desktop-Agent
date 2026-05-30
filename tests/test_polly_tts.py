@@ -26,8 +26,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from command_executor import Command, CommandExecutor, _polly_speak, _POLLY_MAX_CHARS
-from hybrid_coordinator import CoordinatorConfig, HybridCoordinator
+from core.command_executor import Command, CommandExecutor, _polly_speak, _POLLY_MAX_CHARS
+from core.hybrid_coordinator import CoordinatorConfig, HybridCoordinator
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ async def test_clarify_cloud_route_spoken() -> tuple[bool, str]:
     cmd = _cmd("Unclear", params={"message": "Did you mean close?", "route": "cloud"})
 
     # Mock Polly so we don't make a real call in this unit test
-    with patch("command_executor._polly_speak", return_value=True) as mock_polly:
+    with patch("core.command_executor._polly_speak", return_value=True) as mock_polly:
         result = await executor.execute(cmd)
 
     if not mock_polly.called:
@@ -81,7 +81,7 @@ async def test_clarify_local_route_not_spoken() -> tuple[bool, str]:
     executor = CommandExecutor()
     cmd = _cmd("Unclear", params={"message": "Did you mean close?", "route": "local"})
 
-    with patch("command_executor._polly_speak", return_value=True) as mock_polly:
+    with patch("core.command_executor._polly_speak", return_value=True) as mock_polly:
         result = await executor.execute(cmd)
 
     if mock_polly.called:

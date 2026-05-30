@@ -2,7 +2,7 @@
 
 import pytest
 
-from gyro_bias_calibrator import BiasState, GyroBiasCalibrator
+from calibration.gyro_bias_calibrator import BiasState, GyroBiasCalibrator
 
 
 class TestStateMachineTransitions:
