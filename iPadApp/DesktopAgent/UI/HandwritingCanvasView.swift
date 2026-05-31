@@ -365,7 +365,7 @@ final class HandwritingViewModel: ObservableObject {
     /// Vision doesn't read them as texture noise.
     ///
     /// Falls back silently to the original image if Core Image fails.
-    private static func preprocessForTremor(_ input: UIImage) -> UIImage {
+    private nonisolated static func preprocessForTremor(_ input: UIImage) -> UIImage {
         guard let cgInput = input.cgImage else { return input }
         let ci = CIImage(cgImage: cgInput)
 
