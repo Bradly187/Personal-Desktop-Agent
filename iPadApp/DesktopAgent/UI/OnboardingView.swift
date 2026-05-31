@@ -1,4 +1,3 @@
-import ARKit
 import AVFoundation
 import CoreMotion
 import SwiftUI
@@ -7,7 +6,7 @@ import SwiftUI
 /// 0. Welcome        — what the app does
 /// 1. Connection     — find the PC (includes start_agent.bat instruction)
 /// 2. Hardware       — show available sensors on this device
-/// 3. Permissions    — request camera / microphone before any sensor starts
+/// 3. Permissions    — request microphone before any sensor starts
 /// 4. Cursor Control — pick primary cursor input method
 /// 5. Voice & Sound  — enable voice commands and mouth sounds
 /// 6. Calibration    — sensor-aware calibration hub
@@ -189,7 +188,7 @@ private struct WelcomeStep: View {
                 .font(.system(.largeTitle, design: .rounded).weight(.bold))
                 .foregroundStyle(theme.textPrimary)
 
-            Text("Control your computer hands-free using your iPad's sensors — tilt, gaze, head movement, voice, and touch.")
+            Text("Control your computer hands-free using your iPad's sensors — tilt, voice, and touch.")
                 .font(DesignTokens.Typography.body)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -197,7 +196,6 @@ private struct WelcomeStep: View {
 
             VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
                 featureRow(icon: "ipad.landscape", text: "Tilt your iPad to move the cursor")
-                featureRow(icon: "eye", text: "Use eye gaze for fine cursor control")
                 featureRow(icon: "mic", text: "Speak commands or use mouth sounds")
                 featureRow(icon: "hand.draw", text: "Touch trackpad and handwriting input")
             }
@@ -370,7 +368,6 @@ private struct ConnectionStep: View {
 private struct HardwareStep: View {
     @Environment(\.appTheme) private var theme
 
-    private let hasTrueDepth = ARFaceTrackingConfiguration.isSupported
     private let hasMotion = CMMotionManager().isDeviceMotionAvailable
 
     var body: some View {
@@ -392,7 +389,6 @@ private struct HardwareStep: View {
 
             VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
                 sensorRow(name: "Accelerometer & Gyroscope", detail: "Tilt navigation", available: hasMotion)
-                sensorRow(name: "TrueDepth Camera", detail: "Eye gaze & head tracking", available: hasTrueDepth)
                 sensorRow(name: "Microphone", detail: "Voice commands & sound actions", available: true)
                 sensorRow(name: "Multi-Touch Display", detail: "Trackpad & handwriting", available: true)
             }
@@ -400,14 +396,6 @@ private struct HardwareStep: View {
             .background(theme.surfaceSecondary)
             .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
             .padding(.horizontal, DesignTokens.Spacing.lg)
-
-            if !hasTrueDepth {
-                Text("Eye gaze and head tracking require a TrueDepth camera (iPad Pro 2020+).")
-                    .font(DesignTokens.Typography.caption)
-                    .foregroundStyle(theme.warning)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, DesignTokens.Spacing.xl)
-            }
 
             Spacer()
         }
@@ -437,14 +425,13 @@ private struct HardwareStep: View {
 private struct PermissionsStep: View {
     @Environment(\.appTheme) private var theme
 
-    @State private var cameraStatus: PermStatus = .unknown
     @State private var micStatus: PermStatus = .unknown
     @State private var requested = false
 
     private enum PermStatus { case unknown, granted, denied }
 
     private var allHandled: Bool {
-        cameraStatus != .unknown && micStatus != .unknown
+        micStatus != .unknown
     }
 
     var body: some View {
@@ -460,19 +447,13 @@ private struct PermissionsStep: View {
                 .font(DesignTokens.Typography.headline)
                 .foregroundStyle(theme.textPrimary)
 
-            Text("The app needs camera and microphone access. These are used only on your device — nothing is sent to the cloud.")
+            Text("The app needs microphone access. This is used only on your device — nothing is sent to the cloud.")
                 .font(DesignTokens.Typography.body)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, DesignTokens.Spacing.lg)
 
             VStack(spacing: DesignTokens.Spacing.sm) {
-                permRow(
-                    icon: "camera.fill",
-                    title: "Camera",
-                    detail: "TrueDepth camera — eye gaze and head tracking",
-                    status: cameraStatus
-                )
                 permRow(
                     icon: "mic.fill",
                     title: "Microphone",
@@ -504,7 +485,7 @@ private struct PermissionsStep: View {
                         .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
                 }
                 .padding(.horizontal, DesignTokens.Spacing.xl)
-                .accessibilityHint("Double-tap to show iOS permission dialogs for camera and microphone")
+                .accessibilityHint("Double-tap to show the iOS permission dialog for microphone")
             } else if allHandled {
                 HStack(spacing: DesignTokens.Spacing.sm) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(theme.success)
@@ -515,7 +496,7 @@ private struct PermissionsStep: View {
             } else {
                 HStack(spacing: DesignTokens.Spacing.sm) {
                     ProgressView().controlSize(.small)
-                    Text("Waiting for permission dialogs…")
+                    Text("Waiting for permission dialog…")
                         .font(DesignTokens.Typography.caption)
                         .foregroundStyle(theme.textSecondary)
                 }
@@ -552,24 +533,16 @@ private struct PermissionsStep: View {
     }
 
     private func checkExisting() {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:           cameraStatus = .granted
-        case .denied, .restricted:  cameraStatus = .denied
-        default:                    cameraStatus = .unknown
-        }
         switch AVAudioApplication.shared.recordPermission {
         case .granted:  micStatus = .granted
         case .denied:   micStatus = .denied
         default:        micStatus = .unknown
         }
-        if cameraStatus != .unknown && micStatus != .unknown { requested = true }
+        if micStatus != .unknown { requested = true }
     }
 
     private func requestAll() {
         requested = true
-        AVCaptureDevice.requestAccess(for: .video) { granted in
-            DispatchQueue.main.async { cameraStatus = granted ? .granted : .denied }
-        }
         AVAudioApplication.requestRecordPermission { granted in
             DispatchQueue.main.async { micStatus = granted ? .granted : .denied }
         }
@@ -581,8 +554,6 @@ private struct PermissionsStep: View {
 private struct CursorControlStep: View {
     @ObservedObject var settings: SettingsStore
     @Environment(\.appTheme) private var theme
-
-    private let hasTrueDepth = ARFaceTrackingConfiguration.isSupported
 
     var body: some View {
         VStack(spacing: DesignTokens.Spacing.xl) {
@@ -609,33 +580,15 @@ private struct CursorControlStep: View {
                     icon: "ipad.landscape",
                     title: "Tilt",
                     subtitle: "Tilt your iPad to position the cursor",
-                    isSelected: settings.tiltEnabled && !settings.gazeEnabled && !settings.headEnabled,
+                    isSelected: settings.tiltEnabled,
                     action: { selectTilt() }
                 )
-
-                if hasTrueDepth {
-                    cursorOption(
-                        icon: "eye",
-                        title: "Eye Gaze",
-                        subtitle: "Relative eye movement drives the cursor — look left to move left. Not eye-targeting; calibrate monitor mapping after setup for best accuracy.",
-                        isSelected: settings.gazeEnabled && !settings.tiltEnabled,
-                        action: { selectGaze() }
-                    )
-
-                    cursorOption(
-                        icon: "face.smiling",
-                        title: "Head Movement",
-                        subtitle: "Turn your head to move the cursor",
-                        isSelected: settings.headEnabled && !settings.tiltEnabled && !settings.gazeEnabled,
-                        action: { selectHead() }
-                    )
-                }
 
                 cursorOption(
                     icon: "hand.point.up",
                     title: "Trackpad Only",
                     subtitle: "Use the on-screen trackpad with touch",
-                    isSelected: !settings.tiltEnabled && !settings.gazeEnabled && !settings.headEnabled,
+                    isSelected: !settings.tiltEnabled,
                     action: { selectTrackpadOnly() }
                 )
             }
@@ -683,26 +636,10 @@ private struct CursorControlStep: View {
 
     private func selectTilt() {
         settings.tiltEnabled = true
-        settings.gazeEnabled = false
-        settings.headEnabled = false
-    }
-
-    private func selectGaze() {
-        settings.gazeEnabled = true
-        settings.tiltEnabled = false
-        settings.headEnabled = false
-    }
-
-    private func selectHead() {
-        settings.headEnabled = true
-        settings.tiltEnabled = false
-        settings.gazeEnabled = false
     }
 
     private func selectTrackpadOnly() {
         settings.tiltEnabled = false
-        settings.gazeEnabled = false
-        settings.headEnabled = false
     }
 }
 
@@ -716,17 +653,13 @@ private struct CalibrationStep: View {
 
     @Environment(\.appTheme) private var theme
 
-    @State private var showGazeSensitivitySheet = false
-    @State private var showMonitorCalSheet = false
     @State private var showSoundTrainingSheet = false
     @State private var gyroCountdown: Int? = nil
 
     private var isConnected: Bool { wsManager.state == .connected }
     private var hasTilt: Bool { settings.tiltEnabled }
-    private var hasGaze: Bool { settings.gazeEnabled }
-    private var hasHead: Bool { settings.headEnabled }
     private var hasSounds: Bool { !settings.soundMappings.isEmpty }
-    private var hasAny: Bool { hasTilt || hasGaze || hasHead || hasSounds }
+    private var hasAny: Bool { hasTilt || hasSounds }
 
     var body: some View {
         ScrollView {
@@ -792,37 +725,6 @@ private struct CalibrationStep: View {
                             }
                         }
 
-                        // GAZE
-                        if hasGaze {
-                            calSection("Eye Gaze", icon: "eye") {
-                                CalibrationCard(
-                                    title: "Sensitivity Auto-Tune",
-                                    subtitle: "Measures your eye-movement range (~15 s).",
-                                    isDone: done.contains("gaze_sensitivity"),
-                                    isBlocked: false
-                                ) { showGazeSensitivitySheet = true }
-
-                                CalibrationCard(
-                                    title: "Monitor Mapping",
-                                    subtitle: "Maps gaze to exact screen pixels via 5 dots (~2 min). Requires PC bridge.",
-                                    isDone: done.contains("gaze_monitor"),
-                                    isBlocked: !isConnected
-                                ) { showMonitorCalSheet = true }
-                            }
-                        }
-
-                        // HEAD
-                        if hasHead {
-                            calSection("Head Tracking", icon: "face.smiling") {
-                                CalibrationCard(
-                                    title: "Range Auto-Calibrates",
-                                    subtitle: "Move your head left, right, up, down through your comfortable range. The system learns automatically — nothing to do here.",
-                                    isDone: true,
-                                    isBlocked: false
-                                ) { }
-                            }
-                        }
-
                         // SOUND ACTIONS
                         if hasSounds {
                             calSection("Sound Actions", icon: "mouth") {
@@ -837,42 +739,14 @@ private struct CalibrationStep: View {
                     }
                 }
 
-                // PC connection nudge for pending monitor calibration
-                if hasGaze && !done.contains("gaze_monitor") && !isConnected {
-                    HStack(spacing: DesignTokens.Spacing.sm) {
-                        Image(systemName: "wifi.exclamationmark")
-                            .foregroundStyle(theme.warning)
-                        Text("Start the PC bridge to unlock Monitor Mapping. You can finish it later from Settings → Gaze → Calibrate Monitor.")
-                            .font(DesignTokens.Typography.caption)
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                    .padding(DesignTokens.Spacing.md)
-                    .background(theme.surfaceSecondary)
-                    .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
-                }
-
                 Spacer(minLength: DesignTokens.Spacing.xxl)
             }
             .padding(.horizontal, DesignTokens.Spacing.lg)
         }
         .onAppear {
             if hasTilt { sensorManager.tiltSensor.start() }
-            if hasGaze { sensorManager.gazeTracker.start() }
             // Fix P4: start SoundDetector so SoundTrainingSheet receives detections
             if hasSounds { sensorManager.soundDetector.start() }
-            if hasHead { done.insert("head_range") }
-        }
-        .sheet(isPresented: $showGazeSensitivitySheet, onDismiss: {
-            done.insert("gaze_sensitivity")
-        }) {
-            GazeCalibrationSheet(sensorManager: sensorManager, settings: settings)
-        }
-        .sheet(isPresented: $showMonitorCalSheet, onDismiss: {
-            done.insert("gaze_monitor")
-        }) {
-            MonitorCalibrationSheet()
-                .environmentObject(wsManager)
-                .environmentObject(sensorManager)
         }
         .sheet(isPresented: $showSoundTrainingSheet, onDismiss: {
             done.insert("sound_training")
@@ -1270,9 +1144,6 @@ private struct DoneStep: View {
     private var calibrationItems: [(id: String, label: String, relevant: Bool)] { [
         ("tilt_neutral",        "Tilt neutral position",   settings.tiltEnabled),
         ("tilt_gyro",           "Gyro bias",               settings.tiltEnabled && !settings.tiltPositionMode),
-        ("gaze_sensitivity",    "Gaze sensitivity",         settings.gazeEnabled),
-        ("gaze_monitor",        "Monitor mapping",          settings.gazeEnabled),
-        ("head_range",          "Head tracking",            settings.headEnabled),
         ("sound_training",      "Sound training",           !settings.soundMappings.isEmpty),
         ("voice_profiling",     "Voice profile",            settings.audioStreamEnabled),
         ("gesture_assessment",  "Gesture assessment",       true),

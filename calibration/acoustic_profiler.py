@@ -161,8 +161,10 @@ class AcousticProfiler:
         self._flare_samples:   list[VoiceMetrics] = []
         self._MAX_RING = 200
 
-        # Derived thresholds — start with safe defaults, overridden on load()
-        self._vad_threshold:   float = 0.015
+        # Derived thresholds — start with safe defaults, overridden on load().
+        # Default sits at the documented floor (VAD_THRESHOLD_MIN) so the
+        # uncalibrated value always satisfies the MIN ≤ vad ≤ MAX invariant.
+        self._vad_threshold:   float = VAD_THRESHOLD_MIN
         self._logprob_floor:   float = -1.0
         self._flare_vad_scale: float = 0.5
 

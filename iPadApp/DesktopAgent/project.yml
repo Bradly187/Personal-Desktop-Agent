@@ -42,7 +42,6 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - audio
-        NSCameraUsageDescription: "Used for gaze and head tracking."
         NSMicrophoneUsageDescription: "Used for voice keyword detection."
         NSSpeechRecognitionUsageDescription: "Used for on-device keyword matching."
         NSMotionUsageDescription: "Used for tilt-based cursor control."

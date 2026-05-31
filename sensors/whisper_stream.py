@@ -213,7 +213,6 @@ class WhisperStream:
         self._profiler = None
         self._metrics = None   # set via set_metrics()
         self._logprob_floor_override: float | None = None
-        self._gaze_cal_trigger = None  # callable: () → None, set by main.py
         # D8: correction detection state — tracks last command outcome
         self._last_command_status: str = ""   # "ok" | "CLARIFY" | "failed"
         self._last_command_text: str = ""     # text of previous command
@@ -253,10 +252,6 @@ class WhisperStream:
             self._event_loop = _asyncio.get_running_loop()
         except RuntimeError:
             self._event_loop = None
-
-    def set_gaze_calibration_trigger(self, callback) -> None:
-        """Set callable to invoke when 'calibrate monitor' is spoken after wake phrase."""
-        self._gaze_cal_trigger = callback
 
     def set_last_command_status(self, status: str, text: str) -> None:
         """D8: Called by HybridCoordinator after each route() so the next
@@ -657,17 +652,6 @@ class WhisperStream:
                     )
                     self._fusion.on_voice(correction_cmd)
                     return
-
-            # Intercept "calibrate monitor" before it reaches the LLM pipeline.
-            if text.lower().startswith("calibrate monitor") and self._gaze_cal_trigger:
-                log.info("WhisperStream: 'calibrate monitor' → launching gaze calibration")
-                if self._event_loop is not None:
-                    import asyncio as _asyncio
-                    _asyncio.run_coroutine_threadsafe(
-                        self._gaze_cal_trigger(),
-                        self._event_loop,
-                    )
-                return
 
         cmd = Command(
             text=text,

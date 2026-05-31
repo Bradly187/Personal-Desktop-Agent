@@ -84,7 +84,7 @@ async def _with_chroma(tmp_path: str, coro_fn):
 @given(
     text=st.text(min_size=3, max_size=200).filter(lambda t: t.strip()),
     action=st.sampled_from(["CLICK", "TYPE", "SCROLL", "OPEN", "CLOSE", "HOTKEY"]),
-    source=st.sampled_from(["voice", "gesture", "touch", "gaze", "tilt", "head"]),
+    source=st.sampled_from(["voice", "gesture", "touch", "tilt"]),
 )
 def test_property_1_round_trip_semantic_identity(text, action, source):
     # Feature: behavioral-twin-state, Property 1: round-trip semantic identity

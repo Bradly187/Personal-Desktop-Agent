@@ -4,7 +4,7 @@ import QuartzCore
 /// 1-Euro adaptive low-pass filter (Casiez et al., 2012).
 ///
 /// Provides jitter reduction at low speeds and minimal latency at high speeds.
-/// Applied per-axis on iPad before sending gaze/head deltas over WebSocket.
+/// Applied per-axis on iPad before sending sensor deltas (e.g. tilt) over WebSocket.
 ///
 /// Reference: Géry Casiez, Nicolas Roussel, Daniel Vogel. 1€ Filter: A Simple
 /// Speed-based Low-pass Filter for Noisy Input in Interactive Systems. CHI 2012.

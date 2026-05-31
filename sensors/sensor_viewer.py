@@ -8,7 +8,6 @@ Features:
   - Connection status indicator (green=live, amber=stale, grey=no data)
   - Always-on-top toggle (Ctrl+T or checkbox)
   - Hand landmark overlay from GestureProcessor
-  - Gaze cursor overlay on depth panel
   - Freeze-frame (Space or click the Freeze button)
   - Snapshot to disk (Ctrl+S)
   - Depth-at-cursor readout on hover
@@ -116,8 +115,8 @@ def _depth_to_rgb(depth: np.ndarray, max_range: float = 4.0) -> np.ndarray:
 class SensorViewer:
     """Desktop window showing live iPad camera and LiDAR depth feeds.
 
-    Thread-safe: on_camera_frame(), on_depth_frame(), on_hand_landmarks(),
-    and on_gaze() can be called from the asyncio event loop. Data is queued
+    Thread-safe: on_camera_frame(), on_depth_frame(), and on_hand_landmarks()
+    can be called from the asyncio event loop. Data is queued
     and rendered in the tkinter thread.
     """
 
@@ -144,7 +143,6 @@ class SensorViewer:
 
         # Overlay data queues
         self._landmarks_q: queue.Queue[Optional[list]] = queue.Queue(maxsize=1)
-        self._gaze_q: queue.Queue[Optional[tuple]] = queue.Queue(maxsize=1)
 
         # Stats (written from asyncio thread, read from tk thread — atomic floats)
         self._camera_fps = 0.0
@@ -159,11 +157,6 @@ class SensorViewer:
         # Latest PIL images for snapshot saving
         self._last_camera_img: Optional[Image.Image] = None
         self._last_depth_img: Optional[Image.Image] = None
-
-        # Gaze position (normalised 0–1)
-        self._gaze_x = 0.5
-        self._gaze_y = 0.5
-        self._gaze_conf = 0.0
 
         # Hand landmarks (list of (x, y) normalised 0–1, 21 points)
         self._landmarks: Optional[list] = None
@@ -270,10 +263,6 @@ class SensorViewer:
         rgb = _depth_to_rgb(depth)
         img = Image.fromarray(rgb).resize((self._panel_w, self._panel_h), Image.LANCZOS)
 
-        # Draw gaze cursor overlay
-        if self._gaze_conf > 0.3:
-            img = self._draw_gaze(img, self._gaze_x, self._gaze_y)
-
         # Update FPS
         now = time.monotonic()
         if self._depth_ts > 0:
@@ -297,12 +286,6 @@ class SensorViewer:
         landmarks: list of 21 (x, y) tuples normalised 0–1, or None.
         """
         self._landmarks = landmarks
-
-    def on_gaze(self, x: float, y: float, confidence: float) -> None:
-        """Receive gaze position (normalised 0–1) from FusionEngine."""
-        self._gaze_x = x
-        self._gaze_y = y
-        self._gaze_conf = confidence
 
     def set_flick_engine(self, engine) -> None:
         """Wire the D7 FlickEngine for the debug panel.  Thread-safe."""
@@ -343,19 +326,6 @@ class SensorViewer:
             draw.ellipse([pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
                          fill="#00ffcc", outline="#004433")
 
-        return img
-
-    def _draw_gaze(self, img: Image.Image, gx: float, gy: float) -> Image.Image:
-        """Draw gaze cursor dot on depth image."""
-        draw = ImageDraw.Draw(img)
-        w, h = img.size
-        cx, cy = int(gx * w), int(gy * h)
-        r = 8
-        # Outer ring
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r],
-                     outline="#ffff00", width=2)
-        # Inner dot
-        draw.ellipse([cx - 3, cy - 3, cx + 3, cy + 3], fill="#ffff00")
         return img
 
     # ---------------------------------------------------------------------- #

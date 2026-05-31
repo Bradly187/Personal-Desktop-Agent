@@ -1,4 +1,3 @@
-import ARKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -12,7 +11,6 @@ struct SettingsView: View {
     @State private var newSoundName = ""
     @State private var newSoundAction = ""
     @State private var newKeyword = ""
-    @State private var showMonitorCalSheet = false
     // G1: voice calibration sheets
     @State private var showVoiceProfilingSheet = false
     @State private var showVoiceCalibrationSheet = false
@@ -118,67 +116,6 @@ struct SettingsView: View {
                     .accessibilityHint("Double-tap to set the current iPad orientation as the neutral center position")
                 } header: {
                     DASectionHeader(title: "Tilt Navigation")
-                }
-
-                // Gaze
-                Section {
-                    if !ARFaceTrackingConfiguration.isSupported {
-                        Label("Gaze tracking requires TrueDepth camera (iPad Pro or iPhone X+)", systemImage: "exclamationmark.triangle.fill")
-                            .font(DesignTokens.Typography.caption)
-                            .foregroundStyle(.orange)
-                    }
-                    Toggle("Enable Gaze", isOn: $settings.gazeEnabled)
-                        .disabled(!ARFaceTrackingConfiguration.isSupported)
-                    LabeledContent("Smoothing") {
-                        Slider(value: $settings.gazeStabilityThreshold, in: 0.02...0.15)
-                            .overlay(alignment: .trailing) {
-                                Text(String(format: "%.2f", settings.gazeStabilityThreshold))
-                                    .font(DesignTokens.Typography.caption)
-                                    .foregroundStyle(theme.textSecondary)
-                                    .offset(y: 18)
-                            }
-                    }
-                    .disabled(!ARFaceTrackingConfiguration.isSupported)
-                    LabeledContent("Sensitivity") {
-                        Slider(value: $settings.gazeSensitivity, in: 50...500)
-                            .overlay(alignment: .trailing) {
-                                Text(String(format: "%.0f", settings.gazeSensitivity))
-                                    .font(DesignTokens.Typography.caption)
-                                    .foregroundStyle(theme.textSecondary)
-                                    .offset(y: 18)
-                            }
-                    }
-                    .disabled(!ARFaceTrackingConfiguration.isSupported)
-                    Button("Calibrate Monitor") {
-                        showMonitorCalSheet = true
-                    }
-                    .disabled(!ARFaceTrackingConfiguration.isSupported ||
-                              wsManager.state != .connected)
-                    .accessibilityHint("Double-tap to run 5-dot gaze monitor calibration")
-                } header: {
-                    DASectionHeader(title: "Gaze")
-                }
-                .sheet(isPresented: $showMonitorCalSheet) {
-                    MonitorCalibrationSheet()
-                        .environmentObject(wsManager)
-                        .environmentObject(sensorManager)
-                }
-
-                // Head
-                Section {
-                    if !ARFaceTrackingConfiguration.isSupported {
-                        Label("Head tracking requires TrueDepth camera (iPad Pro or iPhone X+)", systemImage: "exclamationmark.triangle.fill")
-                            .font(DesignTokens.Typography.caption)
-                            .foregroundStyle(.orange)
-                    }
-                    Toggle("Enable Head Tracking", isOn: $settings.headEnabled)
-                        .disabled(!ARFaceTrackingConfiguration.isSupported)
-                    LabeledContent("Smoothing") {
-                        Slider(value: $settings.headSmoothingFactor, in: 0.05...1.0)
-                    }
-                    .disabled(!ARFaceTrackingConfiguration.isSupported)
-                } header: {
-                    DASectionHeader(title: "Head Tracking")
                 }
 
                 // Trackpad
@@ -343,9 +280,9 @@ struct SettingsView: View {
                         showRerunOnboardingAlert = true
                     }
                     .foregroundStyle(theme.accent)
-                    .accessibilityHint("Restarts the 11-step calibration wizard from step 1.")
+                    .accessibilityHint("Restarts the calibration wizard from step 1.")
 
-                    Text("Restarts the full calibration wizard (welcome → tilt → gaze → voice → gesture → flare → sound → touch → monitor → summary). Existing calibrations and settings are kept.")
+                    Text("Restarts the full calibration wizard (welcome → tilt → voice → gesture → flare → sound → touch → summary). Existing calibrations and settings are kept.")
                         .font(DesignTokens.Typography.caption)
                         .foregroundStyle(theme.textSecondary)
                 } header: {

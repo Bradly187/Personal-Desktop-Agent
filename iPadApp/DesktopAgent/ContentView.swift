@@ -46,35 +46,7 @@ struct ContentView: View {
                 .padding(.top, 44) // below connection banner
                 .allowsHitTesting(false)
 
-            // Cursor conflict warning (interactive when visible, transparent to
-            // touches otherwise — activeCursorCount drives both the banner body
-            // and the hit-testing gate so they can never get out of sync).
-            let conflictActive = [settings.tiltEnabled, settings.gazeEnabled, settings.headEnabled].filter { $0 }.count >= 2
-            CursorConflictBanner(settings: settings)
-                .padding(.horizontal, DesignTokens.Spacing.lg)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 72) // below activity bar
-                .allowsHitTesting(conflictActive)
-
             ScreenshotOverlayView()
-
-            // E3: Camera permission failure banner (shown when ARKit gives up).
-            if let msg = sensorManager.cameraPermissionMessage {
-                HStack(alignment: .top, spacing: DesignTokens.Spacing.sm) {
-                    Image(systemName: "video.slash.fill")
-                        .foregroundStyle(theme.warning)
-                    Text(msg)
-                        .font(DesignTokens.Typography.caption)
-                        .foregroundStyle(theme.textPrimary)
-                        .multilineTextAlignment(.leading)
-                }
-                .padding(DesignTokens.Spacing.md)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.md))
-                .padding(.horizontal, DesignTokens.Spacing.lg)
-                .padding(.top, 100)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
 
             // ── Custom tab bar with drag-to-switch ───────────────────────────
             customTabBar

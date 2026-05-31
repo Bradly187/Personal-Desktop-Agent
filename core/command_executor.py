@@ -188,11 +188,11 @@ class Command:
     text: str
     action: str  # accessibility: CLICK|SCROLL|TYPE|OPEN|CLOSE|HOTKEY|DICTATE|CLARIFY|SCREENSHOT
                  # dev-agent:    WRITE_FILE|RUN_TERMINAL|EXPLAIN|SEARCH_WEB|READ_SCREEN
-    source: str                          # touch | trackpad | sound_action | gaze_dwell | ...
+    source: str                          # touch | trackpad | sound_action | voice | ...
     whisper_logprob: float = 0.0
     gesture_confidence: float = 1.0
     session_context: list[str] = field(default_factory=list)
-    gaze_coords: tuple[int, int] | None = None
+    gaze_coords: tuple[int, int] | None = None  # explicit click pixel coords (vision grounder, touch)
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -295,7 +295,7 @@ class CommandExecutor:
         p = cmd.params
 
         # ------------------------------------------------------------------ #
-        # CLICK — left-click at provided coords, gaze coords, or screen centre
+        # CLICK — left-click at provided coords, explicit click coords, or screen centre
         # ------------------------------------------------------------------ #
         if action == "CLICK":
             x, y = self._resolve_coords(cmd)
@@ -509,12 +509,12 @@ class CommandExecutor:
 
     @staticmethod
     def _resolve_coords(cmd: Command) -> tuple[int, int]:
-        """Return (x, y) via: explicit params → UIAutomation → gaze coords → cursor.
+        """Return (x, y) via: explicit params → UIAutomation → explicit coords → cursor.
 
         Fallback chain:
-          1. Explicit x/y in params  (vision grounder, gaze dwell)
+          1. Explicit x/y in params  (vision grounder, touch)
           2. UIAutomation structured element lookup  ← Sprint 6
-          3. Gaze coords from Command
+          3. Explicit click coords from Command (gaze_coords)
           4. Current cursor position
         """
         p = cmd.params

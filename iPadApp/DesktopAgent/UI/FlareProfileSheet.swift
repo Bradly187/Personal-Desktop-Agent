@@ -142,16 +142,10 @@ struct FlareProfileSheet: View {
                 icon: "hand.raised.fill"
             )
             sensorToggle(
-                "Eye tracking is harder",
-                subtitle: "Gaze stability threshold increases",
-                binding: $settings.flareGazeDegrades,
-                icon: "eye.fill"
-            )
-            sensorToggle(
-                "Head movement is more limited",
-                subtitle: "Head tracking sensitivity adjusts",
+                "Tilt is harder to control",
+                subtitle: "Tilt sensitivity adjusts",
                 binding: $settings.flareTiltDegrades,
-                icon: "person.bust"
+                icon: "ipad.landscape"
             )
         }
     }

@@ -209,22 +209,6 @@ def _print_startup_table(
         avail = p.is_available()
         return ("OK", "UIA COM available") if avail else ("WARN", "UIA COM unavailable (comtypes?)")
 
-    def _check_gaze_calibration():
-        from calibration.gaze_calibrator import GazeCalibrator, _JSON_PATH
-        if not _JSON_PATH.exists():
-            return "WARN", "not calibrated — say 'hey agent calibrate monitor'"
-        cal = GazeCalibrator()
-        if cal.load():
-            status = cal.get_status()
-            residual = status["residual_px"]
-            calibrated_at = status["calibrated_at"]
-            if calibrated_at > 0:
-                import time as _t
-                age_days = (_t.time() - calibrated_at) / 86400
-                return "OK", f"residual={residual:.1f}px  age={age_days:.0f}d"
-            return "OK", f"residual={residual:.1f}px  age=unknown"
-        return "WARN", "calibration file unreadable"
-
     def _check_chromadb():
         import chromadb  # noqa: F401
         from chromadb.utils.embedding_functions import (  # noqa: F401
@@ -304,7 +288,6 @@ def _print_startup_table(
     check("Whisper (faster-whisper)",       _check_whisper)
     check("Acoustic profiler",              _check_acoustic_profiler)
     check("UIAutomation (Win32)",           _check_uiautomation)
-    check("Gaze monitor calibration",      _check_gaze_calibration)
     check("MiniLM (sentence-transformers)", _check_sentence_transformers)
     check("Screen OCR (tesseract)",         _check_tesseract)
     check("Handwriting OCR (pix2tex)",      _check_pix2tex)
@@ -504,7 +487,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from storage.audit_log import AuditLog
     from adaptive.content_filter import ContentFilter
     from adaptive.mcp_trust_classifier import MCPTrustClassifier
-    from calibration.gaze_calibrator import GazeCalibrator
     from monitoring.metrics import get_metrics
     from storage.session_analyzer import SessionAnalyzer
 
@@ -741,13 +723,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if twin_state:
         twin_state.set_acoustic_profiler(profiler)
 
-    # --- Gaze calibrator (load persisted calibration if available) ---
-    gaze_calibrator = GazeCalibrator(screen_w=sw, screen_h=sh)
-    gaze_calibrator.load()
-    if gaze_calibrator.is_calibrated:
-        log.info("GazeCalibrator: loaded persisted calibration  residual=%.1f px",
-                 gaze_calibrator.get_status()["residual_px"])
-
     bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
@@ -755,14 +730,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_whisper_stream(whisper)
     bridge.set_coordinator(coordinator)  # needed for pain_day_override message
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
-    bridge.set_gaze_calibrator(gaze_calibrator)
-    if _speak_fn:
-        bridge.set_speak_fn(_speak_fn)
-    fusion.set_gaze_calibrator(gaze_calibrator)
     fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
     await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
     await profiler.load_rom_bounds(agent_db)       # D4: ROM → initial VAD bounds
-    whisper.set_gaze_calibration_trigger(bridge.start_gaze_calibration_from_voice)
 
     # D6: wire profiler → WhisperStream so VAD changes push immediately
     profiler.set_whisper_ref(whisper)

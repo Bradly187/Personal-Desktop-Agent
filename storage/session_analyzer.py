@@ -13,7 +13,7 @@ Requirements addressed:
   - Top-10 action verbs
   - Cloud escalation rate over time (trend)
   - Whisper logprob and gesture confidence distributions
-  - Sensor telemetry summary (mean tilt magnitude, gaze activity, head activity)
+  - Sensor telemetry summary (mean tilt magnitude, ambient RMS)
 """
 
 from __future__ import annotations
@@ -188,8 +188,6 @@ class SessionAnalyzer:
             """SELECT
                  COUNT(*) AS samples,
                  AVG(SQRT(tilt_rx * tilt_rx + tilt_ry * tilt_ry)) AS mean_tilt_mag,
-                 AVG(gaze_conf) AS mean_gaze_conf,
-                 AVG(ABS(head_pitch) + ABS(head_yaw)) AS mean_head_activity,
                  AVG(rms_ambient) AS mean_rms
                FROM ops.sensor_telemetry WHERE session_id = ?""", (sid,))
         telem = telem_summary[0] if telem_summary else {}
@@ -218,8 +216,6 @@ class SessionAnalyzer:
             # Extra fields (not stored in DB, used for markdown report only)
             "_telem_samples": telem.get("samples", 0),
             "_mean_tilt_mag": telem.get("mean_tilt_mag"),
-            "_mean_gaze_conf": telem.get("mean_gaze_conf"),
-            "_mean_head_activity": telem.get("mean_head_activity"),
             "_mean_rms": telem.get("mean_rms"),
         }
 
@@ -285,8 +281,6 @@ class SessionAnalyzer:
                 "## Sensor Telemetry",
                 f"- Samples: {ns}",
                 f"- Mean tilt magnitude: {_float3(summary.get('_mean_tilt_mag'))} rad/s",
-                f"- Mean gaze confidence: {_float2(summary.get('_mean_gaze_conf'))}",
-                f"- Mean head activity: {_float2(summary.get('_mean_head_activity'))} °",
                 f"- Mean RMS ambient: {_float3(summary.get('_mean_rms'))}",
                 "",
             ]

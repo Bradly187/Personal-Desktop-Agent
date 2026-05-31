@@ -45,8 +45,8 @@ struct DesktopAgentApp: App {
             switch newPhase {
             case .background:
                 // G4: Keep audio sensors running in background so voice commands
-                // still reach the PC when the screen locks. Camera/tilt stop
-                // (ARKit and Core Motion require foreground). WebSocket stays up.
+                // still reach the PC when the screen locks. Tilt stops
+                // (Core Motion requires foreground). WebSocket stays up.
                 // NOTE: requires UIBackgroundModes: ["audio"] in Info.plist and
                 // AVAudioSession category .playAndRecord with .mixWithOthers option.
                 sensorManager.stopNonAudioSensors()

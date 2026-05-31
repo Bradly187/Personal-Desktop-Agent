@@ -14,7 +14,7 @@ enum ToolbarPosition: String, Codable, CaseIterable {
 
 // MARK: — Dwell Action Types
 
-/// Supported gaze dwell action types. Raw values match the WebSocket protocol strings.
+/// Supported dwell action types. Raw values match the WebSocket protocol strings.
 enum DwellActionType: String, Codable, CaseIterable {
     case leftClick = "left_click"
     case rightClick = "right_click"
@@ -108,45 +108,9 @@ final class SettingsStore: ObservableObject {
         defaults.object(forKey: "neutralGravityX") != nil
     }
 
-    // MARK: — Gaze / Dwell
-    @Published var gazeEnabled: Bool {
-        didSet { defaults.set(gazeEnabled, forKey: "gazeEnabled") }
-    }
+    // MARK: — Dwell
     @Published var dwellTimeout: Double {
         didSet { defaults.set(dwellTimeout, forKey: "dwellTimeout") }
-    }
-
-    /// Gaze stability threshold — used as EMA smoothing factor for gaze deltas.
-    /// Higher values = more smoothing (less jitter, slower response).
-    /// Range: 0.02–0.15. Default: 0.04.
-    @Published var gazeStabilityThreshold: Double {
-        didSet { defaults.set(gazeStabilityThreshold, forKey: "gazeStabilityThreshold") }
-    }
-
-    /// Gaze sensitivity — multiplier for gaze delta → cursor movement.
-    /// Higher values = faster cursor movement from eye movement.
-    /// Range: 50–500. Default: 200.
-    @Published var gazeSensitivity: Double {
-        didSet { defaults.set(gazeSensitivity, forKey: "gazeSensitivity") }
-    }
-
-    // MARK: — Gaze 1-Euro Filter Parameters
-    @Published var gazeFilterMinCutoff: Double {
-        didSet { defaults.set(gazeFilterMinCutoff, forKey: "gazeFilterMinCutoff") }
-    }
-    @Published var gazeFilterBeta: Double {
-        didSet { defaults.set(gazeFilterBeta, forKey: "gazeFilterBeta") }
-    }
-    @Published var gazeFilterDCutoff: Double {
-        didSet { defaults.set(gazeFilterDCutoff, forKey: "gazeFilterDCutoff") }
-    }
-
-    // MARK: — Gaze Saccade Detection
-    @Published var gazeSaccadeEnterThreshold: Double {
-        didSet { defaults.set(gazeSaccadeEnterThreshold, forKey: "gazeSaccadeEnterThreshold") }
-    }
-    @Published var gazeSaccadeExitThreshold: Double {
-        didSet { defaults.set(gazeSaccadeExitThreshold, forKey: "gazeSaccadeExitThreshold") }
     }
 
     /// The currently active dwell action type. Persisted to UserDefaults.
@@ -221,27 +185,8 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    // MARK: — Head tracking
-    @Published var headEnabled: Bool {
-        didSet { defaults.set(headEnabled, forKey: "headEnabled") }
-    }
-    @Published var headSmoothingFactor: Double {
-        didSet { defaults.set(headSmoothingFactor, forKey: "headSmoothingFactor") }
-    }
-
-    // MARK: — Head 1-Euro Filter Parameters
-    @Published var headFilterMinCutoff: Double {
-        didSet { defaults.set(headFilterMinCutoff, forKey: "headFilterMinCutoff") }
-    }
-    @Published var headFilterBeta: Double {
-        didSet { defaults.set(headFilterBeta, forKey: "headFilterBeta") }
-    }
-    @Published var headFilterDCutoff: Double {
-        didSet { defaults.set(headFilterDCutoff, forKey: "headFilterDCutoff") }
-    }
-
-    // MARK: — Cursor Sensor Selection (mutual exclusion)
-    /// Which cursor-driving sensor is currently active: "tilt", "gaze", or "head".
+    // MARK: — Cursor Sensor Selection
+    /// Which cursor-driving sensor is currently active. Currently always "tilt".
     @Published var activeCursorSensor: String {
         didSet { defaults.set(activeCursorSensor, forKey: "activeCursorSensor") }
     }
@@ -265,9 +210,6 @@ final class SettingsStore: ObservableObject {
     }
     @Published var flareGestureDegrades: Bool {
         didSet { defaults.set(flareGestureDegrades, forKey: "flareGestureDegrades") }
-    }
-    @Published var flareGazeDegrades: Bool {
-        didSet { defaults.set(flareGazeDegrades, forKey: "flareGazeDegrades") }
     }
     @Published var flareTiltDegrades: Bool {
         didSet { defaults.set(flareTiltDegrades, forKey: "flareTiltDegrades") }
@@ -303,33 +245,9 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(lastCalibrationDate, forKey: "lastCalibrationDate") }
     }
 
-    // MARK: — Feature Toggles (Gaze Dwell Actions)
-    @Published var gazeDwellClickEnabled: Bool {
-        didSet { defaults.set(gazeDwellClickEnabled, forKey: "gazeDwellClickEnabled") }
-    }
-    @Published var gazeDwellRightClickEnabled: Bool {
-        didSet { defaults.set(gazeDwellRightClickEnabled, forKey: "gazeDwellRightClickEnabled") }
-    }
-    @Published var gazeDwellDoubleClickEnabled: Bool {
-        didSet { defaults.set(gazeDwellDoubleClickEnabled, forKey: "gazeDwellDoubleClickEnabled") }
-    }
-    @Published var gazeDwellDragEnabled: Bool {
-        didSet { defaults.set(gazeDwellDragEnabled, forKey: "gazeDwellDragEnabled") }
-    }
+    // MARK: — Feature Toggles
     @Published var edgeScrollEnabled: Bool {
         didSet { defaults.set(edgeScrollEnabled, forKey: "edgeScrollEnabled") }
-    }
-    @Published var gazeCursorModeEnabled: Bool {
-        didSet { defaults.set(gazeCursorModeEnabled, forKey: "gazeCursorModeEnabled") }
-    }
-
-    /// True when all four dwell action types are disabled (click, right-click, double-click, drag).
-    /// Edge scroll and gaze-to-cursor are independent and not considered here.
-    var allDwellActionsDisabled: Bool {
-        !gazeDwellClickEnabled &&
-        !gazeDwellRightClickEnabled &&
-        !gazeDwellDoubleClickEnabled &&
-        !gazeDwellDragEnabled
     }
 
     // MARK: — Voice condition (G5: persist last-declared condition so it survives reconnects)
@@ -380,15 +298,7 @@ final class SettingsStore: ObservableObject {
         let savedRange = defaults.double(forKey: "tiltRange")
         tiltRange = savedRange > 0 ? max(5.0, min(60.0, savedRange)) : 25.0
         tiltPositionMode = defaults.object(forKey: "tiltPositionMode") as? Bool ?? true
-        gazeEnabled = defaults.object(forKey: "gazeEnabled") as? Bool ?? true
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
-        gazeStabilityThreshold = defaults.double(forKey: "gazeStabilityThreshold").nonZero ?? 0.04
-        gazeSensitivity = defaults.double(forKey: "gazeSensitivity").nonZero ?? 200.0
-        gazeFilterMinCutoff = defaults.double(forKey: "gazeFilterMinCutoff").nonZero ?? 1.5
-        gazeFilterBeta = defaults.double(forKey: "gazeFilterBeta").nonZero ?? 0.01
-        gazeFilterDCutoff = defaults.double(forKey: "gazeFilterDCutoff").nonZero ?? 1.0
-        gazeSaccadeEnterThreshold = defaults.double(forKey: "gazeSaccadeEnterThreshold").nonZero ?? 100.0
-        gazeSaccadeExitThreshold = defaults.double(forKey: "gazeSaccadeExitThreshold").nonZero ?? 50.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
            let action = DwellActionType(rawValue: savedAction) {
@@ -411,11 +321,6 @@ final class SettingsStore: ObservableObject {
         let offsetY = defaults.double(forKey: "toolbarFloatingOffsetY")
         toolbarFloatingOffset = CGSize(width: offsetX, height: offsetY)
 
-        headEnabled = defaults.object(forKey: "headEnabled") as? Bool ?? false
-        headSmoothingFactor = defaults.double(forKey: "headSmoothingFactor").nonZero ?? 0.3
-        headFilterMinCutoff = defaults.double(forKey: "headFilterMinCutoff").nonZero ?? 1.2
-        headFilterBeta = defaults.double(forKey: "headFilterBeta").nonZero ?? 0.008
-        headFilterDCutoff = defaults.double(forKey: "headFilterDCutoff").nonZero ?? 1.0
         activeCursorSensor = defaults.string(forKey: "activeCursorSensor") ?? "tilt"
         trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 2.0
         palmRejectRadius = defaults.double(forKey: "palmRejectRadius").nonZero ?? 25.0
@@ -424,7 +329,6 @@ final class SettingsStore: ObservableObject {
         keywordList = defaults.stringArray(forKey: "keywordList") ?? []
         flareVoiceDegrades  = defaults.object(forKey: "flareVoiceDegrades")  as? Bool ?? true
         flareGestureDegrades = defaults.object(forKey: "flareGestureDegrades") as? Bool ?? false
-        flareGazeDegrades   = defaults.object(forKey: "flareGazeDegrades")   as? Bool ?? false
         flareTiltDegrades   = defaults.object(forKey: "flareTiltDegrades")   as? Bool ?? false
         flareVadScale       = defaults.double(forKey: "flareVadScale").nonZero ?? 0.5
         manualPainDay       = defaults.object(forKey: "manualPainDay")       as? Bool ?? false
@@ -441,12 +345,7 @@ final class SettingsStore: ObservableObject {
             disabledGestures = []
         }
         lastCalibrationDate = defaults.object(forKey: "lastCalibrationDate") as? Date
-        gazeDwellClickEnabled = defaults.object(forKey: "gazeDwellClickEnabled") as? Bool ?? true
-        gazeDwellRightClickEnabled = defaults.object(forKey: "gazeDwellRightClickEnabled") as? Bool ?? true
-        gazeDwellDoubleClickEnabled = defaults.object(forKey: "gazeDwellDoubleClickEnabled") as? Bool ?? true
-        gazeDwellDragEnabled = defaults.object(forKey: "gazeDwellDragEnabled") as? Bool ?? true
         edgeScrollEnabled = defaults.object(forKey: "edgeScrollEnabled") as? Bool ?? true
-        gazeCursorModeEnabled = defaults.object(forKey: "gazeCursorModeEnabled") as? Bool ?? true
 
         voiceCondition = defaults.string(forKey: "voiceCondition") ?? "good_day"
         audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false

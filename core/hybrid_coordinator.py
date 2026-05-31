@@ -4,9 +4,9 @@ Receives a Command from FusionEngine, decides whether to run local inference
 or fall back to the cloud, executes the resulting action, and logs the outcome.
 
 Gate logic (source-dependent):
-  touch / sound_action / gaze_dwell / multimodal → bypass all 4 gates → local
-  voice_local                                     → skip Gate 1 → gates 2-4
-  gesture / voice                                 → full 4-gate evaluation
+  touch / sound_action / multimodal → bypass all 4 gates → local
+  voice_local                       → skip Gate 1 → gates 2-4
+  gesture / voice                   → full 4-gate evaluation
 
 Gate 0 — Privacy:     command text contains no sensitive-data patterns
   fail → force local (never send to cloud)
@@ -329,7 +329,7 @@ async def _retranscribe(cmd: Command) -> Command:
 # HybridCoordinator
 # ---------------------------------------------------------------------------
 
-_BYPASS_SOURCES = {"touch", "sound_action", "gaze_dwell", "multimodal"}
+_BYPASS_SOURCES = {"touch", "sound_action", "multimodal"}
 _SKIP_GATE1_SOURCES = {"voice_local"}
 
 
@@ -1022,7 +1022,7 @@ class HybridCoordinator:
 
         # Vision grounding: resolve named CLICK targets to pixel coords.
         # Only runs when there's a named target and no coords already supplied
-        # (gaze_coords or explicit x/y from touch). Falls through silently on
+        # (explicit click coords or x/y from touch). Falls through silently on
         # any failure — CommandExecutor's Tesseract + cursor fallback takes over.
         grounded_coords = cmd.gaze_coords
         if verb == "CLICK" and target and "x" not in params:

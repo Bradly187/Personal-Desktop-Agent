@@ -1,14 +1,12 @@
 """Property-based tests for WebSocket protocol correctness (Property 17).
 
-**Validates: Requirements 7.2, 7.4, 7.5**
+**Validates: Requirements 7.2, 7.4**
 
 Property 17: WebSocket set_dwell_action protocol correctness
 - For any `set_dwell_action` message: if action_type is in the valid set, the bridge
   SHALL respond with ack status "ok" echoing the action_type and update internal state;
   if action_type is not in the valid set, the bridge SHALL respond with ack status "error"
   and retain the previous action type unchanged.
-- For any `gaze_dwell` message missing the action_type field, the bridge SHALL use the
-  currently active action type.
 
 Run:
     pytest tests/test_prop_websocket_protocol.py -v
@@ -222,116 +220,3 @@ class TestInvalidActionProtocol:
         assert payload["status"] == "error"
         assert "error" in payload
         assert bridge._active_dwell_action == initial_action
-
-
-# ---------------------------------------------------------------------------
-# Property 17c: gaze_dwell without action_type → uses active dwell action fallback
-# **Validates: Requirements 7.5**
-# ---------------------------------------------------------------------------
-
-class TestGazeDwellFallback:
-    """gaze_dwell messages without action_type field use the stored active action."""
-
-    @given(
-        active_action=st.sampled_from(VALID_DWELL_ACTIONS),
-        x=st.floats(min_value=0.0, max_value=1.0),
-        y=st.floats(min_value=0.0, max_value=1.0),
-    )
-    @settings(max_examples=100)
-    def test_gaze_dwell_without_action_type_uses_fallback(self, active_action, x, y):
-        """For any gaze_dwell message missing the action_type field, the bridge
-        SHALL use the currently active action type as fallback.
-
-        **Validates: Requirements 7.5**
-        """
-        bridge = make_bridge()
-        ws = make_mock_ws()
-
-        # Set active dwell action
-        bridge._active_dwell_action = active_action
-
-        # Mock FusionEngine to capture the action_type passed
-        mock_fusion = MagicMock()
-        bridge._fusion = mock_fusion
-
-        # Build gaze_dwell message WITHOUT action_type field
-        msg = {"type": "gaze_dwell", "x": x, "y": y}
-
-        # Route through _handle_message
-        raw = json.dumps(msg)
-        run_async(bridge._handle_message(ws, raw))
-
-        # FusionEngine.on_gaze_dwell should have been called with the fallback action
-        mock_fusion.on_gaze_dwell.assert_called_once()
-        call_args = mock_fusion.on_gaze_dwell.call_args
-        passed_action_type = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get("action_type")
-
-        assert passed_action_type == active_action
-
-    @given(
-        active_action=st.sampled_from(VALID_DWELL_ACTIONS),
-        explicit_action=st.sampled_from(VALID_DWELL_ACTIONS),
-        x=st.floats(min_value=0.0, max_value=1.0),
-        y=st.floats(min_value=0.0, max_value=1.0),
-    )
-    @settings(max_examples=100)
-    def test_gaze_dwell_with_action_type_uses_explicit(self, active_action, explicit_action, x, y):
-        """For any gaze_dwell message WITH an action_type field, the bridge
-        SHALL use the explicit action_type from the message (not the fallback).
-
-        **Validates: Requirements 7.5**
-        """
-        bridge = make_bridge()
-        ws = make_mock_ws()
-
-        # Set active dwell action to something different
-        bridge._active_dwell_action = active_action
-
-        # Mock FusionEngine
-        mock_fusion = MagicMock()
-        bridge._fusion = mock_fusion
-
-        # Build gaze_dwell message WITH explicit action_type
-        msg = {"type": "gaze_dwell", "x": x, "y": y, "action_type": explicit_action}
-
-        raw = json.dumps(msg)
-        run_async(bridge._handle_message(ws, raw))
-
-        # FusionEngine.on_gaze_dwell should have been called with the explicit action
-        mock_fusion.on_gaze_dwell.assert_called_once()
-        call_args = mock_fusion.on_gaze_dwell.call_args
-        passed_action_type = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get("action_type")
-
-        assert passed_action_type == explicit_action
-
-    @given(
-        active_action=st.sampled_from(VALID_DWELL_ACTIONS),
-        x=st.floats(min_value=0.0, max_value=1.0),
-        y=st.floats(min_value=0.0, max_value=1.0),
-    )
-    @settings(max_examples=50)
-    def test_gaze_dwell_with_empty_string_action_type_uses_fallback(self, active_action, x, y):
-        """When action_type is an empty string (falsy), the bridge falls back to
-        the active dwell action.
-
-        **Validates: Requirements 7.5**
-        """
-        bridge = make_bridge()
-        ws = make_mock_ws()
-
-        bridge._active_dwell_action = active_action
-
-        mock_fusion = MagicMock()
-        bridge._fusion = mock_fusion
-
-        # Empty string is falsy — `msg.get("action_type") or self._active_dwell_action`
-        msg = {"type": "gaze_dwell", "x": x, "y": y, "action_type": ""}
-
-        raw = json.dumps(msg)
-        run_async(bridge._handle_message(ws, raw))
-
-        mock_fusion.on_gaze_dwell.assert_called_once()
-        call_args = mock_fusion.on_gaze_dwell.call_args
-        passed_action_type = call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get("action_type")
-
-        assert passed_action_type == active_action

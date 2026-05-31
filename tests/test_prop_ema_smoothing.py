@@ -65,8 +65,6 @@ def _make_engine(alpha: float = 0.4) -> FusionEngine:
     cfg = FusionConfig()
     engine = FusionEngine(screen_width=SCREEN_W, screen_height=SCREEN_H, config=cfg)
     engine._tilt_pos_alpha = alpha
-    # Disable gaze cursor mode so tilt position is not suppressed
-    engine._feature_toggles["gaze_cursor_mode"] = False
     mock_coordinator = AsyncMock()
     mock_coordinator.route = AsyncMock()
     engine.set_coordinator(mock_coordinator)
