@@ -408,6 +408,16 @@ class HybridCoordinator:
         self._recent_dev_commands: list[str] = []
 
     # ---------------------------------------------------------------------- #
+    # Internal helpers
+    # ---------------------------------------------------------------------- #
+
+    @staticmethod
+    def _on_task_done(task: "asyncio.Task[None]", label: str) -> None:
+        """Log any exception from a fire-and-forget task so failures are visible."""
+        if not task.cancelled() and task.exception():
+            log.error("%s raised: %s", label, task.exception())
+
+    # ---------------------------------------------------------------------- #
     # Public entry point
     # ---------------------------------------------------------------------- #
 
@@ -630,7 +640,8 @@ class HybridCoordinator:
             }
             if _lower in _CONDITION_TRIGGERS and self._profiler:
                 condition = _CONDITION_TRIGGERS[_lower]
-                asyncio.create_task(self._switch_condition(condition))
+                t = asyncio.create_task(self._switch_condition(condition))
+                t.add_done_callback(lambda t: self._on_task_done(t, "_switch_condition"))
                 return {"status": "ok", "action": "CONDITION_SWITCH",
                         "condition": condition}
 
@@ -646,7 +657,8 @@ class HybridCoordinator:
             }
             if _lower in _CALIBRATION_TRIGGERS and self._calibrator:
                 condition, quick = _CALIBRATION_TRIGGERS[_lower]
-                asyncio.create_task(self._run_calibration(condition, quick))
+                t = asyncio.create_task(self._run_calibration(condition, quick))
+                t.add_done_callback(lambda t: self._on_task_done(t, "_run_calibration"))
                 return {"status": "ok", "action": "CALIBRATION_START",
                         "condition": condition, "quick": quick}
 

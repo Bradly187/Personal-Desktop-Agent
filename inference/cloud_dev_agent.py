@@ -225,7 +225,7 @@ class CloudDevAgent:
             client = self._get_client()
         except Exception as exc:
             log.warning("CloudDevAgent unavailable: %s", exc)
-            return f"CLARIFY cloud dev agent unavailable: {exc}"
+            return "CLARIFY cloud dev agent temporarily unavailable"
 
         user_content = self._build_user_content(query, domain, context)
 
@@ -264,7 +264,7 @@ class CloudDevAgent:
             # anthropic.APIError subclasses (auth/rate-limit/server) + transport
             # errors all funnel here.  Match the local CLARIFY error contract.
             log.error("CloudDevAgent.run failed (domain=%s): %s", domain, exc)
-            return f"CLARIFY cloud dev agent unavailable: {exc}"
+            return "CLARIFY cloud dev agent temporarily unavailable"
 
     def _build_user_content(self, query: str, domain: str, context: dict) -> list[dict]:
         """Assemble the user turn: optional screenshot + context preamble + query."""

@@ -189,11 +189,11 @@ async def test_run_api_error_returns_clarify_string():
     agent = CloudDevAgent(api_key="k")
     agent._client = _FakeClient(raise_exc=RuntimeError("boom"))
     out = await agent.run("write code", domain="code")
-    assert out == "CLARIFY cloud dev agent unavailable: boom"
+    assert out == "CLARIFY cloud dev agent temporarily unavailable"
 
 
 async def test_run_missing_key_returns_clarify(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     agent = CloudDevAgent(api_key=None)  # no client injected → _get_client raises
     out = await agent.run("write code", domain="code")
-    assert out.startswith("CLARIFY cloud dev agent unavailable:")
+    assert out == "CLARIFY cloud dev agent temporarily unavailable"

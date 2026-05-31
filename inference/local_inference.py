@@ -683,6 +683,9 @@ class VLLMServerInference(LocalInference):
             yield "CLARIFY aiohttp not installed"
             return
 
+        # guided_regex is intentionally omitted: infer_stream() is used only for
+        # CLARIFY/EXPLAIN conversational responses (free-form text for TTS), not
+        # for action classification.  Do not add it here without updating callers.
         payload = {
             "model": self.model,
             "messages": self._build_messages(cmd, few_shot_examples),
@@ -751,23 +754,33 @@ class VLLMServerInference(LocalInference):
     # ---------------------------------------------------------------------- #
 
     def get_status(self) -> dict:
-        """Health-check the server via GET /v1/models (best-effort, short timeout)."""
-        available = False
-        try:
-            import urllib.request as _ur
-            with _ur.urlopen(f"{self.base_url}{self._MODELS_PATH}", timeout=2) as r:
-                r.read()
-            available = True
-        except Exception:
-            available = False
-        self._available = available
+        """Return cached availability — does NOT make a blocking network call.
+
+        Call ``await check_health()`` separately when a live probe is needed
+        (e.g. startup table).  This keeps get_status() safe to call from any
+        synchronous context without stalling the event loop.
+        """
         return {
             "backend": "vllm-server",
             "model": self.model,
-            "available": available,
+            "available": self._available,
             "server_url": self.base_url,
             "sleeping": False,  # server lifecycle is external — never sleeps via this class
         }
+
+    async def check_health(self) -> bool:
+        """Probe GET /v1/models and update the cached availability flag."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"{self.base_url}{self._MODELS_PATH}",
+                    timeout=aiohttp.ClientTimeout(total=2.0),
+                ) as r:
+                    self._available = r.status == 200
+        except Exception:
+            self._available = False
+        return bool(self._available)
 
 
 # NemotronInference removed: nemotron-mini scored 25% on command eval (2026-05-13).
@@ -825,12 +838,16 @@ class VLLMEmbedder:
             from vllm import LLM
         except ImportError:
             raise RuntimeError("vllm not installed")
+        # nomic-embed-text-v1.5 requires trust_remote_code for its custom pooling
+        # class.  Revision is pinned so a compromised HF repo push can't execute
+        # new code here.  Verify + update with: hf model-info nomic-ai/nomic-embed-text-v1.5
         return LLM(
             model=self.model,
             task="embed",
             gpu_memory_utilization=self._gpu_util,
             dtype="auto",
             trust_remote_code=True,
+            revision="e9b6763023c676ca8431644204f50c2b100d9aab",  # verified 2026-05-31
         )
 
     async def encode(self, texts: list[str]) -> list[Any]:
