@@ -632,7 +632,7 @@ class VLLMSpecialistPool:
             gpu_memory_utilization=config.gpu_util,
             max_model_len=config.max_model_len,
             dtype=config.dtype,
-            trust_remote_code=True,
+            trust_remote_code=False,  # Gemma 4 AWQ: vLLM native support, no custom model code needed
             enforce_eager=config.enforce_eager,
             # NOTE: NO enable_sleep_mode. The pool uses destroy-recreate (full
             # teardown) for handoffs, not vLLM-sleep, because two concurrent

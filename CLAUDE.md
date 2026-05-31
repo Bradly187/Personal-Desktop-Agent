@@ -4,7 +4,7 @@ Multimodal accessibility desktop control for a single user with rheumatoid arthr
 
 ## What This Is
 
-The user controls a Windows desktop through voice, eye gaze, head pose, hand gesture, iPad tilt, mouth sounds, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
+The user controls a Windows desktop through voice, hand gesture, iPad tilt, mouth sounds, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). (Eye-gaze and head-pose control were removed — the standard iPad lacks the required TrueDepth sensor.) Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
 
 - Full requirements (17): `.kiro/specs/ipad-sensor-focus/requirements.md`
 - Architecture diagrams (13): `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md`
@@ -13,6 +13,8 @@ The user controls a Windows desktop through voice, eye gaze, head pose, hand ges
 - Daily reviews: `docs/daily/`
 
 ## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 + G1–G5 + iPad logging + 2026-05-24 fixes (2026-05-24)
+
+**Done (Gaze + head-pose removal — 2026-05-30):** Gaze tracking and head-pose tracking were removed **entirely** (PC + iPad). The standard iPad on hand has no TrueDepth front camera, so `ARFaceTrackingConfiguration.isSupported` is false and both pipelines produced no data. Removed PC-side: all gaze/head logic in `fusion_engine.py` (priority 10→7 levels; `_GazeBuffer`/`HeadStationaryLock`/`head_acceleration_curve`/`_check_edge_scroll`/`_apply_gaze_cursor` deleted; edge-scroll was gaze-gated so removed too), `ipad_bridge.py` (7 message handlers + calibration session), `db.py` (`gaze_monitor_calibration` table + 2 methods; existing DBs keep the orphan table), `whisper_stream.py` ("calibrate monitor" trigger), `main.py` wiring; deleted `calibration/gaze_calibrator.py` + `calibration/calibration_overlay.py`; trimmed `vision_grounder.py`/`session_analyzer.py`/`sensor_viewer.py`. Removed iPad-side: `GazeTracker.swift`, `HeadTracker.swift`, `SharedFaceSession.swift`, `GazeCalibrationSheet.swift`, `MonitorCalibrationSheet.swift`, `CursorConflictBanner.swift` + detangled 15 Swift files (and the now-unused front-camera permission). Voice "click" now clicks at the **current cursor position** (cursor driven by tilt/trackpad/touch). `Command.gaze_coords` is KEPT as the generic explicit-click-coordinate field (vision grounder / voice click). ~13 gaze/head test files deleted.
 
 **Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
 
@@ -220,7 +222,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `mcp_server/tools/screen.py` | screenshot (base64 PNG), get_screen_size, find_text_on_screen (OCR) |
 | `mcp_server/tools/windows.py` | get_active_window, list_windows, focus_window (win32gui + psutil) |
 | `mcp_server/tools/handwriting.py` | pix2tex LaTeX OCR; latex_to_unicode fallback converter |
-| `core/fusion_engine.py` | 60 Hz tick loop; 10-level sensor priority; direct pyautogui for tilt/head |
+| `core/fusion_engine.py` | 60 Hz tick loop; 7-level sensor priority; direct pyautogui for tilt (gaze/head removed) |
 | `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); AWS Bedrock fallback; outcome logger |
 | `inference/local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (verified in Ubuntu WSL2, vLLM 0.21.0; `--backend vllm`; use `--gpu-memory-utilization 0.65` with Whisper running) |
 | `adaptive/continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
@@ -237,8 +239,6 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `sensors/sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
 | `sensors/whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
 | `storage/db.py` | `AgentDB` (aiosqlite, 27 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice + gaze monitor calibration + iPad log tables |
-| `calibration/gaze_calibrator.py` | Angular affine mapping from world-space gaze ray → screen pixel; `add_sample()`/`solve()`/`project()`; numpy lstsq; `gaze_calibration.json` + AgentDB persistence |
-| `calibration/calibration_overlay.py` | Tkinter full-screen 5-dot calibration overlay; daemon thread; advances/closes via method calls |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
 | `tts/polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
 | `tts/chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
@@ -303,28 +303,29 @@ used instead (4-second recording window, auto-approve on silence).
 
 ## WebSocket Protocol
 
-**iPad → PC (28 types):**
-- *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`, `gaze_calibration_sample`, `head_pose`, `keyword`, `sound_action`, `audio_stream`, `camera_frame`, `depth_frame`
+Gaze and head-pose message types (`gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`, `gaze_calibration_sample`, `gaze_calibration_start`, `head_pose`) were removed — the standard iPad has no TrueDepth sensor.
+
+**iPad → PC:**
+- *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `keyword`, `sound_action`, `audio_stream`, `camera_frame`, `depth_frame`
 - *Direct control:* `touch_command`, `trackpad`, `handwriting_image`, `ping`
 - *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `calibration_start`, `calibration_cancel`
 - *Diagnostics:* `ipad_log`
 
-**PC → iPad (5 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (drift/seasonal re-cal trigger → QuickRecalSheet)
+**PC → iPad (5 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (voice drift/seasonal re-cal trigger → QuickRecalSheet)
 
-`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 10. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `gaze_ray` carries a world-space unit vector `{dx,dy,dz}` at ~10 Hz; `ipad_bridge` stores it and attaches it to the next `gaze_dwell` event so `FusionEngine` can use `GazeCalibrator.project()` for absolute pixel positioning. `gaze_calibration_sample` delivers a dot_index + known pixel + ray during calibration sessions. `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (gaze, head_pose, keyword, etc.) are dispatched to FusionEngine.
+`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 7. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `set_feature_toggle` is still wired but currently has no valid features (all prior toggles were gaze features). `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (tilt, keyword, sound_action, etc.) are dispatched to FusionEngine.
 
 ## Sensor Priority (FusionEngine — `core/fusion_engine.py`)
 
+7-level priority (gaze and head-pose removed — the standard iPad has no TrueDepth sensor):
+
 1. iPad touch command — bypasses LLM entirely
 2. Sound action (mouth sounds via AVFoundation)
-3. Gaze delta cursor — relative eye movement drives cursor (no dwell)
-4. Gaze + voice "click"
-5. Gaze + gesture POINT
-6. Tilt navigation (Core Motion)
-7. Head tracking (ARKit face anchor)
-8. Gesture alone
-9. On-device voice keyword (Speech Framework)
-10. PC-transcribed voice (Whisper large-v3 on GPU)
+3. Voice "click" keyword — clicks at the current cursor position (bypass, source `multimodal`)
+4. Tilt navigation (Core Motion) — 4a absolute position, 4b legacy velocity
+5. Gesture alone
+6. On-device voice keyword (Speech Framework)
+7. PC-transcribed voice (Whisper large-v3 on GPU)
 
 ## Coding Conventions
 

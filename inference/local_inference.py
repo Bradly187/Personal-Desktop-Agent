@@ -547,6 +547,242 @@ class VLLMInference(LocalInference):
         }
 
 
+# ---------------------------------------------------------------------------
+# VLLMServerInference — HTTP client for a `vllm serve` OpenAI-compatible server
+# ---------------------------------------------------------------------------
+
+class VLLMServerInference(LocalInference):
+    """Talks to a `vllm serve` OpenAI-compatible server over HTTP.
+
+    This is the Windows-friendly alternative to the in-process VLLMInference:
+    vLLM (with its `vllm._C` CUDA extension) only builds cleanly on Linux, so we
+    run `vllm serve <model>` inside WSL2 and reach it from the Windows side over
+    localhost. WSL2 forwards the server's 0.0.0.0:8000 to Windows localhost:8000,
+    so no special networking is required.
+
+    The server lifecycle is managed EXTERNALLY (see scripts/start_vllm_server.sh):
+    this class never loads or unloads a model — wake_up()/sleep() are no-ops.
+
+    Start the server (inside WSL2):
+        wsl bash scripts/start_vllm_server.sh
+        # or double-click scripts/start_vllm_server.bat on Windows
+
+    Activate via:
+        python main.py --backend vllm-server [--vllm-server-url http://localhost:8000]
+
+    Modelled on LlamaCppInference (same aiohttp session pattern, SSE parsing,
+    OpenAI-compatible /v1/chat/completions endpoint) but adds vLLM's
+    `guided_regex` grammar constraint to force valid action-verb output, exactly
+    like the in-process VLLMInference does with StructuredOutputsParams.
+    """
+
+    _CHAT_PATH = "/v1/chat/completions"
+    _MODELS_PATH = "/v1/models"
+
+    # Same grammar constraint as the in-process backend — force the first token
+    # to be one of the 11 accessibility verbs (or CLARIFY).
+    _VERB_PATTERN: str = VLLMInference._VERB_PATTERN
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        model: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        timeout: float = 30.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self._available: bool | None = None  # None = not yet checked
+
+    # ---------------------------------------------------------------------- #
+    # Message construction — identical shape to VLLMInference.infer()
+    # ---------------------------------------------------------------------- #
+
+    def _build_messages(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None,
+    ) -> list[dict]:
+        messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        if few_shot_examples:
+            for ex in few_shot_examples:
+                messages.append({"role": "user",      "content": ex["command_text"]})
+                messages.append({"role": "assistant", "content": ex["action_text"]})
+        if cmd.session_context:
+            ctx = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
+            messages.append({"role": "user",      "content": f"Recent commands:\n{ctx}"})
+            messages.append({"role": "assistant", "content": "Understood."})
+        messages.append({"role": "user", "content": cmd.text})
+        return messages
+
+    # ---------------------------------------------------------------------- #
+    # Inference
+    # ---------------------------------------------------------------------- #
+
+    async def infer(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ) -> str:
+        try:
+            import aiohttp
+        except ImportError:
+            return "CLARIFY aiohttp not installed"
+
+        payload = {
+            "model": self.model,
+            "messages": self._build_messages(cmd, few_shot_examples),
+            "temperature": 0.0,
+            "max_tokens": 64,
+            # vLLM's OpenAI server accepts guided_regex as an extra body field —
+            # equivalent to StructuredOutputsParams(regex=...) on the in-process path.
+            "guided_regex": self._VERB_PATTERN,
+        }
+
+        t0 = time.monotonic()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base_url}{self._CHAT_PATH}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status != 200:
+                        self._available = False
+                        log.error("VLLMServerInference HTTP %s: %s", resp.status, body[:200])
+                        return f"CLARIFY vLLM server error: {resp.status} {body[:200]}"
+                    data = __import__("json").loads(body)
+                    content = data["choices"][0]["message"]["content"].strip()
+                    action = content.splitlines()[0].strip() if content else "CLARIFY empty response"
+                    latency_ms = (time.monotonic() - t0) * 1000
+                    log.info("VLLMServerInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
+                    self._available = True
+                    return action
+        except aiohttp.ClientConnectorError as exc:
+            self._available = False
+            log.error("VLLMServerInference: unreachable at %s: %s", self.base_url, exc)
+            return (
+                f"CLARIFY vLLM server unreachable at {self.base_url} — "
+                f"run: wsl vllm serve {self.model}"
+            )
+        except Exception as exc:
+            self._available = False
+            log.error("VLLMServerInference failed: %s", exc)
+            return f"CLARIFY vLLM server error: {exc}"
+
+    async def infer_stream(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ):
+        """Stream tokens via the vLLM server's OpenAI-compatible SSE stream."""
+        try:
+            import aiohttp
+        except ImportError:
+            yield "CLARIFY aiohttp not installed"
+            return
+
+        # guided_regex is intentionally omitted: infer_stream() is used only for
+        # CLARIFY/EXPLAIN conversational responses (free-form text for TTS), not
+        # for action classification.  Do not add it here without updating callers.
+        payload = {
+            "model": self.model,
+            "messages": self._build_messages(cmd, few_shot_examples),
+            "temperature": 0.0,
+            "max_tokens": 512,
+            "stream": True,
+        }
+
+        t0 = time.monotonic()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base_url}{self._CHAT_PATH}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60.0),
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        yield f"CLARIFY vLLM server error: {resp.status} {body[:200]}"
+                        return
+                    async for raw_line in resp.content:
+                        line = raw_line.decode().strip()
+                        if not line or line == "data: [DONE]":
+                            continue
+                        if line.startswith("data: "):
+                            try:
+                                chunk = __import__("json").loads(line[6:])
+                                token = (
+                                    chunk.get("choices", [{}])[0]
+                                    .get("delta", {})
+                                    .get("content", "")
+                                )
+                                if token:
+                                    yield token
+                            except Exception:
+                                continue
+            latency_ms = (time.monotonic() - t0) * 1000
+            log.info("VLLMServerInference.stream: %r complete (%.0f ms)", cmd.text[:40], latency_ms)
+            self._available = True
+        except aiohttp.ClientConnectorError as exc:
+            self._available = False
+            log.error("VLLMServerInference.stream: unreachable at %s: %s", self.base_url, exc)
+            yield (
+                f"CLARIFY vLLM server unreachable at {self.base_url} — "
+                f"run: wsl vllm serve {self.model}"
+            )
+        except Exception as exc:
+            self._available = False
+            log.error("VLLMServerInference.stream failed: %s", exc)
+            yield f"CLARIFY vLLM server error: {exc}"
+
+    # ---------------------------------------------------------------------- #
+    # External-lifecycle no-ops (server is managed by start_vllm_server.sh)
+    # ---------------------------------------------------------------------- #
+
+    async def wake_up(self) -> None:
+        log.info("VLLMServerInference: wake_up() is a no-op — server lifecycle is "
+                 "external (%s)", self.base_url)
+
+    async def sleep(self) -> None:
+        log.info("VLLMServerInference: sleep() is a no-op — server lifecycle is "
+                 "external (%s)", self.base_url)
+
+    # ---------------------------------------------------------------------- #
+    # Status
+    # ---------------------------------------------------------------------- #
+
+    def get_status(self) -> dict:
+        """Return cached availability — does NOT make a blocking network call.
+
+        Call ``await check_health()`` separately when a live probe is needed
+        (e.g. startup table).  This keeps get_status() safe to call from any
+        synchronous context without stalling the event loop.
+        """
+        return {
+            "backend": "vllm-server",
+            "model": self.model,
+            "available": self._available,
+            "server_url": self.base_url,
+            "sleeping": False,  # server lifecycle is external — never sleeps via this class
+        }
+
+    async def check_health(self) -> bool:
+        """Probe GET /v1/models and update the cached availability flag."""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"{self.base_url}{self._MODELS_PATH}",
+                    timeout=aiohttp.ClientTimeout(total=2.0),
+                ) as r:
+                    self._available = r.status == 200
+        except Exception:
+            self._available = False
+        return bool(self._available)
+
+
 # NemotronInference removed: nemotron-mini scored 25% on command eval (2026-05-13).
 
 
@@ -602,12 +838,16 @@ class VLLMEmbedder:
             from vllm import LLM
         except ImportError:
             raise RuntimeError("vllm not installed")
+        # nomic-embed-text-v1.5 requires trust_remote_code for its custom pooling
+        # class.  Revision is pinned so a compromised HF repo push can't execute
+        # new code here.  Verify + update with: hf model-info nomic-ai/nomic-embed-text-v1.5
         return LLM(
             model=self.model,
             task="embed",
             gpu_memory_utilization=self._gpu_util,
             dtype="auto",
             trust_remote_code=True,
+            revision="e9b6763023c676ca8431644204f50c2b100d9aab",  # verified 2026-05-31
         )
 
     async def encode(self, texts: list[str]) -> list[Any]:

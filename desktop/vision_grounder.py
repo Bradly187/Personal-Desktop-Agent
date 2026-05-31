@@ -6,9 +6,8 @@ of voice CLICK commands to fall through to CLARIFY.
 
 Fallback chain (enforced by HybridCoordinator, not here):
     1. Vision grounding (confidence ≥ GROUNDING_MIN_CONFIDENCE)
-    2. Gaze coords from original Command
-    3. Tesseract OCR word-match (find_text_on_screen)
-    4. Current cursor position + CLARIFY
+    2. Tesseract OCR word-match (find_text_on_screen)
+    3. Current cursor position + CLARIFY
 
 Backends:
     "anthropic"  — claude-sonnet-4-6 via Anthropic API (~$0.003–0.015/call).

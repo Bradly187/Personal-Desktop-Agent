@@ -40,10 +40,10 @@ private struct SensorActivityDot: View {
     @Environment(\.appTheme) private var theme
 
     // G8: How long a running sensor can be silent before it's flagged as degraded.
-    // High-frequency sensors (tilt/gaze) degrade after 2s; audio after 5s.
+    // High-frequency sensors (tilt) degrade after 2s; audio after 5s.
     private var maxSilenceSeconds: Double {
         switch state.id {
-        case "tilt", "gaze", "head":  return 2.0
+        case "tilt":                  return 2.0
         case "audio", "keyword":      return 5.0
         default:                       return 3.0
         }
@@ -73,8 +73,6 @@ private struct SensorActivityDot: View {
     private var iconName: String {
         switch state.id {
         case "tilt": return "ipad.landscape"
-        case "gaze": return "eye"
-        case "head": return "face.smiling"
         case "keyword": return "text.bubble"
         case "sound": return "mouth"
         case "audio": return "mic"
@@ -85,8 +83,6 @@ private struct SensorActivityDot: View {
     private var displayName: String {
         switch state.id {
         case "tilt": return "Tilt"
-        case "gaze": return "Gaze"
-        case "head": return "Head"
         case "keyword": return "Keywords"
         case "sound": return "Sound"
         case "audio": return "Audio"

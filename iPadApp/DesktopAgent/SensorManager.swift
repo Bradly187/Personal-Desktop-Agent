@@ -1,14 +1,12 @@
-import ARKit
 import Combine
 import CoreMotion
 import Foundation
 
-/// Centralized lifecycle controller for all 6 sensors.
+/// Centralized lifecycle controller for all 4 sensors.
 ///
 /// Observes SettingsStore `@Published` toggles via Combine and reactively
 /// starts/stops sensors when their toggle changes. Owns the SharedAudioSession
-/// used by the three audio sensors and the SharedFaceSession used by
-/// GazeTracker and HeadTracker.
+/// used by the three audio sensors.
 ///
 /// Hardware availability is checked before starting each sensor — unavailable
 /// sensors log a warning and remain stopped (no crash).
@@ -20,8 +18,6 @@ final class SensorManager: ObservableObject {
     // MARK: - Sensors
 
     let tiltSensor: TiltSensor
-    let gazeTracker: GazeTracker
-    let headTracker: HeadTracker
     let keywordListener: KeywordListener
     let soundDetector: SoundDetector
     let audioStreamer: AudioStreamer
@@ -29,7 +25,6 @@ final class SensorManager: ObservableObject {
     // MARK: - Shared Dependencies
 
     private let sharedAudioSession: SharedAudioSession
-    private let sharedFaceSession: SharedFaceSession
     private let settings: SettingsStore
     private weak var ws: WebSocketManager?
     private var cancellables = Set<AnyCancellable>()
@@ -41,17 +36,10 @@ final class SensorManager: ObservableObject {
     /// Timestamp of last activity per sensor — used by SensorActivityBar for pulse animations.
     @Published var lastActivity: [String: Date] = [:]
 
-    /// E3: Mirrors SharedFaceSession.permissionFailureMessage so ContentView
-    /// (an ObservableObject consumer of SensorManager) can render a banner.
-    @Published var cameraPermissionMessage: String? = nil
-
     // MARK: - Hardware Availability (3.5)
 
     /// Whether device motion (accelerometer/gyroscope) is available for TiltSensor.
     private let isTiltAvailable: Bool
-
-    /// Whether ARKit face tracking is supported (TrueDepth camera) for GazeTracker/HeadTracker.
-    private let isFaceTrackingAvailable: Bool
 
     // MARK: - Initialization (3.1)
 
@@ -63,19 +51,12 @@ final class SensorManager: ObservableObject {
         let audioSession = SharedAudioSession()
         self.sharedAudioSession = audioSession
 
-        // Create shared face-tracking session (GazeTracker + HeadTracker share one ARSession)
-        let faceSession = SharedFaceSession()
-        self.sharedFaceSession = faceSession
-
         // Check hardware availability before instantiating sensors
         let motionManager = CMMotionManager()
         self.isTiltAvailable = motionManager.isDeviceMotionAvailable
-        self.isFaceTrackingAvailable = ARFaceTrackingConfiguration.isSupported
 
-        // Instantiate all 6 sensors with shared dependencies
+        // Instantiate all sensors with shared dependencies
         self.tiltSensor = TiltSensor(ws: ws, settings: settings)
-        self.gazeTracker = GazeTracker(ws: ws, settings: settings, sharedFaceSession: faceSession)
-        self.headTracker = HeadTracker(ws: ws, settings: settings, sharedFaceSession: faceSession)
         self.keywordListener = KeywordListener(ws: ws, settings: settings, sharedAudioSession: audioSession)
         self.soundDetector = SoundDetector(ws: ws, settings: settings, sharedAudioSession: audioSession)
         self.audioStreamer = AudioStreamer(ws: ws, settings: settings, sharedAudioSession: audioSession)
@@ -85,12 +66,6 @@ final class SensorManager: ObservableObject {
 
         // Subscribe to settings toggles (3.4)
         _subscribeToSettings()
-
-        // E3: Mirror SharedFaceSession permission failure into a published
-        // property so ContentView re-renders when ARKit gives up on camera.
-        faceSession.$permissionFailureMessage
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$cameraPermissionMessage)
     }
 
     // MARK: - Lifecycle (3.2, 3.3)
@@ -100,12 +75,6 @@ final class SensorManager: ObservableObject {
     func startAll() {
         if settings.tiltEnabled {
             _startTilt()
-        }
-        if settings.gazeEnabled {
-            _startGaze()
-        }
-        if settings.headEnabled {
-            _startHead()
         }
         if !settings.keywordList.isEmpty {
             _startKeyword()
@@ -119,31 +88,23 @@ final class SensorManager: ObservableObject {
     }
 
     /// G4: Stop only non-audio sensors for background mode.
-    /// ARKit (gaze/head) and Core Motion (tilt) require foreground.
+    /// Core Motion (tilt) requires foreground.
     /// Audio sensors (keyword, sound, audioStream) can continue in background
     /// when the app has UIBackgroundModes: ["audio"] entitlement.
     func stopNonAudioSensors() {
         tiltSensor.stop()
-        gazeTracker.stop()
-        headTracker.stop()
         _updateState(id: "tilt", isRunning: false)
-        _updateState(id: "gaze", isRunning: false)
-        _updateState(id: "head", isRunning: false)
         // keyword, sound, audio remain running
     }
 
     /// Stops all sensors and releases all hardware resources.
     func stopAll() {
         tiltSensor.stop()
-        gazeTracker.stop()
-        headTracker.stop()
         keywordListener.stop()
         soundDetector.stop()
         audioStreamer.stop()
 
         _updateState(id: "tilt", isRunning: false)
-        _updateState(id: "gaze", isRunning: false)
-        _updateState(id: "head", isRunning: false)
         _updateState(id: "keyword", isRunning: false)
         _updateState(id: "sound", isRunning: false)
         _updateState(id: "audio", isRunning: false)
@@ -164,36 +125,6 @@ final class SensorManager: ObservableObject {
     private func _stopTilt() {
         tiltSensor.stop()
         _updateState(id: "tilt", isRunning: false)
-    }
-
-    private func _startGaze() {
-        guard isFaceTrackingAvailable else {
-            AppLogger.shared.warning("SensorManager", "GazeTracker unavailable — ARFaceTrackingConfiguration.isSupported == false")
-            _updateState(id: "gaze", isAvailable: false, lastError: "TrueDepth camera not available")
-            return
-        }
-        gazeTracker.start()
-        _updateState(id: "gaze", isRunning: true)
-    }
-
-    private func _stopGaze() {
-        gazeTracker.stop()
-        _updateState(id: "gaze", isRunning: false)
-    }
-
-    private func _startHead() {
-        guard isFaceTrackingAvailable else {
-            AppLogger.shared.warning("SensorManager", "HeadTracker unavailable — ARFaceTrackingConfiguration.isSupported == false")
-            _updateState(id: "head", isAvailable: false, lastError: "TrueDepth camera not available")
-            return
-        }
-        headTracker.start()
-        _updateState(id: "head", isRunning: true)
-    }
-
-    private func _stopHead() {
-        headTracker.stop()
-        _updateState(id: "head", isRunning: false)
     }
 
     private func _startKeyword() {
@@ -263,51 +194,6 @@ final class SensorManager: ObservableObject {
             .dropFirst()
             .sink { [weak self] _ in
                 self?.tiltSensor.updateSettings()
-            }
-            .store(in: &cancellables)
-
-        // Gaze toggle
-        settings.$gazeEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                guard let self else { return }
-                self._updateState(id: "gaze", isEnabled: enabled)
-                if enabled {
-                    self._startGaze()
-                } else {
-                    self._stopGaze()
-                }
-            }
-            .store(in: &cancellables)
-
-        // Gaze settings changes — debounced to avoid thrash during slider drag
-        Publishers.CombineLatest3(
-            settings.$gazeSensitivity.removeDuplicates(),
-            settings.$gazeSaccadeEnterThreshold.removeDuplicates(),
-            settings.$gazeSaccadeExitThreshold.removeDuplicates()
-        )
-        .dropFirst()
-        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
-        .sink { [weak self] _ in
-            self?.gazeTracker.updateSettings()
-        }
-        .store(in: &cancellables)
-
-        // Head toggle
-        settings.$headEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                guard let self else { return }
-                self._updateState(id: "head", isEnabled: enabled)
-                if enabled {
-                    self._startHead()
-                } else {
-                    self._stopHead()
-                }
-                // Also update snapshot so processQueue sees the new enabled state
-                self.headTracker.updateSettings()
             }
             .store(in: &cancellables)
 
@@ -393,20 +279,6 @@ final class SensorManager: ObservableObject {
                 lastError: isTiltAvailable ? nil : "Device motion hardware unavailable"
             ),
             SensorState(
-                id: "gaze",
-                isEnabled: settings.gazeEnabled,
-                isRunning: false,
-                isAvailable: isFaceTrackingAvailable,
-                lastError: isFaceTrackingAvailable ? nil : "TrueDepth camera not available"
-            ),
-            SensorState(
-                id: "head",
-                isEnabled: settings.headEnabled,
-                isRunning: false,
-                isAvailable: isFaceTrackingAvailable,
-                lastError: isFaceTrackingAvailable ? nil : "TrueDepth camera not available"
-            ),
-            SensorState(
                 id: "keyword",
                 isEnabled: !settings.keywordList.isEmpty,
                 isRunning: false,
@@ -443,7 +315,7 @@ final class SensorManager: ObservableObject {
 
 /// Represents the observable state of a single sensor for UI consumption.
 struct SensorState: Identifiable {
-    let id: String          // "tilt", "gaze", "head", "keyword", "sound", "audio"
+    let id: String          // "tilt", "keyword", "sound", "audio"
     var isEnabled: Bool     // from SettingsStore toggle
     var isRunning: Bool     // actual runtime state
     var isAvailable: Bool   // hardware capability check

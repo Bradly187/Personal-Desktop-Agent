@@ -4,9 +4,9 @@ Receives a Command from FusionEngine, decides whether to run local inference
 or fall back to the cloud, executes the resulting action, and logs the outcome.
 
 Gate logic (source-dependent):
-  touch / sound_action / gaze_dwell / multimodal → bypass all 4 gates → local
-  voice_local                                     → skip Gate 1 → gates 2-4
-  gesture / voice                                 → full 4-gate evaluation
+  touch / sound_action / multimodal → bypass all 4 gates → local
+  voice_local                       → skip Gate 1 → gates 2-4
+  gesture / voice                   → full 4-gate evaluation
 
 Gate 0 — Privacy:     command text contains no sensitive-data patterns
   fail → force local (never send to cloud)
@@ -106,12 +106,11 @@ class CoordinatorConfig:
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
     # AWS Bedrock (cloud fallback — raw API, used when AgentCore unavailable)
-    # Model: Claude Haiku 4.5 cross-region inference profile (verified 2026-05-15).
-    # Claude 3.5 Haiku is now marked Legacy and requires explicit model access re-grant.
-    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    # Model: Claude Sonnet 4.6 cross-region inference profile.
+    bedrock_model_id: str = "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
     bedrock_region: str = "us-east-1"
 
-    # Cloud path: raw Bedrock Claude Haiku (AgentCore deployment deferred)
+    # Cloud path: raw Bedrock Claude Sonnet 4.6 (AgentCore deployment deferred)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +118,7 @@ class CoordinatorConfig:
 # ---------------------------------------------------------------------------
 
 class _CloudInference:
-    """AWS Bedrock Claude backend. Lazy boto3 import."""
+    """AWS Bedrock Claude (Sonnet 4.6) backend. Lazy boto3 import."""
 
     def __init__(self, model_id: str, region: str) -> None:
         self._model_id = model_id
@@ -330,7 +329,7 @@ async def _retranscribe(cmd: Command) -> Command:
 # HybridCoordinator
 # ---------------------------------------------------------------------------
 
-_BYPASS_SOURCES = {"touch", "sound_action", "gaze_dwell", "multimodal"}
+_BYPASS_SOURCES = {"touch", "sound_action", "multimodal"}
 _SKIP_GATE1_SOURCES = {"voice_local"}
 
 
@@ -399,12 +398,77 @@ class HybridCoordinator:
         self._vram_cache_ttl: float = 2.0  # seconds
         self._metrics = None   # set via set_metrics()
 
+        # Cloud DevAgent (--cloud-dev-agent) — optional Anthropic-API fallback for
+        # dev-domain queries so a 30B specialist (and a GPU wake) is not needed.
+        self._cloud_dev_agent = None          # CloudDevAgent or None
+        self._cloud_always = False            # True with --no-local-specialists
+        self._local_specialist_available = None  # () -> bool (specialist awake?)
+        # Small rolling buffer of recent dev queries — passed to the cloud agent
+        # as context without a DB round-trip in the hot path.
+        self._recent_dev_commands: list[str] = []
+
+    # ---------------------------------------------------------------------- #
+    # Internal helpers
+    # ---------------------------------------------------------------------- #
+
+    @staticmethod
+    def _on_task_done(task: "asyncio.Task[None]", label: str) -> None:
+        """Log any exception from a fire-and-forget task so failures are visible."""
+        if not task.cancelled() and task.exception():
+            log.error("%s raised: %s", label, task.exception())
+
     # ---------------------------------------------------------------------- #
     # Public entry point
     # ---------------------------------------------------------------------- #
 
     def set_dev_agent(self, dev_agent: "DevAgent") -> None:
         self._dev_agent = dev_agent
+
+    def set_cloud_dev_agent(
+        self,
+        cloud_agent,
+        *,
+        always_cloud: bool = False,
+        local_available_fn=None,
+    ) -> None:
+        """Wire a CloudDevAgent for dev-domain routing.
+
+        always_cloud=True  → every dev-domain query goes to the cloud (used with
+                             --no-local-specialists; no GPU specialist is woken).
+        always_cloud=False → cloud is a fallback: a dev query goes local when a
+                             local specialist is already awake, else to the cloud
+                             (avoids a ~50 s GPU wake when the pool is idle/torn
+                             down, freeing the GPU for the command path).
+        local_available_fn → callable () -> bool, True when a local specialist is
+                             currently GPU-resident.
+        """
+        self._cloud_dev_agent = cloud_agent
+        self._cloud_always = always_cloud
+        self._local_specialist_available = local_available_fn
+        log.info(
+            "HybridCoordinator: CloudDevAgent wired (always_cloud=%s, model=%s)",
+            always_cloud, getattr(cloud_agent, "model", "?"),
+        )
+
+    def _should_route_cloud_dev(self) -> bool:
+        """Decide whether a dev-domain query should go to the cloud agent."""
+        if self._cloud_dev_agent is None:
+            return False
+        if self._cloud_always:
+            return True
+        # Fallback mode: cloud only when no local specialist is currently awake.
+        if self._local_specialist_available is None:
+            return False
+        try:
+            return not self._local_specialist_available()
+        except Exception as exc:
+            log.debug("local-specialist availability check failed: %s", exc)
+            return False
+
+    def _record_dev_command(self, text: str) -> None:
+        self._recent_dev_commands.append(text)
+        if len(self._recent_dev_commands) > 10:
+            self._recent_dev_commands = self._recent_dev_commands[-10:]
 
     def set_whisper_stream(self, whisper_stream) -> None:
         self._whisper = whisper_stream
@@ -460,8 +524,31 @@ class HybridCoordinator:
         if self._dev_agent:
             domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
+                # Cloud DevAgent branch — route to Claude when configured to,
+                # avoiding a 30B specialist wake (and the GPU teardown it forces).
+                if self._should_route_cloud_dev():
+                    log.info("HybridCoordinator: dev-domain=%s → CloudDevAgent (%s)",
+                             domain, getattr(self._cloud_dev_agent, "model", "?"))
+                    ctx = {
+                        "session_id": self._session_id,
+                        "recent_commands": list(self._recent_dev_commands),
+                        "source": cmd.source,
+                    }
+                    response_text = await self._cloud_dev_agent.run(cmd.text, domain, ctx)
+                    self._record_dev_command(cmd.text)
+                    return {
+                        "status": "ok",
+                        "action": "dev_agent",
+                        "domain": domain,
+                        "model": self._cloud_dev_agent.model,
+                        "response": response_text,
+                        "steps": 0,
+                        "backend": "anthropic_cloud",
+                    }
+
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
                 agent_result = await self._dev_agent.handle(cmd.text)
+                self._record_dev_command(cmd.text)
                 return {
                     "status": "ok",
                     "action": "dev_agent",
@@ -469,6 +556,7 @@ class HybridCoordinator:
                     "model": agent_result.model_used,
                     "response": agent_result.response_text,
                     "steps": len(agent_result.steps),
+                    "backend": "local",
                 }
 
         # System control commands — intercept before gate evaluation
@@ -552,7 +640,8 @@ class HybridCoordinator:
             }
             if _lower in _CONDITION_TRIGGERS and self._profiler:
                 condition = _CONDITION_TRIGGERS[_lower]
-                asyncio.create_task(self._switch_condition(condition))
+                t = asyncio.create_task(self._switch_condition(condition))
+                t.add_done_callback(lambda t: self._on_task_done(t, "_switch_condition"))
                 return {"status": "ok", "action": "CONDITION_SWITCH",
                         "condition": condition}
 
@@ -568,7 +657,8 @@ class HybridCoordinator:
             }
             if _lower in _CALIBRATION_TRIGGERS and self._calibrator:
                 condition, quick = _CALIBRATION_TRIGGERS[_lower]
-                asyncio.create_task(self._run_calibration(condition, quick))
+                t = asyncio.create_task(self._run_calibration(condition, quick))
+                t.add_done_callback(lambda t: self._on_task_done(t, "_run_calibration"))
                 return {"status": "ok", "action": "CALIBRATION_START",
                         "condition": condition, "quick": quick}
 
@@ -901,7 +991,7 @@ class HybridCoordinator:
         return action_str
 
     async def _run_cloud(self, cmd: Command) -> str:
-        """Route to raw Bedrock Claude Haiku.
+        """Route to raw Bedrock Claude Sonnet 4.6.
 
         Content filter scrubs secrets/PII from the command text before
         transmitting to external APIs. Findings are logged to the audit trail.
@@ -944,7 +1034,7 @@ class HybridCoordinator:
 
         # Vision grounding: resolve named CLICK targets to pixel coords.
         # Only runs when there's a named target and no coords already supplied
-        # (gaze_coords or explicit x/y from touch). Falls through silently on
+        # (explicit click coords or x/y from touch). Falls through silently on
         # any failure — CommandExecutor's Tesseract + cursor fallback takes over.
         grounded_coords = cmd.gaze_coords
         if verb == "CLICK" and target and "x" not in params:

@@ -32,7 +32,7 @@ struct GestureAssessmentSheet: View {
             icon: "hand.point.up.left.fill",
             title: "Point",
             instruction: "Extend your index finger and hold it toward the camera for 2 seconds.",
-            whyMatters: "Used for gaze+gesture click — aim and point."
+            whyMatters: "Used for gesture click — aim and point."
         ),
         GestureDef(
             name: "PINCH",

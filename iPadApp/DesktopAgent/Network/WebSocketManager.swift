@@ -10,15 +10,6 @@ struct RecalibrationRequest {
     let degradationPct: Double  // 0–100
 }
 
-// MARK: — Gaze monitor calibration events (PC → iPad)
-
-enum GazeCalibrationEvent {
-    case next(dotIndex: Int, pxX: Int, pxY: Int, total: Int, label: String)
-    case complete(residualPx: Double, success: Bool, message: String?)
-    case error(String)
-    case cancelled
-}
-
 // MARK: — Connection state
 
 enum ConnectionState: Equatable {
@@ -67,9 +58,6 @@ final class WebSocketManager: ObservableObject {
     /// Feed of voice calibration events from the PC (phrase prompts, results, completion).
     let calibrationEventPublisher = PassthroughSubject<CalibrationEvent, Never>()
 
-    /// Feed of gaze monitor calibration events from the PC (next dot, complete, error).
-    let gazeCalibrationFeed = PassthroughSubject<GazeCalibrationEvent, Never>()
-
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
 
@@ -91,7 +79,7 @@ final class WebSocketManager: ObservableObject {
     private let sendQueue = DispatchQueue(label: "ws.send.serial", qos: .userInitiated)
 
     // G3: Backpressure — track approximate queue depth to drop stale sensor frames.
-    // Sensor streams (tilt, gaze_delta, head) are sampled, not queued: only the
+    // Sensor streams (tilt) are sampled, not queued: only the
     // latest value matters. Non-sensor messages always pass through.
     private var _sendQueueDepth: Int = 0
     private let _maxSensorQueueDepth = 15
@@ -100,7 +88,7 @@ final class WebSocketManager: ObservableObject {
     // brief slowness but cap the buildup to prevent unbounded memory growth.
     private let _maxAudioQueueDepth = 60
     private static let _sensorFrameTypes: Set<String> = [
-        "tilt", "tilt_position", "gaze_delta", "gaze", "gaze_ray", "head_pose"
+        "tilt", "tilt_position"
     ]
 
     // G2: Pending gesture assessment — queued when not connected, flushed on reconnect.
@@ -365,33 +353,6 @@ final class WebSocketManager: ObservableObject {
             calibrationEventPublisher.send(.error(msg))
             parsed = .unknown(type: type, raw: json)
 
-        case "gaze_calibration_next":
-            let dotIndex = json["dot_index"] as? Int    ?? 0
-            let pxX      = json["px_x"]      as? Int    ?? 0
-            let pxY      = json["px_y"]      as? Int    ?? 0
-            let total    = json["total"]     as? Int    ?? 5
-            let label    = json["label"]     as? String ?? ""
-            gazeCalibrationFeed.send(.next(dotIndex: dotIndex, pxX: pxX, pxY: pxY,
-                                           total: total, label: label))
-            parsed = .unknown(type: type, raw: json)
-
-        case "gaze_calibration_complete":
-            let residual = json["residual_px"] as? Double ?? 0.0
-            let success  = json["success"]     as? Bool   ?? false
-            let message  = json["message"]     as? String
-            gazeCalibrationFeed.send(.complete(residualPx: residual,
-                                               success: success, message: message))
-            parsed = .unknown(type: type, raw: json)
-
-        case "gaze_calibration_error":
-            let msg = json["message"] as? String ?? "Unknown error"
-            gazeCalibrationFeed.send(.error(msg))
-            parsed = .unknown(type: type, raw: json)
-
-        case "gaze_calibration_cancelled":
-            gazeCalibrationFeed.send(.cancelled)
-            parsed = .unknown(type: type, raw: json)
-
         default:
             parsed = .unknown(type: type, raw: json)
         }
@@ -467,29 +428,6 @@ extension WebSocketManager {
 
     func sendTiltPosition(x: Double, y: Double) {
         send(["type": "tilt_position", "x": x, "y": y])
-    }
-
-    func sendGaze(x: Double, y: Double, confidence: Double) {
-        send(["type": "gaze", "x": x, "y": y, "confidence": confidence])
-    }
-
-    func sendGazeDelta(dx: Double, dy: Double, confidence: Double = 1.0, saccade: Bool = false) {
-        send(["type": "gaze_delta", "dx": dx, "dy": dy, "conf": confidence, "saccade": saccade])
-    }
-
-    /// Send world-space gaze ray direction at ~10 Hz for monitor calibration.
-    /// Called from GazeTracker.processQueue — WebSocketManager.send() is queue-safe.
-    func sendGazeRay(dx: Double, dy: Double, dz: Double, confidence: Double = 1.0) {
-        send(["type": "gaze_ray", "dx": dx, "dy": dy, "dz": dz, "conf": confidence])
-    }
-
-    func sendGazeDwell(x: Double, y: Double, actionType: DwellActionType) {
-        msgCounter += 1
-        send(["type": "gaze_dwell", "id": "gd-\(msgCounter)", "x": x, "y": y, "action_type": actionType.rawValue])
-    }
-
-    func sendHeadPose(pitch: Double, yaw: Double) {
-        send(["type": "head_pose", "pitch": pitch, "yaw": yaw])
     }
 
     func sendRatchet() {
@@ -596,28 +534,5 @@ extension WebSocketManager {
     func sendLogBatch(_ entries: [[String: Any]]) {
         guard state == .connected, !entries.isEmpty else { return }
         send(["type": "ipad_log", "entries": entries])
-    }
-
-    /// Trigger a 5-dot monitor calibration session on the PC.
-    func sendGazeCalibrationStart() {
-        msgCounter += 1
-        send(["type": "gaze_calibration_start", "id": "gcal-\(msgCounter)"])
-    }
-
-    /// Send a captured calibration sample for one dot to the PC.
-    /// pxX/pxY are the known pixel coords the PC displayed; ray is the gaze world vector.
-    func sendGazeCalibrationSample(dotIndex: Int, pxX: Int, pxY: Int,
-                                   rayDx: Double, rayDy: Double, rayDz: Double) {
-        msgCounter += 1
-        send([
-            "type":      "gaze_calibration_sample",
-            "id":        "gs-\(msgCounter)",
-            "dot_index": dotIndex,
-            "px_x":      pxX,
-            "px_y":      pxY,
-            "ray_dx":    rayDx,
-            "ray_dy":    rayDy,
-            "ray_dz":    rayDz,
-        ])
     }
 }

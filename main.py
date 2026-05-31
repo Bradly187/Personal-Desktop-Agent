@@ -129,7 +129,15 @@ def _measure_vram() -> None:
 # Task 4.4 — Startup status table
 # ---------------------------------------------------------------------------
 
-def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> None:
+def _print_startup_table(
+    port: int,
+    safe_mode: bool,
+    host: str = "0.0.0.0",
+    backend: str = "ollama",
+    vllm_server_url: str = "http://localhost:8000",
+    cloud_dev_agent: bool = False,
+    cloud_dev_model: str = "claude-sonnet-4-6",
+) -> None:
     """Print a table of which PC-side services are available."""
     rows: list[tuple[str, str, str]] = []
 
@@ -201,22 +209,6 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
         avail = p.is_available()
         return ("OK", "UIA COM available") if avail else ("WARN", "UIA COM unavailable (comtypes?)")
 
-    def _check_gaze_calibration():
-        from calibration.gaze_calibrator import GazeCalibrator, _JSON_PATH
-        if not _JSON_PATH.exists():
-            return "WARN", "not calibrated — say 'hey agent calibrate monitor'"
-        cal = GazeCalibrator()
-        if cal.load():
-            status = cal.get_status()
-            residual = status["residual_px"]
-            calibrated_at = status["calibrated_at"]
-            if calibrated_at > 0:
-                import time as _t
-                age_days = (_t.time() - calibrated_at) / 86400
-                return "OK", f"residual={residual:.1f}px  age={age_days:.0f}d"
-            return "OK", f"residual={residual:.1f}px  age=unknown"
-        return "WARN", "calibration file unreadable"
-
     def _check_chromadb():
         import chromadb  # noqa: F401
         from chromadb.utils.embedding_functions import (  # noqa: F401
@@ -257,18 +249,45 @@ def _print_startup_table(port: int, safe_mode: bool, host: str = "0.0.0.0") -> N
         except ImportError:
             return "WARN", "not installed — run vllm_setup.bat to fix CUDA wheels"
 
+    def _check_cloud_dev_agent():
+        if not cloud_dev_agent:
+            return "off", "enable with --cloud-dev-agent"
+        try:
+            import anthropic  # noqa: F401
+        except ImportError:
+            return "WARN", "anthropic SDK not installed"
+        import os as _os
+        if not _os.environ.get("ANTHROPIC_API_KEY"):
+            return "WARN", "ANTHROPIC_API_KEY not set"
+        return "OK", f"{cloud_dev_model} (anthropic_cloud)"
+
+    def _check_vllm_server():
+        import urllib.request as _ur
+        url = vllm_server_url.rstrip("/")
+        try:
+            with _ur.urlopen(f"{url}/v1/models", timeout=2) as r:
+                r.read()
+            return "OK", f"reachable at {url}"
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "refused" in msg or "timed out" in msg:
+                return "WARN", f"unreachable at {url} — run scripts/start_vllm_server.bat"
+            return "WARN", f"{url}: {str(exc)[:50]}"
+
     check("Metrics (in-process)",           lambda: ("OK", "metrics.py singleton ready"))
     check("ChromaDB RAG (codebase index)",  _check_chromadb)
     check("DuckDB (session analytics)",     _check_duckdb)
     check("Kiro/VS Code bridge",            _check_kiro)
     check("llama.cpp server (:8080)",       _check_llamacpp)
     check("vLLM",                           _check_vllm)
+    check("Cloud DevAgent (Anthropic)",     _check_cloud_dev_agent)
+    if backend == "vllm-server":
+        check("vLLM server (OpenAI HTTP)",   _check_vllm_server)
     check("GPU / VRAM (pynvml)",            _check_pynvml)
     check("Ollama LLM server",              _check_ollama)
     check("Whisper (faster-whisper)",       _check_whisper)
     check("Acoustic profiler",              _check_acoustic_profiler)
     check("UIAutomation (Win32)",           _check_uiautomation)
-    check("Gaze monitor calibration",      _check_gaze_calibration)
     check("MiniLM (sentence-transformers)", _check_sentence_transformers)
     check("Screen OCR (tesseract)",         _check_tesseract)
     check("Handwriting OCR (pix2tex)",      _check_pix2tex)
@@ -452,7 +471,9 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
 async def _run_pipeline(args: argparse.Namespace) -> None:
     from core.command_executor import CommandExecutor
     from storage.db import AgentDB
-    from inference.local_inference import OllamaInference, LlamaCppInference, VLLMInference, VLLMEmbedder
+    from inference.local_inference import (
+        OllamaInference, LlamaCppInference, VLLMInference, VLLMServerInference, VLLMEmbedder,
+    )
     from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
     from adaptive.behavioral_twin_state import BehavioralTwinState
     from core.fusion_engine import FusionEngine, FusionConfig
@@ -466,7 +487,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from storage.audit_log import AuditLog
     from adaptive.content_filter import ContentFilter
     from adaptive.mcp_trust_classifier import MCPTrustClassifier
-    from calibration.gaze_calibrator import GazeCalibrator
     from monitoring.metrics import get_metrics
     from storage.session_analyzer import SessionAnalyzer
 
@@ -532,6 +552,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             "Using vLLM backend (LLM class) — model loads on first inference request%s",
             " [speculative decoding enabled]" if _vllm_speculative else "",
         )
+    elif _backend == "vllm-server":
+        local = VLLMServerInference(
+            base_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
+            model=getattr(args, "vllm_server_model", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
+        )
+        log.info(
+            "Using vLLM-server backend (OpenAI-compatible HTTP at %s) — "
+            "server managed externally in WSL2 (scripts/start_vllm_server.sh)",
+            local.base_url,
+        )
     else:
         local = OllamaInference()
 
@@ -540,7 +570,11 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # Requires --backend vllm (command model) + WSL2 with vllm installed.
     # Ollama remains the automatic fallback if the pool raises.
     _vllm_pool: Optional[VLLMSpecialistPool] = None
-    if getattr(args, "vllm_pool", False):
+    _no_local_specialists = getattr(args, "no_local_specialists", False)
+    if _no_local_specialists and getattr(args, "vllm_pool", False):
+        log.warning("--no-local-specialists overrides --vllm-pool; specialist pool disabled "
+                    "(dev queries route to the cloud)")
+    if getattr(args, "vllm_pool", False) and not _no_local_specialists:
         if _backend != "vllm":
             log.warning("--vllm-pool requires --backend vllm; specialist pool disabled")
         else:
@@ -608,6 +642,35 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     )
     coordinator.set_dev_agent(dev_agent)
 
+    # ── Cloud DevAgent (--cloud-dev-agent) ─────────────────────────────────
+    # Route dev-domain queries (code/math/vision/plan/general) to Claude via the
+    # Anthropic API instead of waking a local 30B specialist.  As a fallback
+    # (default) it engages only when no local specialist is GPU-resident; with
+    # --no-local-specialists it is the primary dev path and the GPU is never woken.
+    _cloud_dev_agent = None
+    if getattr(args, "cloud_dev_agent", False):
+        try:
+            from inference.cloud_dev_agent import CloudDevAgent
+            _cloud_dev_agent = CloudDevAgent()
+
+            def _local_specialist_awake() -> bool:
+                return _vllm_pool is not None and bool(_vllm_pool.get_status().get("awake"))
+
+            coordinator.set_cloud_dev_agent(
+                _cloud_dev_agent,
+                always_cloud=_no_local_specialists,
+                local_available_fn=_local_specialist_awake,
+            )
+            _cda_status = _cloud_dev_agent.get_status()
+            log.info("CloudDevAgent: wired (available=%s model=%s always_cloud=%s)",
+                     _cda_status["available"], _cda_status["model"], _no_local_specialists)
+            if not _cda_status["available"]:
+                log.warning("CloudDevAgent: ANTHROPIC_API_KEY not set or anthropic SDK missing "
+                            "— dev queries will return CLARIFY until configured")
+        except Exception as _cda_exc:
+            log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
+            _cloud_dev_agent = None
+
     # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────
     if getattr(args, "kiro", False):
         try:
@@ -660,13 +723,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if twin_state:
         twin_state.set_acoustic_profiler(profiler)
 
-    # --- Gaze calibrator (load persisted calibration if available) ---
-    gaze_calibrator = GazeCalibrator(screen_w=sw, screen_h=sh)
-    gaze_calibrator.load()
-    if gaze_calibrator.is_calibrated:
-        log.info("GazeCalibrator: loaded persisted calibration  residual=%.1f px",
-                 gaze_calibrator.get_status()["residual_px"])
-
     bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
@@ -674,14 +730,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_whisper_stream(whisper)
     bridge.set_coordinator(coordinator)  # needed for pain_day_override message
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
-    bridge.set_gaze_calibrator(gaze_calibrator)
-    if _speak_fn:
-        bridge.set_speak_fn(_speak_fn)
-    fusion.set_gaze_calibrator(gaze_calibrator)
     fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
     await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
     await profiler.load_rom_bounds(agent_db)       # D4: ROM → initial VAD bounds
-    whisper.set_gaze_calibration_trigger(bridge.start_gaze_calibration_from_voice)
 
     # D6: wire profiler → WhisperStream so VAD changes push immediately
     profiler.set_whisper_ref(whisper)
@@ -784,7 +835,13 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Print startup table (task 4.4) ---
     if not args.quiet:
-        _print_startup_table(args.port, args.safe_mode, host=args.host)
+        _print_startup_table(
+            args.port, args.safe_mode, host=args.host,
+            backend=_backend,
+            vllm_server_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
+            cloud_dev_agent=getattr(args, "cloud_dev_agent", False),
+            cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-sonnet-4-6"),
+        )
 
     # --- Run bridge + fusion + watchdog concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
@@ -888,12 +945,23 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--metrics-port", type=int, default=0,
                    help="Expose /metrics JSON endpoint on this port (0 = disabled)")
     # ── Backend selection (roadmap item #1, #6) ──────────────────────────────
-    p.add_argument("--backend", type=str, default="ollama",
-                   choices=["ollama", "vllm", "llamacpp"],
-                   help="LLM inference backend: ollama (default), vllm, llamacpp")
+    p.add_argument("--backend", "--inference-backend", type=str, default="ollama",
+                   dest="backend",
+                   choices=["ollama", "vllm", "llamacpp", "vllm-server"],
+                   help="LLM inference backend: ollama (default), vllm, llamacpp, vllm-server "
+                        "(--inference-backend is an accepted alias)")
     p.add_argument("--vllm-model", type=str,
                    default="meta-llama/Meta-Llama-3.1-8B-Instruct",
                    help="HuggingFace model ID for vLLM backend")
+    # ── vLLM-server backend (Option C: WSL2 `vllm serve` over HTTP) ──────────
+    p.add_argument("--vllm-server-url", type=str, default="http://localhost:8000",
+                   help="Base URL of the WSL2 `vllm serve` OpenAI-compatible server "
+                        "(requires --backend vllm-server). Start it with "
+                        "scripts/start_vllm_server.bat.")
+    p.add_argument("--vllm-server-model", type=str,
+                   default="meta-llama/Meta-Llama-3.1-8B-Instruct",
+                   help="Model name the vllm-server was started with (must match the "
+                        "--model passed to `vllm serve`).")
     p.add_argument("--speculative", action="store_true",
                    help="Enable speculative decoding (roadmap #9): passes "
                         "--speculative-model llama3.1:8b to vLLM at startup. "
@@ -908,6 +976,17 @@ def _parse_args() -> argparse.Namespace:
                         "Routes code/math/vision/plan/general through in-process vLLM "
                         "LLM instances with TTL sleep; 3-8s wake vs Ollama's 60s cold load. "
                         "Needs AWQ checkpoints on HuggingFace (see model_router.py header).")
+    # ── Cloud DevAgent — Anthropic API path for dev-domain queries ───────────
+    p.add_argument("--cloud-dev-agent", action="store_true",
+                   help="Route dev-domain queries (code/math/vision/plan/general) to "
+                        "Claude via the Anthropic API as a fallback when no local "
+                        "specialist is awake — avoids a ~50s GPU wake. "
+                        "Needs ANTHROPIC_API_KEY. ~$0.01/query on Sonnet 4.6.")
+    p.add_argument("--no-local-specialists", action="store_true",
+                   help="Skip the VLLMSpecialistPool entirely and route ALL dev-domain "
+                        "queries to the cloud (implies the cloud is the primary dev "
+                        "path; requires --cloud-dev-agent). Keeps the GPU free for the "
+                        "command path — no 30B specialist is ever woken.")
     p.add_argument("--vllm-embed", action="store_true",
                    help="Use VLLMEmbedder (nomic-embed-text-v1.5) for RAG instead of "
                         "sentence-transformers. Requires --backend vllm.")

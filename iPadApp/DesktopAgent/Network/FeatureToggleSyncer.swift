@@ -3,7 +3,7 @@ import Foundation
 
 /// Syncs feature toggle changes from SettingsStore to the PC via WebSocket.
 ///
-/// Observes the 6 feature toggle `@Published` properties and sends
+/// Observes the feature toggle `@Published` properties and sends
 /// `set_feature_toggle` messages whenever one changes. If the WebSocket is
 /// disconnected, changes are queued locally and flushed on reconnection.
 ///
@@ -15,12 +15,7 @@ final class FeatureToggleSyncer {
 
     /// Maps Swift property key paths to the wire protocol feature names.
     private static let featureNameMap: [String: String] = [
-        "gazeDwellClickEnabled": "gaze_dwell_click",
-        "gazeDwellRightClickEnabled": "gaze_dwell_right_click",
-        "gazeDwellDoubleClickEnabled": "gaze_dwell_double_click",
-        "gazeDwellDragEnabled": "gaze_dwell_drag",
         "edgeScrollEnabled": "edge_scroll",
-        "gazeCursorModeEnabled": "gaze_cursor_mode",
     ]
 
     // MARK: — Dependencies
@@ -48,51 +43,11 @@ final class FeatureToggleSyncer {
     // MARK: — Toggle observation
 
     private func _subscribeToToggles() {
-        settings.$gazeDwellClickEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                self?._handleToggleChange(feature: "gaze_dwell_click", enabled: enabled)
-            }
-            .store(in: &cancellables)
-
-        settings.$gazeDwellRightClickEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                self?._handleToggleChange(feature: "gaze_dwell_right_click", enabled: enabled)
-            }
-            .store(in: &cancellables)
-
-        settings.$gazeDwellDoubleClickEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                self?._handleToggleChange(feature: "gaze_dwell_double_click", enabled: enabled)
-            }
-            .store(in: &cancellables)
-
-        settings.$gazeDwellDragEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                self?._handleToggleChange(feature: "gaze_dwell_drag", enabled: enabled)
-            }
-            .store(in: &cancellables)
-
         settings.$edgeScrollEnabled
             .removeDuplicates()
             .dropFirst()
             .sink { [weak self] enabled in
                 self?._handleToggleChange(feature: "edge_scroll", enabled: enabled)
-            }
-            .store(in: &cancellables)
-
-        settings.$gazeCursorModeEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                self?._handleToggleChange(feature: "gaze_cursor_mode", enabled: enabled)
             }
             .store(in: &cancellables)
     }

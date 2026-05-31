@@ -11,7 +11,9 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from adaptive.behavioral_twin_state import BehavioralTwinState, _DEFAULT_SNAPSHOT
+from adaptive.behavioral_twin_state import (
+    BehavioralTwinState, PreferenceModel, ActionStats, _DEFAULT_SNAPSHOT,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +49,22 @@ def _make_twin(
     twin._pain_day_active = pain_day_active
     twin._acoustic_profiler = None   # added via set_acoustic_profiler(); not set by __new__
     twin._manual_pain_day = False    # added via set_manual_pain_day(); not set by __new__
+
+    # D7: _recompute_pain_day_score() reads the good-day gesture-confidence
+    # baseline from PreferenceModel.action_stats (previously the working-set
+    # mean). __new__ bypasses __init__, so seed a PreferenceModel here from the
+    # working set's gesture entries to exercise signal_3 as these scenarios intend.
+    pm = PreferenceModel()
+    ws_gesture_confs = [
+        e["gesture_confidence"] for e in (working_set or [])
+        if e.get("source") == "gesture" and e.get("gesture_confidence") is not None
+    ]
+    if ws_gesture_confs:
+        stats = ActionStats()
+        stats.good_day_conf_sum = float(sum(ws_gesture_confs))
+        stats.good_day_conf_count = len(ws_gesture_confs)
+        pm.action_stats["gesture"] = stats
+    twin._preference_model = pm
     return twin
 
 
@@ -65,7 +83,7 @@ elapsed_st = st.floats(min_value=0.001, max_value=86_400.0, allow_nan=False, all
 
 # Working set entries — list of dicts with optional gesture_confidence and source
 working_set_entry_st = st.fixed_dictionaries({
-    "source": st.sampled_from(["voice", "gesture", "touch", "gaze", "tilt", "head"]),
+    "source": st.sampled_from(["voice", "gesture", "touch", "tilt"]),
     "gesture_confidence": st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False),
 })
 

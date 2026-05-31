@@ -34,7 +34,7 @@ confidence_st = st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_i
 latency_st = st.floats(min_value=0.0, max_value=10_000.0, allow_nan=False, allow_infinity=False)
 
 # Source names
-source_st = st.sampled_from(["voice", "gesture", "touch", "gaze", "tilt", "head"])
+source_st = st.sampled_from(["voice", "gesture", "touch", "tilt"])
 
 # Unix timestamps covering a full day range (any 24-hour period)
 # Use a fixed base date to keep tests deterministic and avoid DST edge cases

@@ -38,7 +38,6 @@ Delete the auto-generated `ContentView.swift` and `DesktopAgentApp.swift` that X
 Add these usage description strings:
 
 ```
-NSCameraUsageDescription         = "Used for gaze and head tracking."
 NSMicrophoneUsageDescription     = "Used for voice keyword detection and audio streaming to PC."
 NSSpeechRecognitionUsageDescription = "Used for on-device keyword matching."
 NSMotionUsageDescription         = "Used for tilt-based cursor control."
@@ -64,7 +63,7 @@ All sensor preferences are persisted in `UserDefaults` via `SettingsStore.swift`
 
 ### Option A: Xcode (recommended for device deployment)
 
-- Target a **physical iPad** — ARFaceTracking requires TrueDepth camera (no Simulator).
+- Target a **physical iPad** — Core Motion (tilt) is unavailable on the Simulator.
 - Set `serverHost` in Settings to your PC's local IP address.
 - Start the PC bridge first: `python ipad_bridge.py`
 
@@ -135,4 +134,4 @@ If you can't build the native app (no Mac, no Xcode, expired provisioning), the 
 2. On the iPad, open Safari and navigate to `http://<PC_IP>:8765/`
 3. The web client connects to the same WebSocket endpoint (`/ws`) as the native app.
 
-The web client is served automatically when the `web_client/` directory exists alongside `ipad_bridge.py`. It provides basic touch/command input but does not support ARKit gaze tracking, Core Motion tilt, or on-device keyword detection — those require the native app.
+The web client is served automatically when the `web_client/` directory exists alongside `ipad_bridge.py`. It provides basic touch/command input but does not support Core Motion tilt or on-device keyword detection — those require the native app.

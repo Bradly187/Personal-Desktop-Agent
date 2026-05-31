@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Sensor Status Dashboard — shows all 6 sensors with live status,
+/// Sensor Status Dashboard — shows all sensors with live status,
 /// quick-enable toggles, and expandable detail panels.
 ///
 /// Each sensor card shows:
@@ -92,8 +92,6 @@ struct SensorDashboardView: View {
     private func toggleSensor(_ id: String) {
         switch id {
         case "tilt": settings.tiltEnabled.toggle()
-        case "gaze": settings.gazeEnabled.toggle()
-        case "head": settings.headEnabled.toggle()
         case "keyword":
             if settings.keywordList.isEmpty {
                 settings.keywordList = ["click", "scroll", "open"]
@@ -123,8 +121,6 @@ struct SensorDashboardView: View {
     private func detailView(for id: String) -> some View {
         switch id {
         case "tilt": TiltDetailView(sensor: sensorManager.tiltSensor, settings: settings)
-        case "gaze": GazeDetailView()
-        case "head": HeadDetailView()
         case "keyword": KeywordDetailView(listener: sensorManager.keywordListener)
         case "sound": SoundDetailView()
         case "audio": AudioDetailView(streamer: sensorManager.audioStreamer)
@@ -236,8 +232,6 @@ private struct SensorCard<Detail: View>: View {
     private var displayName: String {
         switch state.id {
         case "tilt": return "Tilt Navigation"
-        case "gaze": return "Eye Gaze"
-        case "head": return "Head Tracking"
         case "keyword": return "Voice Keywords"
         case "sound": return "Sound Actions"
         case "audio": return "Audio Stream"
@@ -248,8 +242,6 @@ private struct SensorCard<Detail: View>: View {
     private var iconName: String {
         switch state.id {
         case "tilt": return "ipad.landscape"
-        case "gaze": return "eye"
-        case "head": return "face.smiling"
         case "keyword": return "text.bubble"
         case "sound": return "mouth"
         case "audio": return "mic.badge.plus"
@@ -312,61 +304,6 @@ private struct TiltDetailView: View {
                 )
         }
         .accessibilityLabel(String(format: "Tilt position: %.0f%% right, %.0f%% down", sensor.lastSentX * 100, sensor.lastSentY * 100))
-    }
-}
-
-private struct GazeDetailView: View {
-    @EnvironmentObject var sensorManager: SensorManager
-    @EnvironmentObject var settings: SettingsStore
-    @Environment(\.appTheme) private var theme
-
-    @State private var showCalibration = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
-            Text("Sends relative eye movement deltas to PC.")
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textSecondary)
-            Text("Blink detection active — skips frames when eyes closed.")
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textSecondary)
-            HStack(spacing: DesignTokens.Spacing.sm) {
-                Image(systemName: "eyeglasses")
-                    .foregroundStyle(theme.accent)
-                Text("Increase Smoothing in Settings if using glasses.")
-                    .font(DesignTokens.Typography.caption)
-                    .foregroundStyle(theme.textSecondary)
-            }
-            Text("Sensitivity: \(Int(settings.gazeSensitivity))  Smoothing: \(String(format: "%.2f", settings.gazeStabilityThreshold))")
-                .font(DesignTokens.Typography.mono)
-                .foregroundStyle(theme.textPrimary)
-                .padding(.top, DesignTokens.Spacing.xs)
-
-            Button("Auto-Tune Sensitivity…") {
-                showCalibration = true
-            }
-            .font(DesignTokens.Typography.caption)
-            .foregroundStyle(theme.accent)
-            .padding(.top, DesignTokens.Spacing.xs)
-            .sheet(isPresented: $showCalibration) {
-                GazeCalibrationSheet(sensorManager: sensorManager, settings: settings)
-            }
-        }
-    }
-}
-
-private struct HeadDetailView: View {
-    @Environment(\.appTheme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
-            Text("Sends head pitch/yaw deltas to PC for cursor movement.")
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textSecondary)
-            Text("Shares TrueDepth camera with Eye Gaze (no conflict).")
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textSecondary)
-        }
     }
 }
 
@@ -475,7 +412,7 @@ private struct AudioDetailView: View {
 // MARK: - Cursor Control Section
 
 /// Top-level cursor control panel showing:
-/// - Active cursor sensor picker (segmented: tilt / gaze / head)
+/// - Active cursor sensor indicator (tilt)
 /// - Ratchet button (re-center tilt without cursor jump)
 /// - Pause indicator (shows when cursor sensors are paused)
 ///
@@ -541,8 +478,6 @@ private struct CursorControlSection: View {
 
             HStack(spacing: 0) {
                 sensorPickerButton(label: "Tilt", icon: "ipad.landscape", sensor: "tilt")
-                sensorPickerButton(label: "Gaze", icon: "eye", sensor: "gaze")
-                sensorPickerButton(label: "Head", icon: "face.smiling", sensor: "head")
             }
             .background(theme.surfacePrimary)
             .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.sm))
@@ -634,14 +569,10 @@ private struct CursorControlSection: View {
         // Disable old cursor sensor, enable new one
         switch fromSensor {
         case "tilt": settings.tiltEnabled = false
-        case "gaze": settings.gazeEnabled = false
-        case "head": settings.headEnabled = false
         default: break
         }
         switch sensor {
         case "tilt": settings.tiltEnabled = true
-        case "gaze": settings.gazeEnabled = true
-        case "head": settings.headEnabled = true
         default: break
         }
 
