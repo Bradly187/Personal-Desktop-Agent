@@ -137,6 +137,8 @@ def _print_startup_table(
     vllm_server_url: str = "http://localhost:8000",
     cloud_dev_agent: bool = False,
     cloud_dev_model: str = "claude-sonnet-4-6",
+    dashscope: bool = False,
+    dashscope_domains: str = "math,code,vision",
 ) -> None:
     """Print a table of which PC-side services are available."""
     rows: list[tuple[str, str, str]] = []
@@ -261,6 +263,18 @@ def _print_startup_table(
             return "WARN", "ANTHROPIC_API_KEY not set"
         return "OK", f"{cloud_dev_model} (anthropic_cloud)"
 
+    def _check_dashscope():
+        if not dashscope:
+            return "off", "enable with --dashscope"
+        try:
+            import openai  # noqa: F401
+        except ImportError:
+            return "WARN", "openai SDK not installed (pip install openai)"
+        import os as _os
+        if not _os.environ.get("DASHSCOPE_API_KEY"):
+            return "WARN", "DASHSCOPE_API_KEY not set"
+        return "OK", f"qwq-32b/qwen2.5-coder/qwen-vl-max  domains={dashscope_domains}"
+
     def _check_vllm_server():
         import urllib.request as _ur
         url = vllm_server_url.rstrip("/")
@@ -281,6 +295,7 @@ def _print_startup_table(
     check("llama.cpp server (:8080)",       _check_llamacpp)
     check("vLLM",                           _check_vllm)
     check("Cloud DevAgent (Anthropic)",     _check_cloud_dev_agent)
+    check("Cloud DevAgent (DashScope)",     _check_dashscope)
     if backend == "vllm-server":
         check("vLLM server (OpenAI HTTP)",   _check_vllm_server)
     check("GPU / VRAM (pynvml)",            _check_pynvml)
@@ -642,6 +657,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     )
     coordinator.set_dev_agent(dev_agent)
 
+    # ── Shared cloud-routing availability check ────────────────────────────
+    # Used by both CloudDevAgent and DashScopeAgent: True when a local vLLM
+    # specialist is currently GPU-resident (no cloud wake needed).
+    def _local_specialist_awake() -> bool:
+        return _vllm_pool is not None and bool(_vllm_pool.get_status().get("awake"))
+
     # ── Cloud DevAgent (--cloud-dev-agent) ─────────────────────────────────
     # Route dev-domain queries (code/math/vision/plan/general) to Claude via the
     # Anthropic API instead of waking a local 30B specialist.  As a fallback
@@ -652,9 +673,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         try:
             from inference.cloud_dev_agent import CloudDevAgent
             _cloud_dev_agent = CloudDevAgent()
-
-            def _local_specialist_awake() -> bool:
-                return _vllm_pool is not None and bool(_vllm_pool.get_status().get("awake"))
 
             coordinator.set_cloud_dev_agent(
                 _cloud_dev_agent,
@@ -670,6 +688,39 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         except Exception as _cda_exc:
             log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
             _cloud_dev_agent = None
+
+    # ── DashScope Agent (--dashscope) ─────────────────────────────────────
+    # Routes math/code/vision dev-domain queries to Qwen via DashScope's
+    # OpenAI-compatible API.  Complements CloudDevAgent (Anthropic handles
+    # plan/general).  Uses the same always_cloud / local_available_fn policy.
+    if getattr(args, "dashscope", False):
+        try:
+            from inference.dashscope_agent import DashScopeAgent
+            _dashscope_domains = tuple(
+                d.strip() for d in
+                getattr(args, "dashscope_domains", "math,code,vision").split(",")
+                if d.strip()
+            )
+            _dsa = DashScopeAgent()
+
+            coordinator.set_dashscope_agent(
+                _dsa,
+                domains=_dashscope_domains,
+                always_cloud=_no_local_specialists,
+                local_available_fn=_local_specialist_awake,
+            )
+            _dsa_status = _dsa.get_status()
+            log.info(
+                "DashScopeAgent: wired (available=%s domains=%s always_cloud=%s)",
+                _dsa_status["available"], _dashscope_domains, _no_local_specialists,
+            )
+            if not _dsa_status["available"]:
+                log.warning(
+                    "DashScopeAgent: DASHSCOPE_API_KEY not set or openai SDK missing "
+                    "— dev queries will return CLARIFY until configured"
+                )
+        except Exception as _dsa_exc:
+            log.warning("DashScopeAgent: failed to initialise: %s", _dsa_exc)
 
     # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────
     if getattr(args, "kiro", False):
@@ -841,6 +892,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             vllm_server_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
             cloud_dev_agent=getattr(args, "cloud_dev_agent", False),
             cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-sonnet-4-6"),
+            dashscope=getattr(args, "dashscope", False),
+            dashscope_domains=getattr(args, "dashscope_domains", "math,code,vision"),
         )
 
     # --- Run bridge + fusion + watchdog concurrently ---
@@ -985,8 +1038,19 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-local-specialists", action="store_true",
                    help="Skip the VLLMSpecialistPool entirely and route ALL dev-domain "
                         "queries to the cloud (implies the cloud is the primary dev "
-                        "path; requires --cloud-dev-agent). Keeps the GPU free for the "
-                        "command path — no 30B specialist is ever woken.")
+                        "path; requires --cloud-dev-agent or --dashscope). Keeps the "
+                        "GPU free for the command path — no 30B specialist is ever woken.")
+    # ── DashScope (Qwen cloud API) ────────────────────────────────────────────
+    p.add_argument("--dashscope", action="store_true",
+                   help="Route math/code/vision dev-domain queries to Qwen via "
+                        "DashScope's OpenAI-compatible API (qwq-32b, "
+                        "qwen2.5-coder-32b-instruct, qwen-vl-max). Needs "
+                        "DASHSCOPE_API_KEY. ~$0.003–0.006/query. "
+                        "Use with --cloud-dev-agent to cover plan/general with Anthropic.")
+    p.add_argument("--dashscope-domains", type=str, default="math,code,vision",
+                   help="Comma-separated dev domains routed to DashScope "
+                        "(default: math,code,vision). Everything else goes to "
+                        "--cloud-dev-agent (Anthropic) if also enabled.")
     p.add_argument("--vllm-embed", action="store_true",
                    help="Use VLLMEmbedder (nomic-embed-text-v1.5) for RAG instead of "
                         "sentence-transformers. Requires --backend vllm.")

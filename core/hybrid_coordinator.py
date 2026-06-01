@@ -403,8 +403,12 @@ class HybridCoordinator:
         self._cloud_dev_agent = None          # CloudDevAgent or None
         self._cloud_always = False            # True with --no-local-specialists
         self._local_specialist_available = None  # () -> bool (specialist awake?)
-        # Small rolling buffer of recent dev queries — passed to the cloud agent
-        # as context without a DB round-trip in the hot path.
+        # DashScope agent — Qwen-based cloud tier; handles math/code/vision by
+        # default; Anthropic keeps plan/general.
+        self._dashscope_agent = None          # DashScopeAgent or None
+        self._dashscope_domains: frozenset = frozenset({"math", "code", "vision"})
+        # Small rolling buffer of recent dev queries — passed to cloud agents as
+        # context without a DB round-trip in the hot path.
         self._recent_dev_commands: list[str] = []
 
     # ---------------------------------------------------------------------- #
@@ -450,13 +454,70 @@ class HybridCoordinator:
             always_cloud, getattr(cloud_agent, "model", "?"),
         )
 
+    def set_dashscope_agent(
+        self,
+        agent,
+        *,
+        domains: tuple[str, ...] = ("math", "code", "vision"),
+        always_cloud: bool = False,
+        local_available_fn=None,
+    ) -> None:
+        """Wire a DashScopeAgent for domain-specialised cloud routing.
+
+        domains          → which dev domains route to DashScope (default: math,
+                           code, vision).  All other dev domains fall through to
+                           CloudDevAgent (Anthropic) if wired, else local.
+        always_cloud     → same semantics as set_cloud_dev_agent's always_cloud.
+        local_available_fn → () -> bool; set once (shared with Anthropic path).
+        """
+        self._dashscope_agent = agent
+        self._dashscope_domains = frozenset(domains)
+        if always_cloud:
+            self._cloud_always = True
+        if local_available_fn is not None and self._local_specialist_available is None:
+            self._local_specialist_available = local_available_fn
+        log.info(
+            "HybridCoordinator: DashScopeAgent wired (domains=%s always_cloud=%s)",
+            sorted(domains), always_cloud or self._cloud_always,
+        )
+
+    def _cloud_agent_for_domain(self, domain: str):
+        """Return (cloud_agent, backend_label) for a dev-domain, or (None, None).
+
+        Priority: DashScope for its assigned domains → Anthropic for everything
+        else → DashScope as catch-all if Anthropic not wired.
+        """
+        # Neither cloud agent is wired.
+        if self._dashscope_agent is None and self._cloud_dev_agent is None:
+            return None, None
+
+        # Should we use cloud at all right now?
+        if not self._cloud_always:
+            if self._local_specialist_available is None:
+                return None, None
+            try:
+                if self._local_specialist_available():
+                    return None, None   # local specialist awake — use it
+            except Exception as exc:
+                log.debug("local-specialist availability check failed: %s", exc)
+
+        # DashScope handles its preferred domains.
+        if self._dashscope_agent is not None and domain in self._dashscope_domains:
+            return self._dashscope_agent, "dashscope"
+        # Anthropic catches everything else.
+        if self._cloud_dev_agent is not None:
+            return self._cloud_dev_agent, "anthropic_cloud"
+        # DashScope as catch-all (domain not in preferred set but Anthropic absent).
+        if self._dashscope_agent is not None:
+            return self._dashscope_agent, "dashscope"
+        return None, None
+
     def _should_route_cloud_dev(self) -> bool:
-        """Decide whether a dev-domain query should go to the cloud agent."""
+        """Decide whether a dev-domain query should go to the Anthropic cloud agent."""
         if self._cloud_dev_agent is None:
             return False
         if self._cloud_always:
             return True
-        # Fallback mode: cloud only when no local specialist is currently awake.
         if self._local_specialist_available is None:
             return False
         try:
@@ -524,26 +585,30 @@ class HybridCoordinator:
         if self._dev_agent:
             domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
-                # Cloud DevAgent branch — route to Claude when configured to,
-                # avoiding a 30B specialist wake (and the GPU teardown it forces).
-                if self._should_route_cloud_dev():
-                    log.info("HybridCoordinator: dev-domain=%s → CloudDevAgent (%s)",
-                             domain, getattr(self._cloud_dev_agent, "model", "?"))
+                # Cloud branch — prefer DashScope for its domains, Anthropic for
+                # the rest.  Avoids a 30B specialist wake (and GPU teardown).
+                cloud_agent, cloud_backend = self._cloud_agent_for_domain(domain)
+                if cloud_agent is not None:
+                    log.info(
+                        "HybridCoordinator: dev-domain=%s → %s (%s)",
+                        domain, cloud_backend,
+                        getattr(cloud_agent, "model", "?"),
+                    )
                     ctx = {
                         "session_id": self._session_id,
                         "recent_commands": list(self._recent_dev_commands),
                         "source": cmd.source,
                     }
-                    response_text = await self._cloud_dev_agent.run(cmd.text, domain, ctx)
+                    response_text = await cloud_agent.run(cmd.text, domain, ctx)
                     self._record_dev_command(cmd.text)
                     return {
                         "status": "ok",
                         "action": "dev_agent",
                         "domain": domain,
-                        "model": self._cloud_dev_agent.model,
+                        "model": getattr(cloud_agent, "model", "?"),
                         "response": response_text,
                         "steps": 0,
-                        "backend": "anthropic_cloud",
+                        "backend": cloud_backend,
                     }
 
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
