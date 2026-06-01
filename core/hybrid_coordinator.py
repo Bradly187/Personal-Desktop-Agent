@@ -398,6 +398,8 @@ class HybridCoordinator:
         self._vram_cache_ttl: float = 2.0  # seconds
         self._metrics = None   # set via set_metrics()
 
+        self._memory = None   # MemoryManager — wired via set_memory()
+
         # Cloud DevAgent (--cloud-dev-agent) — optional Anthropic-API fallback for
         # dev-domain queries so a 30B specialist (and a GPU wake) is not needed.
         self._cloud_dev_agent = None          # CloudDevAgent or None
@@ -514,6 +516,10 @@ class HybridCoordinator:
         """Wire FusionEngine so pain-day thresholds propagate on each route()."""
         self._fusion = fusion_engine
 
+    def set_memory(self, memory) -> None:
+        """Wire MemoryManager for standardised storage access."""
+        self._memory = memory
+
     async def route(self, cmd: Command) -> dict:
         """Route a Command through the gate decision tree and execute it.
 
@@ -536,6 +542,8 @@ class HybridCoordinator:
                     }
                     response_text = await self._cloud_dev_agent.run(cmd.text, domain, ctx)
                     self._record_dev_command(cmd.text)
+                    if self._twin:
+                        self._twin.clear_dev_namespace()
                     return {
                         "status": "ok",
                         "action": "dev_agent",
@@ -549,6 +557,8 @@ class HybridCoordinator:
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
                 agent_result = await self._dev_agent.handle(cmd.text)
                 self._record_dev_command(cmd.text)
+                if self._twin:
+                    self._twin.clear_dev_namespace()
                 return {
                     "status": "ok",
                     "action": "dev_agent",
@@ -703,9 +713,9 @@ class HybridCoordinator:
                     )
                     cmd = _dc_replace(cmd, text=corrected_text)
 
-            # Populate session_context from twin state
+            # Populate session_context from twin state (always accessibility namespace)
             if self._twin and self._twin.is_ready:
-                cmd = _dc_replace(cmd, session_context=self._twin.get_session_context())
+                cmd = _dc_replace(cmd, session_context=self._twin.get_session_context("accessibility"))
 
             # Inject pending clarification so the LLM knows what "up" or "yes"
             # is answering.  Prepended so it appears closest to the user turn.

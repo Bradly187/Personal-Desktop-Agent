@@ -69,6 +69,7 @@ class ContinuousTrainer:
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._memory = None   # MemoryManager — wired via set_memory()
         # D9: intra-session velocity calibration trigger
         self._velocity_sample_counter: int = 0
         self._velocity_intra_session_threshold: int = 20
@@ -101,19 +102,32 @@ class ContinuousTrainer:
     # Public API — called by HybridCoordinator
     # ---------------------------------------------------------------------- #
 
+    def set_memory(self, memory) -> None:
+        """Wire MemoryManager for standardised storage access."""
+        self._memory = memory
+
     async def record_success(
         self,
         cmd: "Command",
         action_str: str,
         domain: str = "command",
         command_id: Optional[int] = None,
+        namespace: str = "accessibility",
     ) -> None:
         """Record a successfully executed command as a few-shot example."""
-        await self._db.upsert_few_shot_example(cmd, action_str, domain, command_id)
+        # Phase C: route through MemoryManager when available
+        if self._memory is not None:
+            await self._memory.write_state(
+                "few_shot_example",
+                (cmd, action_str, domain, command_id),
+                namespace=namespace,
+            )
+        else:
+            await self._db.upsert_few_shot_example(cmd, action_str, domain, command_id)
 
         # Feed observation into twin state (non-blocking)
         if self._twin:
-            await self._twin.observe(cmd, action_str)
+            await self._twin.observe(cmd, action_str, namespace=namespace)
 
         # Gesture confidence tracking
         if cmd.source == "gesture":

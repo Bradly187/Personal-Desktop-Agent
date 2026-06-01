@@ -286,6 +286,10 @@ class CodebaseIndexer:
         self._observer = None
         self._watch_loop: Optional[asyncio.AbstractEventLoop] = None
 
+        # ResourceGovernor pause flag — when True, new index/re-index jobs are
+        # skipped. In-progress jobs run to completion.
+        self._paused: bool = False
+
     # ---------------------------------------------------------------------- #
     # Lifecycle
     # ---------------------------------------------------------------------- #
@@ -359,6 +363,18 @@ class CodebaseIndexer:
         import gc
         gc.collect()
 
+    def pause(self) -> None:
+        """Signal the indexer to skip new index jobs (ResourceGovernor flare mode).
+        Any in-progress indexing job runs to completion.
+        """
+        self._paused = True
+        log.info("CodebaseIndexer: paused by ResourceGovernor")
+
+    def resume(self) -> None:
+        """Resume normal indexing after a flare ends."""
+        self._paused = False
+        log.info("CodebaseIndexer: resumed by ResourceGovernor")
+
     # ---------------------------------------------------------------------- #
     # File watcher (roadmap item #5)
     # ---------------------------------------------------------------------- #
@@ -427,6 +443,8 @@ class CodebaseIndexer:
 
     async def _on_file_changed(self, path: Path) -> None:
         """Handle file creation/modification event from watchdog thread."""
+        if self._paused:
+            return
         suffix = path.suffix.lower()
         if suffix not in (".py", ".swift"):
             return
@@ -473,6 +491,9 @@ class CodebaseIndexer:
         Returns:
             Stats dict: {indexed_files, skipped_files, total_chunks, errors}
         """
+        if self._paused:
+            log.debug("CodebaseIndexer.index(): skipped — paused by ResourceGovernor")
+            return {"skipped": True, "reason": "paused"}
         if not self._available:
             return {"error": "ChromaDB unavailable"}
 

@@ -214,6 +214,7 @@ class FusionEngine:
         # Tracked set prevents fire-and-forget tasks from being GC'd before completion
         # and surfaces unhandled exceptions via the done-callback log.
         self._route_tasks: set = set()
+        self._scheduler = None  # AccessibilityScheduler — wired via set_scheduler()
 
     # ---------------------------------------------------------------------- #
     # Wiring
@@ -221,6 +222,24 @@ class FusionEngine:
 
     def set_coordinator(self, coordinator: "HybridCoordinator") -> None:
         self._coordinator = coordinator
+
+    def set_scheduler(self, scheduler) -> None:
+        """Wire AccessibilityScheduler so _emit() submits at the correct priority."""
+        self._scheduler = scheduler
+
+    @staticmethod
+    def _source_to_priority(source: str):
+        """Map a Command source string to its scheduler Priority tier."""
+        from core.scheduler import Priority
+        _MAP = {
+            "touch":        Priority.ACCESSIBILITY,
+            "sound_action": Priority.ACCESSIBILITY,
+            "multimodal":   Priority.ACCESSIBILITY,  # voice-click bypass
+            "voice":        Priority.VOICE,
+            "voice_local":  Priority.VOICE,
+            "gesture":      Priority.GESTURE,
+        }
+        return _MAP.get(source, Priority.ACCESSIBILITY)
 
     def set_agent_db(self, db) -> None:
         """Wire AgentDB for throttled sensor-stream persistence (~1 Hz)."""
@@ -684,14 +703,24 @@ class FusionEngine:
         if self._metrics is not None:
             self._metrics.record_command_routed(cmd.source)
         if self._coordinator:
-            # Fire-and-forget: prevents 200-600ms LLM inference from blocking the 60Hz tick loop.
-            task = asyncio.create_task(self._coordinator.route(cmd))
-            self._route_tasks.add(task)
-            task.add_done_callback(self._route_tasks.discard)
-            task.add_done_callback(
-                lambda t: log.error("FusionEngine route task failed: %s", t.exception())
-                if not t.cancelled() and t.exception() else None
-            )
+            if self._scheduler is not None:
+                # Priority-aware dispatch: DEV_AGENT/BACKGROUND tasks are gated
+                # so they cannot starve accessibility commands during a flare.
+                priority = self._source_to_priority(cmd.source)
+                self._scheduler.submit(
+                    self._coordinator.route(cmd),
+                    priority=priority,
+                    label=cmd.source,
+                )
+            else:
+                # Fallback: bare fire-and-forget (scheduler not yet wired)
+                task = asyncio.create_task(self._coordinator.route(cmd))
+                self._route_tasks.add(task)
+                task.add_done_callback(self._route_tasks.discard)
+                task.add_done_callback(
+                    lambda t: log.error("FusionEngine route task failed: %s", t.exception())
+                    if not t.cancelled() and t.exception() else None
+                )
         else:
             log.warning("FusionEngine: no coordinator set — dropping %r", cmd)
 

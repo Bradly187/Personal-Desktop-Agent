@@ -531,6 +531,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     twin_state = BehavioralTwinState(agent_db=agent_db)
     await twin_state.start()
 
+    # --- MemoryManager — schema-validated façade over AgentDB + SemanticMemory ---
+    from storage.memory_manager import MemoryManager
+    memory = MemoryManager(agent_db=agent_db, twin_state=twin_state)
+
     # --- Build components ---
     cfg = CoordinatorConfig()
 
@@ -642,6 +646,11 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     )
     coordinator.set_dev_agent(dev_agent)
 
+    # Wire MemoryManager into all storage-writing components
+    coordinator.set_memory(memory)
+    dev_agent.set_memory(memory)
+    trainer.set_memory(memory)
+
     # ── Cloud DevAgent (--cloud-dev-agent) ─────────────────────────────────
     # Route dev-domain queries (code/math/vision/plan/general) to Claude via the
     # Anthropic API instead of waking a local 30B specialist.  As a fallback
@@ -690,6 +699,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion.set_coordinator(coordinator)
     fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
     fusion.set_session_id(session_id)
+
+    # Priority-aware scheduler — gates DEV_AGENT/BACKGROUND tasks so they
+    # cannot starve accessibility commands during a flare.
+    from core.scheduler import AccessibilityScheduler
+    scheduler = AccessibilityScheduler()
+    await scheduler.start()
+    fusion.set_scheduler(scheduler)
+    dev_agent.set_scheduler(scheduler)
 
     from calibration.acoustic_profiler import AcousticProfiler
     profiler = AcousticProfiler(agent_db=agent_db, session_id=session_id)
@@ -820,6 +837,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     shutdown = _ShutdownController()
     shutdown.register(fusion, gesture, whisper)
+    shutdown.register(scheduler)
     if viewer:
         shutdown.register(viewer)
     shutdown.arm()
@@ -827,6 +845,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # --- Start trainer and WhisperStream ---
     await trainer.start()
     await whisper.start()
+
+    # --- ResourceGovernor — pain-aware hardware resource control ---
+    from core.resource_governor import ResourceGovernor
+    governor = ResourceGovernor(memory=memory)
+    governor.set_fusion_engine(fusion)
+    governor.set_whisper_stream(whisper)
+    if indexer is not None:
+        governor.set_indexer(indexer)
+    await governor.start()
+    shutdown.register(governor)
 
     # --- Sync hotwords into WhisperStream once trainer is ready ---
     hotwords = await trainer.get_hotwords()

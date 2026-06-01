@@ -179,6 +179,8 @@ class DevAgent:
         self._results_log: list[AgentResult] = []  # kept for get_last_result()
         self._indexer: Optional["CodebaseIndexer"] = None   # set via set_indexer()
         self._kiro: Optional["KiroClient"] = None            # set via set_kiro()
+        self._scheduler = None                               # set via set_scheduler()
+        self._memory = None                                  # set via set_memory()
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
@@ -187,6 +189,14 @@ class DevAgent:
     def set_kiro(self, kiro: "KiroClient") -> None:
         """Wire a KiroClient for IDE context (cursor, file, git, diagnostics)."""
         self._kiro = kiro
+
+    def set_scheduler(self, scheduler) -> None:
+        """Wire AccessibilityScheduler for submitting background sub-tasks at DEV_AGENT priority."""
+        self._scheduler = scheduler
+
+    def set_memory(self, memory) -> None:
+        """Wire MemoryManager for standardised storage access."""
+        self._memory = memory
 
     # ---------------------------------------------------------------------- #
     # Primary entry point
@@ -759,6 +769,41 @@ class DevAgent:
     async def _persist_run(
         self, result: AgentResult, command_id: Optional[int]
     ) -> None:
+        # Phase B: route through MemoryManager when available; fall back to
+        # direct AgentDB calls so existing behaviour is preserved when
+        # MemoryManager is not wired (e.g. in unit tests).
+        if self._memory is not None:
+            run_id = -1
+            try:
+                run_id = await self._memory._db.insert_agent_run(
+                    command_id=command_id,
+                    goal=result.goal,
+                    domain=result.domain,
+                    model_used=result.model_used,
+                    step_count=len(result.steps),
+                    success=result.success,
+                    total_latency_ms=result.total_latency_ms,
+                    error=result.error,
+                )
+                for i, step in enumerate(result.steps):
+                    await self._memory.write_state(
+                        "agent_step",
+                        {
+                            "run_id": run_id,
+                            "step_num": i + 1,
+                            "action": step.action,
+                            "args": step.args or None,
+                            "body": step.body or None,
+                            "result": step.result,
+                            "success": step.success,
+                            "latency_ms": step.latency_ms,
+                        },
+                        namespace="dev_agent",
+                    )
+            except Exception as exc:
+                log.warning("DevAgent._persist_run via MemoryManager failed: %s", exc)
+            return
+
         if not self._agent_db or not self._agent_db.available:
             return
         run_id = await self._agent_db.insert_agent_run(

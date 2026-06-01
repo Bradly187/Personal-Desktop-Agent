@@ -321,7 +321,12 @@ class BehavioralTwinState:
         self._preference_model = PreferenceModel()
 
         # ── Session state ──────────────────────────────────────────────
-        self._session_history: list[str] = []          # command text strings
+        # Namespaced: "accessibility" is persistent; "dev_agent" is ephemeral
+        # (clears itself after get_session_context("dev_agent") is called).
+        self._session_history: dict[str, list[str]] = {
+            "accessibility": [],
+            "dev_agent": [],
+        }
         self._working_set: list[dict] = []             # command dicts from AgentDB
 
         # ── Snapshot cache ─────────────────────────────────────────────
@@ -413,13 +418,18 @@ class BehavioralTwinState:
             log.warning("BehavioralTwinState.get_snapshot error: %s", exc)
             return _DEFAULT_SNAPSHOT
 
-    async def observe(self, cmd: "Command", action_str: str) -> None:
+    async def observe(
+        self,
+        cmd: "Command",
+        action_str: str,
+        namespace: str = "accessibility",
+    ) -> None:
         """Record a successful command. Non-blocking — schedules background task.
         Never raises.
         """
         try:
             task = asyncio.create_task(
-                self._persist_observation(cmd, action_str),
+                self._persist_observation(cmd, action_str, namespace=namespace),
                 name=f"twin_observe_{id(cmd)}",
             )
             self._pending_tasks.add(task)
@@ -435,9 +445,20 @@ class BehavioralTwinState:
             log.warning("BehavioralTwinState.query_similar error: %s", exc)
             return []
 
-    def get_session_context(self) -> list[str]:
-        """Return current SessionHistory as list[str] for Command.session_context."""
-        return list(self._session_history)
+    def get_session_context(self, namespace: str = "accessibility") -> list[str]:
+        """Return SessionHistory for the given namespace as list[str].
+
+        The "dev_agent" namespace clears itself after being read — it is
+        ephemeral and must not pollute future accessibility context.
+        """
+        history = list(self._session_history.get(namespace, []))
+        if namespace == "dev_agent":
+            self._session_history["dev_agent"] = []
+        return history
+
+    def clear_dev_namespace(self) -> None:
+        """Discard ephemeral dev-agent session history. Called after dev session ends."""
+        self._session_history["dev_agent"] = []
 
     def set_acoustic_profiler(self, profiler) -> None:
         """Wire AcousticProfiler so voice clarity feeds into pain detection."""
@@ -468,71 +489,87 @@ class BehavioralTwinState:
             log.warning("BehavioralTwinState._persist_preference_model failed: %s", exc)
 
     async def _write_session_history(self) -> None:
-        """Write current session history to AgentDB twin_session_history table."""
+        """Write accessibility session history to AgentDB twin_session_history table."""
         try:
-            if not self._session_history:
+            accessibility_history = self._session_history.get("accessibility", [])
+            if not accessibility_history:
                 return
-            # Use the current session (most recent) from AgentDB
             session_id = await self._agent_db.get_most_recent_session_id()
             if session_id is None:
                 return
             history = [
                 {"ts": time.time(), "cmd_text": text, "action": "", "source": ""}
-                for text in self._session_history
+                for text in accessibility_history
             ]
             await self._agent_db.write_session_history(session_id, history)
         except Exception as exc:
             log.warning("BehavioralTwinState._write_session_history failed: %s", exc)
 
-    async def _persist_observation(self, cmd: "Command", action_str: str) -> None:
-        """Background task: update PreferenceModel, SessionHistory, SemanticMemory."""
+    async def _persist_observation(
+        self,
+        cmd: "Command",
+        action_str: str,
+        namespace: str = "accessibility",
+    ) -> None:
+        """Background task: update SessionHistory and (for accessibility) PreferenceModel
+        and SemanticMemory.
+
+        Dev-agent observations are written only to the ephemeral "dev_agent"
+        history slice; they never touch PreferenceModel, SemanticMemory, or the
+        session signal accumulators, preventing dev debugging sessions from
+        contaminating the accessibility few-shot context.
+        """
         try:
-            # 1. Extract fields from cmd
-            action_verb = action_str.split()[0].upper() if action_str else "UNKNOWN"
-            confidence = getattr(cmd, 'whisper_logprob', 0.0)
-            latency_ms = 0.0
             source = getattr(cmd, 'source', 'unknown')
             ts = time.time()
-            success = True
             text = getattr(cmd, 'text', '')
 
-            # 2. Update PreferenceModel (D7: pass current pain_day state)
-            self._preference_model.update(
-                action_verb=action_verb,
-                confidence=confidence,
-                latency_ms=latency_ms,
-                source=source,
-                ts=ts,
-                success=success,
-                pain_day=self._pain_day_active,
+            # 1. Append to the correct namespace's session history
+            max_history = (
+                5 if namespace == "dev_agent"
+                else (self.SESSION_HISTORY_PAIN_DAY if self._pain_day_active else self.SESSION_HISTORY_MAX)
             )
+            hist = self._session_history[namespace]
+            hist.append(text)
+            if len(hist) > max_history:
+                self._session_history[namespace] = hist[-max_history:]
 
-            # 3. Update session signal accumulators
-            self._session_cmd_count += 1
-            if action_str.upper() == "CLARIFY":
-                self._session_clarify_count += 1
-            if source == "gesture" and getattr(cmd, 'gesture_confidence', 0) > 0:
-                self._session_gesture_confs.append(cmd.gesture_confidence)
+            # 2. Accessibility-only: PreferenceModel, accumulators, SemanticMemory
+            if namespace == "accessibility":
+                action_verb = action_str.split()[0].upper() if action_str else "UNKNOWN"
+                confidence = getattr(cmd, 'whisper_logprob', 0.0)
 
-            # 4. Append to SessionHistory (respecting window size)
-            max_history = self.SESSION_HISTORY_PAIN_DAY if self._pain_day_active else self.SESSION_HISTORY_MAX
-            self._session_history.append(text)
-            if len(self._session_history) > max_history:
-                self._session_history = self._session_history[-max_history:]
+                # Update PreferenceModel (D7: pass current pain_day state)
+                self._preference_model.update(
+                    action_verb=action_verb,
+                    confidence=confidence,
+                    latency_ms=0.0,
+                    source=source,
+                    ts=ts,
+                    success=True,
+                    pain_day=self._pain_day_active,
+                )
 
-            # 5. Add to SemanticMemory
-            await self._semantic_memory.add(
-                text=text,
-                action=action_str,
-                source=source,
-                ts=ts,
-                success=True,
-            )
+                # Update session signal accumulators
+                self._session_cmd_count += 1
+                if action_str.upper() == "CLARIFY":
+                    self._session_clarify_count += 1
+                if source == "gesture" and getattr(cmd, 'gesture_confidence', 0) > 0:
+                    self._session_gesture_confs.append(cmd.gesture_confidence)
 
-            # 6. Persist preference model to AgentDB
-            await self._persist_preference_model()
+                # Add to SemanticMemory
+                await self._semantic_memory.add(
+                    text=text,
+                    action=action_str,
+                    source=source,
+                    ts=ts,
+                    success=True,
+                )
 
-            # 7. Rebuild _current_snapshot
+                # Persist preference model to AgentDB
+                await self._persist_preference_model()
+
+            # 3. Rebuild _current_snapshot (always — pain-day snapshot uses accessibility slice)
             self._current_snapshot = self._build_snapshot()
 
         except Exception as exc:
@@ -545,7 +582,7 @@ class BehavioralTwinState:
             pain_day_active=self._pain_day_active,
             preferred_actions=self._preference_model.top_actions(current_bucket, n=5),
             source_weights=self._preference_model.source_weights(),
-            session_context=list(self._session_history),
+            session_context=list(self._session_history.get("accessibility", [])),
             command_count_today=self._session_cmd_count,
             pain_day_score=self._pain_day_score,
             snapshot_ts=time.monotonic(),
@@ -606,17 +643,17 @@ class BehavioralTwinState:
             )
             
             if rows:
-                self._session_history = [row["cmd_text"] for row in rows]
+                self._session_history["accessibility"] = [row["cmd_text"] for row in rows]
                 log.debug(
                     "BehavioralTwinState: loaded %d commands from prior session %d",
-                    len(self._session_history),
+                    len(self._session_history["accessibility"]),
                     prior_session_id,
                 )
             else:
                 log.debug("BehavioralTwinState: no session history in prior session %d", prior_session_id)
         except Exception as exc:
             log.warning("BehavioralTwinState._load_session_history failed: %s", exc)
-            self._session_history = []
+            self._session_history["accessibility"] = []
 
     def _recompute_pain_day_score(self) -> float:
         """Compute pain_day_score from current session signals. Returns [0.0, 1.0]."""
