@@ -11,7 +11,7 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 - **System**: The full accessibility agent spanning both the iPad app and the PC-side Python services
 - **iPadApp**: The native Swift/SwiftUI application running on the iPad Pro (2020+), built in Xcode, that captures all sensor data and provides the touch control surface
 - **PC_Service**: The Python-side services running on the desktop PC (HybridCoordinator, DesktopAgent, ContinuousTrainer, WhisperStream)
-- **iPad**: An iPad Pro (2020+) with LiDAR scanner, TrueDepth camera, accelerometer, gyroscope, and microphone
+- **iPad**: An iPad Pro (2020+) with LiDAR scanner, accelerometer, gyroscope, and microphone (the unit in use is a standard iPad with no TrueDepth front camera — gaze and head tracking are unavailable)
 - **WhisperStream**: The voice pipeline on the PC that receives audio from the iPad mic (or system default mic), segments speech with Silero VAD, and transcribes via faster-whisper on CUDA
 - **IPadBridge**: The PC-side component that receives sensor data streams (LiDAR depth, gaze coordinates, motion events, gesture classifications) from the iPadApp over WebSocket
 - **FusionEngine**: The PC-side component that merges inputs from all iPad sources using priority rules and emits a single Command per tick
@@ -20,15 +20,15 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 - **ContinuousTrainer**: The PC-side background learning system that adapts routing thresholds, Whisper vocabulary, gesture confidence floors, and few-shot examples
 - **Command**: The universal dataclass that crosses every pipeline boundary, carrying text, confidence scores, source tag, session context, and optional gaze coordinates
 - **Core_Motion**: Apple's framework providing accelerometer and gyroscope data for tilt-to-navigate and tap-on-table detection
-- **ARKit**: Apple's augmented reality framework used for real-time eye gaze tracking and head pose estimation via the TrueDepth camera
+- **ARKit**: Apple's augmented reality framework; used for LiDAR depth streaming via `ARWorldTrackingConfiguration` (gaze/head tracking via TrueDepth removed 2026-05-30)
 - **Speech_Framework**: Apple's on-device speech recognition framework used for custom keyword listening on the iPad
 - **AVFoundation**: Apple's media framework used for audio capture and sound action detection on the iPad
 - **Record3D**: The iOS app that streams iPad LiDAR depth data to the PC over USB or Wi-Fi
-- **Eyeware_Beam**: The iOS app that uses the iPad TrueDepth camera to provide head and eye tracking data to the PC (fallback if ARKit gaze is insufficient)
-- **MediaPipe**: Google's on-device ML framework used on the PC for hand landmark detection and iris gaze estimation from the iPad camera feed
+- **Eyeware_Beam**: *(removed — required TrueDepth camera not present on device)*
+- **MediaPipe**: Google's on-device ML framework used on the PC for hand landmark detection from the iPad camera feed (iris gaze estimation removed 2026-05-30)
 - **Silero_VAD**: A lightweight voice activity detection model that runs on CPU to segment speech from silence
 - **Gate**: One of four sequential checks in the HybridCoordinator that determine whether a command is processed locally or escalated to the cloud
-- **Dwell_Activation**: A touch or gaze interaction where resting on a target for a configured duration triggers activation without requiring tap force
+- **Dwell_Activation**: A touch interaction where resting on a target for a configured duration triggers activation without requiring tap force (gaze dwell removed 2026-05-30)
 - **Palm_Rejection**: Logic that ignores touch contacts with a radius exceeding a threshold, preventing accidental input from a resting hand
 - **Tilt_Navigation**: An input mode where gentle tilts of the iPad (detected via Core_Motion) are mapped to cursor movement or UI navigation on the PC
 - **Sound_Action**: An input mode where specific mouth sounds (e.g., cluck, pop) detected by AVFoundation trigger predefined commands
@@ -61,29 +61,13 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 4. WHEN the iPad is resting on a stand and the accelerometer detects a sharp impulse (table tap), THE iPadApp SHALL send a tap event to the PC_Service, which the FusionEngine SHALL interpret as a click at the current cursor position
 5. WHEN Core_Motion data is unavailable, THE iPadApp SHALL log a warning and the System SHALL continue operating with remaining input modalities
 
-### Requirement 3: Eye Gaze Tracking via ARKit
+### ~~Requirement 3: Eye Gaze Tracking via ARKit~~ *(REMOVED 2026-05-30)*
 
-**User Story:** As a user with RA, I want my iPad to track where I'm looking on screen, so that I can target UI elements with my eyes during flare-ups when even tilting is painful.
+> **Removed:** `ARFaceTrackingConfiguration.isSupported` returns false on the standard iPad in use — no TrueDepth front camera. All gaze tracking code removed from PC and iPad. `Command.gaze_coords` is retained as a generic explicit-coordinate field (used by vision grounder and voice click).
 
-#### Acceptance Criteria
+### ~~Requirement 4: Head Tracking via ARKit~~ *(REMOVED 2026-05-30)*
 
-1. WHEN the iPadApp ARKit session detects a valid face anchor with eye tracking, THE iPadApp SHALL stream gaze direction vectors to the PC_Service at the ARKit frame rate
-2. WHEN the PC_Service receives gaze data that is stable (spread below 4% of screen diagonal) and the user says "click", THE FusionEngine SHALL produce a Command that moves the cursor to the mapped gaze coordinates and clicks
-3. WHEN gaze is stable and a dwell timer exceeds the configured duration (default 1 second), THE FusionEngine SHALL produce a click Command at the gaze coordinates without requiring any voice or touch input
-4. THE iPadApp settings SHALL allow the user to configure the dwell timer duration and enable or disable gaze dwell activation
-5. WHEN ARKit eye tracking confidence is below 0.55, THE FusionEngine SHALL not use gaze coordinates for targeting
-6. WHEN ARKit eye tracking is unavailable, THE iPadApp SHALL fall back to Eyeware_Beam if installed, then to MediaPipe iris estimation on the PC from the iPad camera feed
-
-### Requirement 4: Head Tracking via ARKit
-
-**User Story:** As a user with RA, I want to move the cursor with subtle head tilts, so that I have a stable hands-free pointing method that works even when my eye tracking is unreliable.
-
-#### Acceptance Criteria
-
-1. WHEN head tracking mode is active, THE iPadApp SHALL use ARKit face anchor transform data to detect head pitch and yaw and stream head pose deltas to the PC_Service
-2. WHEN the PC_Service receives head pose deltas, THE FusionEngine SHALL map them to cursor movement on the desktop with configurable sensitivity and smoothing
-3. THE iPadApp settings SHALL allow the user to configure head tracking sensitivity, smoothing factor, and axis mapping
-4. WHEN both head tracking and eye gaze are active, THE FusionEngine SHALL use eye gaze for fine targeting and head tracking for coarse navigation
+> **Removed:** Same reason as Requirement 3 — no TrueDepth sensor. All head-pose tracking code removed from PC and iPad.
 
 ### Requirement 5: Custom Voice Commands via Speech Framework
 

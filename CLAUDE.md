@@ -143,7 +143,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 
 **Done (iPad structured log forwarding — 2026-05-22):**
 - `ipad_bridge.py` — `ipad_log` message handler: routes each AppLogger entry to `ipad.<subsystem>` Python logger; warning+ entries persisted to DB
-- `db.py` — +1 table: `ipad_logs`; +1 method: `log_ipad_events(session_id, entries)`; total is now **27 AgentDB tables** (previous Sprint C tables were undercounted)
+- `db.py` — +1 table: `ipad_logs`; +1 method: `log_ipad_events(session_id, entries)`; total is now **32 AgentDB tables** (previous Sprint C tables were undercounted)
 - `iPadApp/DesktopAgent/AppLogger.swift` — structured log forwarding over WebSocket (subsystem + level + msg batching)
 - Multiple Swift sensor files updated to use AppLogger for structured output: `SharedAudioSession`, `AudioStreamer`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `LiDARStreamer`, `SharedFaceSession`, `TiltSensor`, `SensorManager`, `DesktopAgentApp`
 - `fusion_engine.py` — `set_gaze_calibrator()` wiring path also updated
@@ -236,9 +236,9 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `inference/model_router.py` | VRAM-aware specialist model selection; domain-tuned prompts; Ollama inference |
 | `inference/dev_agent.py` | Plan→execute→reflect agentic loop; 5 dev verbs; session context |
 | `main.py` | Unified entry point; `--measure-vram`; `--viewer`/`--viewer-only`; startup status table; Ctrl-C shutdown |
-| `sensors/sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; gaze cursor overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
+| `sensors/sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
 | `sensors/whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
-| `storage/db.py` | `AgentDB` (aiosqlite, 27 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice + gaze monitor calibration + iPad log tables |
+| `storage/db.py` | `AgentDB` (aiosqlite, 32 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice + iPad log tables |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
 | `tts/polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
 | `tts/chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |

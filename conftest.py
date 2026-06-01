@@ -5,8 +5,6 @@
 # so pytest cannot resolve their parameter fixtures.
 collect_ignore_glob = [
     "tests/test_touch_scroll_e2e.py",
-    "tests/test_gaze_dwell_e2e.py",
-    "tests/test_gaze_dwell_click.py",
     "tests/test_tilt_navigation.py",
     "tests/test_gesture_bridge_e2e.py",
 ]

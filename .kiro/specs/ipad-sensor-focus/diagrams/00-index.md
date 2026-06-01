@@ -11,7 +11,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 |---|------|----------|
 | 01 | [01-system-architecture.md](01-system-architecture.md) | High-level system architecture, iPad↔PC split, WebSocket protocol |
 | 02 | [02-class-diagram.md](02-class-diagram.md) | Class diagram for both iPad-side (Swift) and PC-side (Python) |
-| 03 | [03-sequence-diagrams.md](03-sequence-diagrams.md) | Interaction flows for all 10 input modalities |
+| 03 | [03-sequence-diagrams.md](03-sequence-diagrams.md) | Interaction flows for all 8 input modalities (gaze/head removed 2026-05-30) |
 | 04 | [04-state-machines.md](04-state-machines.md) | State machines for iPad app, sensor modes, fusion engine, debouncing |
 | 05 | [05-data-flow.md](05-data-flow.md) | iPad sensor data flows, WebSocket message schema, persistent storage |
 | 06 | [06-fusion-routing.md](06-fusion-routing.md) | 10-level fusion priority, 4-gate routing, action execution |
@@ -21,7 +21,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 | 10 | [10-nemoclaw-system-architecture.md](10-nemoclaw-system-architecture.md) | Full pipeline with NemoClaw additions: Gate 0, NemotronInference, log field |
 | 11 | [11-nemoclaw-gate-flow.md](11-nemoclaw-gate-flow.md) | HybridCoordinator gate decision flowchart with gate_that_decided labels |
 | 12 | [12-nemoclaw-inference-tiers.md](12-nemoclaw-inference-tiers.md) | Local inference backends mapped against RTX 5090 VRAM budget |
-| 14 | [14-database-schema.md](14-database-schema.md) | agent.db (14 tables) + analytics.duckdb ER diagrams; pipeline write topology; index coverage |
+| 14 | [14-database-schema.md](14-database-schema.md) | agent.db (32 tables) + analytics.duckdb ER diagrams; pipeline write topology; index coverage |
 | 15 | [15-sprint-roadmap.md](15-sprint-roadmap.md) | Sprint 5–7 planning: vision grounding, UIAutomation, action verification loop |
 
 ---
@@ -33,7 +33,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 iPad Pro (Swift/SwiftUI)          PC (Python asyncio)
 ─────────────────────────         ────────────────────────────────
 Core Motion (tilt)         ──┐
-ARKit (gaze, head, LiDAR)  ──┤    IPadBridge (15 message types)
+ARKit (LiDAR)              ──┤    IPadBridge (15 message types)
 Speech Framework (keywords)──┼──► FusionEngine (10-level @ 60Hz)
 AVFoundation (sound)       ──┤    BehavioralTwinState (ChromaDB)
 Touch UI (command pad)     ──┤    HybridCoordinator (Gate 0 + 1–4)
@@ -43,19 +43,17 @@ Camera (gesture frames)    ──┘    CommandExecutor (16 verbs)
                                   GestureProcessor (HandLandmarker)
 ```
 
-### Sensor Priority (FusionEngine — 10 levels)
+### Sensor Priority (FusionEngine — 7 levels)
 ```
- 1. iPad touch command       → immediate, bypasses LLM
- 2. Sound action             → mapped mouth sounds
- 3. Gaze dwell click         → resting gaze triggers click
- 4. Gaze + voice "click"     → click at gaze pixel
- 5. Gaze + gesture POINT     → click at gaze pixel
- 6. Tilt navigation          → cursor movement from iPad tilt
- 7. Head tracking            → coarse cursor from head pose
- 8. Gesture alone            → gesture command
- 9. On-device voice keyword  → local Speech framework match
-10. PC-transcribed voice     → full Whisper pipeline
+1. iPad touch command       → immediate, bypasses LLM
+2. Sound action             → mapped mouth sounds
+3. Voice "click" keyword    → click at current cursor position
+4. Tilt navigation          → cursor movement from iPad tilt
+5. Gesture alone            → gesture command
+6. On-device voice keyword  → local Speech framework match
+7. PC-transcribed voice     → full Whisper pipeline
 ```
+*(Gaze dwell and head tracking removed 2026-05-30 — standard iPad has no TrueDepth sensor)*
 
 ### WebSocket Message Format
 ```json
