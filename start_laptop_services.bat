@@ -24,11 +24,23 @@ REM Launch python directly in each window (title + working dir). This avoids the
 REM `cmd /k` quote-mangling that breaks when both the exe and the script path are
 REM quoted. The window stays open while the service runs and shows its logs; it
 REM closes when the service stops (re-run this script to restart).
+REM Idempotent: skip a service if its port is already listening (safe to run at
+REM every login / re-run without producing "port in use" error windows).
 echo Starting Whisper service on :8888 ...
-start "Laptop Whisper :8888" /D "%ROOT%" "%PY%" "%ROOT%sensors\remote_whisper_service.py" --port 8888
+netstat -ano | findstr "LISTENING" | findstr ":8888" >nul 2>&1
+if %errorlevel%==0 (
+  echo   already listening on :8888 - skipping
+) else (
+  start "Laptop Whisper :8888" /D "%ROOT%" "%PY%" "%ROOT%sensors\remote_whisper_service.py" --port 8888
+)
 
 echo Starting Indexer service on :9000 ...
-start "Laptop Indexer :9000" /D "%ROOT%" "%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch
+netstat -ano | findstr "LISTENING" | findstr ":9000" >nul 2>&1
+if %errorlevel%==0 (
+  echo   already listening on :9000 - skipping
+) else (
+  start "Laptop Indexer :9000" /D "%ROOT%" "%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch
+)
 
 echo.
 echo Laptop services launching in separate windows.
