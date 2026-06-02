@@ -202,14 +202,14 @@ def test_session_history_bounded_normal_mode(n):
     asyncio.run(run())
 
     expected_len = min(n, BehavioralTwinState.SESSION_HISTORY_MAX)
-    assert len(twin._session_history) == expected_len, (
+    history = twin._session_history["accessibility"]
+    assert len(history) == expected_len, (
         f"Normal mode: expected {expected_len} history entries for N={n}, "
-        f"got {len(twin._session_history)}"
+        f"got {len(history)}"
     )
 
     # Verify chronological order (FIFO — oldest dropped, newest at end)
     if n > 0:
-        history = twin._session_history
         # The last entry should be the most recently observed command
         last_expected_text = f"cmd_{n - 1}"
         assert history[-1] == last_expected_text, (
@@ -243,14 +243,14 @@ def test_session_history_bounded_pain_day_mode(n):
     asyncio.run(run())
 
     expected_len = min(n, BehavioralTwinState.SESSION_HISTORY_PAIN_DAY)
-    assert len(twin._session_history) == expected_len, (
+    history = twin._session_history["accessibility"]
+    assert len(history) == expected_len, (
         f"Pain day mode: expected {expected_len} history entries for N={n}, "
-        f"got {len(twin._session_history)}"
+        f"got {len(history)}"
     )
 
     # Verify chronological order (FIFO)
     if n > 0:
-        history = twin._session_history
         last_expected_text = f"cmd_{n - 1}"
         assert history[-1] == last_expected_text, (
             f"Last history entry should be '{last_expected_text}', got '{history[-1]}'"
@@ -292,7 +292,7 @@ def test_cross_session_context_round_trip(prior_texts):
     asyncio.run(run())
 
     expected_len = min(len(prior_texts), BehavioralTwinState.SESSION_HISTORY_MAX)
-    loaded = twin._session_history
+    loaded = twin._session_history["accessibility"]
 
     assert len(loaded) == expected_len, (
         f"Expected {expected_len} cross-session entries, got {len(loaded)}"
@@ -440,7 +440,7 @@ def test_stop_flushes_all_pending_tasks(n):
         completed = []
 
         # Patch _persist_observation to track completions with a small delay
-        async def tracking_persist(cmd, action_str):
+        async def tracking_persist(cmd, action_str, namespace="accessibility"):
             await asyncio.sleep(0.01)
             completed.append(id(cmd))
 
@@ -708,7 +708,7 @@ def test_stop_flushes_pending_tasks_before_persisting():
         observe_completed = []
         write_history_called_while_tasks_done = []
 
-        async def slow_persist(cmd, action_str):
+        async def slow_persist(cmd, action_str, namespace="accessibility"):
             await asyncio.sleep(0.02)
             observe_completed.append(True)
 
@@ -819,8 +819,11 @@ def test_first_run_empty_db_starts_successfully():
         assert twin._preference_model.source_counts == {}, (
             "Expected empty source_counts from default PreferenceModel"
         )
-        assert twin._session_history == [], (
-            "Expected empty session history on first run"
+        assert twin._session_history["accessibility"] == [], (
+            "Expected empty accessibility session history on first run"
+        )
+        assert twin._session_history["dev_agent"] == [], (
+            "Expected empty dev_agent session history on first run"
         )
 
         await twin.stop()

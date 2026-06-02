@@ -334,7 +334,7 @@ def test_15_4_cross_session_context_survives_restart():
         twin2, _ = _make_twin(db=db)
         await twin2.start()
 
-        loaded = twin2._session_history
+        loaded = twin2._session_history["accessibility"]
         assert len(loaded) > 0, (
             "Session 2 should have loaded cross-session context from AgentDB"
         )
