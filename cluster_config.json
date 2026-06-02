@@ -6,7 +6,7 @@
     "indexer_url": "http://192.168.18.12:9000"
   },
   "routing": {
-    "lightweight_host": "laptop"
+    "lightweight_host": "desktop"
   },
   "smb_share": null
 }

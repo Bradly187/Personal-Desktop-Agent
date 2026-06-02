@@ -21,20 +21,26 @@ def test_config_load_and_helpers():
     assert cfg.enabled is False
     assert cfg.offload_lightweight is False
 
-    # real project config
+    # real project config — routing.lightweight_host is a deployment choice
+    # (laptop|desktop), so we don't assert its value here; just that it loads.
     cfg2 = ClusterConfig.load()  # project-root cluster_config.json
     assert cfg2.enabled is True, "expected project cluster_config.json to load"
-    assert cfg2.lightweight_host == "laptop"
-    assert cfg2.offload_lightweight is True
-    assert cfg2.laptop_ollama_url.endswith(":11434")
+    assert cfg2.laptop_ollama_url and cfg2.laptop_ollama_url.endswith(":11434")
 
     assert _clean_url("  http://x:1/  ") == "http://x:1"
     assert _clean_url(None) is None
     print("OK  config load + helpers")
 
 
+def _laptop_cfg():
+    """Synthetic config that forces laptop offload, reusing the real Ollama URL."""
+    base = ClusterConfig.load()
+    url = base.laptop_ollama_url or "http://192.168.18.12:11434"
+    return ClusterConfig(enabled=True, lightweight_host="laptop", laptop_ollama_url=url)
+
+
 def test_should_offload_logic():
-    cfg = ClusterConfig.load()
+    cfg = _laptop_cfg()
     router = ModelRouter()
 
     # No cluster wired → never offload
@@ -73,7 +79,7 @@ async def test_health_monitor_real():
 
 
 async def test_offload_end_to_end():
-    cfg = ClusterConfig.load()
+    cfg = _laptop_cfg()
     mon = ClusterHealthMonitor(cfg, interval=999, timeout=3)
     await mon._check_all()
     router = ModelRouter()
