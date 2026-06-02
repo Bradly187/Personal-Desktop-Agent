@@ -20,6 +20,31 @@ if not exist "%PY%" (
   exit /b 1
 )
 
+REM (1)(2) Activate the venv so its Scripts + DLL directories are on PATH (chromadb
+REM and other native deps resolve under the minimal login environment) and the
+REM correct interpreter is guaranteed regardless of the system PATH at startup.
+call "%ROOT%.venv-laptop\Scripts\activate.bat"
+
+REM (3) Wait for the LAN to come up before launching. We look for the home subnet
+REM (192.168.x) specifically: the 172.16.x Ethernet is a virtual adapter that is
+REM "up" instantly and must NOT satisfy the check. Pure cmd (no powershell, which
+REM fails under for/f with "input redirection not supported"). Capped at ~60s.
+REM If your LAN isn't 192.168.x, change the subnet below.
+echo Waiting for network (LAN 192.168.x) ...
+set _tries=0
+:waitnet
+ipconfig | findstr /C:"192.168." >nul 2>&1
+if %errorlevel%==0 goto netok
+set /a _tries+=1
+if %_tries% geq 20 (
+  echo   network not ready after ~60s - continuing anyway
+  goto netok
+)
+timeout /t 3 /nobreak >nul
+goto waitnet
+:netok
+echo   network ready.
+
 REM Launch python directly in each window (title + working dir). This avoids the
 REM `cmd /k` quote-mangling that breaks when both the exe and the script path are
 REM quoted. The window stays open while the service runs and shows its logs; it
