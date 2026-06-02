@@ -20,11 +20,14 @@ if not exist "%PY%" (
   exit /b 1
 )
 
+REM Note the doubled outer quotes after `cmd /k`: cmd strips the outermost pair,
+REM leaving the quoted exe + quoted script path intact. Without this, cmd mangles
+REM the command when both the exe and the argument are quoted.
 echo Starting Whisper service on :8888 ...
-start "Laptop Whisper :8888" cmd /k "%PY%" "%ROOT%sensors\remote_whisper_service.py" --port 8888
+start "Laptop Whisper :8888" cmd /k ""%PY%" "%ROOT%sensors\remote_whisper_service.py" --port 8888"
 
 echo Starting Indexer service on :9000 ...
-start "Laptop Indexer :9000" cmd /k "%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch
+start "Laptop Indexer :9000" cmd /k ""%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch"
 
 echo.
 echo Laptop services launching in separate windows.
