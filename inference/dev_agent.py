@@ -181,10 +181,26 @@ class DevAgent:
         self._kiro: Optional["KiroClient"] = None            # set via set_kiro()
         self._scheduler = None                               # set via set_scheduler()
         self._memory = None                                  # set via set_memory()
+        self._remote_indexer = None       # RemoteIndexerClient | None (laptop offload)
+        self._cluster_health = None        # ClusterHealthMonitor | None
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
         self._indexer = indexer
+
+    def set_remote_indexer_url(self, url: str) -> None:
+        """Offload RAG queries to the laptop indexer service at `url`.
+
+        Preferred over the local indexer when the laptop 'indexer' service is
+        healthy; falls back to the local indexer otherwise.
+        """
+        from inference.remote_indexer_client import RemoteIndexerClient
+        self._remote_indexer = RemoteIndexerClient(url)
+        log.info("DevAgent: remote indexer enabled → %s", url)
+
+    def set_cluster_health(self, monitor) -> None:
+        """Wire ClusterHealthMonitor; remote indexer used only while 'indexer' is healthy."""
+        self._cluster_health = monitor
 
     def set_kiro(self, kiro: "KiroClient") -> None:
         """Wire a KiroClient for IDE context (cursor, file, git, diagnostics)."""
@@ -849,10 +865,28 @@ class DevAgent:
         in the system/user prompt, or None if the indexer is unavailable or returns
         no useful hits.
         """
-        if self._indexer is None or not self._indexer.available:
-            return None
+        # Prefer the laptop indexer service when configured and healthy.
+        hits = None
+        use_remote = self._remote_indexer is not None and (
+            self._cluster_health is None or self._cluster_health.is_healthy("indexer")
+        )
+        if use_remote:
+            try:
+                hits = await self._remote_indexer.query_combined(query, n=n)
+            except Exception as exc:
+                log.debug("DevAgent._rag_context() remote indexer failed: %s — local fallback", exc)
+                hits = None
+
+        if hits is None:
+            if self._indexer is None or not self._indexer.available:
+                return None
+            try:
+                hits = await self._indexer.query_combined(query, n=n)
+            except Exception as exc:
+                log.debug("DevAgent._rag_context() failed: %s", exc)
+                return None
+
         try:
-            hits = await self._indexer.query_combined(query, n=n)
             if not hits:
                 return None
             lines = ["[Relevant codebase context]"]

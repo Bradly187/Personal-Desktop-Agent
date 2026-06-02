@@ -1,0 +1,12 @@
+{
+  "laptop": {
+    "hostname": "Brad_Laptop",
+    "ollama_url": "http://192.168.18.12:11434",
+    "whisper_url": "http://192.168.18.12:8888",
+    "indexer_url": "http://192.168.18.12:9000"
+  },
+  "routing": {
+    "lightweight_host": "desktop"
+  },
+  "smb_share": null
+}

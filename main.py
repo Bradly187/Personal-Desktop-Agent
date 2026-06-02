@@ -634,6 +634,20 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     router = ModelRouter()
     if _vllm_pool is not None:
         router.set_vllm_pool(_vllm_pool)
+
+    # ── Cluster offload (laptop service node) ──────────────────────────────
+    # Loads cluster_config.json if present; otherwise a disabled config (no-op).
+    # When lightweight_host == "laptop", the command domain is routed to the
+    # laptop's Ollama while the health monitor reports it up.
+    from core.cluster_config import ClusterConfig
+    from core.cluster_health import ClusterHealthMonitor
+    cluster_cfg = ClusterConfig.load(getattr(args, "cluster_config", None))
+    cluster_health = None
+    if cluster_cfg.enabled:
+        cluster_health = ClusterHealthMonitor(cluster_cfg)
+        await cluster_health.start()
+    router.set_cluster(cluster_cfg, cluster_health)
+
     coordinator = HybridCoordinator(
         local=local, config=cfg, trainer=trainer,
         agent_db=agent_db, session_id=session_id,
@@ -652,10 +666,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     trainer.set_memory(memory)
 
     # ── Cloud DevAgent (--cloud-dev-agent) ─────────────────────────────────
-    # Route dev-domain queries (code/math/vision/plan/general) to Claude via the
-    # Anthropic API instead of waking a local 30B specialist.  As a fallback
-    # (default) it engages only when no local specialist is GPU-resident; with
-    # --no-local-specialists it is the primary dev path and the GPU is never woken.
     _cloud_dev_agent = None
     if getattr(args, "cloud_dev_agent", False):
         try:
@@ -679,6 +689,11 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         except Exception as _cda_exc:
             log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
             _cloud_dev_agent = None
+
+    # Cluster offload: route DevAgent RAG queries to the laptop indexer service.
+    if cluster_cfg.has_remote_indexer:
+        dev_agent.set_remote_indexer_url(cluster_cfg.laptop_indexer_url)
+        dev_agent.set_cluster_health(cluster_health)
 
     # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────
     if getattr(args, "kiro", False):
@@ -717,6 +732,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     whisper.set_agent_db(agent_db, session_id=session_id)
     whisper.set_acoustic_profiler(profiler)
     whisper.set_metrics(m)          # wire metrics to WhisperStream (latency + hallucinations)
+    # Cluster offload: delegate transcription to the laptop Whisper service when
+    # configured. set_remote_url() must precede whisper.start() so the local
+    # large-v3 model is never loaded (saves ~3.5 GB VRAM on the desktop).
+    if cluster_cfg.has_remote_whisper:
+        whisper.set_remote_url(cluster_cfg.laptop_whisper_url)
+        whisper.set_cluster_health(cluster_health)
     coordinator.set_whisper_stream(whisper)
     coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
     coordinator.set_profiler(profiler)
@@ -870,6 +891,15 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             cloud_dev_agent=getattr(args, "cloud_dev_agent", False),
             cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-sonnet-4-6"),
         )
+        if cluster_cfg.enabled:
+            _h = cluster_health.status() if cluster_health is not None else {}
+            def _mark(svc):
+                return "UP" if _h.get(svc) else "down"
+            print("  Cluster node (laptop):")
+            print(f"    Ollama (lightweight) : {cluster_cfg.laptop_ollama_url or '-'}  [{_mark('laptop_ollama')}]"
+                  f"  offload={'on' if cluster_cfg.offload_lightweight else 'off'}")
+            print(f"    Whisper              : {cluster_cfg.laptop_whisper_url or '-'}  [{_mark('whisper')}]")
+            print(f"    Indexer              : {cluster_cfg.laptop_indexer_url or '-'}  [{_mark('indexer')}]")
 
     # --- Run bridge + fusion + watchdog concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
@@ -886,6 +916,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             await t
         except (asyncio.CancelledError, Exception):
             pass
+
+    # Stop cluster health monitor
+    if cluster_health is not None:
+        await cluster_health.stop()
 
     # Stop vLLM specialist pool watchdog
     if _vllm_pool is not None:
@@ -972,6 +1006,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Index Python/Swift source + docs PDFs into ChromaDB RAG at startup")
     p.add_argument("--metrics-port", type=int, default=0,
                    help="Expose /metrics JSON endpoint on this port (0 = disabled)")
+    p.add_argument("--cluster-config", type=str, default=None,
+                   help="Path to cluster_config.json (default: project root). "
+                        "Enables laptop-node offload of the lightweight command domain.")
     # ── Backend selection (roadmap item #1, #6) ──────────────────────────────
     p.add_argument("--backend", "--inference-backend", type=str, default="ollama",
                    dest="backend",

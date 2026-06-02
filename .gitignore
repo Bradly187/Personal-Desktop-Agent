@@ -4,6 +4,7 @@
 *.db-wal
 *.duckdb
 chroma_db/
+.codebase_index_state.json
 
 # Apple credentials and certificates
 *.p8
@@ -32,6 +33,8 @@ __pycache__/
 .venv/
 venv/
 .venv-wsl/
+.venv-laptop/
+.pip-tmp/
 *.egg-info/
 dist/
 build/
