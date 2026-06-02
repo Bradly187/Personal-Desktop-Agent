@@ -257,10 +257,13 @@ class CodebaseIndexer:
     # Source patterns
     SOURCE_PATTERNS = ["**/*.py", "**/*.swift"]
     # Directories to exclude (generated, deps, venv, etc.)
+    # NOTE: includes named venv variants — the laptop service node uses
+    # ".venv-laptop"; without it the indexer would embed all of site-packages
+    # (14k+ files) and never settle.
     EXCLUDE_DIRS = {
         ".git", ".claude", "__pycache__", "node_modules",
-        "venv", ".venv", "env", "Pods", "build", "DerivedData",
-        ".build", "chroma_db",
+        "venv", ".venv", ".venv-laptop", ".venv-wsl", "env",
+        "Pods", "build", "DerivedData", ".build", "chroma_db",
     }
     # File size limit — skip huge auto-generated files
     MAX_FILE_BYTES = 500_000
