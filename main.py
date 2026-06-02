@@ -622,6 +622,11 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     )
     coordinator.set_dev_agent(dev_agent)
 
+    # Cluster offload: route DevAgent RAG queries to the laptop indexer service.
+    if cluster_cfg.has_remote_indexer:
+        dev_agent.set_remote_indexer_url(cluster_cfg.laptop_indexer_url)
+        dev_agent.set_cluster_health(cluster_health)
+
     # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────
     if getattr(args, "kiro", False):
         try:
@@ -651,6 +656,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     whisper.set_agent_db(agent_db, session_id=session_id)
     whisper.set_acoustic_profiler(profiler)
     whisper.set_metrics(m)          # wire metrics to WhisperStream (latency + hallucinations)
+    # Cluster offload: delegate transcription to the laptop Whisper service when
+    # configured. set_remote_url() must precede whisper.start() so the local
+    # large-v3 model is never loaded (saves ~3.5 GB VRAM on the desktop).
+    if cluster_cfg.has_remote_whisper:
+        whisper.set_remote_url(cluster_cfg.laptop_whisper_url)
+        whisper.set_cluster_health(cluster_health)
     coordinator.set_whisper_stream(whisper)
     coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
     coordinator.set_profiler(profiler)

@@ -4,6 +4,7 @@
 *.db-wal
 *.duckdb
 chroma_db/
+.codebase_index_state.json
 
 # Apple credentials and certificates
 *.p8

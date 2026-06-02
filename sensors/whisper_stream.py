@@ -217,6 +217,12 @@ class WhisperStream:
         # D8: correction detection state — tracks last command outcome
         self._last_command_status: str = ""   # "ok" | "CLARIFY" | "failed"
         self._last_command_text: str = ""     # text of previous command
+        # Cluster offload: when a remote Whisper URL is set, the local large-v3
+        # model is NOT loaded (saves ~3.5 GB VRAM) and inference is delegated to
+        # the laptop node. Falls back to local only if a local model is loaded.
+        self._remote_url: Optional[str] = None
+        self._remote_client = None            # RemoteWhisperClient | None
+        self._cluster_health = None           # ClusterHealthMonitor | None
 
     # ---------------------------------------------------------------------- #
     # Wiring
@@ -224,6 +230,22 @@ class WhisperStream:
 
     def set_fusion_engine(self, fusion: "FusionEngine") -> None:
         self._fusion = fusion
+
+    def set_remote_url(self, url: str) -> None:
+        """Delegate model inference to the laptop Whisper service at `url`.
+
+        When set, start() skips loading the local faster-whisper model. The
+        desktop still owns VAD/buffering and the hallucination filter; only the
+        forward pass moves to the laptop.
+        """
+        from sensors.remote_whisper_client import RemoteWhisperClient
+        self._remote_url = url
+        self._remote_client = RemoteWhisperClient(url)
+        log.info("WhisperStream: remote transcription enabled → %s", url)
+
+    def set_cluster_health(self, monitor) -> None:
+        """Wire ClusterHealthMonitor; remote is used only while 'whisper' is healthy."""
+        self._cluster_health = monitor
 
     def set_metrics(self, metrics) -> None:
         """Wire the global Metrics singleton for whisper latency + hallucination tracking."""
@@ -291,8 +313,21 @@ class WhisperStream:
     # ---------------------------------------------------------------------- #
 
     async def start(self) -> None:
-        if not _WHISPER_AVAILABLE or not _NUMPY_AVAILABLE:
-            log.warning("WhisperStream: dependencies missing — not starting")
+        if not _NUMPY_AVAILABLE:
+            log.warning("WhisperStream: numpy missing — not starting")
+            return
+
+        # ── Remote (laptop) transcription: skip local model load entirely ──
+        if self._remote_client is not None:
+            self.available = True
+            self._running = True
+            self._task = asyncio.create_task(self._loop())
+            log.info("WhisperStream: ready (REMOTE → %s, no local model loaded)",
+                     self._remote_url)
+            return
+
+        if not _WHISPER_AVAILABLE:
+            log.warning("WhisperStream: faster-whisper missing and no remote URL — not starting")
             return
         log.info("WhisperStream: loading %s on %s (%s) ...",
                  self._model_size, self._device, self._compute_type)
@@ -429,9 +464,47 @@ class WhisperStream:
         log.debug("WhisperStream: transcribing %.1f s of audio (force=%s)", duration, force)
         await asyncio.to_thread(self._transcribe, audio)
 
+    def _run_whisper(self, audio: "np.ndarray", initial_prompt):
+        """Run the forward pass — on the laptop when configured + healthy, else local.
+
+        Returns (segments_list, info) matching faster-whisper's local output, so the
+        caller's hallucination filter is unchanged. Raises only when neither remote
+        nor a local model can produce a result.
+        """
+        use_remote = self._remote_client is not None and (
+            self._cluster_health is None or self._cluster_health.is_healthy("whisper")
+        )
+        if use_remote:
+            try:
+                return self._remote_client.transcribe(
+                    audio,
+                    initial_prompt=initial_prompt,
+                    min_silence_ms=int(self._silence_s * 1000),
+                    speech_pad_ms=100,
+                )
+            except Exception as exc:
+                if self._model is None:
+                    raise  # no local model loaded — nothing to fall back to
+                log.warning("WhisperStream: remote transcription failed (%s) — local fallback", exc)
+
+        seg_iter, info = self._model.transcribe(
+            audio,
+            language="en",
+            beam_size=5,
+            vad_filter=True,           # silero-vad built into faster-whisper
+            vad_parameters={
+                "min_silence_duration_ms": int(self._silence_s * 1000),
+                "speech_pad_ms": 100,
+            },
+            initial_prompt=initial_prompt,
+        )
+        return list(seg_iter), info
+
     def _transcribe(self, audio: "np.ndarray") -> None:
         """Run faster-whisper and emit Command(s) to FusionEngine. Blocking."""
-        if self._model is None or self._fusion is None:
+        if self._fusion is None:
+            return
+        if self._model is None and self._remote_client is None:
             return
 
         # Build initial_prompt from static + dynamic hotwords to bias the model.
@@ -441,18 +514,7 @@ class WhisperStream:
 
         try:
             _t_transcribe = time.monotonic()
-            segments_iter, info = self._model.transcribe(
-                audio,
-                language="en",
-                beam_size=5,
-                vad_filter=True,           # silero-vad built into faster-whisper
-                vad_parameters={
-                    "min_silence_duration_ms": int(self._silence_s * 1000),
-                    "speech_pad_ms": 100,
-                },
-                initial_prompt=initial_prompt,
-            )
-            segments = list(segments_iter)
+            segments, info = self._run_whisper(audio, initial_prompt)
             _whisper_latency_ms = (time.monotonic() - _t_transcribe) * 1000
             if self._metrics is not None:
                 try:
