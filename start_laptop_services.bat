@@ -20,14 +20,15 @@ if not exist "%PY%" (
   exit /b 1
 )
 
-REM Note the doubled outer quotes after `cmd /k`: cmd strips the outermost pair,
-REM leaving the quoted exe + quoted script path intact. Without this, cmd mangles
-REM the command when both the exe and the argument are quoted.
+REM Launch python directly in each window (title + working dir). This avoids the
+REM `cmd /k` quote-mangling that breaks when both the exe and the script path are
+REM quoted. The window stays open while the service runs and shows its logs; it
+REM closes when the service stops (re-run this script to restart).
 echo Starting Whisper service on :8888 ...
-start "Laptop Whisper :8888" cmd /k ""%PY%" "%ROOT%sensors\remote_whisper_service.py" --port 8888"
+start "Laptop Whisper :8888" /D "%ROOT%" "%PY%" "%ROOT%sensors\remote_whisper_service.py" --port 8888
 
 echo Starting Indexer service on :9000 ...
-start "Laptop Indexer :9000" cmd /k ""%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch"
+start "Laptop Indexer :9000" /D "%ROOT%" "%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch
 
 echo.
 echo Laptop services launching in separate windows.
