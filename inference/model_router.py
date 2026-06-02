@@ -66,8 +66,9 @@ import json
 import logging
 import re
 import time
+import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
@@ -218,6 +219,9 @@ class ModelProfile:
     # vLLM path:  passes extra_body={"enable_thinking": True} in SamplingParams
     # Gemma 4:    thinking API needs validation — may differ from Qwen3 extra_body
     thinking: bool = False
+    # Cluster offload: when set, _call_ollama targets this base URL instead of
+    # the router's local self._host (e.g. the laptop node's Ollama). None = local.
+    inference_host: Optional[str] = None
 
     def __str__(self) -> str:
         think_flag = " [thinking]" if self.thinking else ""
@@ -235,6 +239,21 @@ _PROFILES: dict[str, ModelProfile] = {
         vram_gb=5.3,
         max_tokens=32,
         free_form=False,
+    ),
+    # ── Lightweight command path — offloaded to the laptop node ───────────
+    # Same verb-first contract as "command", but runs llama3.1:8b on the
+    # laptop's Ollama (RTX 4070) to free desktop VRAM/CPU. inference_host is
+    # filled in at runtime by ModelRouter.set_cluster() from cluster_config.json.
+    # Used for the command domain when the laptop is configured AND healthy;
+    # falls back to the local command path on any remote error.
+    "lightweight": ModelProfile(
+        name="llama3.1:8b",
+        domain="command",
+        system_prompt=_COMMAND_PROMPT,
+        vram_gb=4.6,
+        max_tokens=32,
+        free_form=False,
+        inference_host=None,   # set by ModelRouter.set_cluster()
     ),
     # ── All specialist domains → Gemma 4 31B-IT ───────────────────────────
     # Single dense model covers code, math, vision, plan, and general.
@@ -745,11 +764,45 @@ class ModelRouter:
         self._timeout = timeout
         self._profiles = _PROFILES.copy()
         self._vllm_pool: Optional[VLLMSpecialistPool] = None
+        # Cluster offload state (set via set_cluster()).
+        self._cluster_config = None          # ClusterConfig | None
+        self._cluster_health = None          # ClusterHealthMonitor | None
+        self._lightweight_profile: Optional[ModelProfile] = None
 
     def set_vllm_pool(self, pool: VLLMSpecialistPool) -> None:
         """Wire the specialist pool.  Once set, all domain infer() calls use it."""
         self._vllm_pool = pool
         log.info("ModelRouter: vLLM specialist pool wired")
+
+    def set_cluster(self, config, health_monitor=None) -> None:
+        """Enable laptop offload of the command (lightweight) domain.
+
+        config:         core.cluster_config.ClusterConfig
+        health_monitor: core.cluster_health.ClusterHealthMonitor (optional). When
+                        provided, offload only happens while the laptop Ollama is
+                        healthy; otherwise inference stays local.
+        """
+        self._cluster_config = config
+        self._cluster_health = health_monitor
+        if config is not None and getattr(config, "offload_lightweight", False):
+            base = self._profiles["lightweight"]
+            # Build a host-bound copy so we never mutate the shared module profile.
+            self._lightweight_profile = replace(base, inference_host=config.laptop_ollama_url)
+            log.info(
+                "ModelRouter: command-domain offload ENABLED → %s (%s)",
+                self._lightweight_profile.name, config.laptop_ollama_url,
+            )
+        else:
+            self._lightweight_profile = None
+            log.info("ModelRouter: command-domain offload disabled (local only)")
+
+    def _should_offload(self, domain: str) -> bool:
+        """True when this domain's inference should run on the laptop node."""
+        if self._lightweight_profile is None or domain != "command":
+            return False
+        if self._cluster_health is not None and not self._cluster_health.is_healthy("laptop_ollama"):
+            return False
+        return True
 
     # ---------------------------------------------------------------------- #
     # Model selection
@@ -795,6 +848,14 @@ class ModelRouter:
         Tries the vLLM pool first (if wired via set_vllm_pool); falls back to
         Ollama on any pool error so the agent never hard-fails.
         """
+        # ── Cluster offload: lightweight command domain → laptop node ──────
+        # Skips the desktop vLLM pool entirely (the pool is local). On any
+        # remote error we fall through to the normal local path below.
+        if self._should_offload(domain):
+            remote = await self._infer_lightweight_remote(user_text, context, screenshot_b64)
+            if remote is not None:
+                return remote
+
         profile = self.select_profile(domain)
         t0 = time.monotonic()
 
@@ -858,6 +919,54 @@ class ModelRouter:
                 error=str(exc),
             )
 
+    async def _infer_lightweight_remote(
+        self,
+        user_text: str,
+        context: Optional[str],
+        screenshot_b64: Optional[str],
+    ) -> "Optional[RouterResult]":
+        """Run the command-domain prompt on the laptop's Ollama.
+
+        Returns a RouterResult on success, or None on any remote failure so the
+        caller can fall back to the local path. A failed offload also pessimises
+        the health monitor's view via the next poll (we don't mutate it here).
+        """
+        profile = self._lightweight_profile
+        if profile is None:
+            return None
+
+        prompt_parts = [profile.system_prompt]
+        if context:
+            prompt_parts.append(f"\nRecent context:\n{context}")
+        prompt_parts.append(f"\nUser: {user_text}\nAssistant:")
+        prompt = "\n".join(prompt_parts)
+
+        t0 = time.monotonic()
+        try:
+            response = await asyncio.to_thread(
+                self._call_ollama, profile, prompt, screenshot_b64,
+            )
+            latency_ms = (time.monotonic() - t0) * 1000
+            log.info("ModelRouter[laptop]: %s → %r (%.0f ms) [domain=command]",
+                     profile.name, response[:80], latency_ms)
+            return RouterResult(
+                text=response,
+                model=profile.name,
+                domain="command",
+                latency_ms=latency_ms,
+                free_form=profile.free_form,
+                backend="ollama-laptop",
+            )
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            log.warning(
+                "ModelRouter: laptop offload failed (%s) — falling back to local: %s",
+                profile.inference_host, exc,
+            )
+            return None
+        except Exception as exc:  # unexpected — still fall back, don't hard-fail
+            log.warning("ModelRouter: laptop offload error (%s) — local fallback", exc)
+            return None
+
     def _call_ollama(
         self,
         profile: ModelProfile,
@@ -885,8 +994,9 @@ class ModelRouter:
             payload["images"] = [screenshot_b64]
 
         body = json.dumps(payload).encode()
+        base_url = profile.inference_host or self._host
         req = urllib.request.Request(
-            f"{self._host}/api/generate",
+            f"{base_url}/api/generate",
             data=body,
             method="POST",
             headers={"Content-Type": "application/json"},

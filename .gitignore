@@ -32,6 +32,8 @@ __pycache__/
 .venv/
 venv/
 .venv-wsl/
+.venv-laptop/
+.pip-tmp/
 *.egg-info/
 dist/
 build/

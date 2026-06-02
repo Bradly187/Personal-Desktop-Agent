@@ -596,6 +596,20 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     router = ModelRouter()
     if _vllm_pool is not None:
         router.set_vllm_pool(_vllm_pool)
+
+    # ── Cluster offload (laptop service node) ──────────────────────────────
+    # Loads cluster_config.json if present; otherwise a disabled config (no-op).
+    # When lightweight_host == "laptop", the command domain is routed to the
+    # laptop's Ollama while the health monitor reports it up.
+    from core.cluster_config import ClusterConfig
+    from core.cluster_health import ClusterHealthMonitor
+    cluster_cfg = ClusterConfig.load(getattr(args, "cluster_config", None))
+    cluster_health = None
+    if cluster_cfg.enabled:
+        cluster_health = ClusterHealthMonitor(cluster_cfg)
+        await cluster_health.start()
+    router.set_cluster(cluster_cfg, cluster_health)
+
     coordinator = HybridCoordinator(
         local=local, config=cfg, trainer=trainer,
         agent_db=agent_db, session_id=session_id,
@@ -785,6 +799,15 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # --- Print startup table (task 4.4) ---
     if not args.quiet:
         _print_startup_table(args.port, args.safe_mode, host=args.host)
+        if cluster_cfg.enabled:
+            _h = cluster_health.status() if cluster_health is not None else {}
+            def _mark(svc):
+                return "UP" if _h.get(svc) else "down"
+            print("  Cluster node (laptop):")
+            print(f"    Ollama (lightweight) : {cluster_cfg.laptop_ollama_url or '-'}  [{_mark('laptop_ollama')}]"
+                  f"  offload={'on' if cluster_cfg.offload_lightweight else 'off'}")
+            print(f"    Whisper              : {cluster_cfg.laptop_whisper_url or '-'}  [{_mark('whisper')}]")
+            print(f"    Indexer              : {cluster_cfg.laptop_indexer_url or '-'}  [{_mark('indexer')}]")
 
     # --- Run bridge + fusion + watchdog concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
@@ -801,6 +824,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             await t
         except (asyncio.CancelledError, Exception):
             pass
+
+    # Stop cluster health monitor
+    if cluster_health is not None:
+        await cluster_health.stop()
 
     # Stop vLLM specialist pool watchdog
     if _vllm_pool is not None:
@@ -887,6 +914,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Index Python/Swift source + docs PDFs into ChromaDB RAG at startup")
     p.add_argument("--metrics-port", type=int, default=0,
                    help="Expose /metrics JSON endpoint on this port (0 = disabled)")
+    p.add_argument("--cluster-config", type=str, default=None,
+                   help="Path to cluster_config.json (default: project root). "
+                        "Enables laptop-node offload of the lightweight command domain.")
     # ── Backend selection (roadmap item #1, #6) ──────────────────────────────
     p.add_argument("--backend", type=str, default="ollama",
                    choices=["ollama", "vllm", "llamacpp"],
