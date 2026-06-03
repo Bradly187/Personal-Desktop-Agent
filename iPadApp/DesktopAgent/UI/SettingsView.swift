@@ -11,11 +11,16 @@ struct SettingsView: View {
     @State private var newSoundName = ""
     @State private var newSoundAction = ""
     @State private var newKeyword = ""
-    // G1: voice calibration sheets
-    @State private var showVoiceProfilingSheet = false
-    @State private var showVoiceCalibrationSheet = false
-    // G7: command button export
-    @State private var showExportShareSheet = false
+    // Single source of truth for which modal is presented. Stacking multiple
+    // `.sheet(isPresented:)` on the same view is undefined behavior in SwiftUI
+    // (and crashes the Settings tab on iOS 26); one `.sheet(item:)` at the Form
+    // level is the supported pattern.
+    private enum ActiveSheet: Int, Identifiable {
+        case voiceProfiling, voiceCalibration, exportButtons
+        var id: Int { rawValue }
+    }
+    @State private var activeSheet: ActiveSheet? = nil
+    // G7: command button export — URL produced before presenting the share sheet
     @State private var exportURL: URL? = nil
     // Re-run onboarding confirmation
     @State private var showRerunOnboardingAlert = false
@@ -237,7 +242,7 @@ struct SettingsView: View {
                 Section {
                     // Acoustic Profiling: local measurement, no PC round-trip
                     Button("Acoustic Profile (offline)") {
-                        showVoiceProfilingSheet = true
+                        activeSheet = .voiceProfiling
                     }
                     .accessibilityHint("Measures your voice volume and clarity using the iPad mic. No PC connection needed.")
 
@@ -249,7 +254,7 @@ struct SettingsView: View {
 
                     // Guided Calibration: PC-driven, pronunciation correction
                     Button("Guided Calibration (requires PC)") {
-                        showVoiceCalibrationSheet = true
+                        activeSheet = .voiceCalibration
                     }
                     .disabled(wsManager.state != .connected)
                     .accessibilityHint("PC-driven session: corrects pronunciation errors and adapts recognition to today's condition.")
@@ -271,19 +276,13 @@ struct SettingsView: View {
                 } header: {
                     DASectionHeader(title: "Voice Calibration")
                 }
-                .sheet(isPresented: $showVoiceProfilingSheet) {
-                    VoiceProfilingSheet(settings: settings)
-                }
-                .sheet(isPresented: $showVoiceCalibrationSheet) {
-                    VoiceCalibrationSheet(wsManager: wsManager)
-                }
 
                 // G7: Command Button backup
                 Section {
                     Button("Export Command Buttons…") {
                         if let url = settings.exportCommandButtons() {
                             exportURL = url
-                            showExportShareSheet = true
+                            activeSheet = .exportButtons
                         }
                     }
                     Text("Saves your command button layout as command_buttons.json in the Files app. Import on a new device to restore.")
@@ -291,11 +290,6 @@ struct SettingsView: View {
                         .foregroundStyle(theme.textSecondary)
                 } header: {
                     DASectionHeader(title: "Command Buttons Backup")
-                }
-                .sheet(isPresented: $showExportShareSheet) {
-                    if let url = exportURL {
-                        ShareSheet(items: [url])
-                    }
                 }
 
                 // Re-run onboarding — for TestFlight updates that preserve
@@ -314,17 +308,33 @@ struct SettingsView: View {
                 } header: {
                     DASectionHeader(title: "Onboarding")
                 }
-                .alert("Re-run Onboarding?", isPresented: $showRerunOnboardingAlert) {
-                    Button("Cancel", role: .cancel) {}
-                    Button("Restart", role: .destructive) {
-                        onboardingCurrentStep = 0
-                        onboardingComplete = false
-                    }
-                } message: {
-                    Text("The calibration wizard will reopen on the next screen. Your saved settings and calibrations are not erased.")
-                }
             }
             .navigationTitle("Settings")
+            // All modals live at the Form level — a single `.sheet(item:)` plus
+            // one `.alert`. Attaching these to individual Sections (whose identity
+            // can change as the Form re-renders) is fragile and crashed Settings
+            // on iOS 26.
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .voiceProfiling:
+                    VoiceProfilingSheet(settings: settings)
+                case .voiceCalibration:
+                    VoiceCalibrationSheet(wsManager: wsManager)
+                case .exportButtons:
+                    if let url = exportURL {
+                        ShareSheet(items: [url])
+                    }
+                }
+            }
+            .alert("Re-run Onboarding?", isPresented: $showRerunOnboardingAlert) {
+                Button("Cancel", role: .cancel) {}
+                Button("Restart", role: .destructive) {
+                    onboardingCurrentStep = 0
+                    onboardingComplete = false
+                }
+            } message: {
+                Text("The calibration wizard will reopen on the next screen. Your saved settings and calibrations are not erased.")
+            }
         }
     }
 
