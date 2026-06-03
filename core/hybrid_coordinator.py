@@ -466,7 +466,10 @@ class HybridCoordinator:
 
         # System control commands — intercept before gate evaluation
         if cmd.source in ("voice", "voice_local"):
-            _lower = cmd.text.lower().strip()
+            # Strip surrounding whitespace AND punctuation: Whisper routinely
+            # appends a period ("pain day on." / "lecture mode on?") which would
+            # otherwise miss every exact-match keyword below.
+            _lower = cmd.text.lower().strip(" \t\n.,!?;:\"'")
 
             # Lecture mode
             if _lower in ("start lecture mode", "lecture mode on", "begin lecture mode"):
