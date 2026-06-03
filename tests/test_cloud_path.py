@@ -50,7 +50,7 @@ def _complex_cmd(text: str) -> Command:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: _CloudInference.infer() — real Bedrock call
+# Test 1: _CloudInference.infer() — real Anthropic API call
 # ---------------------------------------------------------------------------
 
 async def test_cloud_inference_real_anthropic() -> tuple[bool, str]:
@@ -161,20 +161,20 @@ async def test_cloud_content_filter_scrubs_secrets() -> tuple[bool, str]:
     from unittest.mock import AsyncMock as _AM
     from adaptive.content_filter import ContentFilter
 
-    mock_bedrock = _AM(return_value="CLARIFY")
+    mock_cloud = _AM(return_value="CLARIFY")
     mock_execute = _AM(return_value={"status": "ok"})
 
     coord = HybridCoordinator(config=CoordinatorConfig())
-    coord._cloud.infer = mock_bedrock
+    coord._cloud.infer = mock_cloud
     coord._execute_action = mock_execute
     coord._content_filter = ContentFilter()
 
     cmd = _complex_cmd("my password is secret123 close the window and open Chrome")
     await coord.route(cmd)
 
-    if not mock_bedrock.called:
+    if not mock_cloud.called:
         return False, "Bedrock was never called"
-    transmitted_text = mock_bedrock.call_args[0][0].text
+    transmitted_text = mock_cloud.call_args[0][0].text
     if "secret123" in transmitted_text:
         return False, f"Secret not scrubbed — Bedrock received: {transmitted_text!r}"
     return True, "ContentFilter scrubbed secret before cloud transmission"

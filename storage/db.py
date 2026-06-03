@@ -484,7 +484,7 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     duration_s            REAL,
     total_commands        INTEGER NOT NULL DEFAULT 0,
     success_rate          REAL,           -- fraction 0.0–1.0
-    cloud_escalation_rate REAL,           -- fraction of commands routed to Bedrock
+    cloud_escalation_rate REAL,           -- fraction of commands routed to the cloud
     gate0_blocks          INTEGER DEFAULT 0,
     gate1_blocks          INTEGER DEFAULT 0,
     gate2_blocks          INTEGER DEFAULT 0,

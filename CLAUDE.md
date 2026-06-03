@@ -36,13 +36,13 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 - `continuous_trainer.py` — Routing threshold adaptation; few-shot ranking; gesture confidence floors; velocity-floor calibration (p10 of observed samples, −30% on pain days); delegates all storage to `AgentDB`
 - `main.py` — Unified entry point; `--measure-vram`; startup status table; Ctrl-C shutdown
 - `benchmark_models.py` — Ollama model benchmark; p50/p95 latency; VRAM snapshots; `--vllm` flag for VLLMInference comparison
-- `whisper_stream.py` — GPU-accelerated speech; Silero VAD + faster-whisper; preserves audio bytes in `Command.params` for Gate 1 Transcribe re-transcription
+- `whisper_stream.py` — GPU-accelerated speech; Silero VAD + faster-whisper
 - `db.py` — `AgentDB` (aiosqlite, 14 tables) + `AnalyticsDB` (DuckDB); MiniLM semantic few-shot retrieval; +2 tables for gesture velocity learning (gesture_velocity_samples, gesture_velocity_calibration)
 
 **Done (Phase 6 — cloud fallback):**
-- `hybrid_coordinator.py` — `_retranscribe()`: Stage 1 phonetic vocabulary correction (6 misrecognitions, 0ms), Stage 2 Amazon Transcribe streaming (activates when `pip install amazon-transcribe`); Gate 1 route label propagated to executor
+- `hybrid_coordinator.py` — `_retranscribe()`: phonetic vocabulary correction (6 misrecognitions, 0ms) on low-confidence voice before Gate 2 (Amazon Transcribe Stage 2 removed in the Anthropic migration); Gate 1 route label propagated to executor
 - `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Danielle neural, 16kHz PCM) sidecar-down fallback for CLARIFY; primary path uses `polly_stream.get_client().speak_sync()`; SEARCH_WEB URL-encoded via `urllib.parse`
-- Cloud path: raw Bedrock `us.anthropic.claude-haiku-4-5-20251001-v1:0` (8/8 accuracy on voice misrecognitions); AgentCore deployment deferred and source deleted — raw Bedrock is the active cloud path
+- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5-20251001` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. (Migrated off AWS Bedrock; AgentCore deployment deferred and source deleted.)
 
 **Done (LiDAR gesture depth + Settings UI + housekeeping — 2026-05-16):**
 - `LiDARStreamer.swift` — ARWorldTrackingConfiguration + `.smoothedSceneDepth`; 5 fps depth / 10 fps camera; serialises `depth_frame` (float32 + uint8 conf) and `camera_frame` (JPEG 480px) matching PC bridge protocol; publishes UIImages for debug view
@@ -223,7 +223,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `mcp_server/tools/windows.py` | get_active_window, list_windows, focus_window (win32gui + psutil) |
 | `mcp_server/tools/handwriting.py` | pix2tex LaTeX OCR; latex_to_unicode fallback converter |
 | `core/fusion_engine.py` | 60 Hz tick loop; 7-level sensor priority; direct pyautogui for tilt (gaze/head removed) |
-| `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); AWS Bedrock fallback; outcome logger |
+| `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); Anthropic API cloud fallback (10s timeout circuit-breaker); outcome logger |
 | `inference/local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (verified in Ubuntu WSL2, vLLM 0.21.0; `--backend vllm`; use `--gpu-memory-utilization 0.65` with Whisper running) |
 | `adaptive/continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
 | `sensors/lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |

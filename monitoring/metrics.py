@@ -25,7 +25,7 @@ Metrics catalogue:
     commands_success        — commands that executed without error
     commands_failed         — commands that returned an error
     commands_clarify        — CLARIFY actions emitted
-    cloud_escalations       — commands routed to Bedrock
+    cloud_escalations       — commands routed to the cloud (Anthropic API)
     gate0_blocks            — Gate 0 privacy blocks
     gate1_discards          — Gate 1 confidence discards
     gate2_cloud             — Gate 2 complexity → cloud
@@ -49,7 +49,7 @@ Metrics catalogue:
     latency_ms              — end-to-end per-command latency
     whisper_latency_ms      — Whisper transcription latency
     llm_latency_ms          — local LLM inference latency
-    cloud_latency_ms        — Bedrock round-trip latency
+    cloud_latency_ms        — cloud (Anthropic API) round-trip latency
 
   Source counters (per-source command counts):
     source_counts           — {voice: N, gesture: N, touch: N, ...}
