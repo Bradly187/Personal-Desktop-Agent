@@ -77,6 +77,7 @@ class ResourceGovernor:
         self._flare_active: bool = False
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
 
     # ── Wiring ────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,9 @@ class ResourceGovernor:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        if self._running:
+            log.warning("ResourceGovernor.start() called while already running — ignored")
+            return
         self._running = True
         self._task = asyncio.create_task(
             self._poll_loop(), name="resource_governor"
@@ -110,9 +114,34 @@ class ResourceGovernor:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        # Always restore defaults on shutdown regardless of current flare state
-        self._restore_resources_sync()
+        # Always restore defaults on shutdown regardless of current flare state.
+        # Run in a thread — _restore_resources_sync() makes blocking urllib calls.
+        await asyncio.to_thread(self._restore_resources_sync)
         log.info("ResourceGovernor stopped (resources restored)")
+
+    # ── SVT fast-path ────────────────────────────────────────────────────────
+
+    def notify_pain_day_change(self, score: float) -> None:
+        """Called synchronously by BehavioralTwinState.set_manual_pain_day().
+
+        Fires _on_flare_start / _on_flare_end immediately via create_task so
+        VRAM is released in <100ms on an SVT attack instead of waiting up to
+        POLL_INTERVAL_S (5s) for the next poll cycle.
+        """
+        if not self._running:
+            return
+        if not self._flare_active and score >= _ACTIVATE_THRESHOLD:
+            t = asyncio.create_task(
+                self._on_flare_start(score), name="governor_svt_flare_start"
+            )
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+        elif self._flare_active and score < _DEACTIVATE_THRESHOLD:
+            t = asyncio.create_task(
+                self._on_flare_end(score), name="governor_svt_flare_end"
+            )
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
 

@@ -191,6 +191,52 @@ class TestUncalibratedSuppression:
         assert cal.should_suppress(0.03, 0.02) is False
 
 
+class TestIPadDeadZoneContract:
+    """Encodes the contract between the iPad sender and this PC calibrator.
+
+    The calibrator can only estimate drift from *stationary* samples
+    (|rate| < stationary_threshold). If the iPad applies a send-side dead zone
+    larger than stationary_threshold, those samples never arrive and the
+    calibrator is starved — the exact defect fixed in TiltSensor.swift
+    (velocity mode previously gated on tiltDeadZone=1.5 as rad/s ≈ 86°/s).
+    """
+
+    def test_starved_when_upstream_dead_zone_exceeds_stationary_threshold(self):
+        """Simulate the OLD iPad behavior: only above-dead-zone samples sent.
+
+        The iPad dead zone filters out everything below it, so the calibrator
+        only ever sees fast-motion samples and can never detect 'stationary'.
+        It must stay UNCALIBRATED forever.
+        """
+        cal = GyroBiasCalibrator(stationary_threshold=0.02)
+        dt = 1.0 / 60.0
+        # Every delivered sample is above any plausible dead zone (>1.5 rad/s),
+        # mimicking samples that survived a 1.5-rad/s send gate.
+        for i in range(600):  # 10 seconds — far past stationary_duration
+            cal.update(2.0, 2.0, now=i * dt)
+        assert cal.state == BiasState.UNCALIBRATED
+        assert cal.bias_x == 0.0 and cal.bias_y == 0.0
+
+    def test_calibrates_when_stationary_samples_delivered(self):
+        """Simulate the FIXED iPad behavior: every frame sent, no dead zone.
+
+        Idle samples now reach the calibrator, so it estimates bias and the
+        cursor's drift correction actually engages.
+        """
+        cal = GyroBiasCalibrator(stationary_threshold=0.02, stationary_duration=1.0)
+        dt = 1.0 / 60.0
+        bias = 0.008  # a realistic resting gyro offset, below the threshold
+        # 2s resting → COLLECTING with ~60 samples (≥ min_samples=50)
+        for i in range(120):
+            cal.update(bias, bias, now=i * dt)
+        # Picking the device back up ends the rest and finalizes the estimate.
+        cal.update(1.0, 1.0, now=120 * dt)
+        assert cal.state in (BiasState.CALIBRATED, BiasState.FROZEN)
+        bx, by = cal.get_current_bias(now=1000.0)
+        assert abs(bx - bias) < 0.001
+        assert abs(by - bias) < 0.001
+
+
 class TestReset:
     """Verify reset behavior."""
 

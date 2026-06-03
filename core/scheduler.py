@@ -72,6 +72,9 @@ class AccessibilityScheduler:
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        if self._running:
+            log.warning("AccessibilityScheduler.start() called while already running — ignored")
+            return
         self._running = True
         self._worker_task = asyncio.create_task(
             self._worker(), name="scheduler_worker"

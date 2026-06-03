@@ -300,6 +300,15 @@ class IPadBridge:
                 self._fusion.on_touch(cmd)
             return
 
+        if msg_type == "dwell_click":
+            # Tilt dwell-to-click: the iPad held the cursor still long enough.
+            # Fire whatever the DwellActionToolbar has selected, at the current
+            # cursor position (tilt already positioned it).
+            result = await self._handle_dwell_click()
+            await self._ack(ws, msg.get("id"), result.get("status", "ok"),
+                            result.get("action", self._active_dwell_action))
+            return
+
         if msg_type == "tilt_ratchet":
             if self._fusion:
                 self._fusion.on_tilt_ratchet()
@@ -374,13 +383,29 @@ class IPadBridge:
             if self._coordinator and hasattr(self._coordinator, "_twin") \
                     and self._coordinator._twin:
                 self._coordinator._twin.set_manual_pain_day(active)
-            if self._whisper and hasattr(self._whisper, "_profiler") \
-                    and self._whisper._profiler:
-                vad = self._whisper._profiler.get_vad_threshold(pain_day=active)
-                self._whisper._silence_thresh = vad
-                log.info("ipad_bridge: VAD %s to %.3f",
-                         "relaxed" if active else "restored", vad)
+            # Immediate recognizer relaxation (VAD + logprob floor) so the next
+            # utterance benefits before route() reconciles on the next command.
+            if self._whisper is not None:
+                self._whisper.apply_pain_day(active)
             await self._ack(ws, msg.get("id"), "ok", "pain_day_override applied")
+            return
+
+        if msg_type == "flare_profile":
+            # Which sensors degrade on a flare (iPad FlareProfileSheet). Persist
+            # and apply live so route() honours them on the next command.
+            flags = {
+                k: msg[k] for k in (
+                    "voice_degrades", "gesture_degrades", "tilt_degrades",
+                    "sound_degrades", "flare_vad_scale",
+                ) if k in msg
+            }
+            log.info("ipad_bridge: flare_profile %s", flags)
+            if self._agent_db:
+                await self._agent_db.upsert_flare_profile(flags)
+            if self._coordinator and hasattr(self._coordinator, "_twin") \
+                    and self._coordinator._twin:
+                self._coordinator._twin.set_flare_profile(flags)
+            await self._ack(ws, msg.get("id"), "ok", "flare_profile applied")
             return
 
         if msg_type == "calibration_start":
@@ -563,6 +588,35 @@ class IPadBridge:
                 return {"status": "error", "error": f"unknown trackpad event: {event!r}"}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
+
+    async def _handle_dwell_click(self) -> dict:
+        """Execute the active dwell action at the current cursor position.
+
+        Triggered by the iPad's tilt dwell (hold-still) detection. Maps the
+        DwellActionToolbar selection (_active_dwell_action) onto pyautogui
+        calls at the current cursor — no coordinate lookup, like trackpad tap.
+        """
+        import pyautogui
+        action = self._active_dwell_action
+        try:
+            if action == "left_click":
+                pyautogui.click(button="left", _pause=False)
+            elif action == "right_click":
+                pyautogui.click(button="right", _pause=False)
+            elif action == "double_click":
+                pyautogui.doubleClick(_pause=False)
+            elif action == "drag_start":
+                pyautogui.mouseDown(_pause=False)
+            elif action == "drag_end":
+                pyautogui.mouseUp(_pause=False)
+            else:
+                return {"status": "error", "action": action,
+                        "error": f"unknown dwell action: {action!r}"}
+            log.info("Dwell click fired: %s", action)
+            return {"status": "ok", "action": action}
+        except Exception as exc:
+            log.warning("dwell_click (%s) failed: %s", action, exc)
+            return {"status": "error", "action": action, "error": str(exc)}
 
     # ---------------------------------------------------------------------- #
     # Handwriting OCR
@@ -893,6 +947,8 @@ class IPadBridge:
     def _prevent_sleep(self) -> None:
         """Prevent Windows from sleeping while the bridge is running.
         Uses SetThreadExecutionState to keep the system awake (display can still turn off)."""
+        if sys.platform != "win32":
+            return
         try:
             import ctypes
             ES_CONTINUOUS = 0x80000000
@@ -904,6 +960,8 @@ class IPadBridge:
 
     def _allow_sleep(self) -> None:
         """Re-enable normal sleep behavior."""
+        if sys.platform != "win32":
+            return
         try:
             import ctypes
             ES_CONTINUOUS = 0x80000000

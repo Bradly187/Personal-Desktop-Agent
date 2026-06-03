@@ -183,6 +183,7 @@ class DevAgent:
         self._memory = None                                  # set via set_memory()
         self._remote_indexer = None       # RemoteIndexerClient | None (laptop offload)
         self._cluster_health = None        # ClusterHealthMonitor | None
+        self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
@@ -477,11 +478,19 @@ class DevAgent:
             msg = (step.args or step.body or "").strip()
             if not msg:
                 raise ValueError("GIT_COMMIT requires a commit message")
+            if not await self._confirm_destructive_op(
+                f"Approve git commit: {msg[:60]}?"
+            ):
+                return "GIT_COMMIT cancelled by user"
             return await asyncio.to_thread(self._git_commit, msg)
 
         if action == "GIT_CHECKOUT":
             # args: [-b] <branch>
             branch_args = (step.args or "").strip()
+            if not await self._confirm_destructive_op(
+                f"Approve git checkout {branch_args[:40]}?"
+            ):
+                return "GIT_CHECKOUT cancelled by user"
             return await asyncio.to_thread(self._git_checkout, branch_args)
 
         # ── GitHub integration (roadmap item #3) ────────────────────────────
@@ -492,6 +501,10 @@ class DevAgent:
             body = (step.body or "").strip()
             if not title:
                 raise ValueError("GITHUB_PR requires a title in args")
+            if not await self._confirm_destructive_op(
+                f"Approve opening pull request: {title[:60]}?"
+            ):
+                return "GITHUB_PR cancelled by user"
             return await asyncio.to_thread(self._github_pr, title, body)
 
         # ── Web retrieval (roadmap item #3) ─────────────────────────────────
@@ -612,6 +625,91 @@ class DevAgent:
         if result.returncode != 0:
             raise RuntimeError(f"Command failed ({status}): {output[:200]}")
         return output or status
+
+    # ── Git safety confirmation ──────────────────────────────────────────────
+
+    # Verbs that mutate state visible to others or that are hard to reverse.
+    _GIT_DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
+        "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR"
+    })
+
+    async def _confirm_destructive_op(self, description: str) -> bool:
+        """Speak the action description and wait for voice confirmation.
+
+        Returns True (proceed) if the user says yes or stays silent within the
+        timeout window.  Returns False if the user says no/cancel/stop.
+
+        Falls back to auto-approve (True) when TTS or microphone are unavailable
+        so the agent never silently drops work due to audio hardware issues.
+        """
+        import numpy as np
+
+        _APPROVE_WORDS = frozenset({
+            "yes", "yeah", "yep", "ok", "okay", "sure", "approve",
+            "go", "proceed", "continue", "correct", "right", "do it",
+        })
+        _REJECT_WORDS = frozenset({
+            "no", "nope", "stop", "cancel", "abort", "block", "don't",
+            "wait", "hold", "skip", "never",
+        })
+
+        log.info("DevAgent: confirmation required — %s", description)
+
+        # --- 1. Speak via TTS ------------------------------------------------
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            _tts = _get_tts()
+            await asyncio.to_thread(_tts.speak_sync, description)
+        except Exception as exc:
+            log.debug("DevAgent._confirm: TTS unavailable (%s) — auto-approving", exc)
+            return True
+
+        # --- 2. Record 4 s of mic audio --------------------------------------
+        try:
+            import sounddevice as sd
+            audio = await asyncio.to_thread(
+                lambda: sd.rec(
+                    int(4.0 * 16_000), samplerate=16_000,
+                    channels=1, dtype="float32",
+                ).flatten()
+            )
+            await asyncio.to_thread(sd.wait)
+        except Exception as exc:
+            log.debug("DevAgent._confirm: mic unavailable (%s) — auto-approving", exc)
+            return True
+
+        # --- 3. Check for voice activity; silence → auto-approve -------------
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.005:
+            log.info("DevAgent._confirm: silence → auto-approved")
+            return True
+
+        # --- 4. Transcribe with tiny Whisper on CPU (no GPU contention) ------
+        # Model is cached on self so the ~600ms load cost is paid once.
+        try:
+            if self._confirm_whisper is None:
+                from faster_whisper import WhisperModel
+                self._confirm_whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
+            model = self._confirm_whisper
+            segs, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=False)
+            text = " ".join(s.text for s in segs).lower().strip()
+            log.info("DevAgent._confirm: heard %r", text)
+        except Exception as exc:
+            log.debug("DevAgent._confirm: transcription failed (%s) — auto-approving", exc)
+            return True
+
+        # --- 5. Keyword detection --------------------------------------------
+        words = set(text.split())
+        if words & _REJECT_WORDS:
+            log.info("DevAgent._confirm: REJECTED — %r", text)
+            return False
+        if words & _APPROVE_WORDS:
+            log.info("DevAgent._confirm: approved — %r", text)
+            return True
+
+        # Ambiguous response → auto-approve (matches approval_hook.py timeout behaviour)
+        log.info("DevAgent._confirm: ambiguous response %r → auto-approved", text)
+        return True
 
     # ── Git implementations ──────────────────────────────────────────────────
 

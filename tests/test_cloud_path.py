@@ -1,18 +1,17 @@
-"""Integration tests for the cloud fallback path (Gate 2 → Bedrock).
+"""Integration tests for the cloud fallback path (Gate 2 → Anthropic API).
 
 Covers:
-  1. _CloudInference.infer() — real Bedrock call on a complex command
+  1. _CloudInference.infer() — real Anthropic API call on a complex command
   2. HybridCoordinator.route() Gate 2 trigger — complexity keyword routes to cloud
   3. Voice-misrecognition disambiguation (cloud-specific guidance)
-  4. Graceful degradation — bad credentials → CLARIFY (no crash)
+  4. Graceful degradation — bad API key → CLARIFY (no crash)
   5. Gate 0 (privacy) force-local — cloud is never invoked for sensitive text
   6. ContentFilter scrubs secrets before cloud transmission
 
 Run:
     python tests/test_cloud_path.py
 
-Requires active AWS credentials in ~/.aws/credentials with Bedrock access
-to us.anthropic.claude-haiku-4-5-20251001-v1:0.
+Requires ANTHROPIC_API_KEY in the environment.
 
 Exit codes: 0 = all passed, 1 = any failed
 """
@@ -54,12 +53,9 @@ def _complex_cmd(text: str) -> Command:
 # Test 1: _CloudInference.infer() — real Bedrock call
 # ---------------------------------------------------------------------------
 
-async def test_cloud_inference_real_bedrock() -> tuple[bool, str]:
-    """_CloudInference sends a complex command to Bedrock and gets a valid action."""
-    cloud = _CloudInference(
-        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        region="us-east-1",
-    )
+async def test_cloud_inference_real_anthropic() -> tuple[bool, str]:
+    """_CloudInference sends a complex command to the Anthropic API and gets a valid action."""
+    cloud = _CloudInference(model="claude-haiku-4-5-20251001")
     cmd = _cmd("close the window and then open Chrome")
     result = await cloud.infer(cmd)
 
@@ -100,10 +96,7 @@ async def test_gate2_routes_to_cloud() -> tuple[bool, str]:
 
 async def test_cloud_resolves_voice_misrecognition() -> tuple[bool, str]:
     """Cloud correctly resolves 'clothes' → CLOSE via misrecognition guidance."""
-    cloud = _CloudInference(
-        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        region="us-east-1",
-    )
+    cloud = _CloudInference(model="claude-haiku-4-5-20251001")
     cmd = _cmd("clothes the window", source="voice", logprob=-0.9)
     result = await cloud.infer(cmd)
 
@@ -117,18 +110,13 @@ async def test_cloud_resolves_voice_misrecognition() -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 async def test_cloud_bad_credentials_returns_clarify() -> tuple[bool, str]:
-    """When boto3 raises an exception, cloud returns CLARIFY (no crash)."""
-    cloud = _CloudInference(
-        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        region="us-east-1",
-    )
-
-    # Patch boto3 to raise a credentials error
-    import botocore.exceptions
-    fake_error = botocore.exceptions.NoCredentialsError()
+    """When the Anthropic client raises an exception, cloud returns CLARIFY (no crash)."""
+    cloud = _CloudInference(model="claude-haiku-4-5-20251001")
 
     with patch.object(cloud, "_get_client") as mock_client:
-        mock_client.return_value.invoke_model = MagicMock(side_effect=fake_error)
+        mock_client.return_value.messages.create = MagicMock(
+            side_effect=Exception("invalid x-api-key")
+        )
         cmd = _cmd("close the window")
         result = await cloud.infer(cmd)
 
@@ -229,7 +217,7 @@ async def test_gate1_retranscribe_no_audio() -> tuple[bool, str]:
 
 async def run_tests() -> int:
     tests = [
-        ("_CloudInference real Bedrock call",          test_cloud_inference_real_bedrock),
+        ("_CloudInference real Anthropic API call",     test_cloud_inference_real_anthropic),
         ("Gate 2 routes complex command to cloud",     test_gate2_routes_to_cloud),
         ("Cloud resolves voice misrecognition",        test_cloud_resolves_voice_misrecognition),
         ("Bad credentials → CLARIFY (no crash)",       test_cloud_bad_credentials_returns_clarify),

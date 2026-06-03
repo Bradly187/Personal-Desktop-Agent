@@ -12,12 +12,15 @@ Snap grid (9 zones, matching Windows 11 Snap Layouts):
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.wintypes
 import logging
+import sys
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
+if sys.platform == "win32":
+    import ctypes
+    import ctypes.wintypes
 
 log = logging.getLogger(__name__)
 

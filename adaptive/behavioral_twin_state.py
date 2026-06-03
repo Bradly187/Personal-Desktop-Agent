@@ -54,6 +54,14 @@ class TwinSnapshot:
     command_count_today: int               # Commands executed today
     pain_day_score: float                  # Current score in [0.0, 1.0]
     snapshot_ts: float                     # time.monotonic() at creation
+    # flare_profile gating — which sensors Brad said actually degrade on a
+    # flare (iPad FlareProfileSheet). Consumers relax only when their flag is
+    # set, so pain-day relaxation matches his real symptom pattern. Default
+    # True (relax everything) until a profile is configured.
+    flare_voice_degrades: bool = True
+    flare_gesture_degrades: bool = True
+    flare_tilt_degrades: bool = True
+    flare_sound_degrades: bool = True
 
 
 # Default snapshot returned before start() completes or on any error.
@@ -352,6 +360,16 @@ class BehavioralTwinState:
         self._session_start_ts: float = time.monotonic()  # session start time
         self._acoustic_profiler = None   # set via set_acoustic_profiler()
         self._manual_pain_day: bool = False  # user override via "hey agent pain day on"
+        self._resource_governor = None   # set via set_resource_governor()
+        self._gesture = None             # set via set_gesture_processor()
+        self._bg_tasks: set = set()      # keeps fire-and-forget create_task refs alive
+
+        # ── flare_profile degrade flags (loaded from AgentDB in start) ─────
+        # Default True so behavior is unchanged until a profile is configured.
+        self._flare_voice_degrades: bool = True
+        self._flare_gesture_degrades: bool = True
+        self._flare_tilt_degrades: bool = True
+        self._flare_sound_degrades: bool = True
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -464,13 +482,53 @@ class BehavioralTwinState:
         """Wire AcousticProfiler so voice clarity feeds into pain detection."""
         self._acoustic_profiler = profiler
 
+    def set_resource_governor(self, governor) -> None:
+        """Wire ResourceGovernor for sub-100ms SVT/flare notification.
+
+        When set, set_manual_pain_day() calls governor.notify_pain_day_change()
+        immediately instead of waiting up to POLL_INTERVAL_S (5s) for the next
+        poll cycle.  Critical for SVT attacks where VRAM must be freed fast.
+        """
+        self._resource_governor = governor
+
+    def set_gesture_processor(self, gesture) -> None:
+        """Wire GestureProcessor for immediate pain-day velocity-floor flips.
+
+        Without this, the x0.70 gesture floor only changes on the next
+        ContinuousTrainer tick (~60s after a flare is detected).
+        """
+        self._gesture = gesture
+
+    def _on_pain_day_transition(self, active: bool) -> None:
+        """Fire the immediate-response consumers on any pain-day state change.
+
+        Shared by the manual override and the auto-detection loop so both
+        paths converge to the same side effects with no poll/tick latency:
+        - ResourceGovernor (SVT fast-path, <100ms VRAM release)
+        - GestureProcessor velocity floor (gated by flare_gesture_degrades)
+        """
+        if self._resource_governor is not None:
+            self._resource_governor.notify_pain_day_change(1.0 if active else 0.0)
+        if self._gesture is not None:
+            try:
+                self._gesture.apply_pain_day(active and self._flare_gesture_degrades)
+            except Exception as exc:
+                log.warning("BehavioralTwinState: gesture.apply_pain_day failed: %s", exc)
+
     def set_manual_pain_day(self, active: bool) -> None:
         """User override — immediately force pain_day_active state."""
         self._manual_pain_day = active
         self._pain_day_active = active
+        # Rebuild the cached snapshot so HybridCoordinator.route() sees the new
+        # state on the very next command (the loop only rebuilds every 60s).
+        if self._is_ready:
+            self._current_snapshot = self._build_snapshot()
         log.info("BehavioralTwinState: manual pain day %s", "ON" if active else "OFF")
         if self._agent_db and self._agent_db.available:
-            asyncio.create_task(self._agent_db.set_manual_pain_day(active))
+            t = asyncio.create_task(self._agent_db.set_manual_pain_day(active))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+        self._on_pain_day_transition(active)
 
     # ── Internal ───────────────────────────────────────────────────────
 
@@ -586,6 +644,10 @@ class BehavioralTwinState:
             command_count_today=self._session_cmd_count,
             pain_day_score=self._pain_day_score,
             snapshot_ts=time.monotonic(),
+            flare_voice_degrades=self._flare_voice_degrades,
+            flare_gesture_degrades=self._flare_gesture_degrades,
+            flare_tilt_degrades=self._flare_tilt_degrades,
+            flare_sound_degrades=self._flare_sound_degrades,
         )
 
     async def _load_working_set(self) -> None:
@@ -746,6 +808,9 @@ class BehavioralTwinState:
                 # Rebuild snapshot if state changed
                 if old_active != self._pain_day_active:
                     self._current_snapshot = self._build_snapshot()
+                    # Fire immediate consumers (governor + gesture) so an
+                    # auto-detected flare doesn't wait for the next poll/tick.
+                    self._on_pain_day_transition(self._pain_day_active)
 
                 # Log pain day score to AgentDB
                 try:
@@ -773,6 +838,54 @@ class BehavioralTwinState:
         await self._load_working_set()
         await self._load_preference_model()
         await self._load_session_history()
+        await self._load_flare_profile()
+
+    async def _load_flare_profile(self) -> None:
+        """Load which sensors degrade on a flare from AgentDB.flare_profile.
+
+        Leaves the all-True defaults in place when no profile row exists, so
+        pain-day relaxation is unchanged until Brad configures it on the iPad.
+        """
+        try:
+            profile = await self._agent_db.get_flare_profile()
+            if profile:
+                self._flare_voice_degrades = bool(profile.get("voice_degrades", True))
+                self._flare_gesture_degrades = bool(profile.get("gesture_degrades", True))
+                self._flare_tilt_degrades = bool(profile.get("tilt_degrades", True))
+                self._flare_sound_degrades = bool(profile.get("sound_degrades", True))
+                log.info(
+                    "BehavioralTwinState: flare degrade flags — voice=%s gesture=%s "
+                    "tilt=%s sound=%s",
+                    self._flare_voice_degrades, self._flare_gesture_degrades,
+                    self._flare_tilt_degrades, self._flare_sound_degrades,
+                )
+        except Exception as exc:
+            log.warning("BehavioralTwinState._load_flare_profile failed: %s", exc)
+
+    def set_flare_profile(self, flags: dict) -> None:
+        """Apply updated flare degrade flags live (from the iPad FlareProfileSheet).
+
+        Updates only the keys present in `flags` and rebuilds the cached
+        snapshot so HybridCoordinator.route() honours them on the next command
+        without a restart. Keys: voice_degrades / gesture_degrades /
+        tilt_degrades / sound_degrades.
+        """
+        if "voice_degrades" in flags:
+            self._flare_voice_degrades = bool(flags["voice_degrades"])
+        if "gesture_degrades" in flags:
+            self._flare_gesture_degrades = bool(flags["gesture_degrades"])
+        if "tilt_degrades" in flags:
+            self._flare_tilt_degrades = bool(flags["tilt_degrades"])
+        if "sound_degrades" in flags:
+            self._flare_sound_degrades = bool(flags["sound_degrades"])
+        if self._is_ready:
+            self._current_snapshot = self._build_snapshot()
+        log.info(
+            "BehavioralTwinState: flare profile updated — voice=%s gesture=%s "
+            "tilt=%s sound=%s",
+            self._flare_voice_degrades, self._flare_gesture_degrades,
+            self._flare_tilt_degrades, self._flare_sound_degrades,
+        )
 
     async def _init_chroma(self) -> None:
         """Connect ChromaDB, create/open collection."""

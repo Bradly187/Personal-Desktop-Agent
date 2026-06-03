@@ -213,6 +213,7 @@ class WhisperStream:
         self._profiler = None
         self._metrics = None   # set via set_metrics()
         self._logprob_floor_override: float | None = None
+        self._pain_day_active: bool = False  # tracked for apply_pain_day() idempotence
         # D8: correction detection state — tracks last command outcome
         self._last_command_status: str = ""   # "ok" | "CLARIFY" | "failed"
         self._last_command_text: str = ""     # text of previous command
@@ -222,6 +223,7 @@ class WhisperStream:
         self._remote_url: Optional[str] = None
         self._remote_client = None            # RemoteWhisperClient | None
         self._cluster_health = None           # ClusterHealthMonitor | None
+        self._composer = None                 # VoicePromptComposer | None
 
     # ---------------------------------------------------------------------- #
     # Wiring
@@ -246,6 +248,10 @@ class WhisperStream:
         """Wire ClusterHealthMonitor; remote is used only while 'whisper' is healthy."""
         self._cluster_health = monitor
 
+    def set_composer(self, composer) -> None:
+        """Wire VoicePromptComposer for voice-to-Claude-Code prompt dictation."""
+        self._composer = composer
+
     def set_metrics(self, metrics) -> None:
         """Wire the global Metrics singleton for whisper latency + hallucination tracking."""
         self._metrics = metrics
@@ -258,6 +264,31 @@ class WhisperStream:
         self._logprob_floor_override = profiler.get_logprob_floor()
         log.info(
             "WhisperStream: acoustic profile applied — vad=%.3f logprob_floor=%.2f",
+            self._silence_thresh, self._logprob_floor_override,
+        )
+
+    def apply_pain_day(self, active: bool) -> None:
+        """Relax (or restore) the voice recognizer for a pain/flare day.
+
+        Single source of truth for pain-day voice adaptation — pulls BOTH the
+        VAD silence threshold and the Gate 1 logprob floor from the profiler so
+        a softer, lower-confidence voice still registers. Idempotent, so it is
+        safe to call from HybridCoordinator.route() on every command as well as
+        from the immediate manual-override sites (voice keyword / iPad toggle).
+
+        No-op when no AcousticProfiler is wired (the recognizer keeps its
+        constructor defaults).
+        """
+        if active == self._pain_day_active:
+            return  # idempotent — no work on the common no-change path
+        self._pain_day_active = active
+        if self._profiler is None:
+            return
+        self._silence_thresh = self._profiler.get_vad_threshold(pain_day=active)
+        self._logprob_floor_override = self._profiler.get_logprob_floor(pain_day=active)
+        log.info(
+            "WhisperStream: pain-day %s — vad=%.3f logprob_floor=%.2f",
+            "ON" if active else "OFF",
             self._silence_thresh, self._logprob_floor_override,
         )
 
@@ -605,6 +636,21 @@ class WhisperStream:
             cb(text, avg_logprob, duration_s)
             return  # don't route to FusionEngine
 
+        # Compose mode: while the user is building a multi-sentence prompt,
+        # every utterance goes to the composer instead of FusionEngine — no
+        # wake phrase required between sentences.
+        # Still respect the suppress window so Danielle's own TTS echo doesn't
+        # add itself to the compose buffer.
+        if self._composer is not None and self._composer.is_composing():
+            if time.monotonic() >= self._suppress_until:
+                if self._event_loop is not None:
+                    import asyncio as _asyncio
+                    _asyncio.run_coroutine_threadsafe(
+                        self._composer.handle_utterance(text),
+                        self._event_loop,
+                    )
+            return  # always consume — never fall through to normal pipeline
+
         # Post-TTS echo guard: discard transcription results that completed
         # while the mic was suppressed (e.g. Danielle's voice buffered during
         # TTS playback and transcribed just as suppress() was called).
@@ -684,6 +730,17 @@ class WhisperStream:
                 return
 
             log.info("WhisperStream: wake phrase detected, command: %r", text)
+
+            # Compose-mode trigger: "claude compose" / "claude [text]" / "hey claude"
+            # enters VoicePromptComposer instead of routing through HybridCoordinator.
+            if self._composer is not None and self._composer.is_trigger(text):
+                if self._event_loop is not None:
+                    import asyncio as _asyncio
+                    _asyncio.run_coroutine_threadsafe(
+                        self._composer.handle_utterance(text),
+                        self._event_loop,
+                    )
+                return
 
             # D8: correction detection — "no/wait/actually <new command>" after
             # a failed or CLARIFY outcome re-routes as a voice_correction.

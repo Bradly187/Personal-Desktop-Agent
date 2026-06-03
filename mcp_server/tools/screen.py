@@ -20,7 +20,7 @@ def screenshot(region: Optional[dict] = None) -> dict:
     If omitted, captures the full primary monitor.
     Returns: {"image_base64": str, "width": int, "height": int}
     """
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         if region:
             monitor = {
                 "left": region["left"],
@@ -47,7 +47,7 @@ def screenshot(region: Optional[dict] = None) -> dict:
 
 def get_screen_size() -> dict:
     """Return the width and height of the primary monitor."""
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         mon = sct.monitors[1]
         return {"width": mon["width"], "height": mon["height"]}
 
@@ -62,7 +62,7 @@ def find_text_on_screen(text: str) -> dict:
         return {"found": False, "x": None, "y": None, "confidence": None,
                 "error": "pytesseract not installed"}
 
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         raw = sct.grab(sct.monitors[1])
         img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 

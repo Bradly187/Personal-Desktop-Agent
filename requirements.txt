@@ -69,20 +69,12 @@ sounddevice==0.5.5
 # Models auto-download from HuggingFace on first call (~2 GB, cached).
 chatterbox-tts==0.1.3
 
-# ── Anthropic API — VisionGrounder (Claude vision) + CloudDevAgent ───────────
-# CloudDevAgent (inference/cloud_dev_agent.py) routes dev-domain queries to
-# Claude via the Messages API (--cloud-dev-agent), avoiding a local 30B wake.
+# ── Anthropic API — cloud fallback, VisionGrounder, CloudDevAgent ────────────
+# HybridCoordinator routes gate-failing commands to Claude via Messages API.
+# CloudDevAgent routes dev-domain queries to Claude (--cloud-dev-agent flag).
 # Managed Agents (client.beta.agents/sessions) need >=0.40.0; installed 0.103.1.
 anthropic>=0.40.0
 
-# ── AWS cloud fallback (Phase 6 — Bedrock, Transcribe, Polly) ────────────────
-boto3==1.43.11
-# amazon-transcribe: Gate 1 Stage 2 re-transcription (pulls grpcio, ~50 MB).
-amazon-transcribe==0.6.2
-# AgentCore Python SDK (runtime — deploy via AWS console, not CLI)
-# CLI (bedrock-agentcore.exe) ships but bedrock_agentcore.cli module missing;
-# deploy the Lambda function via CDK or the AgentCore console instead.
-bedrock-agentcore==1.10.0
 
 # ── Semantic memory (behavioral-twin-state) ──────────────────────────────────
 # ChromaDB vector store for SemanticMemory (all-MiniLM-L6-v2 embeddings).
@@ -108,7 +100,7 @@ watchdog==6.0.0
 # ── WebSocket client for Kiro/VS Code bridge (KiroClient) ─────────────────────
 # Used by kiro_client.py to connect to the kiro-extension WebSocket server (:8767).
 # Optional — DevAgent degrades gracefully when Kiro is not running.
-websockets==14.2
+websockets==16.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.3.0

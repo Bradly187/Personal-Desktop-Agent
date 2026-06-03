@@ -504,6 +504,15 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     agent_db = AgentDB()
     await agent_db.open(Path("agent.db"))
 
+    # --- Startup DB prune: keep high-write tables from growing unboundedly ---
+    # sensor_telemetry: ~86,400 rows/day → retain 7 days
+    # gesture_velocity_samples: ~7,200 rows/day → retain 90 days
+    # ipad_logs: ~50 rows/day → retain 60 days
+    # Non-fatal: prune failures are logged and skipped, never block startup.
+    await agent_db.prune_sensor_telemetry(days=7)
+    await agent_db.prune_gesture_velocity_samples(days=90)
+    await agent_db.prune_ipad_logs(days=60)
+
     # --- Open audit log (separate append-only DB) ---
     audit = AuditLog()
     await audit.open(Path("audit.db"))
@@ -754,12 +763,22 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         calibrator.set_tts(_speak_fn)
     coordinator.set_calibrator(calibrator)
 
+    # Wire VoicePromptComposer — "hey agent claude compose" → dictate to Claude Code
+    from inference.voice_prompt_composer import VoicePromptComposer
+    composer = VoicePromptComposer()
+    if _speak_fn:
+        composer.set_speak_fn(_speak_fn)
+    composer.set_suppress_fn(whisper.suppress)
+    whisper.set_composer(composer)
+
     # Wire profiler into fusion engine for rms_ambient telemetry
     fusion.set_acoustic_profiler(profiler)
 
     # Wire profiler into twin state for voice clarity pain signal
     if twin_state:
         twin_state.set_acoustic_profiler(profiler)
+        # Immediate pain-day velocity-floor flips (no 60s ContinuousTrainer lag)
+        twin_state.set_gesture_processor(gesture)
 
     bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
@@ -875,6 +894,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if indexer is not None:
         governor.set_indexer(indexer)
     await governor.start()
+    twin_state.set_resource_governor(governor)   # SVT fast-path: <100ms flare response
     shutdown.register(governor)
 
     # --- Sync hotwords into WhisperStream once trainer is ready ---

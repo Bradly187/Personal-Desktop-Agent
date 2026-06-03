@@ -99,7 +99,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 **Done (Sprint B — iPad Accessibility Onboarding UI — 2026-05-20):**
 - `VoiceProfilingSheet.swift` — 10 phrases × 3 repeats, 4s countdown; iPad streams mic while AcousticProfiler captures samples passively
 - `GestureAssessmentSheet.swift` — rates 4 gestures (POINT/PINCH/OPEN_PALM/FIST) as Easy/Hard/Can't; disabled gestures synced to `GestureProcessor.set_disabled_gestures()`
-- `FlareProfileSheet.swift` — which sensors degrade, voice volume fraction slider, manual pain day toggle (syncs to PC via `pain_day_override` WebSocket message in <100ms)
+- `FlareProfileSheet.swift` — which sensors degrade (voice/gesture/tilt/sound), voice volume fraction slider, manual pain day toggle (manual toggle syncs via `pain_day_override` in <100ms; degrade flags sync via debounced `flare_profile` message → `AgentDB.upsert_flare_profile` + `BehavioralTwinState.set_flare_profile`)
 - `QuickRecalSheet.swift` — 3 phrases × 3 repeats (~90s); shown automatically when PC detects voice drift or seasonal prompt fires; wired into `ContentView` via `wsManager.recalibrationFeed`
 - `OnboardingView.swift` — expanded 7 → 10 steps with the 3 new calibration sheets (all skippable)
 
@@ -214,7 +214,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 | File | Purpose |
 |------|---------|
-| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 15 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
+| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 17 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
 | `core/command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
 | `mcp_server/desktop_mcp_server.py` | MCP stdio server; 14 tools; `SAFE_MODE` env var |
 | `mcp_server/tools/mouse.py` | move, click, double_click, scroll, drag |
@@ -307,8 +307,8 @@ Gaze and head-pose message types (`gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`
 
 **iPad → PC:**
 - *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `keyword`, `sound_action`, `audio_stream`, `camera_frame`, `depth_frame`
-- *Direct control:* `touch_command`, `trackpad`, `handwriting_image`, `ping`
-- *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `calibration_start`, `calibration_cancel`
+- *Direct control:* `touch_command`, `trackpad`, `handwriting_image`, `dwell_click`, `ping`
+- *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `flare_profile`, `calibration_start`, `calibration_cancel`
 - *Diagnostics:* `ipad_log`
 
 **PC → iPad (5 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (voice drift/seasonal re-cal trigger → QuickRecalSheet)

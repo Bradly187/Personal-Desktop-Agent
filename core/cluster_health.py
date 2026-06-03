@@ -59,6 +59,9 @@ class ClusterHealthMonitor:
         if not self._endpoints:
             log.info("ClusterHealthMonitor: no endpoints configured — not starting")
             return
+        if self._task is not None and not self._task.done():
+            log.warning("ClusterHealthMonitor.start() called while already running — ignored")
+            return
         await self._check_all()
         self._task = asyncio.create_task(self._loop(), name="cluster-health")
         log.info(

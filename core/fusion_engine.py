@@ -136,6 +136,11 @@ class FusionEngine:
         # Pain-day effective config — starts as alias of base config; replaced by
         # apply_pain_day(True) without mutating _cfg so base can always be restored.
         self._effective_cfg: FusionConfig = self._cfg
+        # Tilt and sound relax independently so the flare_profile tilt flag
+        # can't suppress the (acoustic) mouth-sound cooldown. _pain_day_active
+        # stays as the OR for telemetry.
+        self._pain_day_tilt: bool = False
+        self._pain_day_sound: bool = False
         self._pain_day_active: bool = False
 
         # --- Input slots (cleared after consumption) ---
@@ -189,6 +194,11 @@ class FusionEngine:
         self._cursor_pause_last_toggle: float = 0.0
         self._cursor_pause_auto_resume_s: float = 60.0
         self._cursor_pause_debounce_s: float = 0.5
+
+        # --- Cursor position cache (updated at 10 Hz by background task) ---
+        # Avoids blocking pyautogui.position() OS calls inside the 60 Hz tick loop.
+        self._cursor_pos: tuple[int, int] = (screen_width // 2, screen_height // 2)
+        self._cursor_cache_task: Optional[asyncio.Task] = None
 
         # Gaze, gaze-to-cursor, edge-scroll, and drag state were removed with the
         # gaze pipeline (gaze dwell was the only drag initiator).
@@ -288,35 +298,45 @@ class FusionEngine:
     # Pain-day threshold adaptation
     # ---------------------------------------------------------------------- #
 
-    def apply_pain_day(self, active: bool) -> None:
+    def apply_pain_day(self, tilt: bool, sound: bool | None = None) -> None:
         """Apply or remove pain-day sensor threshold relaxations.
 
-        Called by HybridCoordinator.route() once per command after reading
-        TwinSnapshot.pain_day_active.  Uses dataclasses.replace to derive
-        an adjusted FusionConfig without mutating self._cfg so the base
-        can always be restored.
+        Called by HybridCoordinator.route() once per command. Tilt and sound
+        relax independently so the flare_profile ``tilt_degrades`` flag gates
+        only the tilt dead zone — the (acoustic) mouth-sound cooldown is a
+        separate sensor and is controlled by its own argument.
 
-        Pain-day adjustments (all relax thresholds for tremor/fatigue):
-            dead_zone_inner       : 0.05 → 0.08 rad/s (larger tilt dead zone)
-            sound_cooldown_s      : 0.5 → 0.3 s      (faster mouth-sound retry)
+        Uses dataclasses.replace to derive an adjusted FusionConfig without
+        mutating self._cfg so the base can always be restored.
+
+        Pain-day adjustments (relax thresholds for tremor/fatigue):
+            tilt  → dead_zone_inner  : 0.05 → 0.08 rad/s (larger tilt dead zone)
+            sound → sound_cooldown_s : 0.5 → 0.3 s       (faster mouth-sound retry)
+
+        ``sound`` defaults to ``tilt`` when omitted, preserving the original
+        single-argument "relax both" behaviour for any legacy caller.
         """
-        if active == self._pain_day_active:
+        if sound is None:
+            sound = tilt
+
+        if tilt == self._pain_day_tilt and sound == self._pain_day_sound:
             return  # idempotent — no config object created on every tick
 
-        self._pain_day_active = active
-
-        if not active:
-            self._effective_cfg = self._cfg
-            log.info("FusionEngine: pain-day thresholds restored to baseline")
-            return
+        self._pain_day_tilt = tilt
+        self._pain_day_sound = sound
+        self._pain_day_active = tilt or sound  # OR for telemetry
 
         from dataclasses import replace as _dc_replace
-        self._effective_cfg = _dc_replace(
-            self._cfg,
-            dead_zone_inner=0.08,
-            sound_cooldown_s=0.3,
+        overrides: dict[str, float] = {}
+        if tilt:
+            overrides["dead_zone_inner"] = 0.08
+        if sound:
+            overrides["sound_cooldown_s"] = 0.3
+
+        self._effective_cfg = _dc_replace(self._cfg, **overrides) if overrides else self._cfg
+        log.info(
+            "FusionEngine: pain-day thresholds — tilt=%s sound=%s", tilt, sound
         )
-        log.info("FusionEngine: pain-day thresholds applied")
 
     # ---------------------------------------------------------------------- #
     # Feature toggle management
@@ -451,11 +471,19 @@ class FusionEngine:
     # 60 Hz tick
     # ---------------------------------------------------------------------- #
 
+    async def _cursor_cache_loop(self) -> None:
+        """Update _cursor_pos at 10 Hz using a thread so the 60 Hz tick never blocks on position()."""
+        import pyautogui
+        while self._running:
+            try:
+                pos = await asyncio.to_thread(pyautogui.position)
+                self._cursor_pos = (int(pos.x), int(pos.y))
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)  # 10 Hz
+
     async def _tick(self) -> None:
         import pyautogui
-        pyautogui.FAILSAFE = False
-        pyautogui.PAUSE = 0
-
         tick_start = time.monotonic()
         cfg = self._effective_cfg  # pain-day-adjusted config alias for this tick
 
@@ -487,11 +515,7 @@ class FusionEngine:
         # the keyword so it never falls through to DICTATE and types "click".
         if self._voice_local and self._voice_local.lower().strip() == "click":
             self._voice_local = None
-            try:
-                _pos = pyautogui.position()
-                px_x, px_y = int(_pos.x), int(_pos.y)
-            except Exception:
-                px_x, px_y = self._w // 2, self._h // 2
+            px_x, px_y = self._cursor_pos
             cmd = Command(
                 text="voice click",
                 action="CLICK",
@@ -662,13 +686,8 @@ class FusionEngine:
             if self._acoustic_profiler is not None:
                 _rms = getattr(self._acoustic_profiler, "_last_rms", None)
 
-            # Cursor position — read pyautogui off the event loop to avoid latency
-            try:
-                import pyautogui as _pag
-                _pos = _pag.position()
-                _cursor_x, _cursor_y = int(_pos.x), int(_pos.y)
-            except Exception:
-                pass
+            # Cursor position from cache (updated at 10 Hz by _cursor_cache_loop)
+            _cursor_x, _cursor_y = self._cursor_pos
 
             asyncio.ensure_future(
                 self._db.insert_sensor_telemetry(
@@ -729,7 +748,14 @@ class FusionEngine:
     # ---------------------------------------------------------------------- #
 
     async def run(self) -> None:
+        import pyautogui
+        pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0
+
         self._running = True
+        self._cursor_cache_task = asyncio.create_task(
+            self._cursor_cache_loop(), name="cursor_cache"
+        )
         # _tick_count is initialised in __init__ (moved for D2 sensor sampling)
         interval = 1.0 / self._cfg.tick_hz
         log.info("FusionEngine running at %.0f Hz", self._cfg.tick_hz)
@@ -749,4 +775,7 @@ class FusionEngine:
 
     def stop(self) -> None:
         self._running = False
+        if self._cursor_cache_task is not None:
+            self._cursor_cache_task.cancel()
+            self._cursor_cache_task = None
         log.info("FusionEngine stopped")

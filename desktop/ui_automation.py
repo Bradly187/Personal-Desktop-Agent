@@ -138,6 +138,8 @@ class UIAutomationProvider:
         """
         cache_key = (target.lower().strip(), (app_name or "").lower())
         now = time.monotonic()
+        if len(self._cache) > 200:
+            self._cache = {k: v for k, v in self._cache.items() if v[1] > now}
         if cache_key in self._cache:
             elem, expiry = self._cache[cache_key]
             if now < expiry:
