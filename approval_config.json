@@ -31,5 +31,8 @@
   "device":        "Microphone (Realtek USB Audio)",
 
   "_note_policy":  "Bash/PowerShell/Agent gate because they can run arbitrary commands. Edit/Write pass silently because they can be reviewed in git diff before commit.",
-  "_note_timeout": "If no voice detected within record_s seconds, timeout_action applies: 'approve' = proceed, 'reject' = block"
+  "_note_timeout": "If no voice detected within record_s seconds, timeout_action applies: 'approve' = proceed, 'reject' = block",
+
+  "goal_session_duration_s":  900,
+  "goal_session_max_actions": 50
 }
