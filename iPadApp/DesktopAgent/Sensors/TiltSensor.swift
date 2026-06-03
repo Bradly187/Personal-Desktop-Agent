@@ -39,6 +39,21 @@ final class TiltSensor: ObservableObject {
     /// Frozen output coordinates during stationary lock
     var lockedCoords: (x: Double, y: Double)?
 
+    // MARK: — Dwell-to-click state
+
+    /// True while a dwell countdown is running (drives the progress ring).
+    /// Published so the HUD can animate; toggled only on start/cancel/fire,
+    /// not per-frame, to avoid 60 Hz UI churn.
+    @Published var dwellInProgress: Bool = false
+
+    /// Whether a dwell click has already fired for the current stationary
+    /// period (fire-once until the device moves again).
+    private var dwellFired: Bool = false
+    /// Background-side mirror of dwellInProgress so we only hop to the main
+    /// actor when the state actually changes.
+    private var dwellActiveLocal: Bool = false
+    private let dwellHaptic = UIImpactFeedbackGenerator(style: .medium)
+
     // Impulse detection state
     private var prevAccelMag: Double = 0
     private let tapThreshold: Double = 2.5   // g-force delta that counts as a tap
@@ -65,6 +80,8 @@ final class TiltSensor: ObservableObject {
     private var snapshotTiltSensitivity: Double = 1.0
     private var snapshotTiltRange: Double = 25.0
     private var snapshotTiltInverted: Bool = false
+    private var snapshotTiltDwellEnabled: Bool = false
+    private var snapshotTiltDwellDuration: Double = 1.0
 
     init(ws: WebSocketManager, settings: SettingsStore) {
         self.ws = ws
@@ -100,6 +117,8 @@ final class TiltSensor: ObservableObject {
             snapshotTiltSensitivity = s.tiltSensitivity
             snapshotTiltRange = s.tiltRange
             snapshotTiltInverted = s.tiltInverted
+            snapshotTiltDwellEnabled = s.tiltDwellClickEnabled
+            snapshotTiltDwellDuration = s.tiltDwellDuration
         }
 
         motion.deviceMotionUpdateInterval = 1.0 / 60.0
@@ -137,6 +156,44 @@ final class TiltSensor: ObservableObject {
         snapshotTiltSensitivity = s.tiltSensitivity
         snapshotTiltRange = s.tiltRange
         snapshotTiltInverted = s.tiltInverted
+        snapshotTiltDwellEnabled = s.tiltDwellClickEnabled
+        snapshotTiltDwellDuration = s.tiltDwellDuration
+    }
+
+    // MARK: — Dwell-to-click
+
+    /// Advance the dwell countdown while the device is held still (position
+    /// mode). Fires the active dwell action once per stationary period when the
+    /// hold exceeds the configured duration. Called from the motion queue;
+    /// published/UI/haptic side effects hop to the main actor.
+    private func updateDwell(now: CFTimeInterval) {
+        guard snapshotTiltDwellEnabled, !dwellFired,
+              let startTime = stationaryStartTime else { return }
+
+        // First still frame → start the ring countdown.
+        if !dwellActiveLocal {
+            dwellActiveLocal = true
+            DispatchQueue.main.async { [weak self] in self?.dwellInProgress = true }
+        }
+
+        if now - startTime >= snapshotTiltDwellDuration {
+            dwellFired = true
+            dwellActiveLocal = false
+            ws?.sendDwellClick()
+            DispatchQueue.main.async { [weak self] in
+                self?.dwellInProgress = false
+                self?.dwellHaptic.impactOccurred()
+            }
+        }
+    }
+
+    /// Reset dwell state when the device moves again (or dwell is disabled).
+    private func cancelDwell() {
+        dwellFired = false
+        if dwellActiveLocal {
+            dwellActiveLocal = false
+            DispatchQueue.main.async { [weak self] in self?.dwellInProgress = false }
+        }
     }
 
     // MARK: — Calibration
@@ -298,9 +355,11 @@ final class TiltSensor: ObservableObject {
                         y = locked.y
                     }
                 }
+                updateDwell(now: now)
             } else {
                 stationaryStartTime = nil
                 lockedCoords = nil
+                cancelDwell()
             }
 
             // --- Message suppression ---
@@ -319,7 +378,16 @@ final class TiltSensor: ObservableObject {
             }
         } else {
             // --- Legacy velocity-based mode ---
-            let dz = snapshotTiltDeadZone
+            // No on-device dead zone. The PC owns gating (FusionConfig
+            // dead_zone_ramp) AND the GyroBiasCalibrator needs the low-velocity
+            // "stationary" samples (< 0.02 rad/s) to estimate drift — an
+            // on-device dead zone filters out exactly those samples, so the
+            // calibrator could never leave UNCALIBRATED.
+            //
+            // The previous gate `abs(rx) > tiltDeadZone` reused tiltDeadZone
+            // (1.5, a *degree* value used correctly in position mode) as a
+            // rad/s threshold ≈ 86°/s: it made the cursor nearly immovable and
+            // starved the calibrator. Send every frame and let the PC gate.
             let sensitivity = snapshotTiltSensitivity
 
             let g = data.gravity
@@ -340,9 +408,7 @@ final class TiltSensor: ObservableObject {
                 ry = -ry
             }
 
-            if abs(rx) > dz || abs(ry) > dz {
-                ws?.sendTilt(rx: rx, ry: ry)
-            }
+            ws?.sendTilt(rx: rx, ry: ry)
         }
 
         // --- Impulse tap detection (runs regardless of mode) ---

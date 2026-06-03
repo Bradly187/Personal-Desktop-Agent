@@ -147,6 +147,12 @@ struct FlareProfileSheet: View {
                 binding: $settings.flareTiltDegrades,
                 icon: "ipad.landscape"
             )
+            sensorToggle(
+                "Mouth sounds are harder to make",
+                subtitle: "Sound retry cooldown shortens",
+                binding: $settings.flareSoundDegrades,
+                icon: "mouth.fill"
+            )
         }
     }
 

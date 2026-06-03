@@ -47,6 +47,7 @@ class SemanticMemory:
         self._client = None
         self._collection = None
         self._available: bool = False
+        self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
 
     async def start(self) -> bool:
         """Initialize ChromaDB client. Returns True if available."""
@@ -111,7 +112,9 @@ class SemanticMemory:
             )
 
             if await self.count() >= self.CAP:
-                asyncio.create_task(self._evict_oldest())
+                t = asyncio.create_task(self._evict_oldest())
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
 
         except Exception as exc:
             log.warning("SemanticMemory.add() failed: %s — disabling ChromaDB", exc)

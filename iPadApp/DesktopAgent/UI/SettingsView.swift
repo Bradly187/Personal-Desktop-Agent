@@ -109,6 +109,15 @@ struct SettingsView: View {
                     LabeledContent("Dead Zone: \(String(format: "%.1f°", settings.tiltDeadZone))") {
                         Slider(value: $settings.tiltDeadZone, in: 0.5...5.0)
                     }
+                    Toggle("Dwell Click", isOn: $settings.tiltDwellClickEnabled)
+                    Text("Hold the cursor still to click. Fires the action selected in the dwell toolbar.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
+                    if settings.tiltDwellClickEnabled {
+                        LabeledContent("Dwell Time: \(String(format: "%.1fs", settings.tiltDwellDuration))") {
+                            Slider(value: $settings.tiltDwellDuration, in: 0.5...2.5, step: 0.1)
+                        }
+                    }
                     Button("Calibrate Neutral") {
                         sensorManager.tiltSensor.calibrate()
                     }

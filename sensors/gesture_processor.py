@@ -284,6 +284,20 @@ class GestureProcessor:
         """Wire SensorViewer for FlickEngine debug panel."""
         self._viewer = viewer
 
+    def apply_pain_day(self, active: bool) -> None:
+        """Apply or remove the pain-day velocity-floor relaxation immediately.
+
+        Called by BehavioralTwinState on every pain-day transition so the
+        x0.70 floor (_PAIN_DAY_VELOCITY_FACTOR, applied lazily in
+        _swipe_threshold/_push_threshold) takes effect at once instead of
+        lagging up to one ContinuousTrainer tick (~60s). The trainer keeps
+        ownership of the base thresholds; this only flips the multiplier.
+        """
+        if active == self._pain_day_active:
+            return  # idempotent
+        self._pain_day_active = active
+        log.info("GestureProcessor: pain-day %s", "ON" if active else "OFF")
+
     def set_velocity_thresholds(
         self,
         thresholds: dict[str, float],

@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
@@ -436,3 +436,176 @@ def _noop_to_thread_factory():
         except Exception:
             pass
     return _shim
+
+
+# ---------------------------------------------------------------------------
+# SVT fast-path: notify_pain_day_change()
+# ---------------------------------------------------------------------------
+
+class TestSVTFastPath:
+    """notify_pain_day_change() must trigger flare start/end immediately
+    without waiting for the 5-second poll cycle."""
+
+    @pytest.mark.asyncio
+    async def test_notify_above_threshold_triggers_flare_start(self):
+        """score=1.0 → _on_flare_start called immediately via create_task."""
+        gov, _ = _make_governor(score=0.0)
+        fusion = _make_fusion()
+        gov.set_fusion_engine(fusion)
+        gov._running = True
+
+        with (
+            patch.object(gov, "_raise_whisper_priority"),
+            patch.object(gov, "_reduce_ollama_keepalive"),
+        ):
+            gov.notify_pain_day_change(1.0)
+            await asyncio.sleep(0)   # yield so the created task runs
+
+        assert gov._flare_active is True
+        fusion.apply_pain_day.assert_called_once_with(True)
+
+    @pytest.mark.asyncio
+    async def test_notify_below_threshold_triggers_flare_end(self):
+        """score=0.0 while flare active → _on_flare_end called immediately."""
+        gov, _ = _make_governor(score=0.0)
+        gov._flare_active = True
+        fusion = _make_fusion()
+        gov.set_fusion_engine(fusion)
+        gov._running = True
+
+        with (
+            patch.object(gov, "_restore_whisper_priority"),
+            patch.object(gov, "_restore_ollama_keepalive"),
+        ):
+            gov.notify_pain_day_change(0.0)
+            await asyncio.sleep(0)
+
+        assert gov._flare_active is False
+        fusion.apply_pain_day.assert_called_once_with(False)
+
+    def test_notify_does_nothing_when_not_running(self):
+        """If governor is stopped, notify_pain_day_change is a no-op."""
+        gov, _ = _make_governor(score=0.0)
+        gov._running = False
+        # Should not raise and should not change flare state
+        gov.notify_pain_day_change(1.0)
+        assert gov._flare_active is False
+
+    def test_notify_in_dead_band_does_not_trigger(self):
+        """score=0.5 (between 0.4 and 0.6) → no state change."""
+        gov, _ = _make_governor()
+        gov._running = True
+        gov.notify_pain_day_change(0.5)
+        assert gov._flare_active is False
+
+    def test_notify_when_already_active_does_not_double_trigger(self):
+        """Calling notify with score=1.0 while already in flare is a no-op."""
+        gov, _ = _make_governor()
+        gov._flare_active = True
+        gov._running = True
+        called = []
+        gov._on_flare_start = lambda s: called.append(s)
+        gov.notify_pain_day_change(1.0)
+        assert called == []   # already active — no second start
+
+    @pytest.mark.asyncio
+    async def test_svt_fast_path_wired_from_twin_state(self):
+        """BehavioralTwinState.set_manual_pain_day(True) fires governor immediately."""
+        from adaptive.behavioral_twin_state import BehavioralTwinState
+
+        db = AsyncMock()
+        db.available = False
+        twin = BehavioralTwinState(agent_db=db)
+        mock_semantic = MagicMock()
+        mock_semantic.available = False
+        mock_semantic.add = AsyncMock()
+        twin._semantic_memory = mock_semantic
+
+        gov, _ = _make_governor()
+        gov._running = True
+        fusion = _make_fusion()
+        gov.set_fusion_engine(fusion)
+        twin.set_resource_governor(gov)
+
+        with (
+            patch.object(gov, "_raise_whisper_priority"),
+            patch.object(gov, "_reduce_ollama_keepalive"),
+        ):
+            twin.set_manual_pain_day(True)
+            await asyncio.sleep(0)
+
+        assert gov._flare_active is True
+        fusion.apply_pain_day.assert_called_once_with(True)
+
+    def test_resource_governor_initialized_to_none_in_twin(self):
+        """_resource_governor must be None by default (not missing from __init__)."""
+        from adaptive.behavioral_twin_state import BehavioralTwinState
+        db = AsyncMock()
+        db.available = False
+        twin = BehavioralTwinState(agent_db=db)
+        assert twin._resource_governor is None
+
+
+# ---------------------------------------------------------------------------
+# Circuit-breaker: _run_cloud() timeout
+# ---------------------------------------------------------------------------
+
+class TestCloudCircuitBreaker:
+    """_run_cloud() must time out and return CLARIFY instead of hanging."""
+
+    @pytest.mark.asyncio
+    async def test_run_cloud_returns_clarify_on_timeout(self):
+        """If cloud inference hangs longer than _CLOUD_TIMEOUT_S, _run_cloud
+        returns a CLARIFY string instead of stalling."""
+        from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+        from core.command_executor import Command
+
+        local = MagicMock()
+        local.infer = AsyncMock(return_value="CLICK button")
+        local.get_status = MagicMock(return_value={"model": "test", "backend": "ollama"})
+
+        coord = HybridCoordinator(local=local, config=CoordinatorConfig())
+
+        # Replace internal _cloud with a hanging mock
+        async def _hang(*a, **kw):
+            await asyncio.sleep(999)
+
+        coord._cloud = MagicMock()
+        coord._cloud.infer = _hang
+
+        original_timeout = HybridCoordinator._CLOUD_TIMEOUT_S
+        HybridCoordinator._CLOUD_TIMEOUT_S = 0.05
+
+        try:
+            cmd = Command(text="open notepad", action="OPEN", source="voice")
+            result = await coord._run_cloud(cmd)
+        finally:
+            HybridCoordinator._CLOUD_TIMEOUT_S = original_timeout
+
+        assert result.startswith("CLARIFY")
+        assert "timed out" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_run_cloud_succeeds_within_timeout(self):
+        """Fast cloud inference completes normally and returns the action string."""
+        from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
+        from core.command_executor import Command
+
+        local = MagicMock()
+        local.infer = AsyncMock(return_value="CLICK button")
+        local.get_status = MagicMock(return_value={"model": "test", "backend": "ollama"})
+
+        coord = HybridCoordinator(local=local, config=CoordinatorConfig())
+        coord._cloud = MagicMock()
+        coord._cloud.infer = AsyncMock(return_value="SCROLL down")
+
+        cmd = Command(text="scroll down", action="SCROLL", source="voice")
+        result = await coord._run_cloud(cmd)
+
+        assert result == "SCROLL down"
+
+    @pytest.mark.asyncio
+    async def test_cloud_timeout_constant_is_10s(self):
+        """_CLOUD_TIMEOUT_S must be exactly 10 seconds."""
+        from core.hybrid_coordinator import HybridCoordinator
+        assert HybridCoordinator._CLOUD_TIMEOUT_S == 10.0

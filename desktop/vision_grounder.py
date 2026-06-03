@@ -106,6 +106,9 @@ class VisionGrounder:
 
         cache_key = target.lower().strip()
         now = time.monotonic()
+        # Evict stale entries on each lookup to prevent unbounded growth.
+        if len(self._cache) > 200:
+            self._cache = {k: v for k, v in self._cache.items() if v[2] > now}
         if cache_key in self._cache:
             cx, cy, expiry = self._cache[cache_key]
             if now < expiry:

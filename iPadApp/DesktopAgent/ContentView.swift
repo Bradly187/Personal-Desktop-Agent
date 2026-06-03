@@ -46,6 +46,13 @@ struct ContentView: View {
                 .padding(.top, 44) // below connection banner
                 .allowsHitTesting(false)
 
+            // Tilt dwell-to-click countdown ring — centered, non-interactive.
+            // Observes TiltSensor directly so its dwellInProgress drives the ring.
+            DwellRingHUD(tiltSensor: sensorManager.tiltSensor,
+                         duration: settings.tiltDwellDuration)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .allowsHitTesting(false)
+
             ScreenshotOverlayView()
 
             // ── Custom tab bar with drag-to-switch ───────────────────────────

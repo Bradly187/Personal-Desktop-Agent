@@ -366,6 +366,7 @@ CREATE TABLE IF NOT EXISTS flare_profile (
     gesture_degrades    INTEGER NOT NULL DEFAULT 0,
     gaze_degrades       INTEGER NOT NULL DEFAULT 0,
     tilt_degrades       INTEGER NOT NULL DEFAULT 0,
+    sound_degrades      INTEGER NOT NULL DEFAULT 1,    -- mouth-sound cooldown relaxes on flare
     flare_vad_scale     REAL    NOT NULL DEFAULT 0.5,  -- voice volume fraction
     manual_pain_day     INTEGER NOT NULL DEFAULT 0,    -- user override flag
     notes               TEXT
@@ -483,7 +484,7 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     duration_s            REAL,
     total_commands        INTEGER NOT NULL DEFAULT 0,
     success_rate          REAL,           -- fraction 0.0–1.0
-    cloud_escalation_rate REAL,           -- fraction of commands routed to Bedrock
+    cloud_escalation_rate REAL,           -- fraction of commands routed to the cloud
     gate0_blocks          INTEGER DEFAULT 0,
     gate1_blocks          INTEGER DEFAULT 0,
     gate2_blocks          INTEGER DEFAULT 0,
@@ -562,6 +563,17 @@ class AgentDB:
             "PRAGMA synchronous=NORMAL;"
         )
         await self._conn.executescript(AGENT_DB_SCHEMA)
+        # Idempotent column migrations for DBs created before the column existed.
+        # CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing table.
+        for table, column, ddl in (
+            ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
+        ):
+            try:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"
+                )
+            except Exception:
+                pass  # column already exists
         await self._conn.commit()
         self.available = True
         log.info("AgentDB opened: %s", path)
@@ -900,7 +912,8 @@ class AgentDB:
         try:
             row = await (await self._conn.execute(
                 """SELECT voice_degrades, gesture_degrades, gaze_degrades,
-                          tilt_degrades, flare_vad_scale, manual_pain_day, notes
+                          tilt_degrades, flare_vad_scale, manual_pain_day, notes,
+                          sound_degrades
                    FROM flare_profile ORDER BY id DESC LIMIT 1"""
             )).fetchone()
             if not row:
@@ -909,11 +922,57 @@ class AgentDB:
                 "voice_degrades": bool(row[0]), "gesture_degrades": bool(row[1]),
                 "gaze_degrades": bool(row[2]), "tilt_degrades": bool(row[3]),
                 "flare_vad_scale": row[4], "manual_pain_day": bool(row[5]),
-                "notes": row[6],
+                "notes": row[6], "sound_degrades": bool(row[7]),
             }
         except Exception as exc:
             log.warning("AgentDB.get_flare_profile failed: %s", exc)
             return None
+
+    async def upsert_flare_profile(self, flags: dict) -> None:
+        """Persist the user's flare degrade profile from the iPad FlareProfileSheet.
+
+        Updates the most recent flare_profile row (preserving manual_pain_day),
+        or inserts a new one. `flags` may contain any of: voice_degrades,
+        gesture_degrades, gaze_degrades, tilt_degrades, sound_degrades,
+        flare_vad_scale.
+        """
+        if not self._conn:
+            return
+        cols = ("voice_degrades", "gesture_degrades", "gaze_degrades",
+                "tilt_degrades", "sound_degrades", "flare_vad_scale")
+        try:
+            existing = await (await self._conn.execute(
+                "SELECT id FROM flare_profile ORDER BY id DESC LIMIT 1"
+            )).fetchone()
+            present = [(c, flags[c]) for c in cols if c in flags]
+            if not present:
+                return
+            if existing:
+                set_clause = ", ".join(f"{c}=?" for c, _ in present)
+                params = [
+                    int(v) if c != "flare_vad_scale" else float(v)
+                    for c, v in present
+                ]
+                await self._conn.execute(
+                    f"UPDATE flare_profile SET {set_clause}, updated_at=? WHERE id=?",
+                    (*params, time.time(), existing[0]),
+                )
+            else:
+                col_names = ", ".join(c for c, _ in present)
+                placeholders = ", ".join("?" for _ in present)
+                params = [
+                    int(v) if c != "flare_vad_scale" else float(v)
+                    for c, v in present
+                ]
+                await self._conn.execute(
+                    f"INSERT INTO flare_profile (updated_at, {col_names}) "
+                    f"VALUES (?, {placeholders})",
+                    (time.time(), *params),
+                )
+            await self._conn.commit()
+            log.info("AgentDB: flare_profile updated — %s", dict(present))
+        except Exception as exc:
+            log.warning("AgentDB.upsert_flare_profile failed: %s", exc)
 
     async def set_manual_pain_day(self, active: bool) -> None:
         """User override: force pain_day_active regardless of auto-detection."""
@@ -1499,6 +1558,75 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.get_gesture_velocity_floor failed: %s", exc)
             return default
+
+    # ---------------------------------------------------------------------- #
+    # Maintenance / pruning (called at startup or on a schedule)
+    # ---------------------------------------------------------------------- #
+
+    async def prune_sensor_telemetry(self, days: int = 7) -> int:
+        """Delete sensor_telemetry rows older than `days`. Returns rows deleted.
+
+        At 1 Hz write rate, 7 days = ~604,800 rows (~30–50 MB). Call at startup
+        to keep the DB from growing unboundedly across long-uptime deployments.
+        """
+        if not self._conn:
+            return 0
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                "DELETE FROM sensor_telemetry WHERE ts < ?", (cutoff,)
+            ) as cur:
+                deleted = cur.rowcount or 0
+            await self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            await self._conn.commit()
+            if deleted:
+                log.info("AgentDB: pruned %d sensor_telemetry rows (> %d days)", deleted, days)
+            return deleted
+        except Exception as exc:
+            log.warning("AgentDB.prune_sensor_telemetry failed: %s", exc)
+            return 0
+
+    async def prune_gesture_velocity_samples(self, days: int = 90) -> int:
+        """Delete gesture_velocity_samples rows older than `days`. Returns rows deleted.
+
+        At ~7,200/day, 90 days = ~648,000 rows. Retaining 90 days preserves enough
+        signal for ContinuousTrainer's p10 velocity-floor calibration.
+        """
+        if not self._conn:
+            return 0
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                "DELETE FROM gesture_velocity_samples WHERE ts < ?", (cutoff,)
+            ) as cur:
+                deleted = cur.rowcount or 0
+            await self._conn.commit()
+            if deleted:
+                log.info(
+                    "AgentDB: pruned %d gesture_velocity_samples rows (> %d days)", deleted, days
+                )
+            return deleted
+        except Exception as exc:
+            log.warning("AgentDB.prune_gesture_velocity_samples failed: %s", exc)
+            return 0
+
+    async def prune_ipad_logs(self, days: int = 60) -> int:
+        """Delete ipad_logs rows older than `days`. Returns rows deleted."""
+        if not self._conn:
+            return 0
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                "DELETE FROM ipad_logs WHERE ts < ?", (cutoff,)
+            ) as cur:
+                deleted = cur.rowcount or 0
+            await self._conn.commit()
+            if deleted:
+                log.info("AgentDB: pruned %d ipad_logs rows (> %d days)", deleted, days)
+            return deleted
+        except Exception as exc:
+            log.warning("AgentDB.prune_ipad_logs failed: %s", exc)
+            return 0
 
     # ---------------------------------------------------------------------- #
     # Adaptation queries (used by ContinuousTrainer)

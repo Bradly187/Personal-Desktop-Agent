@@ -1,4 +1,4 @@
-"""HybridCoordinator — 4-gate routing between local LLM and AWS Bedrock.
+"""HybridCoordinator — 4-gate routing between local LLM and Anthropic cloud.
 
 Receives a Command from FusionEngine, decides whether to run local inference
 or fall back to the cloud, executes the resulting action, and logs the outcome.
@@ -12,17 +12,17 @@ Gate 0 — Privacy:     command text contains no sensitive-data patterns
   fail → force local (never send to cloud)
 
 Gate 1 — Confidence:  whisper_logprob ≥ min AND gesture_conf ≥ min
-  fail-voice    → Amazon Transcribe re-transcription, then retry Gate 2
+  fail-voice    → vocabulary correction → retry Gate 2
   fail-gesture  → discard silently
 
 Gate 2 — Complexity:  token_count ≤ max AND no complexity keywords
-  fail → AWS Bedrock
+  fail → Anthropic API
 
 Gate 3 — VRAM:  vram_free_gb ≥ vram_free_min_gb  (via pynvml)
-  fail → AWS Bedrock
+  fail → Anthropic API
 
 Gate 4 — Latency EMA:  latency_ema_ms ≤ latency_budget_ms
-  fail → AWS Bedrock
+  fail → Anthropic API
 
 After inference: log outcome to agent.db (AgentDB), call CommandExecutor.execute().
 Each log entry includes `gate_that_decided`: which gate was the decisive routing
@@ -33,7 +33,6 @@ factor ("bypass", "gate0_privacy", "gate2_complexity", "gate3_vram",
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -105,33 +104,28 @@ class CoordinatorConfig:
 
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
-    # AWS Bedrock (cloud fallback — raw API, used when AgentCore unavailable)
-    # Model: Claude Sonnet 4.6 cross-region inference profile.
-    bedrock_model_id: str = "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
-    bedrock_region: str = "us-east-1"
-
-    # Cloud path: raw Bedrock Claude Sonnet 4.6 (AgentCore deployment deferred)
+    # Anthropic API (cloud fallback)
+    anthropic_model: str = "claude-sonnet-4-6-20250514"
 
 
 # ---------------------------------------------------------------------------
-# Cloud inference (AWS Bedrock)
+# Cloud inference (Anthropic API)
 # ---------------------------------------------------------------------------
 
 class _CloudInference:
-    """AWS Bedrock Claude (Sonnet 4.6) backend. Lazy boto3 import."""
+    """Anthropic SDK Claude backend. Lazy import."""
 
-    def __init__(self, model_id: str, region: str) -> None:
-        self._model_id = model_id
-        self._region = region
+    def __init__(self, model: str) -> None:
+        self._model = model
         self._client = None
 
     def _get_client(self):
         if self._client is None:
             try:
-                import boto3
-                self._client = boto3.client("bedrock-runtime", region_name=self._region)
+                import anthropic
+                self._client = anthropic.Anthropic()
             except ImportError:
-                raise RuntimeError("boto3 not installed — run: pip install boto3")
+                raise RuntimeError("anthropic not installed — run: pip install anthropic")
         return self._client
 
     async def infer(self, cmd: Command) -> str:
@@ -141,7 +135,6 @@ class _CloudInference:
             log.error("CloudInference unavailable: %s", exc)
             return f"CLARIFY cloud unavailable: {exc}"
 
-        # Build few-shot context string for the user message
         context_lines = ""
         if cmd.session_context:
             joined = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
@@ -149,25 +142,17 @@ class _CloudInference:
 
         user_content = f"Command: {cmd.text}{context_lines}"
 
-        body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 64,
-            "temperature": 0.0,
-            "system": _CLOUD_SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": user_content}],
-        }
-
         t0 = time.monotonic()
         try:
-            result = await asyncio.to_thread(
-                client.invoke_model,
-                modelId=self._model_id,
-                body=json.dumps(body),
-                contentType="application/json",
-                accept="application/json",
+            response = await asyncio.to_thread(
+                client.messages.create,
+                model=self._model,
+                max_tokens=64,
+                temperature=0.0,
+                system=_CLOUD_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_content}],
             )
-            data = json.loads(result["body"].read())
-            action = data["content"][0]["text"].strip().splitlines()[0].strip()
+            action = response.content[0].text.strip().splitlines()[0].strip()
             latency_ms = (time.monotonic() - t0) * 1000
             log.info("CloudInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
             return action
@@ -177,11 +162,10 @@ class _CloudInference:
 
 
 # ---------------------------------------------------------------------------
-# Amazon Transcribe re-transcription (Gate 1 voice fallback)
+# Gate 1 — voice confidence fallback
 # ---------------------------------------------------------------------------
 
 # Phonetic vocabulary corrections for the most common voice misrecognitions.
-# Applied as a fast first pass before (optionally) calling Amazon Transcribe.
 # Keyed on lowercased word/phrase, mapped to the correct desktop-control word.
 _VOICE_CORRECTIONS: dict[str, str] = {
     "clothes":     "close",
@@ -224,102 +208,11 @@ def _apply_vocabulary_corrections(text: str) -> tuple[str, bool]:
 
 
 async def _retranscribe(cmd: Command) -> Command:
-    """Attempt to improve a low-confidence voice transcript before Gate 2.
-
-    Two-stage approach:
-      1. Vocabulary correction — instant, no network, fixes the 6 deterministic
-         misrecognitions documented in the cloud system prompt.
-      2. Amazon Transcribe streaming — tried when `amazon-transcribe` is installed
-         AND audio bytes were preserved in cmd.params['audio_bytes'].  Falls back
-         gracefully (returns corrected or original cmd) on any error or timeout.
-
-    To enable Transcribe streaming:
-        pip install amazon-transcribe
-    Audio bytes are preserved automatically by WhisperStream when
-    `preserve_audio=True` (default True from Phase 6 onwards).
-    """
-    # --- Stage 1: deterministic vocabulary correction (always runs) ----------
+    """Apply vocabulary correction to a low-confidence voice transcript before Gate 2."""
     corrected_text, changed = _apply_vocabulary_corrections(cmd.text)
     if changed:
-        log.info(
-            "Gate 1 vocab correction: %r → %r", cmd.text, corrected_text
-        )
+        log.info("Gate 1 vocab correction: %r → %r", cmd.text, corrected_text)
         cmd = _dc_replace(cmd, text=corrected_text, whisper_logprob=0.0)
-
-    # --- Stage 2: Amazon Transcribe streaming (optional) --------------------
-    audio_bytes: bytes | None = cmd.params.get("audio_bytes")
-    sample_rate: int = cmd.params.get("sample_rate", 16_000)
-
-    if not audio_bytes:
-        log.debug(
-            "Gate 1 Transcribe: no audio bytes in cmd.params — skipping "
-            "(WhisperStream.preserve_audio must be True)"
-        )
-        return cmd
-
-    try:
-        from amazon_transcribe.client import TranscribeStreamingClient  # type: ignore
-        from amazon_transcribe.handlers import TranscriptResultStreamHandler  # type: ignore
-        from amazon_transcribe.model import TranscriptEvent  # type: ignore
-    except ImportError:
-        log.debug("Gate 1 Transcribe: amazon-transcribe not installed — using vocab correction only")
-        return cmd
-
-    class _ResultHandler(TranscriptResultStreamHandler):
-        def __init__(self, stream):
-            super().__init__(stream)
-            self.transcript = ""
-            self.confidence = 0.0
-
-        async def handle_transcript_event(self, event: TranscriptEvent):
-            for result in event.transcript.results:
-                if not result.is_partial and result.alternatives:
-                    alt = result.alternatives[0]
-                    self.transcript = alt.transcript
-                    items = getattr(alt, "items", []) or []
-                    confs = [
-                        getattr(i, "confidence", 1.0)
-                        for i in items
-                        if getattr(i, "confidence", None) is not None
-                    ]
-                    self.confidence = sum(confs) / len(confs) if confs else 0.8
-
-    try:
-        t_client = TranscribeStreamingClient(region="us-east-1")
-
-        async def _audio_gen():
-            chunk = 3200  # 100 ms of 16 kHz int16
-            for i in range(0, len(audio_bytes), chunk):
-                yield audio_bytes[i: i + chunk]
-
-        stream = await t_client.start_stream_transcription(
-            language_code="en-US",
-            media_sample_rate_hz=sample_rate,
-            media_encoding="pcm",
-        )
-
-        handler = _ResultHandler(stream.output_stream)
-        await asyncio.wait_for(
-            asyncio.gather(stream.input_stream.send_audio_event(audio_chunk=audio_bytes),
-                           stream.input_stream.end_stream(),
-                           handler.handle_events()),
-            timeout=3.0,
-        )
-
-        if handler.transcript and handler.transcript.lower() != cmd.text.lower():
-            log.info(
-                "Gate 1 Transcribe: %r → %r (conf=%.2f)",
-                cmd.text, handler.transcript, handler.confidence,
-            )
-            from dataclasses import replace as dc_replace
-            logprob_equiv = -max(0.0, 1.0 - handler.confidence)
-            cmd = _dc_replace(cmd, text=handler.transcript, whisper_logprob=logprob_equiv)
-
-    except asyncio.TimeoutError:
-        log.warning("Gate 1 Transcribe: timed out after 3s — using vocab-corrected text")
-    except Exception as exc:
-        log.warning("Gate 1 Transcribe: error — %s (using vocab-corrected text)", exc)
-
     return cmd
 
 
@@ -372,7 +265,7 @@ class HybridCoordinator:
     ) -> None:
         self._local = local or OllamaInference()
         self._cfg = config or CoordinatorConfig()
-        self._cloud = _CloudInference(self._cfg.bedrock_model_id, self._cfg.bedrock_region)
+        self._cloud = _CloudInference(self._cfg.anthropic_model)
         self._executor = CommandExecutor()
         self._trainer = trainer
         self._dev_agent = dev_agent
@@ -615,21 +508,16 @@ class HybridCoordinator:
             elif _lower in ("pain day on", "flare day on", "bad day"):
                 if self._twin:
                     self._twin.set_manual_pain_day(True)
-                # Immediately loosen VAD for softer voice
-                if self._whisper and hasattr(self._whisper, '_profiler') \
-                        and self._whisper._profiler:
-                    vad = self._whisper._profiler.get_vad_threshold(pain_day=True)
-                    self._whisper._silence_thresh = vad
-                    log.info("Pain day ON — VAD relaxed to %.3f", vad)
+                # Immediately relax the recognizer (VAD + logprob floor) for the
+                # next utterance, before route() reconciles on the next command.
+                if self._whisper is not None:
+                    self._whisper.apply_pain_day(True)
                 return {"status": "ok", "action": "PAIN_DAY", "enabled": True}
             elif _lower in ("pain day off", "flare day off", "feeling better"):
                 if self._twin:
                     self._twin.set_manual_pain_day(False)
-                if self._whisper and hasattr(self._whisper, '_profiler') \
-                        and self._whisper._profiler:
-                    vad = self._whisper._profiler.get_vad_threshold(pain_day=False)
-                    self._whisper._silence_thresh = vad
-                    log.info("Pain day OFF — VAD restored to %.3f", vad)
+                if self._whisper is not None:
+                    self._whisper.apply_pain_day(False)
                 return {"status": "ok", "action": "PAIN_DAY", "enabled": False}
 
             # Condition switching — loads calibrated voice profile for condition
@@ -698,9 +586,21 @@ class HybridCoordinator:
             else:
                 effective_cfg = self._cfg
 
-            # Propagate pain-day state to FusionEngine sensor thresholds
+            # Propagate pain-day state to sensor + voice thresholds. Each
+            # consumer relaxes only if its flare_profile degrade flag is set,
+            # and apply_pain_day is idempotent so calling every command is cheap.
             if self._fusion is not None:
-                self._fusion.apply_pain_day(snapshot.pain_day_active)
+                # Tilt and sound are independent flare_profile flags, so a
+                # user who tilts fine but whose mouth-sounds weaken (or vice
+                # versa) gets exactly the relaxation they configured.
+                self._fusion.apply_pain_day(
+                    tilt=snapshot.pain_day_active and snapshot.flare_tilt_degrades,
+                    sound=snapshot.pain_day_active and snapshot.flare_sound_degrades,
+                )
+            if self._whisper is not None:
+                self._whisper.apply_pain_day(
+                    snapshot.pain_day_active and snapshot.flare_voice_degrades
+                )
 
             # Always apply vocabulary corrections before any gate evaluation
             # so app-name phonetics ("key-row" → "kiro") reach the LLM fixed
@@ -1000,11 +900,17 @@ class HybridCoordinator:
             )
         return action_str
 
+    _CLOUD_TIMEOUT_S = 10.0  # circuit-breaker: cloud inference must complete within this window
+
     async def _run_cloud(self, cmd: Command) -> str:
-        """Route to raw Bedrock Claude Sonnet 4.6.
+        """Route to Anthropic API (Claude).
 
         Content filter scrubs secrets/PII from the command text before
         transmitting to external APIs. Findings are logged to the audit trail.
+
+        A 10-second asyncio.timeout acts as a circuit-breaker: if the API hangs
+        (network drop, service hiccup) the coroutine is cancelled and the
+        pipeline degrades to a CLARIFY response rather than stalling indefinitely.
         """
         # Scrub secrets before sending to external API
         if self._content_filter:
@@ -1020,7 +926,15 @@ class HybridCoordinator:
                     _gaze_coords=cmd.gaze_coords,
                 )
 
-        return await self._cloud.infer(cmd)
+        try:
+            async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
+                return await self._cloud.infer(cmd)
+        except TimeoutError:
+            log.error(
+                "HybridCoordinator: cloud inference timed out after %.0fs — CLARIFY fallback",
+                self._CLOUD_TIMEOUT_S,
+            )
+            return "CLARIFY cloud inference timed out"
 
     # ---------------------------------------------------------------------- #
     # Action execution

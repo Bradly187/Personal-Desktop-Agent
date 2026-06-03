@@ -249,6 +249,30 @@ class TestFix4PainDayFusionConfig:
 
         assert fe._effective_cfg.dead_zone_inner == 0.08
 
+    def test_sound_decoupled_from_tilt(self, engine):
+        """tilt flag off + sound on relaxes only the sound cooldown."""
+        fe, _ = engine
+        fe.apply_pain_day(tilt=False, sound=True)
+
+        assert fe._effective_cfg.dead_zone_inner  == 0.05   # tilt untouched
+        assert fe._effective_cfg.sound_cooldown_s == 0.3    # sound relaxed
+        assert fe._pain_day_active is True                  # OR for telemetry
+
+    def test_tilt_decoupled_from_sound(self, engine):
+        """sound flag off + tilt on relaxes only the tilt dead zone."""
+        fe, _ = engine
+        fe.apply_pain_day(tilt=True, sound=False)
+
+        assert fe._effective_cfg.dead_zone_inner  == 0.08   # tilt relaxed
+        assert fe._effective_cfg.sound_cooldown_s == 0.5    # sound untouched
+
+    def test_apply_pain_day_single_arg_relaxes_both(self, engine):
+        """Legacy single-positional call still relaxes both (sound defaults to tilt)."""
+        fe, _ = engine
+        fe.apply_pain_day(True)
+        assert fe._effective_cfg.dead_zone_inner  == 0.08
+        assert fe._effective_cfg.sound_cooldown_s == 0.3
+
     def test_sound_cooldown_respected_on_pain_day(self, engine):
         """Pain-day sound cooldown (0.3s) allows faster retry than normal (0.5s)."""
         fe, _ = engine
@@ -297,4 +321,6 @@ class TestFix4PainDayFusionConfig:
         cmd = Command(text="click submit", action="DICTATE", source="touch")
         asyncio.run(coordinator.route(cmd))
 
-        mock_fusion.apply_pain_day.assert_called_with(True)
+        # Tilt gated by flare_tilt_degrades (True by default); sound relaxes on
+        # any pain day — the two are now decoupled.
+        mock_fusion.apply_pain_day.assert_called_with(tilt=True, sound=True)

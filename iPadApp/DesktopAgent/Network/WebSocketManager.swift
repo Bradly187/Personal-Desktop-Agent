@@ -477,6 +477,12 @@ extension WebSocketManager {
         commandFeed.send("Scroll \(direction)")
     }
 
+    /// Tilt dwell-to-click: the cursor was held still long enough. The PC
+    /// fires whatever DwellActionToolbar selected at the current cursor.
+    func sendDwellClick() {
+        send(["type": "dwell_click"])
+    }
+
     func sendTiltTap() {
         msgCounter += 1
         send(["type": "tilt_tap", "id": "tt-\(msgCounter)"])
@@ -508,6 +514,21 @@ extension WebSocketManager {
     /// adapts VAD thresholds and PainDayEngine state.
     func sendPainDayOverride(active: Bool) {
         send(["type": "pain_day_override", "active": active])
+    }
+
+    /// Sync the user's flare degrade profile (which sensors get harder on a
+    /// flare) so BehavioralTwinState gates pain-day relaxation to match.
+    func sendFlareProfile(voiceDegrades: Bool, gestureDegrades: Bool,
+                          tiltDegrades: Bool, soundDegrades: Bool,
+                          vadScale: Double) {
+        send([
+            "type": "flare_profile",
+            "voice_degrades": voiceDegrades,
+            "gesture_degrades": gestureDegrades,
+            "tilt_degrades": tiltDegrades,
+            "sound_degrades": soundDegrades,
+            "flare_vad_scale": vadScale,
+        ])
     }
 
     /// Send the user's gesture capability assessment so GestureProcessor

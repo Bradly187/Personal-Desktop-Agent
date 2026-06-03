@@ -19,7 +19,7 @@
 # ── Core bridge & MCP ────────────────────────────────────────────────────────
 mcp==1.27.0
 aiohttp==3.13.5
-zeroconf==0.148.0
+zeroconf==0.149.16  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
 
 # ── Desktop control ───────────────────────────────────────────────────────────
 pyautogui==0.9.54
@@ -69,31 +69,27 @@ sounddevice==0.5.5
 # Models auto-download from HuggingFace on first call (~2 GB, cached).
 chatterbox-tts==0.1.3
 
-# ── Anthropic API — VisionGrounder (Claude vision) + CloudDevAgent ───────────
-# CloudDevAgent (inference/cloud_dev_agent.py) routes dev-domain queries to
-# Claude via the Messages API (--cloud-dev-agent), avoiding a local 30B wake.
+# ── Anthropic API — cloud fallback, VisionGrounder, CloudDevAgent ────────────
+# HybridCoordinator routes gate-failing commands to Claude via Messages API.
+# CloudDevAgent routes dev-domain queries to Claude (--cloud-dev-agent flag).
 # Managed Agents (client.beta.agents/sessions) need >=0.40.0; installed 0.103.1.
 anthropic>=0.40.0
 
-# ── AWS cloud fallback (Phase 6 — Bedrock, Transcribe, Polly) ────────────────
-boto3==1.43.11
-# amazon-transcribe: Gate 1 Stage 2 re-transcription (pulls grpcio, ~50 MB).
-amazon-transcribe==0.6.2
-# AgentCore Python SDK (runtime — deploy via AWS console, not CLI)
-# CLI (bedrock-agentcore.exe) ships but bedrock_agentcore.cli module missing;
-# deploy the Lambda function via CDK or the AgentCore console instead.
-bedrock-agentcore==1.10.0
 
 # ── Semantic memory (behavioral-twin-state) ──────────────────────────────────
 # ChromaDB vector store for SemanticMemory (all-MiniLM-L6-v2 embeddings).
 # Falls back to AgentDB Jaccard scoring when unavailable.
+# SECURITY: GHSA-f4j7-r4q5-qw2c (critical, pre-auth code injection) affects
+# chromadb *server* mode only. We use chromadb.PersistentClient (embedded,
+# local, no server/network) — not affected. No patched release exists yet
+# (PyPI tops out at 1.5.9); revisit when a fix ships.
 chromadb==1.5.9
 
 # ── PDF parsing for codebase_indexer.py document collection ──────────────────
 # pdfplumber is the primary parser (richer layout-aware extraction).
 # pypdf is a lighter fallback if pdfplumber is unavailable.
 pdfplumber==0.11.6
-pypdf==5.6.0
+pypdf==6.10.2  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
 
 # ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
 # windows-curses provides the stdlib curses module on Windows.
@@ -108,7 +104,7 @@ watchdog==6.0.0
 # ── WebSocket client for Kiro/VS Code bridge (KiroClient) ─────────────────────
 # Used by kiro_client.py to connect to the kiro-extension WebSocket server (:8767).
 # Optional — DevAgent degrades gracefully when Kiro is not running.
-websockets==14.2
+websockets==16.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.3.0

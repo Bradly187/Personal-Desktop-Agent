@@ -163,6 +163,27 @@ class RemoteWhisperService:
             "warm": self._warm,
         })
 
+    async def handle_devices(self, request: web.Request) -> web.Response:
+        """Return all sounddevice audio input devices on this machine."""
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            default_input = sd.default.device[0] if hasattr(sd.default, "device") else None
+            inputs = [
+                {
+                    "index": i,
+                    "name": d["name"],
+                    "channels": d["max_input_channels"],
+                    "default_samplerate": d["default_samplerate"],
+                    "is_default": (i == default_input),
+                }
+                for i, d in enumerate(devices)
+                if d["max_input_channels"] > 0
+            ]
+            return web.json_response({"inputs": inputs, "default_index": default_input})
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Remote faster-whisper service (laptop node)")
@@ -179,6 +200,7 @@ def main() -> None:
     app = web.Application(client_max_size=64 * 1024 * 1024)  # allow large audio bodies
     app.router.add_post("/transcribe", svc.handle_transcribe)
     app.router.add_get("/health", svc.handle_health)
+    app.router.add_get("/devices", svc.handle_devices)
     log.info("RemoteWhisperService listening on %s:%d", args.host, args.port)
     web.run_app(app, host=args.host, port=args.port, print=None)
 
