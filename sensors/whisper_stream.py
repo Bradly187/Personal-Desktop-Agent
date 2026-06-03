@@ -29,7 +29,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 # Shared approval gate directory — approval_hook.py writes "pending",
 # WhisperStream responds with the transcript in "response".
@@ -233,6 +233,10 @@ class WhisperStream:
         self._metrics = None   # set via set_metrics()
         self._logprob_floor_override: float | None = None
         self._pain_day_active: bool = False  # tracked for apply_pain_day() idempotence
+        self._muted: bool = False           # hard mic mute; unmute via iPad button
+        # Fired whenever the mute state changes (voice- or iPad-initiated) so the
+        # bridge can push a `mic_state` message and keep the iPad indicator in sync.
+        self.on_mute_change: Optional[Callable[[bool], None]] = None
         # D8: correction detection state — tracks last command outcome
         self._last_command_status: str = ""   # "ok" | "CLARIFY" | "failed"
         self._last_command_text: str = ""     # text of previous command
@@ -330,6 +334,25 @@ class WhisperStream:
         utterance can be detected as a correction if the previous command failed."""
         self._last_command_status = status
         self._last_command_text = text
+
+    def set_muted(self, muted: bool) -> None:
+        """Hard mute/unmute the microphone input.
+
+        When muted, on_audio_chunk() silently drops all audio — identical to
+        having no mic connected. The buffer is cleared on mute so no queued
+        audio fires after unmute. Unmute is iPad-driven (mic_mute message with
+        muted=false); voice cannot unmute because the mic is deaf when muted.
+        """
+        self._muted = muted
+        if muted:
+            self._buffer_chunks = []
+            self._buffer_start_ts = None
+        log.info("WhisperStream: mic %s", "MUTED" if muted else "UNMUTED")
+        if self.on_mute_change is not None:
+            try:
+                self.on_mute_change(muted)
+            except Exception as exc:  # never let a UI sync failure break muting
+                log.debug("on_mute_change callback failed: %s", exc)
 
     def set_lecture_mode(self, enabled: bool) -> None:
         """Enable/disable lecture mode — stores non-command audio to AgentDB."""
@@ -444,6 +467,8 @@ class WhisperStream:
         """
         if not self.available or not _NUMPY_AVAILABLE:
             return
+        if self._muted:
+            return  # hard mute — iPad button unmutes
         if time.monotonic() < self._suppress_until:
             return  # post-TTS echo guard — discard mic echo
         try:
@@ -867,4 +892,5 @@ class WhisperStream:
             "device": self._device,
             "buffer_s": round(buf_s, 2),
             "hotwords": len(self._hotwords),
+            "muted": self._muted,
         }

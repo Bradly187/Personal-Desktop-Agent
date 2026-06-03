@@ -264,6 +264,9 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "stop the agent", "cancel the task",
     "hey agent history", "what did you do", "agent history",
     "show history", "recent actions",
+    # Mic mute — voice can only mute; unmute requires the iPad button
+    # (mic is deaf once muted, so a voice unmute command can never arrive)
+    "mute mic", "mute microphone", "mic off", "silence mic",
 })
 
 
@@ -704,6 +707,13 @@ class HybridCoordinator:
                 summary = await self._audit_history_summary(n=5)
                 asyncio.create_task(self._tts_speak(summary))
                 return {"status": "ok", "action": "AGENT_HISTORY", "summary": summary}
+
+            # Mic mute — voice one-way; unmute via iPad mic_mute message
+            elif _lower in ("mute mic", "mute microphone", "mic off", "silence mic"):
+                if self._whisper is not None:
+                    self._whisper.set_muted(True)
+                asyncio.create_task(self._tts_speak("Microphone muted. Tap the iPad to unmute."))
+                return {"status": "ok", "action": "MIC_MUTE", "muted": True}
 
         t0 = time.monotonic()
         route_label = "local"

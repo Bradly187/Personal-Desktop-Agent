@@ -26,6 +26,8 @@ Message types:
   pain_day_override      →  BehavioralTwinState.set_manual_pain_day(); relaxes VAD threshold
   calibration_start      →  spawns VoiceCalibrator session task; streams progress to iPad
   calibration_cancel     →  VoiceCalibrator.stop()
+  mic_mute               →  WhisperStream.set_muted(bool) — hard mute/unmute mic input
+                            (PC echoes a `mic_state` push so the iPad indicator syncs)
   ipad_log               →  structured log entries forwarded to AgentDB ipad_logs table
 
 Usage:
@@ -144,6 +146,9 @@ class IPadBridge:
 
     def set_whisper_stream(self, whisper: "WhisperStream") -> None:
         self._whisper = whisper
+        # Push every mute-state change (voice- or iPad-initiated) to all clients
+        # so the iPad's mute indicator stays in sync.
+        whisper.on_mute_change = self._notify_mic_state
 
     def set_coordinator(self, coordinator) -> None:
         self._coordinator = coordinator
@@ -187,6 +192,7 @@ class IPadBridge:
                 "active_window": None,
                 "cursor": {"x": 0, "y": 0},
                 "active_dwell_action": self._active_dwell_action,
+                "muted": bool(self._whisper and self._whisper._muted),
                 "ts": time.time(),
             })
         except Exception as exc:
@@ -425,6 +431,15 @@ class IPadBridge:
             await self._ack(ws, msg.get("id"), "ok", "calibration cancelled")
             return
 
+
+        if msg_type == "mic_mute":
+            muted = bool(msg.get("muted", True))
+            if self._whisper is not None:
+                self._whisper.set_muted(muted)
+            log.info("ipad_bridge: mic %s via iPad button", "MUTED" if muted else "UNMUTED")
+            await self._ack(ws, msg.get("id"), "ok",
+                            "mic muted" if muted else "mic unmuted")
+            return
 
         if msg_type == "audio_stream":
             if self._whisper and self._whisper.available:
@@ -832,6 +847,23 @@ class IPadBridge:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    def _notify_mic_state(self, muted: bool) -> None:
+        """Sync callback from WhisperStream.set_muted — schedule a broadcast.
+
+        set_muted() is synchronous and may be called from either the bridge's
+        mic_mute handler or the coordinator's voice path; both run on the bridge
+        event loop, so create_task is safe. Guard for the no-loop case.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.broadcast_mic_state(muted))
+
+    async def broadcast_mic_state(self, muted: bool) -> None:
+        """Push the current mic mute state to all connected iPad clients."""
+        await self.broadcast_json({"type": "mic_state", "muted": bool(muted)})
 
     async def send_recalibration_request(
         self, reason: str = "voice_clarity", degradation_pct: float = 0.0

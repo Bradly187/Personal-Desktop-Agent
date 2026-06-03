@@ -39,6 +39,11 @@ final class WebSocketManager: ObservableObject {
     @Published private(set) var state: ConnectionState = .disconnected
     @Published private(set) var latencyMs: Double = 0
 
+    /// Current microphone mute state, mirrored from the PC. Updated by the
+    /// `mic_state` push (voice- or iPad-initiated) and the welcome `status`.
+    /// Safety-critical: surfaced as a persistent toolbar indicator.
+    @Published private(set) var micMuted: Bool = false
+
     // Fix #3: PassthroughSubject delivers every message to every subscriber (no single-slot loss).
     // Keep @Published lastMessage for backward compat but add a subject that never drops.
     @Published private(set) var lastMessage: BridgeMessage?
@@ -302,11 +307,19 @@ final class WebSocketManager: ObservableObject {
             }
         case "status":
             let cursor = json["cursor"] as? [String: Int] ?? [:]
+            // Welcome/status frames carry the current mute state so the
+            // indicator is correct immediately on (re)connect.
+            if let muted = json["muted"] as? Bool {
+                micMuted = muted
+            }
             parsed = .status(
                 activeWindow: json["active_window"] as? String,
                 cursorX: cursor["x"] ?? 0,
                 cursorY: cursor["y"] ?? 0
             )
+        case "mic_state":
+            micMuted = json["muted"] as? Bool ?? false
+            parsed = .unknown(type: type, raw: json)
         case "screenshot":
             parsed = .screenshot(
                 id: id,
@@ -548,6 +561,16 @@ extension WebSocketManager {
         guard let pending = _pendingGestureAssessment else { return }
         send(["type": "gesture_assessment", "disabled": pending])
         _pendingGestureAssessment = nil
+    }
+
+    /// Mute or unmute the PC microphone. The PC echoes a `mic_state` push that
+    /// updates `micMuted`; we also set it optimistically for instant UI feedback.
+    /// Unlike voice ("mute mic" is one-way), this works in both directions — it
+    /// is the only way to UNmute once the mic is deaf.
+    func sendMicMute(_ muted: Bool) {
+        micMuted = muted
+        send(["type": "mic_mute", "muted": muted])
+        commandFeed.send(muted ? "Mic muted" : "Mic unmuted")
     }
 
     /// Forward a batch of structured log entries to the PC bridge.

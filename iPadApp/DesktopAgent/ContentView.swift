@@ -46,6 +46,13 @@ struct ContentView: View {
                 .padding(.top, 44) // below connection banner
                 .allowsHitTesting(false)
 
+            // Persistent mic-mute indicator/toggle — top-trailing, always
+            // interactive. Safety-critical: the only way to unmute once muted.
+            MicMuteIndicator()
+                .padding(.trailing, DesignTokens.Spacing.lg)
+                .padding(.top, DesignTokens.Spacing.sm)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+
             // Tilt dwell-to-click countdown ring — centered, non-interactive.
             // Observes TiltSensor directly so its dwellInProgress drives the ring.
             DwellRingHUD(tiltSensor: sensorManager.tiltSensor,
