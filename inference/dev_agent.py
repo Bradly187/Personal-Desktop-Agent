@@ -975,7 +975,10 @@ class DevAgent:
                 log.debug("DevAgent._rag_context() remote indexer failed: %s — local fallback", exc)
                 hits = None
 
-        if hits is None:
+        # M3: an empty remote result (flaking service returning []) is treated as
+        # a miss, not success — fall back to the local indexer rather than
+        # silently dropping RAG context.
+        if not hits:
             if self._indexer is None or not self._indexer.available:
                 return None
             try:
