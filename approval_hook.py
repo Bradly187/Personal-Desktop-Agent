@@ -239,6 +239,18 @@ def main() -> None:
     if not _needs_approval(tool_name, config):
         sys.exit(0)
 
+    # --- Goal-session fast-path: silent auto-approve under an authorized goal --
+    try:
+        from core.goal_session import GoalSessionStore
+        _gs = GoalSessionStore.get_active()
+        if _gs and _gs.allows(tool_name):
+            GoalSessionStore.consume()
+            log.info("approval_hook: auto-approved %r under goal session %r",
+                     tool_name, _gs.goal[:60])
+            sys.exit(0)
+    except Exception as _gs_exc:
+        log.debug("approval_hook: goal session check failed: %s", _gs_exc)
+
     # --- Speak the action description ----------------------------------------
     message = _build_message(tool_name, tool_input)
     voice = config.get("voice_id", "Danielle")

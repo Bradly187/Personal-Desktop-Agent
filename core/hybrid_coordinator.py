@@ -257,6 +257,16 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "run voice calibration", "calibrate my voice", "quick calibration",
     "calibrate flare day", "calibrate allergy day",
     "calibrate svt", "calibrate svt attack",
+    # Goal-level agent control
+    "hey agent status", "what are you doing", "agent status",
+    "status", "what's happening",
+    "hey agent stop", "cancel task", "cancel agent", "stop agent",
+    "stop the agent", "cancel the task",
+    "hey agent history", "what did you do", "agent history",
+    "show history", "recent actions",
+    # Mic mute — voice can only mute; unmute requires the iPad button
+    # (mic is deaf once muted, so a voice unmute command can never arrive)
+    "mute mic", "mute microphone", "mic off", "silence mic",
 })
 
 
@@ -269,7 +279,12 @@ def _is_system_control_voice(cmd) -> bool:
     if norm in _SYSTEM_CONTROL_PHRASES:
         return True
     # lecture-notes search is a startswith/contains pattern, not exact-match
-    return "lecture notes" in norm and "search" in norm
+    if "lecture notes" in norm and "search" in norm:
+        return True
+    # "hey agent authorize <goal>" — prefix match
+    if norm.startswith("hey agent authorize ") or norm.startswith("authorize "):
+        return True
+    return False
 
 
 class HybridCoordinator:
@@ -447,6 +462,54 @@ class HybridCoordinator:
         """Wire MemoryManager for standardised storage access."""
         self._memory = memory
 
+    def _approval_config(self) -> dict:
+        """Load approval_config.json; returns {} on failure (safe defaults used by callers)."""
+        try:
+            import json
+            from pathlib import Path
+            p = Path(__file__).parent.parent / "approval_config.json"
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    async def _tts_speak(self, text: str) -> None:
+        """Speak text via the configured TTS backend (fire-and-forget safe)."""
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            await asyncio.to_thread(_get_tts().speak_sync, text)
+        except Exception as exc:
+            log.debug("HybridCoordinator._tts_speak failed: %s", exc)
+
+    async def _audit_history_summary(self, n: int = 5) -> str:
+        """Query audit.db for the last `n` mcp_call events and return a spoken summary."""
+        if self._audit is None:
+            return "Audit log not available."
+        try:
+            rows = await self._audit.get_recent_mcp_calls(n=n)
+            if not rows:
+                return "No recent actions recorded."
+            parts = []
+            for r in rows:
+                tool = r.get("tool", "unknown")
+                params = r.get("params") or ""
+                # Extract the most readable param for speech
+                try:
+                    import json as _json
+                    p = _json.loads(params) if isinstance(params, str) else params
+                    detail = (
+                        p.get("command", "")[:30] or
+                        p.get("text", "")[:30] or
+                        p.get("title_substring", "")[:30] or
+                        p.get("key", "") or ""
+                    )
+                except Exception:
+                    detail = ""
+                parts.append(f"{tool}{' ' + detail if detail else ''}")
+            return "Last " + str(len(parts)) + " actions: " + ", ".join(parts) + "."
+        except Exception as exc:
+            log.debug("HybridCoordinator._audit_history_summary failed: %s", exc)
+            return "Could not retrieve history."
+
     async def route(self, cmd: Command) -> dict:
         """Route a Command through the gate decision tree and execute it.
 
@@ -598,6 +661,59 @@ class HybridCoordinator:
                 t.add_done_callback(lambda t: self._on_task_done(t, "_run_calibration"))
                 return {"status": "ok", "action": "CALIBRATION_START",
                         "condition": condition, "quick": quick}
+
+            # ── Goal-level agent control ──────────────────────────────────────
+
+            # "hey agent status" / "what are you doing"
+            if _lower in ("hey agent status", "what are you doing", "agent status",
+                          "status", "what's happening"):
+                if self._dev_agent is not None:
+                    ps = self._dev_agent.get_plan_status()
+                    if ps.get("active"):
+                        msg = (f"Running step {ps['step']} of {ps['total_steps']}: "
+                               f"{ps.get('goal', '')[:50]}")
+                    else:
+                        msg = "No active task."
+                    asyncio.create_task(self._tts_speak(msg))
+                    return {"status": "ok", "action": "AGENT_STATUS", "plan": ps}
+
+            # "hey agent stop" / "cancel task" / "cancel agent"
+            elif _lower in ("hey agent stop", "cancel task", "cancel agent", "stop agent",
+                            "stop the agent", "cancel the task"):
+                if self._dev_agent is not None:
+                    self._dev_agent.request_cancel()
+                    asyncio.create_task(self._tts_speak("Cancelling after current step."))
+                    return {"status": "ok", "action": "AGENT_CANCEL"}
+                return {"status": "ok", "action": "AGENT_CANCEL", "note": "no active agent"}
+
+            # "hey agent authorize <goal>" — create a standalone goal session
+            elif _lower.startswith("hey agent authorize ") or _lower.startswith("authorize "):
+                goal_text = (cmd.text.split("authorize ", 1)[-1]).strip(" .,!?\"'")
+                if goal_text:
+                    from core.goal_session import GoalSessionStore
+                    duration = self._approval_config().get("goal_session_duration_s", 900)
+                    max_act = self._approval_config().get("goal_session_max_actions", 50)
+                    GoalSessionStore.create(goal=goal_text, domain="plan",
+                                            duration_s=duration, max_actions=max_act)
+                    mins = int(duration / 60)
+                    asyncio.create_task(
+                        self._tts_speak(f"Goal authorized for {mins} minutes: {goal_text[:40]}")
+                    )
+                    return {"status": "ok", "action": "GOAL_AUTHORIZE", "goal": goal_text}
+
+            # "hey agent history" / "what did you do"
+            elif _lower in ("hey agent history", "what did you do", "agent history",
+                            "show history", "recent actions"):
+                summary = await self._audit_history_summary(n=5)
+                asyncio.create_task(self._tts_speak(summary))
+                return {"status": "ok", "action": "AGENT_HISTORY", "summary": summary}
+
+            # Mic mute — voice one-way; unmute via iPad mic_mute message
+            elif _lower in ("mute mic", "mute microphone", "mic off", "silence mic"):
+                if self._whisper is not None:
+                    self._whisper.set_muted(True)
+                asyncio.create_task(self._tts_speak("Microphone muted. Tap the iPad to unmute."))
+                return {"status": "ok", "action": "MIC_MUTE", "muted": True}
 
         t0 = time.monotonic()
         route_label = "local"

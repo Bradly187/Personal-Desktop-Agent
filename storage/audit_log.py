@@ -251,6 +251,10 @@ class AuditLog:
             log.warning("AuditLog.get_by_type failed: %s", exc)
             return []
 
+    async def get_recent_mcp_calls(self, n: int = 10) -> list[dict]:
+        """Return the most recent `n` mcp_call events for history queries."""
+        return await self.get_by_type("mcp_call", limit=n)
+
     async def get_security_events(
         self, severity: Optional[str] = None, limit: int = 50
     ) -> list[dict]:

@@ -185,6 +185,13 @@ class DevAgent:
         self._cluster_health = None        # ClusterHealthMonitor | None
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
 
+        # Goal-level authorization state (reset after each plan)
+        self._plan_authorized: bool = False
+        self._cancel_event: asyncio.Event = asyncio.Event()
+        self._current_goal: Optional[str] = None
+        self._current_step: int = 0
+        self._total_steps: int = 0
+
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
         self._indexer = indexer
@@ -214,6 +221,24 @@ class DevAgent:
     def set_memory(self, memory) -> None:
         """Wire MemoryManager for standardised storage access."""
         self._memory = memory
+
+    def request_cancel(self) -> None:
+        """Signal the running plan to stop after the current step completes."""
+        self._cancel_event.set()
+        log.info("DevAgent: cancel requested — will stop after current step")
+
+    def get_plan_status(self) -> dict:
+        """Return the current plan execution state for voice status queries."""
+        if self._current_goal is None:
+            return {"active": False}
+        return {
+            "active": True,
+            "goal": self._current_goal,
+            "step": self._current_step,
+            "total_steps": self._total_steps,
+            "authorized": self._plan_authorized,
+            "cancel_requested": self._cancel_event.is_set(),
+        }
 
     # ---------------------------------------------------------------------- #
     # Primary entry point
@@ -332,9 +357,22 @@ class DevAgent:
 
         log.info("DevAgent: plan has %d steps", len(steps))
 
+        # Upfront plan approval gate: speak summary → voice yes/no → authorize all steps
+        self._plan_authorized = await self._approve_plan_upfront(goal, steps)
+        self._cancel_event.clear()
+        self._current_goal = goal
+        self._total_steps = min(len(steps), self.MAX_STEPS)
+        self._current_step = 0
+
         # Step 2: Execute
         executed: list[AgentStep] = []
+        cancelled = False
         for i, step in enumerate(steps[: self.MAX_STEPS]):
+            if self._cancel_event.is_set():
+                log.info("DevAgent: plan cancelled before step %d", i + 1)
+                cancelled = True
+                break
+            self._current_step = i + 1
             log.info("DevAgent: step %d/%d  action=%s  args=%r",
                      i + 1, len(steps), step.action, step.args[:60])
             step_t0 = time.monotonic()
@@ -360,18 +398,141 @@ class DevAgent:
                            + "\n".join(f"  {s.action} → {'ok' if s.success else 'failed'}"
                                        for s in executed))
 
+        all_ok = all(s.success for s in executed) if executed else True
         result = AgentResult(
             goal=goal,
             domain="plan",
             model_used=plan_result.model,
             steps=executed,
             response_text=reflect_text or plan_result.text,
-            success=all(s.success for s in executed),
+            success=all_ok and not cancelled,
             total_latency_ms=(time.monotonic() - t0) * 1000,
         )
         self._results_log.append(result)
         await self._persist_run(result, command_id=None)
+
+        # Speak completion summary and clean up goal-session state
+        await self._speak_plan_completion(result, cancelled)
+        self._reset_plan_state()
+
         return result
+
+    # ---------------------------------------------------------------------- #
+    # Plan-level authorization helpers
+    # ---------------------------------------------------------------------- #
+
+    async def _approve_plan_upfront(self, goal: str, steps: list[AgentStep]) -> bool:
+        """Speak plan summary, capture voice yes/no, write GoalSession on approval.
+
+        Returns True if the user approved (or TTS/mic unavailable — auto-approve
+        so a hardware failure never silently drops work).
+        """
+        from core.goal_session import GoalSessionStore
+
+        verbs = [s.action for s in steps[: self.MAX_STEPS]]
+        verb_summary = ", ".join(verbs[:6])
+        if len(verbs) > 6:
+            verb_summary += f" … (+{len(verbs) - 6} more)"
+        n = min(len(steps), self.MAX_STEPS)
+        message = f"I'll run {n} step{'s' if n != 1 else ''}: {verb_summary}. Approve all?"
+
+        log.info("DevAgent: requesting plan approval — %s", message)
+
+        # Speak via TTS
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            await asyncio.to_thread(_get_tts().speak_sync, message)
+        except Exception as exc:
+            log.debug("DevAgent._approve_plan_upfront: TTS unavailable (%s) — auto-approving", exc)
+            GoalSessionStore.create(goal=goal, domain="plan")
+            return True
+
+        # Wait for iPad approval signal (7 s window, same as approval_hook.py)
+        _APPROVAL_DIR = Path.home() / ".claude" / "approval"
+        _PENDING_FILE  = _APPROVAL_DIR / "pending"
+        _RESPONSE_FILE = _APPROVAL_DIR / "response"
+
+        _APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
+        _RESPONSE_FILE.unlink(missing_ok=True)
+        _PENDING_FILE.write_text(str(time.monotonic()), encoding="utf-8")
+
+        transcript: Optional[str] = None
+        deadline = time.monotonic() + 7.0
+        try:
+            while time.monotonic() < deadline:
+                if _RESPONSE_FILE.exists():
+                    transcript = _RESPONSE_FILE.read_text(encoding="utf-8-sig").strip()
+                    break
+                await asyncio.sleep(0.1)
+        finally:
+            _PENDING_FILE.unlink(missing_ok=True)
+            _RESPONSE_FILE.unlink(missing_ok=True)
+
+        if transcript is None:
+            # Silence or bridge not running → fallback: 4 s PC mic recording
+            try:
+                import numpy as np
+                import sounddevice as sd
+                audio = await asyncio.to_thread(
+                    lambda: sd.rec(int(4.0 * 16_000), samplerate=16_000,
+                                   channels=1, dtype="float32").flatten()
+                )
+                await asyncio.to_thread(sd.wait)
+                rms = float(np.sqrt(np.mean(audio ** 2)))
+                if rms < 0.005:
+                    # Silence → auto-approve
+                    log.info("DevAgent._approve_plan_upfront: silence → auto-approved")
+                    GoalSessionStore.create(goal=goal, domain="plan")
+                    return True
+                if self._confirm_whisper is None:
+                    from faster_whisper import WhisperModel
+                    self._confirm_whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
+                segs, _ = self._confirm_whisper.transcribe(audio, language="en", beam_size=1, vad_filter=False)
+                transcript = " ".join(s.text for s in segs).lower().strip()
+            except Exception as exc:
+                log.debug("DevAgent._approve_plan_upfront: mic fallback failed (%s) — auto-approving", exc)
+                GoalSessionStore.create(goal=goal, domain="plan")
+                return True
+
+        _REJECT = frozenset({"no", "nope", "stop", "cancel", "abort", "block", "don't", "wait", "hold", "skip"})
+        _APPROVE = frozenset({"yes", "yeah", "yep", "ok", "okay", "sure", "approve", "go", "proceed", "do it"})
+
+        words = set((transcript or "").lower().split())
+        if words & _REJECT:
+            log.info("DevAgent._approve_plan_upfront: REJECTED — %r", transcript)
+            return False
+
+        # Approved (explicit yes, or silence-auto, or ambiguous → approve)
+        log.info("DevAgent._approve_plan_upfront: approved — %r", transcript)
+        GoalSessionStore.create(goal=goal, domain="plan")
+        return True
+
+    async def _speak_plan_completion(self, result: AgentResult, cancelled: bool) -> None:
+        """Speak a short TTS summary after a plan finishes."""
+        if cancelled:
+            msg = (f"Task cancelled at step {self._current_step} of {self._total_steps}.")
+        elif result.success:
+            summary = (result.response_text or "")[:80].replace("\n", " ")
+            msg = f"Done. {summary}" if summary else "Plan complete."
+        else:
+            failed = [s for s in result.steps if not s.success]
+            first_err = (failed[0].result or "")[:60] if failed else ""
+            msg = f"Task failed at step {self._current_step}: {first_err}" if first_err else "Plan failed."
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            asyncio.create_task(_get_tts().speak(msg))
+        except Exception as exc:
+            log.debug("DevAgent._speak_plan_completion: TTS failed: %s", exc)
+
+    def _reset_plan_state(self) -> None:
+        """Clean up goal-session and status fields after a plan run."""
+        from core.goal_session import GoalSessionStore
+        GoalSessionStore.cancel()
+        self._plan_authorized = False
+        self._cancel_event.clear()
+        self._current_goal = None
+        self._current_step = 0
+        self._total_steps = 0
 
     async def _reflect(
         self, goal: str, steps: list[AgentStep], model: str
@@ -652,6 +813,11 @@ class DevAgent:
             "no", "nope", "stop", "cancel", "abort", "block", "don't",
             "wait", "hold", "skip", "never",
         })
+
+        # If the user already approved the entire plan upfront, skip per-op confirmation
+        if self._plan_authorized:
+            log.info("DevAgent._confirm: skipping (plan authorized) — %s", description)
+            return True
 
         log.info("DevAgent: confirmation required — %s", description)
 
@@ -1027,6 +1193,7 @@ class DevAgent:
             "kiro_bridge": (
                 self._kiro.get_status() if self._kiro is not None else "not wired"
             ),
+            "plan": self.get_plan_status(),
         }
 
     def get_last_result(self) -> Optional[AgentResult]:

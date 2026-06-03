@@ -34,8 +34,9 @@ from typing import Any, Coroutine
 
 log = logging.getLogger(__name__)
 
-_MAX_CONCURRENT_DEV = 1   # only one heavy dev/background task at a time
-_DEV_TASK_TIMEOUT_S = 30  # hard ceiling on a single dev step
+_MAX_CONCURRENT_DEV = 1    # only one heavy dev/background task at a time
+_DEV_TASK_TIMEOUT_S = 30   # ceiling for single specialist-model inferences
+_PLAN_TASK_TIMEOUT_S = 300 # ceiling for full DevAgent plan_and_run() (5 min)
 
 
 class Priority(IntEnum):
@@ -93,6 +94,24 @@ class AccessibilityScheduler:
 
     # ── Public submit API ──────────────────────────────────────────────────────
 
+    def submit_plan(
+        self,
+        coro: Coroutine[Any, Any, Any],
+        label: str = "",
+    ) -> asyncio.Future:
+        """Schedule a full DevAgent plan at DEV_AGENT priority with the 5-min ceiling.
+
+        Use this instead of submit(..., Priority.DEV_AGENT) when the coroutine is
+        plan_and_run() rather than a single specialist-model inference.
+        """
+        self._seq += 1
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future = loop.create_future()
+        self._queue.put_nowait(
+            (Priority.DEV_AGENT.value, self._seq, coro, future, label, _PLAN_TASK_TIMEOUT_S)
+        )
+        return future
+
     def submit(
         self,
         coro: Coroutine[Any, Any, Any],
@@ -107,7 +126,9 @@ class AccessibilityScheduler:
         self._seq += 1
         loop = asyncio.get_event_loop()
         future: asyncio.Future = loop.create_future()
-        self._queue.put_nowait((priority.value, self._seq, coro, future, label))
+        self._queue.put_nowait(
+            (priority.value, self._seq, coro, future, label, _DEV_TASK_TIMEOUT_S)
+        )
         return future
 
     # ── Worker ────────────────────────────────────────────────────────────────
@@ -124,13 +145,13 @@ class AccessibilityScheduler:
         """
         while self._running:
             try:
-                priority_val, _seq, coro, future, label = await self._queue.get()
+                priority_val, _seq, coro, future, label, timeout_s = await self._queue.get()
                 priority = Priority(priority_val)
 
                 if priority >= Priority.DEV_AGENT:
                     # Heavy task — acquire semaphore, launch with timeout
                     asyncio.create_task(
-                        self._run_dev_task(coro, future, label),
+                        self._run_dev_task(coro, future, label, timeout_s),
                         name=f"sched_dev_{label}",
                     )
                 else:
@@ -168,15 +189,16 @@ class AccessibilityScheduler:
         coro: Coroutine[Any, Any, Any],
         future: asyncio.Future,
         label: str,
+        timeout_s: float = _DEV_TASK_TIMEOUT_S,
     ) -> None:
         """Run a gated dev/background coroutine under the semaphore with timeout."""
         async with self._dev_sem:
             try:
-                result = await asyncio.wait_for(coro, timeout=_DEV_TASK_TIMEOUT_S)
+                result = await asyncio.wait_for(coro, timeout=timeout_s)
                 if not future.done():
                     future.set_result(result)
             except asyncio.TimeoutError:
-                msg = f"dev task {label!r} timed out after {_DEV_TASK_TIMEOUT_S}s"
+                msg = f"dev task {label!r} timed out after {timeout_s}s"
                 log.warning("Scheduler: %s", msg)
                 if not future.done():
                     future.set_exception(asyncio.TimeoutError(msg))

@@ -92,6 +92,23 @@ struct SettingsView: View {
                     DASectionHeader(title: "Connection")
                 }
 
+                // Microphone mute — safety-critical. Voice "mute mic" is one-way
+                // (the mic goes deaf), so this toggle is the only way to unmute.
+                Section {
+                    Toggle("Mute Microphone", isOn: Binding(
+                        get: { wsManager.micMuted },
+                        set: { wsManager.sendMicMute($0) }
+                    ))
+                    .tint(theme.destructive)
+                    Text(wsManager.micMuted
+                         ? "Microphone is muted. The PC ignores all voice input until you unmute here."
+                         : "Stops the PC from hearing any voice. You can also say “hey agent mute mic”, but only this toggle can unmute.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
+                } header: {
+                    DASectionHeader(title: "Microphone")
+                }
+
                 // Tilt
                 Section {
                     Toggle("Enable Tilt", isOn: $settings.tiltEnabled)
