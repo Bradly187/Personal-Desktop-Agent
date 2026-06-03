@@ -104,8 +104,10 @@ class CoordinatorConfig:
 
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
-    # Anthropic API (cloud fallback)
-    anthropic_model: str = "claude-sonnet-4-6-20250514"
+    # Anthropic API (cloud fallback). Haiku 4.5 — matches the model documented
+    # in CLAUDE.md (8/8 on voice misrecognitions) and exercised by the tests;
+    # the prior default ("claude-sonnet-4-6-20250514") was a stale/typo'd ID.
+    anthropic_model: str = "claude-haiku-4-5-20251001"
 
 
 # ---------------------------------------------------------------------------
@@ -917,14 +919,10 @@ class HybridCoordinator:
             clean_text, findings = await self._content_filter.scrub(cmd.text)
             if findings:
                 log.info("ContentFilter: redacted %d secret(s) before cloud call", len(findings))
-                cmd = Command(
-                    text=clean_text,
-                    whisper_logprob=cmd.whisper_logprob,
-                    gesture_confidence=cmd.gesture_confidence,
-                    source=cmd.source,
-                    session_context=cmd.session_context,
-                    _gaze_coords=cmd.gaze_coords,
-                )
+                # replace() preserves every field (action, source, params, …) and
+                # only overrides text — the manual rebuild dropped the required
+                # `action` and used a nonexistent `_gaze_coords` kwarg (TypeError).
+                cmd = _dc_replace(cmd, text=clean_text)
 
         try:
             async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
