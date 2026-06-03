@@ -154,7 +154,14 @@ class WhisperStream:
     # Wake phrase — transcripts must start with one of these (case-insensitive)
     # to be forwarded to FusionEngine.  Bypassed when awaiting a clarification
     # response so the user can say "up" without needing "hey agent up".
-    WAKE_PHRASES: tuple[str, ...] = ("hey agent", "agent")
+    # Includes common Whisper mishearings of "agent" — observed live: "agent"
+    # → "aiden"; also "agents"/"a gent". Erring toward firing is the right
+    # trade-off for a single-user accessibility tool (the alternative is a
+    # silently-dropped command). Longest match wins (sorted in the matcher).
+    WAKE_PHRASES: tuple[str, ...] = (
+        "hey agent", "hey aiden", "hey agents", "hey a gent",
+        "agent", "aiden", "agents",
+    )
 
     def __init__(
         self,

@@ -240,6 +240,38 @@ def _apply_pain_day_adjustments(cfg, snapshot) -> "CoordinatorConfig":
     )
 
 
+# Voice phrases handled by the system-control block in route() (pain day,
+# lecture mode, condition switching, calibration). The dev-agent pre-gate must
+# NOT intercept these: the DomainClassifier maps some (e.g. "pain day on" →
+# general) to dev domains, which would shadow the keyword handler and send the
+# phrase to an LLM instead. KEEP IN SYNC with the keyword block in route().
+_SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
+    "start lecture mode", "lecture mode on", "begin lecture mode",
+    "stop lecture mode", "lecture mode off", "end lecture mode",
+    "pain day on", "flare day on", "bad day",
+    "pain day off", "flare day off", "feeling better",
+    "this is a good day", "good day mode", "feeling well",
+    "this is a flare day", "flare day", "flare mode",
+    "this is an allergy day", "allergy day", "allergy mode",
+    "having an svt", "svt attack", "svt mode", "this is an svt day",
+    "run voice calibration", "calibrate my voice", "quick calibration",
+    "calibrate flare day", "calibrate allergy day",
+    "calibrate svt", "calibrate svt attack",
+})
+
+
+def _is_system_control_voice(cmd) -> bool:
+    """True if `cmd` is a voice system-control keyword that route()'s keyword
+    block handles — so the dev-agent pre-gate leaves it alone."""
+    if cmd.source not in ("voice", "voice_local"):
+        return False
+    norm = cmd.text.lower().strip(" \t\n.,!?;:\"'")
+    if norm in _SYSTEM_CONTROL_PHRASES:
+        return True
+    # lecture-notes search is a startswith/contains pattern, not exact-match
+    return "lecture notes" in norm and "search" in norm
+
+
 class HybridCoordinator:
     # Class-level DomainClassifier — stateless keyword scorer, no need to
     # re-instantiate per route() call.
@@ -422,7 +454,9 @@ class HybridCoordinator:
         here and forwarded to DevAgent before the accessibility pipeline runs.
         """
         # --- Dev-agent pre-gate: intercept non-command domains ---
-        if self._dev_agent:
+        # Skip for voice system-control keywords so they reach the keyword block
+        # below instead of being misrouted to an LLM (e.g. "pain day on").
+        if self._dev_agent and not _is_system_control_voice(cmd):
             domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
                 # Cloud DevAgent branch — route to Claude when configured to,

@@ -48,3 +48,28 @@ def test_feeling_better_with_bang_turns_off():
     res = _route(c, "Feeling better!")
     c._twin.set_manual_pain_day.assert_called_once_with(False)
     assert res.get("action") == "PAIN_DAY"
+
+
+# --- bug #3: dev-agent pre-gate must not shadow system-control keywords -------
+
+def test_is_system_control_voice_classifier():
+    from core.hybrid_coordinator import _is_system_control_voice
+    assert _is_system_control_voice(Command(text="Pain day on.", action="X", source="voice"))
+    assert _is_system_control_voice(Command(text="calibrate svt", action="X", source="voice"))
+    # a genuine dev query is NOT system-control
+    assert not _is_system_control_voice(
+        Command(text="explain this function", action="X", source="voice"))
+    # only voice sources qualify
+    assert not _is_system_control_voice(
+        Command(text="pain day on", action="X", source="touch"))
+
+
+def test_pain_day_not_shadowed_when_dev_agent_present():
+    # With a DevAgent wired, "pain day on" classifies as a dev domain — without
+    # the guard it was intercepted and sent to an LLM (the live 404 bug).
+    c = _coord()
+    c._dev_agent = MagicMock()
+    res = _route(c, "Pain day on.")
+    c._dev_agent.handle.assert_not_called()          # not misrouted to DevAgent
+    c._twin.set_manual_pain_day.assert_called_once_with(True)
+    assert res.get("action") == "PAIN_DAY"
