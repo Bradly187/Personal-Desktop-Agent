@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Optional
 
 log = logging.getLogger(__name__)
 
+from core.async_utils import fire_and_log
+
 if TYPE_CHECKING:
     from adaptive.behavioral_twin_state import BehavioralTwinState
     from core.command_executor import Command
@@ -184,8 +186,9 @@ class ContinuousTrainer:
 
     def record_gesture_sample(self, gesture: str, confidence: float) -> None:
         """Synchronous wrapper for direct calls from GestureProcessor."""
-        asyncio.ensure_future(
-            self._db.record_gesture_sample(gesture, confidence)
+        fire_and_log(
+            self._db.record_gesture_sample(gesture, confidence),
+            log, "gesture_sample write",
         )
 
     async def get_gesture_floor(self, gesture: str) -> float:

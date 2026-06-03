@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+from core.async_utils import fire_and_log
+
 
 # ---------------------------------------------------------------------------
 # Signal processing utility functions
@@ -689,7 +691,7 @@ class FusionEngine:
             # Cursor position from cache (updated at 10 Hz by _cursor_cache_loop)
             _cursor_x, _cursor_y = self._cursor_pos
 
-            asyncio.ensure_future(
+            fire_and_log(
                 self._db.insert_sensor_telemetry(
                     self._session_id,
                     time.time(),
@@ -706,12 +708,14 @@ class FusionEngine:
                     active_source=self._last_active_source,
                     gesture_conf=self._last_gesture_conf,
                     rms_ambient=_rms,
-                )
+                ),
+                log, "sensor_telemetry write",
             )
             # Also push legacy sensor_events for backward-compat DuckDB queries
             if self._last_tilt_sample is not None:
-                asyncio.ensure_future(
-                    self._db.insert_sensor_event("tilt", x=_tilt_rx, y=_tilt_ry)
+                fire_and_log(
+                    self._db.insert_sensor_event("tilt", x=_tilt_rx, y=_tilt_ry),
+                    log, "sensor_event write",
                 )
 
     async def _emit(self, cmd: Command) -> None:
