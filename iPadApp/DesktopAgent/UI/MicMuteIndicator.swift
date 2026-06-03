@@ -23,17 +23,17 @@ struct MicMuteIndicator: View {
                 Text(muted ? "Muted" : "Mic on")
                     .font(DesignTokens.Typography.caption.weight(.semibold))
             }
-            .foregroundStyle(muted ? Color.white : theme.textSecondary)
+            .foregroundStyle(muted ? Color.white : theme.accent)
             .padding(.horizontal, DesignTokens.Spacing.md)
             .frame(minHeight: DesignTokens.Size.touchTargetMin)
             .background(
                 Capsule()
-                    .fill(muted ? theme.destructive : theme.surfaceSecondary)
+                    .fill(muted ? theme.destructive : theme.accent.opacity(0.12))
             )
             .overlay(
                 Capsule()
-                    .strokeBorder(muted ? theme.destructive : theme.textSecondary.opacity(0.25),
-                                  lineWidth: muted ? 2 : 1)
+                    .strokeBorder(muted ? theme.destructive : theme.accent.opacity(0.6),
+                                  lineWidth: 2)
             )
             .shadow(color: .black.opacity(muted ? 0.2 : 0.08),
                     radius: muted ? 5 : 2, x: 0, y: 1)
