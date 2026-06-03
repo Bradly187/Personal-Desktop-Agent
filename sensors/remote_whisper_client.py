@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import random
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,10 +43,14 @@ class _Info:
 
 
 class RemoteWhisperClient:
-    def __init__(self, url: str, timeout: float = 30.0) -> None:
+    def __init__(self, url: str, timeout: float = 8.0, retries: int = 1) -> None:
         # url e.g. "http://192.168.18.12:8888"
+        # timeout 8s (was 30s): LAN inference is ~1-3s, so 30s only delayed the
+        # fall back to local on a hung laptop. retries=1 absorbs a single
+        # transient blip (jittered backoff) before giving up.
         self._endpoint = url.rstrip("/") + "/transcribe"
         self._timeout = timeout
+        self._retries = max(0, retries)
 
     def transcribe(
         self,
@@ -68,8 +77,22 @@ class RemoteWhisperClient:
             self._endpoint, data=body, method="POST",
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-            data = json.loads(resp.read())
+        last_exc: Optional[BaseException] = None
+        data = None
+        for attempt in range(self._retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    data = json.loads(resp.read())
+                break
+            except (urllib.error.URLError, OSError) as exc:
+                last_exc = exc
+                if attempt < self._retries:
+                    time.sleep(0.1 + random.random() * 0.2)  # 100–300ms jitter
+                    log.debug("RemoteWhisperClient: retry %d after %s", attempt + 1, exc)
+                    continue
+                raise
+        if data is None:  # defensive — loop either set data or raised
+            raise last_exc or RuntimeError("remote whisper: no response")
 
         if "error" in data:
             raise RuntimeError(f"remote whisper error: {data['error']}")

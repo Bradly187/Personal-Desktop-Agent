@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import urllib.request
-from typing import Dict, Optional
+from typing import Dict, Optional, Set, Tuple
 
 from core.cluster_config import ClusterConfig
 
@@ -34,12 +35,22 @@ class ClusterHealthMonitor:
         config: ClusterConfig,
         interval: float = 10.0,
         timeout: float = 2.0,
+        fail_threshold: int = 2,
+        recover_threshold: int = 1,
     ) -> None:
         self._config = config
         self._interval = interval
         self._timeout = timeout
+        # Debounce: require N consecutive probes that disagree with the current
+        # state before flipping it, so one transient blip can't evict the laptop
+        # (fail) or a single lucky probe can't prematurely re-enable it (recover).
+        self._fail_threshold = max(1, fail_threshold)
+        self._recover_threshold = max(1, recover_threshold)
+        self._streak: Dict[str, int] = {}        # consecutive probes disagreeing with state
         self._health: Dict[str, bool] = {}
         self._task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._recheck_pending: Set[str] = set()   # dedupe in-flight on-demand re-probes
 
         # service name → health-check URL
         self._endpoints: Dict[str, str] = {}
@@ -62,6 +73,7 @@ class ClusterHealthMonitor:
         if self._task is not None and not self._task.done():
             log.warning("ClusterHealthMonitor.start() called while already running — ignored")
             return
+        self._loop = asyncio.get_running_loop()  # for thread-safe mark_suspect()
         await self._check_all()
         self._task = asyncio.create_task(self._loop(), name="cluster-health")
         log.info(
@@ -94,22 +106,77 @@ class ClusterHealthMonitor:
 
     async def _check_all(self) -> None:
         for svc, url in self._endpoints.items():
-            ok = await asyncio.to_thread(self._ping, url)
-            prev = self._health.get(svc)
-            if ok != prev:
-                if ok:
-                    log.info("ClusterHealthMonitor: %s is UP (%s)", svc, url)
-                else:
-                    # WARNING only after we'd previously seen it up, or on first miss
-                    log.warning("ClusterHealthMonitor: %s is DOWN (%s) — routing falls back to desktop", svc, url)
-            self._health[svc] = ok
+            ok, detail, dt_ms = await asyncio.to_thread(self._ping, url)
+            self._apply_probe(svc, url, ok, detail, dt_ms)
 
-    def _ping(self, url: str) -> bool:
+    def _ping(self, url: str) -> Tuple[bool, str, float]:
+        """Probe `url`. Returns (ok, detail, latency_ms). `detail` is the HTTP
+        status or the exception class name (M4: distinguishes timeout vs refused
+        vs 5xx instead of collapsing every failure to one boolean)."""
+        t0 = time.monotonic()
         try:
             with urllib.request.urlopen(url, timeout=self._timeout) as resp:
-                return 200 <= getattr(resp, "status", 200) < 400
+                code = int(getattr(resp, "status", 200))
+                return (200 <= code < 400), f"HTTP {code}", (time.monotonic() - t0) * 1000.0
+        except Exception as exc:
+            return False, type(exc).__name__, (time.monotonic() - t0) * 1000.0
+
+    def _apply_probe(self, svc: str, url: str, ok: bool, detail: str, dt_ms: float) -> None:
+        """Fold one probe result into health state with debounce (H1).
+
+        A probe that agrees with the current state resets the streak. A probe
+        that disagrees accumulates a streak; the state flips only once the streak
+        reaches fail_threshold (down) / recover_threshold (up).
+        """
+        cur = self._health.get(svc, False)
+        if ok == cur:
+            self._streak[svc] = 0
+            return
+        self._streak[svc] = self._streak.get(svc, 0) + 1
+        need = self._recover_threshold if ok else self._fail_threshold
+        if self._streak[svc] >= need:
+            self._health[svc] = ok
+            self._streak[svc] = 0
+            if ok:
+                log.info("ClusterHealthMonitor: %s is UP (%s, %.0fms)", svc, url, dt_ms)
+            else:
+                log.warning(
+                    "ClusterHealthMonitor: %s is DOWN (%s, %s) after %d miss(es) "
+                    "— routing falls back to desktop", svc, url, detail, need,
+                )
+        else:
+            log.debug(
+                "ClusterHealthMonitor: %s probe %s (%s, %.0fms) streak %d/%d",
+                svc, "ok" if ok else "fail", detail, dt_ms, self._streak[svc], need,
+            )
+
+    # ------------------------------------------------------------------ #
+    # On-demand re-probe (H2) — called by consumers on a live remote failure
+    # ------------------------------------------------------------------ #
+
+    def mark_suspect(self, service: str) -> None:
+        """Trigger an immediate re-probe of `service` instead of waiting up to
+        `interval` for the next poll. Thread-safe: consumers (e.g. WhisperStream)
+        call this from worker threads, so the coroutine is scheduled onto the
+        monitor's event loop. Deduped while a re-probe is already in flight."""
+        if service not in self._endpoints or self._loop is None:
+            return
+        if service in self._recheck_pending:
+            return
+        self._recheck_pending.add(service)
+        try:
+            asyncio.run_coroutine_threadsafe(self._recheck(service), self._loop)
         except Exception:
-            return False
+            self._recheck_pending.discard(service)
+
+    async def _recheck(self, service: str) -> None:
+        try:
+            url = self._endpoints.get(service)
+            if url:
+                ok, detail, dt_ms = await asyncio.to_thread(self._ping, url)
+                self._apply_probe(service, url, ok, detail, dt_ms)
+        finally:
+            self._recheck_pending.discard(service)
 
     # ------------------------------------------------------------------ #
     # Query (sync, hot-path safe)

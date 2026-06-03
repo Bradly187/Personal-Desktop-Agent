@@ -89,6 +89,11 @@ except ImportError:
     log.warning("faster-whisper not installed — WhisperStream disabled. "
                 "Install with: pip install faster-whisper")
 
+# C1: model size for the lazy local fallback used when a configured remote
+# (laptop) Whisper service fails. Small + int8 + CPU so it loads fast and adds
+# little memory; quality is lower than the laptop's large-v3 but keeps voice alive.
+_FALLBACK_MODEL_SIZE = "base"
+
 if TYPE_CHECKING:
     from core.command_executor import Command
     from core.fusion_engine import FusionEngine
@@ -490,6 +495,29 @@ class WhisperStream:
         log.debug("WhisperStream: transcribing %.1f s of audio (force=%s)", duration, force)
         await asyncio.to_thread(self._transcribe, audio)
 
+    def _ensure_fallback_model(self) -> None:
+        """Lazy-load a lightweight local Whisper as a fallback for remote mode (C1).
+
+        Remote mode skips loading any model at startup to save ~3.5 GB VRAM. When
+        the laptop service fails, this loads a small int8 CPU model *once* so voice
+        input survives (degraded) instead of going silent until restart. No-op if
+        faster-whisper isn't installed locally. Runs inside the _transcribe worker
+        thread, so the one-time blocking load never touches the event loop.
+        """
+        if self._model is not None or not _WHISPER_AVAILABLE:
+            return
+        try:
+            log.warning("WhisperStream: loading local fallback model %r (CPU/int8) …",
+                        _FALLBACK_MODEL_SIZE)
+            self._model = WhisperModel(_FALLBACK_MODEL_SIZE, device="cpu", compute_type="int8")
+            self._device = "cpu"
+            self._compute_type = "int8"
+            log.info("WhisperStream: local fallback model ready (%s, CPU/int8)",
+                     _FALLBACK_MODEL_SIZE)
+        except Exception as exc:
+            log.error("WhisperStream: fallback model load failed — voice degraded: %s", exc)
+            self._model = None
+
     def _run_whisper(self, audio: "np.ndarray", initial_prompt):
         """Run the forward pass — on the laptop when configured + healthy, else local.
 
@@ -509,9 +537,19 @@ class WhisperStream:
                     speech_pad_ms=100,
                 )
             except Exception as exc:
+                log.warning("WhisperStream: remote transcription failed (%s)", exc)
+                # H2: nudge the health monitor to re-probe now rather than waiting
+                # for the next poll, so subsequent utterances stop hitting remote.
+                if self._cluster_health is not None:
+                    self._cluster_health.mark_suspect("whisper")
+                # C1: remote mode skips loading a local model at startup. Lazy-load
+                # a small CPU fallback on first failure so a laptop outage degrades
+                # voice to lower-quality local instead of dropping it until restart.
                 if self._model is None:
-                    raise  # no local model loaded — nothing to fall back to
-                log.warning("WhisperStream: remote transcription failed (%s) — local fallback", exc)
+                    self._ensure_fallback_model()
+                if self._model is None:
+                    raise  # fallback unavailable (faster-whisper not installed locally)
+                log.warning("WhisperStream: falling back to local model")
 
         seg_iter, info = self._model.transcribe(
             audio,
