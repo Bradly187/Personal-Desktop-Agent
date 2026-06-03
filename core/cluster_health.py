@@ -49,7 +49,9 @@ class ClusterHealthMonitor:
         self._streak: Dict[str, int] = {}        # consecutive probes disagreeing with state
         self._health: Dict[str, bool] = {}
         self._task: Optional[asyncio.Task] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # NOTE: named _evloop, NOT _loop — _loop is the poll-loop coroutine method
+        # below; an attribute named self._loop would shadow it and break start().
+        self._evloop: Optional[asyncio.AbstractEventLoop] = None
         self._recheck_pending: Set[str] = set()   # dedupe in-flight on-demand re-probes
 
         # service name → health-check URL
@@ -73,7 +75,7 @@ class ClusterHealthMonitor:
         if self._task is not None and not self._task.done():
             log.warning("ClusterHealthMonitor.start() called while already running — ignored")
             return
-        self._loop = asyncio.get_running_loop()  # for thread-safe mark_suspect()
+        self._evloop = asyncio.get_running_loop()  # for thread-safe mark_suspect()
         await self._check_all()
         self._task = asyncio.create_task(self._loop(), name="cluster-health")
         log.info(
@@ -159,13 +161,13 @@ class ClusterHealthMonitor:
         `interval` for the next poll. Thread-safe: consumers (e.g. WhisperStream)
         call this from worker threads, so the coroutine is scheduled onto the
         monitor's event loop. Deduped while a re-probe is already in flight."""
-        if service not in self._endpoints or self._loop is None:
+        if service not in self._endpoints or self._evloop is None:
             return
         if service in self._recheck_pending:
             return
         self._recheck_pending.add(service)
         try:
-            asyncio.run_coroutine_threadsafe(self._recheck(service), self._loop)
+            asyncio.run_coroutine_threadsafe(self._recheck(service), self._evloop)
         except Exception:
             self._recheck_pending.discard(service)
 

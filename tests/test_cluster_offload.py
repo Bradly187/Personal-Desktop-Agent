@@ -64,21 +64,38 @@ def test_ping_returns_reason_and_latency():
     assert isinstance(dt_ms, float) and dt_ms >= 0.0
 
 
+# ── start()/stop() lifecycle — guards the _loop method vs _evloop attr collision
+# (a self._loop attribute would shadow the _loop() poll coroutine and crash start)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_start_does_not_shadow_poll_loop(monkeypatch):
+    async def run():
+        m = _mon()
+        monkeypatch.setattr(m, "_ping", lambda url: (True, "HTTP 200", 5.0))
+        await m.start()          # must not raise (regression: _loop() was un-callable)
+        assert m._task is not None and not m._task.done()
+        assert m.is_healthy("whisper") is True
+        await m.stop()
+        assert m._task is None
+
+    asyncio.run(run())
+
+
 # ── H2: mark_suspect ────────────────────────────────────────────────────────
 
 def test_mark_suspect_is_noop_without_loop_or_unknown_service():
     m = _mon()
-    m._loop = None
+    m._evloop = None
     m.mark_suspect("whisper")        # loop None → no-op, must not raise
-    m._loop = asyncio.new_event_loop()
+    m._evloop = asyncio.new_event_loop()
     m.mark_suspect("does_not_exist")  # unknown service → no-op
-    m._loop.close()
+    m._evloop.close()
 
 
 def test_mark_suspect_triggers_immediate_reprobe(monkeypatch):
     async def run():
         m = _mon(fail=1)
-        m._loop = asyncio.get_running_loop()
+        m._evloop = asyncio.get_running_loop()
         m._apply_probe("whisper", "u", True, "HTTP 200", 5.0)  # start healthy
         assert m.is_healthy("whisper") is True
         # Next probe will fail; fail_threshold=1 so one re-probe evicts it.
