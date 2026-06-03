@@ -19,7 +19,7 @@
 # ── Core bridge & MCP ────────────────────────────────────────────────────────
 mcp==1.27.0
 aiohttp==3.13.5
-zeroconf==0.148.0
+zeroconf==0.149.16  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
 
 # ── Desktop control ───────────────────────────────────────────────────────────
 pyautogui==0.9.54
@@ -79,13 +79,17 @@ anthropic>=0.40.0
 # ── Semantic memory (behavioral-twin-state) ──────────────────────────────────
 # ChromaDB vector store for SemanticMemory (all-MiniLM-L6-v2 embeddings).
 # Falls back to AgentDB Jaccard scoring when unavailable.
+# SECURITY: GHSA-f4j7-r4q5-qw2c (critical, pre-auth code injection) affects
+# chromadb *server* mode only. We use chromadb.PersistentClient (embedded,
+# local, no server/network) — not affected. No patched release exists yet
+# (PyPI tops out at 1.5.9); revisit when a fix ships.
 chromadb==1.5.9
 
 # ── PDF parsing for codebase_indexer.py document collection ──────────────────
 # pdfplumber is the primary parser (richer layout-aware extraction).
 # pypdf is a lighter fallback if pdfplumber is unavailable.
 pdfplumber==0.11.6
-pypdf==5.6.0
+pypdf==6.10.2  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
 
 # ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
 # windows-curses provides the stdlib curses module on Windows.
