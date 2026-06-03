@@ -241,6 +241,30 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Flare degrade profile — sync all flags to the PC whenever any change.
+        // Mixed types, so map each to Void and merge; debounce collapses the
+        // initial @Published replays into one emission, which dropFirst skips.
+        Publishers.MergeMany([
+            settings.$flareVoiceDegrades.map { _ in () }.eraseToAnyPublisher(),
+            settings.$flareGestureDegrades.map { _ in () }.eraseToAnyPublisher(),
+            settings.$flareTiltDegrades.map { _ in () }.eraseToAnyPublisher(),
+            settings.$flareSoundDegrades.map { _ in () }.eraseToAnyPublisher(),
+            settings.$flareVadScale.map { _ in () }.eraseToAnyPublisher(),
+        ])
+        .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+        .dropFirst()
+        .sink { [weak self] in
+            guard let self else { return }
+            self.ws?.sendFlareProfile(
+                voiceDegrades: self.settings.flareVoiceDegrades,
+                gestureDegrades: self.settings.flareGestureDegrades,
+                tiltDegrades: self.settings.flareTiltDegrades,
+                soundDegrades: self.settings.flareSoundDegrades,
+                vadScale: self.settings.flareVadScale
+            )
+        }
+        .store(in: &cancellables)
+
         // Disabled gestures — sync when assessment changes and on first connect
         settings.$disabledGestures
             .removeDuplicates()

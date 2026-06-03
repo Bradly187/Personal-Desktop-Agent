@@ -82,6 +82,15 @@ final class SettingsStore: ObservableObject {
     @Published var tiltPositionMode: Bool {
         didSet { defaults.set(tiltPositionMode, forKey: "tiltPositionMode") }
     }
+    /// Tilt dwell-to-click: hold the cursor still to fire the active dwell
+    /// action. Opt-in (off by default) to avoid accidental "Midas touch" clicks.
+    @Published var tiltDwellClickEnabled: Bool {
+        didSet { defaults.set(tiltDwellClickEnabled, forKey: "tiltDwellClickEnabled") }
+    }
+    /// Seconds the cursor must be held still before a dwell click fires.
+    @Published var tiltDwellDuration: Double {
+        didSet { defaults.set(tiltDwellDuration, forKey: "tiltDwellDuration") }
+    }
 
     // MARK: — Neutral Gravity Persistence
 
@@ -214,6 +223,11 @@ final class SettingsStore: ObservableObject {
     @Published var flareTiltDegrades: Bool {
         didSet { defaults.set(flareTiltDegrades, forKey: "flareTiltDegrades") }
     }
+    /// Mouth-sound triggers get weaker/slower on flare days → relax the
+    /// sound cooldown. Independent of tilt.
+    @Published var flareSoundDegrades: Bool {
+        didSet { defaults.set(flareSoundDegrades, forKey: "flareSoundDegrades") }
+    }
     /// Fraction of baseline voice volume on flare days (0.25–0.75).
     @Published var flareVadScale: Double {
         didSet { defaults.set(flareVadScale, forKey: "flareVadScale") }
@@ -298,6 +312,8 @@ final class SettingsStore: ObservableObject {
         let savedRange = defaults.double(forKey: "tiltRange")
         tiltRange = savedRange > 0 ? max(5.0, min(60.0, savedRange)) : 25.0
         tiltPositionMode = defaults.object(forKey: "tiltPositionMode") as? Bool ?? true
+        tiltDwellClickEnabled = defaults.object(forKey: "tiltDwellClickEnabled") as? Bool ?? false
+        tiltDwellDuration = defaults.double(forKey: "tiltDwellDuration").nonZero ?? 1.0
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
@@ -330,6 +346,7 @@ final class SettingsStore: ObservableObject {
         flareVoiceDegrades  = defaults.object(forKey: "flareVoiceDegrades")  as? Bool ?? true
         flareGestureDegrades = defaults.object(forKey: "flareGestureDegrades") as? Bool ?? false
         flareTiltDegrades   = defaults.object(forKey: "flareTiltDegrades")   as? Bool ?? false
+        flareSoundDegrades  = defaults.object(forKey: "flareSoundDegrades")  as? Bool ?? true
         flareVadScale       = defaults.double(forKey: "flareVadScale").nonZero ?? 0.5
         manualPainDay       = defaults.object(forKey: "manualPainDay")       as? Bool ?? false
         if let data = defaults.data(forKey: "gestureAssessment"),
