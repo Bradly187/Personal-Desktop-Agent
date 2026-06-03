@@ -162,6 +162,10 @@ class WhisperStream:
         "hey agent", "hey aiden", "hey agents", "hey a gent",
         "agent", "aiden", "agents",
     )
+    # Seconds a bare wake phrase stays "armed" — the next utterance within this
+    # window is accepted as the command without repeating the wake. Tolerates
+    # the VAD splitting "hey agent <pause> pain day on" into two segments.
+    WAKE_ARM_WINDOW: float = 6.0
 
     def __init__(
         self,
@@ -217,6 +221,9 @@ class WhisperStream:
         self._suppress_until: float = 0.0
         self._awaiting_clarification: bool = False
         self._clarification_deadline: float = 0.0
+        # Wake-arming: a bare "hey agent" (VAD split it off from the command)
+        # arms this window; the next segment is taken as the command.
+        self._wake_armed_until: float = 0.0
         self._agent_db = None
         self._session_id: int = -1
         self._lecture_mode: bool = False
@@ -745,8 +752,21 @@ class WhisperStream:
                  if normalised.startswith(p)),
                 None,
             )
+            wake_armed = now_mono < self._wake_armed_until
+
             if matched is None:
-                if self._lecture_mode and self._agent_db and self._agent_db.available \
+                if wake_armed:
+                    # Command segment arriving just after a bare "hey agent"
+                    # (the VAD split the utterance). Take the whole text as the
+                    # command — but reject long sentences (ambient audio leaking
+                    # through the open window), mirroring the clarification gate.
+                    self._wake_armed_until = 0.0
+                    if len(text.split()) > 8:
+                        log.debug("WhisperStream: wake-armed window — ignoring long "
+                                  "utterance (%d words): %r", len(text.split()), text)
+                        return
+                    log.info("WhisperStream: wake-armed command: %r", text)
+                elif self._lecture_mode and self._agent_db and self._agent_db.available \
                         and self._event_loop is not None:
                     log.debug("WhisperStream: lecture mode — storing: %r", text)
                     import asyncio as _asyncio
@@ -759,22 +779,29 @@ class WhisperStream:
                         ),
                         self._event_loop,
                     )
+                    return
                 else:
                     log.debug("WhisperStream: no wake phrase — discarding: %r", text)
-                return
+                    return
+            else:
+                # Strip wake phrase words from the original text by word count
+                phrase_word_count = len(matched.split())
+                words = _re.split(r'[\s,\.]+', text.strip())
+                command_words = [w for w in words[phrase_word_count:] if w]
+                stripped = ' '.join(command_words)
 
-            # Strip wake phrase words from the original text by word count
-            phrase_word_count = len(matched.split())
-            words = _re.split(r'[\s,\.]+', text.strip())
-            command_words = [w for w in words[phrase_word_count:] if w]
-            text = ' '.join(command_words)
+                # Bare wake ("hey agent") with no command in this segment — the
+                # VAD likely split the utterance. Arm a window so the NEXT
+                # segment is accepted as the command without repeating the wake.
+                if not stripped or not _re.search(r'[a-zA-Z]', stripped):
+                    self._wake_armed_until = now_mono + self.WAKE_ARM_WINDOW
+                    log.info("WhisperStream: wake armed — say the command (%.0fs window)",
+                             self.WAKE_ARM_WINDOW)
+                    return
 
-            # Discard if nothing meaningful remains after stripping wake phrase
-            if not text or not _re.search(r'[a-zA-Z]', text):
-                log.debug("WhisperStream: wake phrase with no command — discarding")
-                return
-
-            log.info("WhisperStream: wake phrase detected, command: %r", text)
+                text = stripped
+                self._wake_armed_until = 0.0
+                log.info("WhisperStream: wake phrase detected, command: %r", text)
 
             # Compose-mode trigger: "claude compose" / "claude [text]" / "hey claude"
             # enters VoicePromptComposer instead of routing through HybridCoordinator.
