@@ -378,11 +378,22 @@ class FusionEngine:
         )
 
     def on_tilt(self, rx: float, ry: float) -> None:
+        # Reject non-finite values at ingress. JSON parses NaN/Infinity tokens by
+        # default, and a single NaN/inf would poison the OneEuroFilter
+        # (NaN - NaN = NaN forever) and the sub-pixel accumulator, after which
+        # int()/round() in _tick raises every tick until a filter reset — tilt
+        # would silently die. Drop the bad frame instead.
+        if not (math.isfinite(rx) and math.isfinite(ry)):
+            log.debug("FusionEngine: dropping non-finite tilt (%r, %r)", rx, ry)
+            return
         self._tilt = (rx, ry)
         self._last_tilt_sample = (rx, ry)  # D2: cache for DB sampling
 
     def on_tilt_position(self, x: float, y: float) -> None:
         """Receive absolute position from iPad tilt sensor (position-mapped mode)."""
+        if not (math.isfinite(x) and math.isfinite(y)):
+            log.debug("FusionEngine: dropping non-finite tilt_position (%r, %r)", x, y)
+            return
         self._tilt_position = (x, y)
 
     def on_tilt_ratchet(self) -> None:
