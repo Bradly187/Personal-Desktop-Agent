@@ -12,7 +12,29 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status — Phases 1–6 complete + Sprints A–C + 5–7 + G1–G5 + iPad logging + 2026-05-24 fixes (2026-05-24)
+## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute (2026-06-03)
+
+**Done (Voice control + goal sessions + mic mute — 2026-06-03):**
+- `core/goal_session.py` — **new file**; goal-level authorization: the user authorizes a high-level goal once (via voice) and the constituent Claude Code tool calls / DevAgent steps run silently without per-tool prompts; atomic-replace signal file `~/.claude/approval/goal_session.json` read by `approval_hook.py` and `DevAgent._confirm_destructive_op()`; voice `cancel`/`status`/`history` control
+- `inference/dev_agent.py` — `_approve_plan_upfront()`, `_confirm_destructive_op()`, goal-session wiring; `core/hybrid_coordinator.py` — `authorize` phrase + cancel/status/history routing
+- Mic mute — iPad toggle + indicator with two-way state sync: `mic_mute` (iPad→PC) hard-mutes `WhisperStream`; PC echoes `mic_state` (PC→iPad) so `MicMuteIndicator.swift` stays in sync; wired in `core/ipad_bridge.py` (`broadcast_mic_state`), `sensors/whisper_stream.py` (`set_muted`, `on_mute_change`)
+- Voice pipeline hardening: wake-arming window (a paused wake phrase still works), wake-phrase mishearing correction + system-control keyword shadowing fix, trailing-punctuation strip before exact-match keyword routing (`sensors/whisper_stream.py`, `core/hybrid_coordinator.py`)
+- `fix(cloud)`: repaired `_run_cloud` secret-scrub `Command` rebuild + aligned model; `fix(ipad)`: hardened Settings modals against iOS 26 crash (`SettingsView.swift`)
+- `core/async_utils.py` — **new file**; `fire_and_log` safe fire-and-forget for non-critical background DB writes (strong ref until done, DEBUG-logs exceptions, no-ops without a loop); adopted in `fusion_engine.py` + `continuous_trainer.py`
+- Desktop launcher scripts: `start_desktop.bat`, `Create-DesktopShortcut.ps1`
+
+**Done (Cluster offload — laptop compute node — 2026-06-02):**
+- `core/cluster_health.py` — **new file**; `ClusterHealthMonitor` polls laptop service endpoints (`laptop_ollama`/`whisper`/`indexer`); zero-cost synchronous `is_healthy()` for hot-path routing; fail-safe to local when unknown/down (fixed a `_loop` attr that shadowed the poll-loop method → startup crash)
+- `core/cluster_config.py` + `cluster_config.json` — **new**; `ClusterConfig` endpoints/policy; lightweight LLM routed to desktop, Whisper + Indexer offloaded to RTX 4070 laptop
+- `start_laptop_services.bat` — idempotent (skips running ports), login auto-start hardened; `codebase_indexer.py` excludes `.venv-laptop`/`.venv-wsl`
+- Hardened laptop-offload failure paths (C1, H1, H2, M1–M4)
+
+**Done (AIOS alignment — scheduler / memory syscall / resource governor / context namespacing — 2026-06-01):**
+- `core/scheduler.py` — **new file**; `AccessibilityScheduler` priority queue over `coordinator.route()`; 5 tiers (ACCESSIBILITY/VOICE/GESTURE concurrent; DEV_AGENT/BACKGROUND semaphore-gated); 60 Hz tick loop untouched
+- `storage/memory_manager.py` — **new file**; `MemoryManager` syscall façade over AgentDB + SemanticMemory (`read_context`/`write_state`/`search_semantic` + zero-copy `get_pain_day_active/score()`); `_VALID_KEYS` schema validation; incremental migration (DevAgent + ContinuousTrainer writers)
+- `core/resource_governor.py` — **new file**; pain-aware kernel primitive; on flare (score ≥ 0.6) relaxes sensor thresholds, pauses indexer, raises Whisper VAD thread priority, evicts `qwen3-vl:30b` from VRAM (`keep_alive=0`); reverses on recovery (< 0.4 hysteresis)
+- Gap 4 — context namespacing in `BehavioralTwinState`: `_session_history` split into `accessibility` (persistent) / `dev_agent` (ephemeral, auto-clears) so dev sessions don't contaminate accessibility few-shot
+- 83 tests for AIOS alignment gaps 1–4; full handoff at `docs/daily/2026-06-01-aios-alignment-handoff.md`
 
 **Done (Gaze + head-pose removal — 2026-05-30):** Gaze tracking and head-pose tracking were removed **entirely** (PC + iPad). The standard iPad on hand has no TrueDepth front camera, so `ARFaceTrackingConfiguration.isSupported` is false and both pipelines produced no data. Removed PC-side: all gaze/head logic in `fusion_engine.py` (priority 10→7 levels; `_GazeBuffer`/`HeadStationaryLock`/`head_acceleration_curve`/`_check_edge_scroll`/`_apply_gaze_cursor` deleted; edge-scroll was gaze-gated so removed too), `ipad_bridge.py` (7 message handlers + calibration session), `db.py` (`gaze_monitor_calibration` table + 2 methods; existing DBs keep the orphan table), `whisper_stream.py` ("calibrate monitor" trigger), `main.py` wiring; deleted `calibration/gaze_calibrator.py` + `calibration/calibration_overlay.py`; trimmed `vision_grounder.py`/`session_analyzer.py`/`sensor_viewer.py`. Removed iPad-side: `GazeTracker.swift`, `HeadTracker.swift`, `SharedFaceSession.swift`, `GazeCalibrationSheet.swift`, `MonitorCalibrationSheet.swift`, `CursorConflictBanner.swift` + detangled 15 Swift files (and the now-unused front-camera permission). Voice "click" now clicks at the **current cursor position** (cursor driven by tilt/trackpad/touch). `Command.gaze_coords` is KEPT as the generic explicit-click-coordinate field (vision grounder / voice click). ~13 gaze/head test files deleted.
 
@@ -148,7 +170,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 - Multiple Swift sensor files updated to use AppLogger for structured output: `SharedAudioSession`, `AudioStreamer`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `LiDARStreamer`, `SharedFaceSession`, `TiltSensor`, `SensorManager`, `DesktopAgentApp`
 - `fusion_engine.py` — `set_gaze_calibrator()` wiring path also updated
 
-**Test suite (2026-05-21):** 388 pytest tests + 31 standalone integration scripts + 15 Swift XCTest files = 434 total
+**Test suite (2026-06-03):** 552 pytest test functions across 49 `tests/test_*.py` files (+ standalone integration scripts) + 15 Swift XCTest files
 
 ## Run Commands
 
@@ -214,7 +236,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 | File | Purpose |
 |------|---------|
-| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 17 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result` replies |
+| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 26 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result`, `mic_state`, `recalibration_request` replies |
 | `core/command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
 | `mcp_server/desktop_mcp_server.py` | MCP stdio server; 14 tools; `SAFE_MODE` env var |
 | `mcp_server/tools/mouse.py` | move, click, double_click, scroll, drag |
@@ -223,7 +245,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `mcp_server/tools/windows.py` | get_active_window, list_windows, focus_window (win32gui + psutil) |
 | `mcp_server/tools/handwriting.py` | pix2tex LaTeX OCR; latex_to_unicode fallback converter |
 | `core/fusion_engine.py` | 60 Hz tick loop; 7-level sensor priority; direct pyautogui for tilt (gaze/head removed) |
-| `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); Anthropic API cloud fallback (10s timeout circuit-breaker); outcome logger |
+| `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); Anthropic API cloud fallback (10s timeout circuit-breaker); local-inference circuit-breaker (`local_timeout_s`, default 15s → CLARIFY); LLM output schema validation (`_parse_action` + `_VALID_COMMAND_VERBS`; malformed verb → CLARIFY); outcome logger |
 | `inference/local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, 373ms warm p50), `VLLMInference` (verified in Ubuntu WSL2, vLLM 0.21.0; `--backend vllm`; use `--gpu-memory-utilization 0.65` with Whisper running) |
 | `adaptive/continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
 | `sensors/lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
@@ -257,6 +279,13 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `inference/codebase_indexer.py` | ChromaDB RAG index over Python/Swift source + docs PDFs; incremental file watcher; fed to DevAgent for context |
 | `monitoring/metrics.py` | In-process metrics singleton; VRAM poller; optional `/metrics` HTTP endpoint |
 | `storage/session_analyzer.py` | Post-session DuckDB analytics; route distribution, latency percentiles, error modes; summary persisted to AgentDB |
+| `core/scheduler.py` | `AccessibilityScheduler` — priority queue over `coordinator.route()`; 5 tiers (ACCESSIBILITY/VOICE/GESTURE concurrent, DEV_AGENT/BACKGROUND semaphore-gated); wired in `FusionEngine._emit()`, falls back to bare `create_task` |
+| `storage/memory_manager.py` | `MemoryManager` — syscall façade over AgentDB + SemanticMemory: `read_context`/`write_state`/`search_semantic` + zero-copy `get_pain_day_active/score()`; `_VALID_KEYS` schema validation at write boundaries |
+| `core/resource_governor.py` | Pain-aware kernel primitive; polls `MemoryManager.get_pain_day_score()` every 5s; on flare relaxes sensor thresholds, pauses indexer, raises Whisper VAD thread priority, evicts `qwen3-vl:30b` from VRAM; reverses on recovery (hysteresis 0.6/0.4) |
+| `core/goal_session.py` | Goal-level authorization; one voice approval lets the goal's tool calls / DevAgent steps run silently; atomic-replace signal file `~/.claude/approval/goal_session.json` shared with `approval_hook.py`; voice cancel/status/history |
+| `core/cluster_health.py` | `ClusterHealthMonitor` — polls laptop service nodes (`laptop_ollama`/`whisper`/`indexer`); synchronous zero-cost `is_healthy()` for hot-path routing; fail-safe to local when unknown/down |
+| `core/cluster_config.py` | `ClusterConfig` — laptop compute-node endpoints + offload policy (loads `cluster_config.json`); consumed by `model_router.py` and `cluster_health.py` |
+| `core/async_utils.py` | `fire_and_log` — safe fire-and-forget for non-critical background DB writes (strong ref until done, DEBUG-logs exceptions, no-ops without a running loop) |
 
 ## Polly TTS Voice
 
@@ -308,10 +337,10 @@ Gaze and head-pose message types (`gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`
 **iPad → PC:**
 - *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `keyword`, `sound_action`, `audio_stream`, `camera_frame`, `depth_frame`
 - *Direct control:* `touch_command`, `trackpad`, `handwriting_image`, `dwell_click`, `ping`
-- *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `flare_profile`, `calibration_start`, `calibration_cancel`
+- *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `flare_profile`, `calibration_start`, `calibration_cancel`, `mic_mute`
 - *Diagnostics:* `ipad_log`
 
-**PC → iPad (5 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (voice drift/seasonal re-cal trigger → QuickRecalSheet)
+**PC → iPad (6 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (voice drift/seasonal re-cal trigger → QuickRecalSheet), `mic_state` (mute/unmute echo so the iPad `MicMuteIndicator` stays in two-way sync)
 
 `touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 7. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `set_feature_toggle` is still wired but currently has no valid features (all prior toggles were gaze features). `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (tilt, keyword, sound_action, etc.) are dispatched to FusionEngine.
 
@@ -337,6 +366,7 @@ Gaze and head-pose message types (`gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`
 
 ## Known Gotchas
 
+- **Voice approval gate requires an explicit confirmation word (2026-06-04 hardening).** While `approval_hook.py`'s `~/.claude/approval/pending` file exists, `WhisperStream._handle_approval_gate()` writes a response ONLY when the transcript classifies as a deliberate approve/deny (`core/approval_keywords.classify_confirmation` — single source of truth shared with `approval_hook.py`). Ambient audio / podcast speech / a stray word returns `None` → discarded, gate keeps waiting (it no longer auto-answers with garbage). Deny wins ties; utterances longer than `MAX_ANSWER_WORDS` (6) are treated as ambient. Danielle's spoken "Approve …?" question is flushed by `_check_approval_echo_guard()` (fires once when `pending` first appears → `suppress(1.0s)`) so the TTS echo — which contains the word "approve" — can't self-approve. Timeout/ambiguity/silence **fail safe to DENY**: `approval_config.json` `timeout_action` is now `"reject"` and `approval_hook._parse_response()` defaults to deny. Tests: `tests/test_approval_gate.py` (44).
 - `SCREENSHOT` automatically copies the captured image to the Windows clipboard (CF_DIB via `win32clipboard`) so the user can Ctrl+V immediately. Failure to copy is non-fatal — the base64 result is still returned.
 - `pyautogui.typewrite` is ASCII-only — `TYPE` has this limitation and keeps it for backward compat. `DICTATE` was fixed (2026-05-07) to use `keyboard_paste()` (win32clipboard + Ctrl+V) and now supports full unicode including mathematical symbols.
 - `pyautogui.FAILSAFE = True` is set globally — moving the mouse to the top-left screen corner raises `FailSafeException`. All tool wrappers inherit this behaviour.

@@ -27,11 +27,11 @@
 
   "voice_id":      "Danielle",
   "record_s":      4.0,
-  "timeout_action":"approve",
+  "timeout_action":"reject",
   "device":        "Microphone (Realtek USB Audio)",
 
   "_note_policy":  "Bash/PowerShell/Agent gate because they can run arbitrary commands. Edit/Write pass silently because they can be reviewed in git diff before commit.",
-  "_note_timeout": "If no voice detected within record_s seconds, timeout_action applies: 'approve' = proceed, 'reject' = block",
+  "_note_timeout": "Fail safe: if no clear yes/no confirmation is heard within the window, timeout_action applies. Keep 'reject' so ambient audio / TTS echo / silence can never auto-approve a destructive tool call. 'approve' = proceed on ambiguity (NOT recommended).",
 
   "goal_session_duration_s":  900,
   "goal_session_max_actions": 50

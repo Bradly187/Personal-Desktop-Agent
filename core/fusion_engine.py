@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
@@ -66,6 +67,35 @@ def dead_zone_ramp(magnitude: float, inner: float, outer: float) -> float:
     # Smoothstep: 3t² - 2t³ (zero derivative at t=0 and t=1)
     s = t * t * (3.0 - 2.0 * t)
     return s * magnitude
+
+
+def _detect_virtual_screen(fallback_w: int, fallback_h: int) -> tuple[int, int, int, int]:
+    """Return (left, top, width, height) of the full virtual desktop.
+
+    The virtual desktop is the bounding rectangle spanning *all* monitors. A
+    monitor positioned to the left of / above the primary has a negative origin,
+    so `left`/`top` can be < 0 and `width`/`height` cover every screen. This is
+    what lets absolute tilt positioning reach a side monitor — `pyautogui.size()`
+    only ever reports the primary monitor.
+
+    Windows: SM_*VIRTUALSCREEN system metrics. Other platforms (or on any
+    failure) fall back to a single (0, 0, fallback_w, fallback_h) screen.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            # SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77,
+            # SM_CXVIRTUALSCREEN=78, SM_CYVIRTUALSCREEN=79
+            left = int(user32.GetSystemMetrics(76))
+            top = int(user32.GetSystemMetrics(77))
+            width = int(user32.GetSystemMetrics(78))
+            height = int(user32.GetSystemMetrics(79))
+            if width > 0 and height > 0:
+                return (left, top, width, height)
+        except Exception as exc:  # pragma: no cover - platform/ctypes quirks
+            log.debug("virtual-screen detection failed (%s) — using primary", exc)
+    return (0, 0, int(fallback_w), int(fallback_h))
 
 
 def power_curve(value: float, exponent: float, sensitivity: float = 1.0) -> float:
@@ -119,6 +149,13 @@ class FusionConfig:
     dead_zone_inner: float = 0.05            # rad/s — below this: zero output
     dead_zone_ramp_mult: float = 1.5         # outer = inner + inner * mult → 0.125 rad/s
 
+    # Max per-frame cursor displacement (px) for tilt VELOCITY mode. The power
+    # curve (exponent 2) amplifies fast input, so an involuntary tremor jerk can
+    # produce a large single-frame fling. Clamping each axis caps that without
+    # affecting normal control — at sensitivity 200 a brisk 0.7 rad/s move is
+    # ~98 px/frame, well under the cap. Set <= 0 to disable.
+    tilt_max_px_per_frame: float = 150.0
+
 
 # ---------------------------------------------------------------------------
 # FusionEngine
@@ -134,6 +171,16 @@ class FusionEngine:
         self._w = screen_width
         self._h = screen_height
         self._diag = math.hypot(screen_width, screen_height)
+        # Virtual-desktop bounds (left, top, width, height) spanning ALL monitors.
+        # Absolute tilt positioning maps into this rectangle so the cursor can
+        # reach a side monitor. Initialised to the primary (deterministic for
+        # construction/tests); refresh_screen_geometry() picks up the real
+        # multi-monitor layout once the engine runs, and re-checks periodically
+        # so a resolution change / hot-plugged monitor is handled without restart.
+        self._vleft: int = 0
+        self._vtop: int = 0
+        self._vw: int = screen_width
+        self._vh: int = screen_height
         self._cfg = config or FusionConfig()
         # Pain-day effective config — starts as alias of base config; replaced by
         # apply_pain_day(True) without mutating _cfg so base can always be restored.
@@ -252,6 +299,27 @@ class FusionEngine:
             "gesture":      Priority.GESTURE,
         }
         return _MAP.get(source, Priority.ACCESSIBILITY)
+
+    def refresh_screen_geometry(self) -> bool:
+        """Re-query the virtual desktop bounds; update them if they changed.
+
+        Lets a resolution change or a newly plugged-in / removed monitor take
+        effect at runtime (absolute tilt then maps across the new layout). Cheap
+        GetSystemMetrics calls — safe to poll. Returns True if the bounds moved.
+        Blocking (ctypes), so callers on the event loop should use to_thread.
+        """
+        new = _detect_virtual_screen(self._w, self._h)
+        if new != (self._vleft, self._vtop, self._vw, self._vh):
+            self._vleft, self._vtop, self._vw, self._vh = new
+            log.info(
+                "FusionEngine: screen geometry updated → %dx%d at (%d, %d) "
+                "(spans %s)",
+                self._vw, self._vh, self._vleft, self._vtop,
+                "multiple monitors" if (self._vw, self._vh) != (self._w, self._h)
+                or (self._vleft, self._vtop) != (0, 0) else "primary only",
+            )
+            return True
+        return False
 
     def set_agent_db(self, db) -> None:
         """Wire AgentDB for throttled sensor-stream persistence (~1 Hz)."""
@@ -378,11 +446,22 @@ class FusionEngine:
         )
 
     def on_tilt(self, rx: float, ry: float) -> None:
+        # Reject non-finite values at ingress. JSON parses NaN/Infinity tokens by
+        # default, and a single NaN/inf would poison the OneEuroFilter
+        # (NaN - NaN = NaN forever) and the sub-pixel accumulator, after which
+        # int()/round() in _tick raises every tick until a filter reset — tilt
+        # would silently die. Drop the bad frame instead.
+        if not (math.isfinite(rx) and math.isfinite(ry)):
+            log.debug("FusionEngine: dropping non-finite tilt (%r, %r)", rx, ry)
+            return
         self._tilt = (rx, ry)
         self._last_tilt_sample = (rx, ry)  # D2: cache for DB sampling
 
     def on_tilt_position(self, x: float, y: float) -> None:
         """Receive absolute position from iPad tilt sensor (position-mapped mode)."""
+        if not (math.isfinite(x) and math.isfinite(y)):
+            log.debug("FusionEngine: dropping non-finite tilt_position (%r, %r)", x, y)
+            return
         self._tilt_position = (x, y)
 
     def on_tilt_ratchet(self) -> None:
@@ -392,15 +471,18 @@ class FusionEngine:
         from the new neutral point. The iPad has already captured the new neutral
         gravity vector; this just tells the PC to hold position.
         """
-        import pyautogui
-        # Record current cursor position as the held position
-        pos = pyautogui.position()
-        self._ratchet_held_pos = (pos.x, pos.y)
+        # Use the cached cursor position (refreshed at 10 Hz by
+        # _cursor_cache_loop) rather than a synchronous pyautogui.position() call,
+        # which would block the asyncio event loop this callback runs on — the
+        # very thing the cursor cache exists to avoid. The held position is
+        # informational, so 10 Hz freshness is ample.
+        px, py = self._cursor_pos
+        self._ratchet_held_pos = (px, py)
         self._ratchet_active = True
         # Reset tilt position filter so it starts fresh from the new neutral
         self._tilt_pos_filter_x.reset()
         self._tilt_pos_filter_y.reset()
-        log.info("Ratchet activated — holding cursor at (%d, %d)", pos.x, pos.y)
+        log.info("Ratchet activated — holding cursor at (%d, %d)", px, py)
 
     def on_sensor_switch(self, from_sensor: str | None, to_sensor: str) -> None:
         """Handle cursor sensor switch — hold cursor for 200ms to prevent jump.
@@ -474,14 +556,26 @@ class FusionEngine:
     # ---------------------------------------------------------------------- #
 
     async def _cursor_cache_loop(self) -> None:
-        """Update _cursor_pos at 10 Hz using a thread so the 60 Hz tick never blocks on position()."""
+        """Update _cursor_pos at 10 Hz using a thread so the 60 Hz tick never blocks on position().
+
+        Also re-checks the virtual-desktop geometry ~every 2 s so a resolution
+        change or a hot-plugged/removed monitor is picked up without a restart.
+        """
         import pyautogui
+        _geom_counter = 0
         while self._running:
             try:
                 pos = await asyncio.to_thread(pyautogui.position)
                 self._cursor_pos = (int(pos.x), int(pos.y))
             except Exception:
                 pass
+            # Refresh geometry every ~2 s (20 ticks at 10 Hz). Off-loop (ctypes).
+            if _geom_counter % 20 == 0:
+                try:
+                    await asyncio.to_thread(self.refresh_screen_geometry)
+                except Exception:
+                    pass
+            _geom_counter += 1
             await asyncio.sleep(0.1)  # 10 Hz
 
     async def _tick(self) -> None:
@@ -580,13 +674,14 @@ class FusionEngine:
                 curved_x = 0.5 + power_curve(dx / 0.5, exp) * 0.5 if dx != 0.0 else 0.5
                 curved_y = 0.5 + power_curve(dy / 0.5, exp) * 0.5 if dy != 0.0 else 0.5
 
-                # Convert to pixels
-                px_x = round(curved_x * self._w)
-                px_y = round(curved_y * self._h)
+                # Convert to pixels across the FULL virtual desktop so the cursor
+                # can reach a side monitor (left/top origin may be negative).
+                px_x = self._vleft + round(curved_x * self._vw)
+                px_y = self._vtop + round(curved_y * self._vh)
 
-                # Clamp to screen bounds
-                px_x = max(0, min(self._w - 1, px_x))
-                px_y = max(0, min(self._h - 1, px_y))
+                # Clamp to the virtual-desktop bounds
+                px_x = max(self._vleft, min(self._vleft + self._vw - 1, px_x))
+                px_y = max(self._vtop, min(self._vtop + self._vh - 1, px_y))
 
                 await asyncio.to_thread(pyautogui.moveTo, px_x, px_y, duration=0)
                 return
@@ -632,6 +727,14 @@ class FusionEngine:
                 exp = self._effective_cfg.tilt_vel_exponent
                 cursor_dx = power_curve(rx_ramped, exp, sensitivity)
                 cursor_dy = power_curve(ry_ramped, exp, sensitivity)
+
+                # Clamp per-frame displacement so a tremor spike (amplified by
+                # the quadratic power curve) can't fling the cursor across the
+                # screen in a single frame.
+                _max_px = self._effective_cfg.tilt_max_px_per_frame
+                if _max_px > 0:
+                    cursor_dx = max(-_max_px, min(_max_px, cursor_dx))
+                    cursor_dy = max(-_max_px, min(_max_px, cursor_dy))
 
                 # rx = rotationRate.x: rotation around X-axis → vertical cursor
                 #   positive rx (tilt top away) → cursor moves up (negative dy)
@@ -757,6 +860,12 @@ class FusionEngine:
         pyautogui.PAUSE = 0
 
         self._running = True
+        # Pick up the real multi-monitor layout before the first tilt frame so
+        # absolute positioning can reach a side monitor immediately.
+        try:
+            await asyncio.to_thread(self.refresh_screen_geometry)
+        except Exception:
+            pass
         self._cursor_cache_task = asyncio.create_task(
             self._cursor_cache_loop(), name="cursor_cache"
         )

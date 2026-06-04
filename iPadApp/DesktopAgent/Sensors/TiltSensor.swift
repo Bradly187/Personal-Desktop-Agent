@@ -56,10 +56,18 @@ final class TiltSensor: ObservableObject {
 
     // Impulse detection state
     private var prevAccelMag: Double = 0
-    private let tapThreshold: Double = 2.5   // g-force delta that counts as a tap
+    // g-force delta that counts as a tap. User-tunable via the Settings "Tap
+    // Sensitivity" slider (SettingsStore.tapThreshold, default 1.2). Lower = a
+    // lighter tap registers. Snapshotted from MainActor so the motion queue
+    // reads it without a cross-isolation access. Each accepted tap sends one
+    // tilt_tap → one left click; two quick taps become an OS double-click.
+    private var snapshotTapThreshold: Double = 1.2
     /// Monotonic timestamp of last tap fire — replaces boolean tapCooldown to eliminate race condition.
     private var lastTapFireTime: CFTimeInterval = 0
-    private let tapCooldownDuration: Double = 0.25
+    // Lowered 0.25 → 0.18 so a deliberate double-tap (two taps ~0.18–0.5 s apart)
+    // both register and land inside the OS double-click window, while still
+    // suppressing a single tap's acceleration ring from double-firing.
+    private let tapCooldownDuration: Double = 0.18
 
     // Diagnostic counters — logged once per second by `handle()` so we can verify
     // from the PC's ipad_logs table whether the motion handler is alive, what
@@ -119,6 +127,7 @@ final class TiltSensor: ObservableObject {
             snapshotTiltInverted = s.tiltInverted
             snapshotTiltDwellEnabled = s.tiltDwellClickEnabled
             snapshotTiltDwellDuration = s.tiltDwellDuration
+            snapshotTapThreshold = s.tapThreshold
         }
 
         motion.deviceMotionUpdateInterval = 1.0 / 60.0
@@ -158,6 +167,7 @@ final class TiltSensor: ObservableObject {
         snapshotTiltInverted = s.tiltInverted
         snapshotTiltDwellEnabled = s.tiltDwellClickEnabled
         snapshotTiltDwellDuration = s.tiltDwellDuration
+        snapshotTapThreshold = s.tapThreshold
     }
 
     // MARK: — Dwell-to-click
@@ -419,7 +429,7 @@ final class TiltSensor: ObservableObject {
         // Fix: Use timestamp comparison instead of boolean flag.
         // This eliminates the race condition where a Task on the cooperative pool
         // would reset a boolean that the OperationQueue reads.
-        if mag - prevAccelMag > tapThreshold && (now - lastTapFireTime) > tapCooldownDuration {
+        if mag - prevAccelMag > snapshotTapThreshold && (now - lastTapFireTime) > tapCooldownDuration {
             ws?.sendTiltTap()
             lastTapFireTime = now
         }

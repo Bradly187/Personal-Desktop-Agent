@@ -79,6 +79,15 @@ class OneEuroFilter:
         """
         now = timestamp if timestamp is not None else time.monotonic()
 
+        # Never let a non-finite sample enter the filter state: NaN/Inf would
+        # poison every subsequent output (NaN - NaN = NaN forever) and only a
+        # reset() could recover. Drop it and return the last good value. Callers
+        # should validate at ingress too; this is defense in depth for the
+        # shared filter (tilt velocity + tilt position pipelines).
+        if not math.isfinite(x):
+            log.debug("OneEuroFilter: dropping non-finite sample %r", x)
+            return self._x_prev if self._x_prev is not None else 0.0
+
         if self._t_prev is None or self._x_prev is None:
             # First sample — initialize without jump
             self._x_prev = x

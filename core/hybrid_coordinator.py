@@ -102,6 +102,12 @@ class CoordinatorConfig:
     latency_budget_ms: float = 600.0
     latency_ema_alpha: float = 0.1          # smoothing factor for EMA
 
+    # Local-inference circuit-breaker — a hung local call (Ollama wedged, GPU
+    # stuck mid-flare, model reload stall) must not stall the accessibility
+    # pipeline indefinitely. Warm p50 is ~373ms and an 8B cold load ~2.5s, so
+    # 15s is ~6x the worst legitimate case while still catching a true hang.
+    local_timeout_s: float = 15.0
+
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
     # Anthropic API (cloud fallback). Haiku 4.5 — matches the model documented
@@ -226,6 +232,17 @@ async def _retranscribe(cmd: Command) -> Command:
 
 _BYPASS_SOURCES = {"touch", "sound_action", "multimodal"}
 _SKIP_GATE1_SOURCES = {"voice_local"}
+
+# Output schema for the command-path LLM. The local/cloud command models are
+# prompted to answer verb-first with exactly one of these 11 accessibility
+# verbs (dev verbs are handled by DevAgent before the gate path; SNAP_WINDOW is
+# gesture-sourced and never an LLM output). Any response whose first token is
+# not one of these is a malformed LLM output and is degraded to CLARIFY in
+# _execute_action() rather than dispatched as a bad/unknown verb.
+_VALID_COMMAND_VERBS: frozenset[str] = frozenset({
+    "CLICK", "MOUSEDOWN", "MOUSEUP", "SCROLL", "TYPE", "OPEN",
+    "CLOSE", "HOTKEY", "DICTATE", "CLARIFY", "SCREENSHOT",
+})
 
 
 def _apply_pain_day_adjustments(cfg, snapshot) -> "CoordinatorConfig":
@@ -1033,7 +1050,19 @@ class HybridCoordinator:
             if self._trainer else None
         )
         t0 = time.monotonic()
-        action_str = await self._local.infer(cmd, few_shot_examples=examples)
+        # Circuit-breaker: a wedged local backend (Ollama hung, GPU stuck during
+        # a flare, stalled model reload) must not stall the pipeline forever.
+        # On timeout, degrade to CLARIFY rather than blocking the accessibility
+        # path indefinitely. Mirrors the cloud-path guard in _run_cloud().
+        try:
+            async with asyncio.timeout(self._cfg.local_timeout_s):
+                action_str = await self._local.infer(cmd, few_shot_examples=examples)
+        except TimeoutError:
+            log.error(
+                "HybridCoordinator: local inference timed out after %.0fs — CLARIFY fallback",
+                self._cfg.local_timeout_s,
+            )
+            return "CLARIFY local inference timed out"
         latency_ms = (time.monotonic() - t0) * 1000
         # NOTE: Do NOT call _update_ema here — route()'s finally block already
         # updates EMA with the total route latency (which includes inference).
@@ -1098,9 +1127,30 @@ class HybridCoordinator:
         if not action_str:
             return {"status": "error", "error": "empty action string"}
 
-        parts = action_str.strip().split(None, 1)
-        verb = parts[0].upper()
-        target = parts[1] if len(parts) > 1 else ""
+        verb, target = self._parse_action(action_str)
+
+        # Output-schema validation: the command-path LLM must answer with one of
+        # the 11 accessibility verbs. A response whose first token is anything
+        # else (prose, a hallucinated verb, a refusal) is malformed — degrade to
+        # CLARIFY so the user is re-prompted instead of dispatching a bad verb
+        # that would surface as a raw "Unknown action" error. The original
+        # malformed action_str is still recorded to agent.db by route() for
+        # later analysis.
+        if verb not in _VALID_COMMAND_VERBS:
+            log.warning(
+                "Malformed LLM action %r — first token %r not in command "
+                "vocabulary; degrading to CLARIFY",
+                action_str, verb,
+            )
+            if self._metrics is not None:
+                _rec = getattr(self._metrics, "record_malformed_action", None)
+                if _rec is not None:
+                    try:
+                        _rec(action_str)
+                    except Exception:
+                        pass
+            verb = "CLARIFY"
+            target = "Sorry, I didn't catch that. Could you say it again?"
 
         params = self._parse_params(verb, target, cmd)
         # CLARIFY from a cloud route should speak via Polly TTS
@@ -1179,6 +1229,30 @@ class HybridCoordinator:
         except Exception as exc:
             log.warning("_ground_target failed for %r: %s", target, exc)
             return None
+
+    @staticmethod
+    def _parse_action(action_str: str) -> tuple[str, str]:
+        """Split a raw LLM action string into (verb, target).
+
+        verb is upper-cased; target is the remainder (may be empty). Callers
+        validate verb against _VALID_COMMAND_VERBS before dispatch. Tolerates a
+        single leading "Action:"/"ACTION:" label some models prepend, but does
+        not otherwise hunt for a verb mid-string — an accessibility tool should
+        re-prompt rather than guess at a destructive action.
+        """
+        text = action_str.strip()
+        # Strip one optional leading label, e.g. "Action: CLICK button".
+        low = text.lower()
+        for label in ("action:", "command:"):
+            if low.startswith(label):
+                text = text[len(label):].strip()
+                break
+        parts = text.split(None, 1)
+        if not parts:
+            return "", ""
+        verb = parts[0].upper().rstrip(":")
+        target = parts[1].strip() if len(parts) > 1 else ""
+        return verb, target
 
     @staticmethod
     def _parse_params(verb: str, target: str, original: Command) -> dict:

@@ -131,6 +131,21 @@ struct SettingsView: View {
                     LabeledContent("Dead Zone: \(String(format: "%.1f°", settings.tiltDeadZone))") {
                         Slider(value: $settings.tiltDeadZone, in: 0.5...5.0)
                     }
+                    // Tap-to-click sensitivity. Slider 0→1 maps to tapThreshold 3.0→0.5 g
+                    // (higher slider = lighter tap registers). Inverted binding keeps
+                    // "right = more sensitive" intuitive.
+                    LabeledContent("Tap Sensitivity: \(Int((3.0 - settings.tapThreshold) / 2.5 * 100))%") {
+                        Slider(
+                            value: Binding(
+                                get: { (3.0 - settings.tapThreshold) / 2.5 },
+                                set: { settings.tapThreshold = 3.0 - $0 * 2.5 }
+                            ),
+                            in: 0...1
+                        )
+                    }
+                    Text("How light a tap on the iPad registers as a click. Higher = lighter taps. Two quick taps make a double-click.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
                     Toggle("Dwell Click", isOn: $settings.tiltDwellClickEnabled)
                     Text("Hold the cursor still to click. Fires the action selected in the dwell toolbar.")
                         .font(DesignTokens.Typography.caption)

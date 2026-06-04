@@ -32,8 +32,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 # Shared approval gate directory — approval_hook.py writes "pending",
-# WhisperStream responds with the transcript in "response".
+# WhisperStream responds with the canonical verdict in "response".
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
+
+# Seconds to flush+suppress the mic when the approval gate first opens, so the
+# TTS echo of Danielle's spoken "Approve …?" question (which contains the word
+# "approve") isn't transcribed and mistaken for the user's answer.
+_APPROVAL_ECHO_GUARD_S: float = 1.0
+
+# Shared confirmation vocabulary — kept in core/ so approval_hook.py and this
+# module parse identical yes/no language and can never drift out of sync.
+from core.approval_keywords import classify_confirmation
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +128,23 @@ def _has_trailing_silence(
     if len(audio) < n:
         return False
     return _rms(audio[-n:]) < threshold
+
+
+def _log_future_exc(fut) -> None:
+    """done-callback for run_coroutine_threadsafe fire-and-forget coroutines.
+
+    Without this, an exception inside a scheduled coroutine (composer dictation,
+    ambient-transcript DB write) is stored on the future and only surfaces as
+    Python's contextless "exception was never retrieved" warning. Logging it here
+    keeps a background failure from disappearing silently — and a failed non-
+    critical write can never affect the command path it was forked off of.
+    """
+    try:
+        exc = fut.exception()
+    except Exception:
+        return  # cancelled or not-yet-done — nothing to report
+    if exc is not None:
+        log.warning("WhisperStream: background task failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +247,9 @@ class WhisperStream:
         self._suppress_until: float = 0.0
         self._awaiting_clarification: bool = False
         self._clarification_deadline: float = 0.0
+        # Tracks whether the approval gate is currently open so the TTS echo of
+        # the spoken question is flushed exactly once when the gate first opens.
+        self._approval_pending_active: bool = False
         # Wake-arming: a bare "hey agent" (VAD split it off from the command)
         # arms this window; the next segment is taken as the command.
         self._wake_armed_until: float = 0.0
@@ -505,29 +534,106 @@ class WhisperStream:
             except Exception as exc:
                 log.error("WhisperStream loop error: %s", exc)
 
+    def _check_approval_echo_guard(self) -> None:
+        """Drop the TTS echo of the approval question when the gate first opens.
+
+        approval_hook.py speaks "Approve …?" through the PC speakers, then writes
+        the ``pending`` signal file. The iPad mic captures that spoken question;
+        if transcribed it would be mistaken for the user's answer — and the
+        question text itself contains the word "approve". When the gate first
+        opens we flush whatever the mic captured during playback and briefly
+        suppress incoming audio so only the user's actual reply is transcribed.
+        Idempotent per gate: fires once on the not-open → open transition.
+        """
+        try:
+            pending = (_APPROVAL_DIR / "pending").exists()
+        except OSError:
+            pending = False
+        if pending and not self._approval_pending_active:
+            self._approval_pending_active = True
+            self.suppress(_APPROVAL_ECHO_GUARD_S)   # flush buffer + drop echo tail
+            log.debug("WhisperStream: approval gate opened — TTS echo guard %.1fs",
+                      _APPROVAL_ECHO_GUARD_S)
+        elif not pending and self._approval_pending_active:
+            self._approval_pending_active = False
+
+    def _handle_approval_gate(self, text: str) -> bool:
+        """Treat ``text`` as a candidate yes/no answer when the gate is open.
+
+        Returns True if the transcript was consumed by the gate (caller must NOT
+        forward it to FusionEngine). Only a *deliberate* confirmation word is
+        written to the response file — ambient speech, the TTS echo, or garbage
+        is discarded and the gate keeps waiting (approval_hook.py then times out,
+        failing safe to DENY). This is the core fix: random speech can no longer
+        silently approve or deny a destructive tool call.
+        """
+        if not (_APPROVAL_DIR / "pending").exists():
+            return False
+        verdict = classify_confirmation(text)
+        if verdict is None:
+            log.info("WhisperStream: ignoring non-confirmation during approval "
+                     "gate (still waiting): %r", text)
+            return True  # consume — never forward ambient audio downstream
+        try:
+            # Write the canonical token ("approve"/"deny") so approval_hook.py
+            # parses the verdict unambiguously regardless of the exact phrasing.
+            (_APPROVAL_DIR / "response").write_text(verdict, encoding="utf-8")
+            log.info("WhisperStream: approval response %s ← %r", verdict, text)
+        except Exception as exc:
+            log.warning("WhisperStream: could not write approval response: %s", exc)
+        return True
+
+    def _trailing_silence_from_chunks(self) -> bool:
+        """Trailing-silence check that concatenates only the tail chunks needed.
+
+        Walks the buffered chunks from the end until it has the last
+        ``silence_s`` worth of samples (≈ a handful of ~100 ms chunks) and tests
+        that window's RMS — instead of concatenating the entire (growing) buffer
+        on every 150 ms poll tick. Same result as
+        ``_has_trailing_silence(full_buffer, …)`` but O(silence window), not O(n).
+        """
+        n = int(self.SAMPLE_RATE * self._silence_s)
+        if n <= 0:
+            return False
+        tail: list = []
+        count = 0
+        for c in reversed(self._buffer_chunks):
+            tail.append(c)
+            count += len(c)
+            if count >= n:
+                break
+        if count < n:
+            return False  # not enough audio buffered yet
+        tail_audio = np.concatenate(list(reversed(tail)))
+        return _rms(tail_audio[-n:]) < self._silence_thresh
+
     async def _maybe_transcribe(self) -> None:
+        # Flush the TTS echo of the approval prompt before it can be transcribed.
+        self._check_approval_echo_guard()
         if not self._buffer_chunks:
             return
 
-        # Concatenate once (O(n) total, not O(n) per chunk)
-        buf = np.concatenate(self._buffer_chunks)
-        duration = len(buf) / self.SAMPLE_RATE
+        # Measure duration without concatenating: summing chunk lengths is
+        # O(#chunks) (~hundreds), not O(#samples) (up to 480k). Concatenation of
+        # the full buffer is deferred to the moment we actually transcribe — the
+        # whole point of the on_audio_chunk list accumulator. Re-concatenating
+        # the growing buffer on every poll tick would be O(n²) on the event loop.
+        total_samples = sum(len(c) for c in self._buffer_chunks)
+        duration = total_samples / self.SAMPLE_RATE
 
         # Too short to be speech
         if duration < self._min_speech_s:
             return
 
         force = duration >= self._max_buffer_s
-        silence_at_end = _has_trailing_silence(
-            buf, self.SAMPLE_RATE, self._silence_s, self._silence_thresh
-        )
 
-        if not force and not silence_at_end:
+        if not force and not self._trailing_silence_from_chunks():
             return
 
         # Claim the buffer — clear before awaiting so new chunks go into a
-        # fresh buffer while transcription runs on the old one
-        audio = buf
+        # fresh buffer while transcription runs on the old one. The single full
+        # concatenation happens here, exactly once per utterance.
+        audio = np.concatenate(self._buffer_chunks)
         self._buffer_chunks = []
         self._buffer_start_ts = None
 
@@ -669,14 +775,21 @@ class WhisperStream:
 
         log.info("WhisperStream: %r (logprob=%.2f)", text, avg_logprob)
 
-        # Feed acoustic profiler — builds per-user voice model over time
+        # Feed acoustic profiler — builds per-user voice model over time.
+        # Guarded: this is a non-critical adaptive write. A profiler failure must
+        # never abort _transcribe before the command reaches FusionEngine, or a
+        # learning bug would silently drop the user's accessibility command.
         if self._profiler is not None:
-            self._profiler.record(
-                audio=audio,
-                avg_logprob=avg_logprob,
-                actual_text=text,
-                sr=self.SAMPLE_RATE,
-            )
+            try:
+                self._profiler.record(
+                    audio=audio,
+                    avg_logprob=avg_logprob,
+                    actual_text=text,
+                    sr=self.SAMPLE_RATE,
+                )
+            except Exception as exc:
+                log.warning("WhisperStream: acoustic profiler.record failed "
+                            "(non-fatal): %s", exc)
 
         from core.command_executor import Command
         params: dict = {}
@@ -689,18 +802,12 @@ class WhisperStream:
         # ---------------------------------------------------------------------------
         # Approval gate intercept — check before forwarding to FusionEngine.
         # approval_hook.py (Claude Code PreToolUse) writes a "pending" signal file
-        # when waiting for a yes/no from the user. If we see it, write the
-        # transcript as the approval response and suppress it from the pipeline so
-        # "yes" / "no" never reaches the desktop action pipeline.
+        # when waiting for a yes/no from the user. Only a deliberate confirmation
+        # word (yes/approve vs no/cancel) is written as the response — ambient
+        # audio, the TTS echo of the question, and stray words are discarded so
+        # they can never silently approve or deny a destructive tool call.
         # ---------------------------------------------------------------------------
-        _approval_pending = _APPROVAL_DIR / "pending"
-        _approval_response = _APPROVAL_DIR / "response"
-        if _approval_pending.exists():
-            try:
-                _approval_response.write_text(text, encoding="utf-8")
-                log.info("WhisperStream: approval response → %r", text)
-            except Exception as exc:
-                log.warning("WhisperStream: could not write approval response: %s", exc)
+        if self._handle_approval_gate(text):
             return  # consumed by approval gate — do NOT forward to FusionEngine
 
         # Calibration capture: one-shot intercept for VoiceCalibrator sessions.
@@ -710,7 +817,10 @@ class WhisperStream:
             self._calibration_capture = None  # consume — one shot only
             duration_s = len(audio) / self.SAMPLE_RATE
             log.info("WhisperStream: calibration capture: %r (logprob=%.2f)", text, avg_logprob)
-            cb(text, avg_logprob, duration_s)
+            try:
+                cb(text, avg_logprob, duration_s)
+            except Exception as exc:
+                log.warning("WhisperStream: calibration callback failed: %s", exc)
             return  # don't route to FusionEngine
 
         # Compose mode: while the user is building a multi-sentence prompt,
@@ -722,10 +832,11 @@ class WhisperStream:
             if time.monotonic() >= self._suppress_until:
                 if self._event_loop is not None:
                     import asyncio as _asyncio
-                    _asyncio.run_coroutine_threadsafe(
+                    _fut = _asyncio.run_coroutine_threadsafe(
                         self._composer.handle_utterance(text),
                         self._event_loop,
                     )
+                    _fut.add_done_callback(_log_future_exc)
             return  # always consume — never fall through to normal pipeline
 
         # Post-TTS echo guard: discard transcription results that completed
@@ -795,7 +906,7 @@ class WhisperStream:
                         and self._event_loop is not None:
                     log.debug("WhisperStream: lecture mode — storing: %r", text)
                     import asyncio as _asyncio
-                    _asyncio.run_coroutine_threadsafe(
+                    _fut = _asyncio.run_coroutine_threadsafe(
                         self._agent_db.insert_ambient_transcript(
                             session_id=self._session_id,
                             text=text,
@@ -804,6 +915,7 @@ class WhisperStream:
                         ),
                         self._event_loop,
                     )
+                    _fut.add_done_callback(_log_future_exc)
                     return
                 else:
                     log.debug("WhisperStream: no wake phrase — discarding: %r", text)
@@ -833,10 +945,11 @@ class WhisperStream:
             if self._composer is not None and self._composer.is_trigger(text):
                 if self._event_loop is not None:
                     import asyncio as _asyncio
-                    _asyncio.run_coroutine_threadsafe(
+                    _fut = _asyncio.run_coroutine_threadsafe(
                         self._composer.handle_utterance(text),
                         self._event_loop,
                     )
+                    _fut.add_done_callback(_log_future_exc)
                 return
 
             # D8: correction detection — "no/wait/actually <new command>" after
