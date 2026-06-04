@@ -148,9 +148,15 @@ From the 2026-05-30 review:
   (SVT fast-path block) and `tests/test_pain_day_propagation.py`. The 5 s poll
   is now only the fallback path — a manual flare/SVT toggle releases VRAM in
   < 100 ms.
-- **LLM output schema validation** — verb responses are still parsed by string
-  split; a malformed response silently becomes a bad verb. No Pydantic/schema
-  gate yet. (Out of scope per the AIOS sprint, but still open — next candidate.)
+- ~~**LLM output schema validation**~~ — **RESOLVED 2026-06-04.**
+  `_execute_action()` now parses the LLM response via `_parse_action()` (with
+  leading-`Action:`-label tolerance) and validates the verb against
+  `_VALID_COMMAND_VERBS` (the 11 accessibility verbs). A response whose first
+  token is prose, a hallucinated verb, a dev verb, or a refusal is degraded to
+  CLARIFY (user re-prompted) instead of dispatched as a bad verb that surfaced
+  as a raw "Unknown action" error. The original malformed `action_str` is still
+  recorded to agent.db for analysis. Covered by `tests/test_action_schema.py`
+  (14 tests).
 - **`aios_sdk` package** — `register_agent()` / `subscribe_to_sensor()` /
   `invoke_tool()` SDK from the AIOS plan is not started (low priority for a
   single-user system).

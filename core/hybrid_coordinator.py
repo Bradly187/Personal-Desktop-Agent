@@ -233,6 +233,17 @@ async def _retranscribe(cmd: Command) -> Command:
 _BYPASS_SOURCES = {"touch", "sound_action", "multimodal"}
 _SKIP_GATE1_SOURCES = {"voice_local"}
 
+# Output schema for the command-path LLM. The local/cloud command models are
+# prompted to answer verb-first with exactly one of these 11 accessibility
+# verbs (dev verbs are handled by DevAgent before the gate path; SNAP_WINDOW is
+# gesture-sourced and never an LLM output). Any response whose first token is
+# not one of these is a malformed LLM output and is degraded to CLARIFY in
+# _execute_action() rather than dispatched as a bad/unknown verb.
+_VALID_COMMAND_VERBS: frozenset[str] = frozenset({
+    "CLICK", "MOUSEDOWN", "MOUSEUP", "SCROLL", "TYPE", "OPEN",
+    "CLOSE", "HOTKEY", "DICTATE", "CLARIFY", "SCREENSHOT",
+})
+
 
 def _apply_pain_day_adjustments(cfg, snapshot) -> "CoordinatorConfig":
     """Return a modified config copy with pain-day threshold relaxations.
@@ -1116,9 +1127,30 @@ class HybridCoordinator:
         if not action_str:
             return {"status": "error", "error": "empty action string"}
 
-        parts = action_str.strip().split(None, 1)
-        verb = parts[0].upper()
-        target = parts[1] if len(parts) > 1 else ""
+        verb, target = self._parse_action(action_str)
+
+        # Output-schema validation: the command-path LLM must answer with one of
+        # the 11 accessibility verbs. A response whose first token is anything
+        # else (prose, a hallucinated verb, a refusal) is malformed — degrade to
+        # CLARIFY so the user is re-prompted instead of dispatching a bad verb
+        # that would surface as a raw "Unknown action" error. The original
+        # malformed action_str is still recorded to agent.db by route() for
+        # later analysis.
+        if verb not in _VALID_COMMAND_VERBS:
+            log.warning(
+                "Malformed LLM action %r — first token %r not in command "
+                "vocabulary; degrading to CLARIFY",
+                action_str, verb,
+            )
+            if self._metrics is not None:
+                _rec = getattr(self._metrics, "record_malformed_action", None)
+                if _rec is not None:
+                    try:
+                        _rec(action_str)
+                    except Exception:
+                        pass
+            verb = "CLARIFY"
+            target = "Sorry, I didn't catch that. Could you say it again?"
 
         params = self._parse_params(verb, target, cmd)
         # CLARIFY from a cloud route should speak via Polly TTS
@@ -1197,6 +1229,30 @@ class HybridCoordinator:
         except Exception as exc:
             log.warning("_ground_target failed for %r: %s", target, exc)
             return None
+
+    @staticmethod
+    def _parse_action(action_str: str) -> tuple[str, str]:
+        """Split a raw LLM action string into (verb, target).
+
+        verb is upper-cased; target is the remainder (may be empty). Callers
+        validate verb against _VALID_COMMAND_VERBS before dispatch. Tolerates a
+        single leading "Action:"/"ACTION:" label some models prepend, but does
+        not otherwise hunt for a verb mid-string — an accessibility tool should
+        re-prompt rather than guess at a destructive action.
+        """
+        text = action_str.strip()
+        # Strip one optional leading label, e.g. "Action: CLICK button".
+        low = text.lower()
+        for label in ("action:", "command:"):
+            if low.startswith(label):
+                text = text[len(label):].strip()
+                break
+        parts = text.split(None, 1)
+        if not parts:
+            return "", ""
+        verb = parts[0].upper().rstrip(":")
+        target = parts[1].strip() if len(parts) > 1 else ""
+        return verb, target
 
     @staticmethod
     def _parse_params(verb: str, target: str, original: Command) -> dict:
