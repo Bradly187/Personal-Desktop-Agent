@@ -431,6 +431,17 @@ class FusionEngine:
     # ---------------------------------------------------------------------- #
 
     def on_touch(self, cmd: Command) -> None:
+        # Pin the click to the current cursor position. A tilt-tap CLICK arrives
+        # with no coordinates and text="tilt_tap"; without this, _resolve_coords
+        # would treat "tilt_tap" as a UI target name and run a UIAutomation fuzzy
+        # BFS (~0.3s, and may mis-click whatever fuzzy-matches) before finally
+        # falling back to the cursor. Writing explicit params x/y is step 1 of the
+        # resolver chain, so it short-circuits the lookup and clicks exactly where
+        # tilt/trackpad/touch last put the cursor — mirroring the voice-"click" path.
+        if cmd.action == "CLICK" and "x" not in cmd.params:
+            px, py = self._cursor_pos
+            cmd.params = {**cmd.params, "x": px, "y": py}
+            log.info("FusionEngine: touch CLICK pinned to cursor (%d, %d)", px, py)
         self._touch = cmd
 
     def on_sound_action(self, sound: str, conf: float) -> None:

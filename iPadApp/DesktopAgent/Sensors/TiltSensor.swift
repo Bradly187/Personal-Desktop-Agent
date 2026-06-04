@@ -80,6 +80,13 @@ final class TiltSensor: ObservableObject {
     /// Max instantaneous angular velocity seen in the diag window (rad/s).
     /// Tells us if the user is actually moving the iPad or if it's stationary.
     private var diagMaxAngVel: Double = 0
+    /// Tap impulses that crossed the threshold and fired a tilt_tap this window.
+    private var diagTapsFired: Int = 0
+    /// Largest accel-magnitude delta seen this window (g). Compared against
+    /// snapshotTapThreshold, it tells us whether real taps are landing close to
+    /// the bar — if peakAccelDelta hovers just under the threshold with
+    /// tapsFired=0, the tap is being detected but rejected as too light.
+    private var diagPeakAccelDelta: Double = 0
 
     // MARK: — Snapshotted settings (avoids cross-isolation reads at 60Hz)
     private var snapshotTiltEnabled: Bool = true
@@ -429,9 +436,12 @@ final class TiltSensor: ObservableObject {
         // Fix: Use timestamp comparison instead of boolean flag.
         // This eliminates the race condition where a Task on the cooperative pool
         // would reset a boolean that the OperationQueue reads.
-        if mag - prevAccelMag > snapshotTapThreshold && (now - lastTapFireTime) > tapCooldownDuration {
+        let accelDelta = mag - prevAccelMag
+        if accelDelta > diagPeakAccelDelta { diagPeakAccelDelta = accelDelta }
+        if accelDelta > snapshotTapThreshold && (now - lastTapFireTime) > tapCooldownDuration {
             ws?.sendTiltTap()
             lastTapFireTime = now
+            diagTapsFired += 1
         }
         prevAccelMag = mag
     }
@@ -448,10 +458,11 @@ final class TiltSensor: ObservableObject {
         }
         guard now - diagLastReportTime >= 1.0 else { return }
         let summary = String(
-            format: "handler=%d/s sends=%d suppressed=%d wsNil=%d enabled=%@ posMode=%@ locked=%@ peakAngVel=%.3f rad/s",
+            format: "handler=%d/s sends=%d suppressed=%d wsNil=%d enabled=%@ posMode=%@ locked=%@ peakAngVel=%.3f rad/s tapsFired=%d peakAccelDelta=%.2fg tapThresh=%.2fg",
             diagHandlerCalls, diagSendsAttempted, diagSendsSuppressed, diagWsNilCount,
             snapshotTiltEnabled.description, snapshotTiltPositionMode.description,
-            (lockedCoords != nil).description, diagMaxAngVel
+            (lockedCoords != nil).description, diagMaxAngVel,
+            diagTapsFired, diagPeakAccelDelta, snapshotTapThreshold
         )
         AppLogger.shared.info("TiltSensor", summary)
         diagLastReportTime = now
@@ -460,5 +471,7 @@ final class TiltSensor: ObservableObject {
         diagSendsSuppressed = 0
         diagWsNilCount = 0
         diagMaxAngVel = 0
+        diagTapsFired = 0
+        diagPeakAccelDelta = 0
     }
 }

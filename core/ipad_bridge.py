@@ -301,9 +301,12 @@ class IPadBridge:
             return
 
         if msg_type == "tilt_tap":
+            log.info("tilt_tap received (id=%s) → CLICK", msg.get("id", "?"))
             if self._fusion:
                 cmd = Command(text="tilt_tap", action="CLICK", source="touch")
                 self._fusion.on_touch(cmd)
+            else:
+                log.warning("tilt_tap dropped: FusionEngine not wired")
             return
 
         if msg_type == "dwell_click":
