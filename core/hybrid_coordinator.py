@@ -102,6 +102,12 @@ class CoordinatorConfig:
     latency_budget_ms: float = 600.0
     latency_ema_alpha: float = 0.1          # smoothing factor for EMA
 
+    # Local-inference circuit-breaker — a hung local call (Ollama wedged, GPU
+    # stuck mid-flare, model reload stall) must not stall the accessibility
+    # pipeline indefinitely. Warm p50 is ~373ms and an 8B cold load ~2.5s, so
+    # 15s is ~6x the worst legitimate case while still catching a true hang.
+    local_timeout_s: float = 15.0
+
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
     # Anthropic API (cloud fallback). Haiku 4.5 — matches the model documented
@@ -1033,7 +1039,19 @@ class HybridCoordinator:
             if self._trainer else None
         )
         t0 = time.monotonic()
-        action_str = await self._local.infer(cmd, few_shot_examples=examples)
+        # Circuit-breaker: a wedged local backend (Ollama hung, GPU stuck during
+        # a flare, stalled model reload) must not stall the pipeline forever.
+        # On timeout, degrade to CLARIFY rather than blocking the accessibility
+        # path indefinitely. Mirrors the cloud-path guard in _run_cloud().
+        try:
+            async with asyncio.timeout(self._cfg.local_timeout_s):
+                action_str = await self._local.infer(cmd, few_shot_examples=examples)
+        except TimeoutError:
+            log.error(
+                "HybridCoordinator: local inference timed out after %.0fs — CLARIFY fallback",
+                self._cfg.local_timeout_s,
+            )
+            return "CLARIFY local inference timed out"
         latency_ms = (time.monotonic() - t0) * 1000
         # NOTE: Do NOT call _update_ema here — route()'s finally block already
         # updates EMA with the total route latency (which includes inference).

@@ -133,16 +133,24 @@ From the 2026-05-30 review:
 
 ## Open Items
 
-- **HybridCoordinator circuit-breaker (carried from AIOS handoff)** — `route()`
-  has no top-level `asyncio.timeout`; a hung local-inference call could still
-  stall the pipeline. The cloud path (10 s) and laptop offload (`ClusterHealth`)
-  are guarded, but the local path is not.
+- ~~**HybridCoordinator circuit-breaker (carried from AIOS handoff)**~~ —
+  **RESOLVED 2026-06-04.** `_run_local()` now wraps `self._local.infer()` in an
+  `asyncio.timeout(cfg.local_timeout_s)` (default 15 s) and degrades to
+  `"CLARIFY local inference timed out"` on expiry, mirroring the cloud-path
+  guard. A hung local backend can no longer stall the accessibility pipeline.
+  Covered by `tests/test_local_timeout.py` (4 tests). The cloud path (10 s) and
+  laptop offload (`ClusterHealth`) were already guarded.
+- ~~**SVT fast-path for `ResourceGovernor`**~~ — **already done (verified
+  2026-06-04).** `ResourceGovernor.notify_pain_day_change()` is wired through
+  `BehavioralTwinState._on_pain_day_transition()` (called by
+  `set_manual_pain_day()`) and registered in `main.py:897` via
+  `set_resource_governor()`; covered by `tests/test_resource_governor.py`
+  (SVT fast-path block) and `tests/test_pain_day_propagation.py`. The 5 s poll
+  is now only the fallback path — a manual flare/SVT toggle releases VRAM in
+  < 100 ms.
 - **LLM output schema validation** — verb responses are still parsed by string
   split; a malformed response silently becomes a bad verb. No Pydantic/schema
-  gate yet. (Out of scope per the AIOS sprint, but still open.)
-- **SVT fast-path for `ResourceGovernor`** — the 5 s poll means up to 5 s before
-  VRAM is released on an SVT attack; a `set_manual_pain_day(True)` callback hook
-  would cut this to < 1 s.
+  gate yet. (Out of scope per the AIOS sprint, but still open — next candidate.)
 - **`aios_sdk` package** — `register_agent()` / `subscribe_to_sensor()` /
   `invoke_tool()` SDK from the AIOS plan is not started (low priority for a
   single-user system).
