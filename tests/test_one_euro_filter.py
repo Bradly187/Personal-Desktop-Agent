@@ -22,6 +22,27 @@ class TestOneEuroFilterBasics:
             result = f(3.0, timestamp=i * dt)
         assert abs(result - 3.0) < 0.001
 
+    def test_non_finite_sample_does_not_poison_filter(self):
+        """A NaN/Inf sample must be dropped — never poison subsequent output."""
+        f = OneEuroFilter(min_cutoff=1.0, beta=0.007)
+        dt = 1.0 / 60.0
+        f(1.0, timestamp=0 * dt)
+        # NaN then Inf — both dropped, last good value returned
+        assert f(float("nan"), timestamp=1 * dt) == pytest.approx(1.0)
+        assert f(float("inf"), timestamp=2 * dt) == pytest.approx(1.0)
+        # Subsequent finite samples still produce finite, sensible output
+        for i in range(3, 60):
+            out = f(2.0, timestamp=i * dt)
+        assert math.isfinite(out)
+        assert abs(out - 2.0) < 0.1
+
+    def test_non_finite_first_sample_returns_zero(self):
+        """A non-finite first sample (no prior value) returns 0.0, not NaN."""
+        f = OneEuroFilter()
+        assert f(float("nan"), timestamp=0.0) == 0.0
+        assert f.initialized is False           # state untouched
+        assert f(5.0, timestamp=0.1) == 5.0     # first real sample passes through
+
     def test_step_response_monotonic(self):
         """Step from 0 to 1 should produce monotonically increasing output."""
         f = OneEuroFilter(min_cutoff=1.0, beta=0.007)

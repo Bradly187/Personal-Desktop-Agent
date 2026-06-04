@@ -119,6 +119,13 @@ class FusionConfig:
     dead_zone_inner: float = 0.05            # rad/s — below this: zero output
     dead_zone_ramp_mult: float = 1.5         # outer = inner + inner * mult → 0.125 rad/s
 
+    # Max per-frame cursor displacement (px) for tilt VELOCITY mode. The power
+    # curve (exponent 2) amplifies fast input, so an involuntary tremor jerk can
+    # produce a large single-frame fling. Clamping each axis caps that without
+    # affecting normal control — at sensitivity 200 a brisk 0.7 rad/s move is
+    # ~98 px/frame, well under the cap. Set <= 0 to disable.
+    tilt_max_px_per_frame: float = 150.0
+
 
 # ---------------------------------------------------------------------------
 # FusionEngine
@@ -403,15 +410,18 @@ class FusionEngine:
         from the new neutral point. The iPad has already captured the new neutral
         gravity vector; this just tells the PC to hold position.
         """
-        import pyautogui
-        # Record current cursor position as the held position
-        pos = pyautogui.position()
-        self._ratchet_held_pos = (pos.x, pos.y)
+        # Use the cached cursor position (refreshed at 10 Hz by
+        # _cursor_cache_loop) rather than a synchronous pyautogui.position() call,
+        # which would block the asyncio event loop this callback runs on — the
+        # very thing the cursor cache exists to avoid. The held position is
+        # informational, so 10 Hz freshness is ample.
+        px, py = self._cursor_pos
+        self._ratchet_held_pos = (px, py)
         self._ratchet_active = True
         # Reset tilt position filter so it starts fresh from the new neutral
         self._tilt_pos_filter_x.reset()
         self._tilt_pos_filter_y.reset()
-        log.info("Ratchet activated — holding cursor at (%d, %d)", pos.x, pos.y)
+        log.info("Ratchet activated — holding cursor at (%d, %d)", px, py)
 
     def on_sensor_switch(self, from_sensor: str | None, to_sensor: str) -> None:
         """Handle cursor sensor switch — hold cursor for 200ms to prevent jump.
@@ -643,6 +653,14 @@ class FusionEngine:
                 exp = self._effective_cfg.tilt_vel_exponent
                 cursor_dx = power_curve(rx_ramped, exp, sensitivity)
                 cursor_dy = power_curve(ry_ramped, exp, sensitivity)
+
+                # Clamp per-frame displacement so a tremor spike (amplified by
+                # the quadratic power curve) can't fling the cursor across the
+                # screen in a single frame.
+                _max_px = self._effective_cfg.tilt_max_px_per_frame
+                if _max_px > 0:
+                    cursor_dx = max(-_max_px, min(_max_px, cursor_dx))
+                    cursor_dy = max(-_max_px, min(_max_px, cursor_dy))
 
                 # rx = rotationRate.x: rotation around X-axis → vertical cursor
                 #   positive rx (tilt top away) → cursor moves up (negative dy)

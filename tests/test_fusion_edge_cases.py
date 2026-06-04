@@ -112,3 +112,64 @@ def test_nan_velocity_frame_does_not_poison_tilt(monkeypatch):
         for c in mv.call_args_list:
             dx, dy = c[0][:2]
             assert isinstance(dx, int) and isinstance(dy, int)
+
+
+# ---------------------------------------------------------------------------
+# Ratchet uses the cached cursor position (no blocking pyautogui.position())
+# ---------------------------------------------------------------------------
+
+def test_ratchet_uses_cached_cursor_position():
+    with patch("pyautogui.position") as pos:
+        fe = _engine()
+        fe._cursor_pos = (123, 456)         # as set by _cursor_cache_loop
+        fe.on_tilt_ratchet()
+        assert fe._ratchet_active is True
+        assert fe._ratchet_held_pos == (123, 456)
+        pos.assert_not_called()             # did NOT block the loop on position()
+
+
+# ---------------------------------------------------------------------------
+# #4 — tremor velocity clamp
+# ---------------------------------------------------------------------------
+
+def test_velocity_clamp_caps_tremor_fling():
+    """A sharp jerk that would produce a huge single-frame move is clamped."""
+    from core.fusion_engine import FusionConfig
+    with patch("pyautogui.moveRel") as mv, \
+         patch("pyautogui.moveTo"), \
+         patch("pyautogui.position", return_value=MagicMock(x=960, y=540)):
+        cfg = FusionConfig(tilt_max_px_per_frame=150.0)
+        fe = FusionEngine(1920, 1080, config=cfg)
+        fe._coordinator = MagicMock()
+        fe._coordinator.route = AsyncMock(return_value={"status": "ok"})
+
+        # rx=ry=2.0 rad/s → power_curve(2.0, 2, 200) = 800 px/frame uncapped.
+        for _ in range(8):
+            fe.on_tilt(2.0, 2.0)
+            asyncio.run(fe._tick())
+
+        assert mv.called
+        for c in mv.call_args_list:
+            dx, dy = c[0][:2]
+            assert abs(dx) <= 150 and abs(dy) <= 150, f"unclamped move {dx},{dy}"
+        # At least one frame actually hit the cap (proves the clamp engaged).
+        assert any(abs(c[0][0]) == 150 or abs(c[0][1]) == 150 for c in mv.call_args_list)
+
+
+def test_velocity_clamp_disabled_allows_large_move():
+    """With the clamp disabled (<=0), the large fling is NOT capped."""
+    from core.fusion_engine import FusionConfig
+    with patch("pyautogui.moveRel") as mv, \
+         patch("pyautogui.moveTo"), \
+         patch("pyautogui.position", return_value=MagicMock(x=960, y=540)):
+        cfg = FusionConfig(tilt_max_px_per_frame=0.0)
+        fe = FusionEngine(1920, 1080, config=cfg)
+        fe._coordinator = MagicMock()
+        fe._coordinator.route = AsyncMock(return_value={"status": "ok"})
+
+        for _ in range(8):
+            fe.on_tilt(2.0, 2.0)
+            asyncio.run(fe._tick())
+
+        assert mv.called
+        assert any(abs(c[0][0]) > 150 or abs(c[0][1]) > 150 for c in mv.call_args_list)
