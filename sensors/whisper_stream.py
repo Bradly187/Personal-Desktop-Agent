@@ -130,6 +130,23 @@ def _has_trailing_silence(
     return _rms(audio[-n:]) < threshold
 
 
+def _log_future_exc(fut) -> None:
+    """done-callback for run_coroutine_threadsafe fire-and-forget coroutines.
+
+    Without this, an exception inside a scheduled coroutine (composer dictation,
+    ambient-transcript DB write) is stored on the future and only surfaces as
+    Python's contextless "exception was never retrieved" warning. Logging it here
+    keeps a background failure from disappearing silently — and a failed non-
+    critical write can never affect the command path it was forked off of.
+    """
+    try:
+        exc = fut.exception()
+    except Exception:
+        return  # cancelled or not-yet-done — nothing to report
+    if exc is not None:
+        log.warning("WhisperStream: background task failed (non-fatal): %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # WhisperStream
 # ---------------------------------------------------------------------------
@@ -758,14 +775,21 @@ class WhisperStream:
 
         log.info("WhisperStream: %r (logprob=%.2f)", text, avg_logprob)
 
-        # Feed acoustic profiler — builds per-user voice model over time
+        # Feed acoustic profiler — builds per-user voice model over time.
+        # Guarded: this is a non-critical adaptive write. A profiler failure must
+        # never abort _transcribe before the command reaches FusionEngine, or a
+        # learning bug would silently drop the user's accessibility command.
         if self._profiler is not None:
-            self._profiler.record(
-                audio=audio,
-                avg_logprob=avg_logprob,
-                actual_text=text,
-                sr=self.SAMPLE_RATE,
-            )
+            try:
+                self._profiler.record(
+                    audio=audio,
+                    avg_logprob=avg_logprob,
+                    actual_text=text,
+                    sr=self.SAMPLE_RATE,
+                )
+            except Exception as exc:
+                log.warning("WhisperStream: acoustic profiler.record failed "
+                            "(non-fatal): %s", exc)
 
         from core.command_executor import Command
         params: dict = {}
@@ -793,7 +817,10 @@ class WhisperStream:
             self._calibration_capture = None  # consume — one shot only
             duration_s = len(audio) / self.SAMPLE_RATE
             log.info("WhisperStream: calibration capture: %r (logprob=%.2f)", text, avg_logprob)
-            cb(text, avg_logprob, duration_s)
+            try:
+                cb(text, avg_logprob, duration_s)
+            except Exception as exc:
+                log.warning("WhisperStream: calibration callback failed: %s", exc)
             return  # don't route to FusionEngine
 
         # Compose mode: while the user is building a multi-sentence prompt,
@@ -805,10 +832,11 @@ class WhisperStream:
             if time.monotonic() >= self._suppress_until:
                 if self._event_loop is not None:
                     import asyncio as _asyncio
-                    _asyncio.run_coroutine_threadsafe(
+                    _fut = _asyncio.run_coroutine_threadsafe(
                         self._composer.handle_utterance(text),
                         self._event_loop,
                     )
+                    _fut.add_done_callback(_log_future_exc)
             return  # always consume — never fall through to normal pipeline
 
         # Post-TTS echo guard: discard transcription results that completed
@@ -878,7 +906,7 @@ class WhisperStream:
                         and self._event_loop is not None:
                     log.debug("WhisperStream: lecture mode — storing: %r", text)
                     import asyncio as _asyncio
-                    _asyncio.run_coroutine_threadsafe(
+                    _fut = _asyncio.run_coroutine_threadsafe(
                         self._agent_db.insert_ambient_transcript(
                             session_id=self._session_id,
                             text=text,
@@ -887,6 +915,7 @@ class WhisperStream:
                         ),
                         self._event_loop,
                     )
+                    _fut.add_done_callback(_log_future_exc)
                     return
                 else:
                     log.debug("WhisperStream: no wake phrase — discarding: %r", text)
@@ -916,10 +945,11 @@ class WhisperStream:
             if self._composer is not None and self._composer.is_trigger(text):
                 if self._event_loop is not None:
                     import asyncio as _asyncio
-                    _asyncio.run_coroutine_threadsafe(
+                    _fut = _asyncio.run_coroutine_threadsafe(
                         self._composer.handle_utterance(text),
                         self._event_loop,
                     )
+                    _fut.add_done_callback(_log_future_exc)
                 return
 
             # D8: correction detection — "no/wait/actually <new command>" after
