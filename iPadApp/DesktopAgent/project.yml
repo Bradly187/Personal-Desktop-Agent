@@ -34,6 +34,11 @@ targets:
         CFBundleVersion: "1"
         CFBundleShortVersionString: "1.0"
         CFBundleIconName: AppIcon
+        # Declares the app uses no non-exempt encryption (only standard HTTPS/WSS,
+        # which is exempt). Without this, every TestFlight build lands as "Missing
+        # Compliance" and won't install until the export question is answered by
+        # hand in App Store Connect — which is why builds kept getting stuck.
+        ITSAppUsesNonExemptEncryption: false
         UILaunchStoryboardName: LaunchScreen
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations~ipad:
