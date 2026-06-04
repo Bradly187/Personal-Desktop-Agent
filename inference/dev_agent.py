@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from core.approval_keywords import classify_confirmation
 from core.domain_classifier import DomainClassifier
 from inference.model_router import ModelRouter, RouterResult
 
@@ -494,11 +495,10 @@ class DevAgent:
                 GoalSessionStore.create(goal=goal, domain="plan")
                 return True
 
-        _REJECT = frozenset({"no", "nope", "stop", "cancel", "abort", "block", "don't", "wait", "hold", "skip"})
-        _APPROVE = frozenset({"yes", "yeah", "yep", "ok", "okay", "sure", "approve", "go", "proceed", "do it"})
-
-        words = set((transcript or "").lower().split())
-        if words & _REJECT:
+        # Shared confirmation vocabulary (core/approval_keywords). Only an
+        # explicit deny blocks goal authorization; an explicit yes, silence, or
+        # an ambiguous reply all proceed (the user opted into a whole-goal grant).
+        if classify_confirmation(transcript) == "deny":
             log.info("DevAgent._approve_plan_upfront: REJECTED — %r", transcript)
             return False
 
@@ -805,15 +805,6 @@ class DevAgent:
         """
         import numpy as np
 
-        _APPROVE_WORDS = frozenset({
-            "yes", "yeah", "yep", "ok", "okay", "sure", "approve",
-            "go", "proceed", "continue", "correct", "right", "do it",
-        })
-        _REJECT_WORDS = frozenset({
-            "no", "nope", "stop", "cancel", "abort", "block", "don't",
-            "wait", "hold", "skip", "never",
-        })
-
         # If the user already approved the entire plan upfront, skip per-op confirmation
         if self._plan_authorized:
             log.info("DevAgent._confirm: skipping (plan authorized) — %s", description)
@@ -864,16 +855,19 @@ class DevAgent:
             log.debug("DevAgent._confirm: transcription failed (%s) — auto-approving", exc)
             return True
 
-        # --- 5. Keyword detection --------------------------------------------
-        words = set(text.split())
-        if words & _REJECT_WORDS:
+        # --- 5. Keyword detection (shared vocabulary, core/approval_keywords) -
+        verdict = classify_confirmation(text)
+        if verdict == "deny":
             log.info("DevAgent._confirm: REJECTED — %r", text)
             return False
-        if words & _APPROVE_WORDS:
+        if verdict == "approve":
             log.info("DevAgent._confirm: approved — %r", text)
             return True
 
-        # Ambiguous response → auto-approve (matches approval_hook.py timeout behaviour)
+        # Ambiguous response → auto-approve. Unlike the iPad approval gate (which
+        # listens to a continuous ambient mic and must fail safe to DENY), this
+        # path records a deliberate 4 s answer to a spoken prompt, so the agent
+        # never silently drops work on an unrecognised reply.
         log.info("DevAgent._confirm: ambiguous response %r → auto-approved", text)
         return True
 
