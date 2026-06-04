@@ -56,10 +56,16 @@ final class TiltSensor: ObservableObject {
 
     // Impulse detection state
     private var prevAccelMag: Double = 0
-    private let tapThreshold: Double = 2.5   // g-force delta that counts as a tap
+    // Lowered 2.5 → 1.2 so a light tap registers (less force needed — better for
+    // limited grip strength). Each accepted tap sends one tilt_tap → one left
+    // click; two taps within Windows' double-click time become a double-click.
+    private let tapThreshold: Double = 1.2   // g-force delta that counts as a tap
     /// Monotonic timestamp of last tap fire — replaces boolean tapCooldown to eliminate race condition.
     private var lastTapFireTime: CFTimeInterval = 0
-    private let tapCooldownDuration: Double = 0.25
+    // Lowered 0.25 → 0.18 so a deliberate double-tap (two taps ~0.18–0.5 s apart)
+    // both register and land inside the OS double-click window, while still
+    // suppressing a single tap's acceleration ring from double-firing.
+    private let tapCooldownDuration: Double = 0.18
 
     // Diagnostic counters — logged once per second by `handle()` so we can verify
     // from the PC's ipad_logs table whether the motion handler is alive, what
