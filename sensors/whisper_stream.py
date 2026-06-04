@@ -32,8 +32,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 # Shared approval gate directory — approval_hook.py writes "pending",
-# WhisperStream responds with the transcript in "response".
+# WhisperStream responds with the canonical verdict in "response".
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
+
+# Seconds to flush+suppress the mic when the approval gate first opens, so the
+# TTS echo of Danielle's spoken "Approve …?" question (which contains the word
+# "approve") isn't transcribed and mistaken for the user's answer.
+_APPROVAL_ECHO_GUARD_S: float = 1.0
+
+# Shared confirmation vocabulary — kept in core/ so approval_hook.py and this
+# module parse identical yes/no language and can never drift out of sync.
+from core.approval_keywords import classify_confirmation
 
 log = logging.getLogger(__name__)
 
@@ -221,6 +230,9 @@ class WhisperStream:
         self._suppress_until: float = 0.0
         self._awaiting_clarification: bool = False
         self._clarification_deadline: float = 0.0
+        # Tracks whether the approval gate is currently open so the TTS echo of
+        # the spoken question is flushed exactly once when the gate first opens.
+        self._approval_pending_active: bool = False
         # Wake-arming: a bare "hey agent" (VAD split it off from the command)
         # arms this window; the next segment is taken as the command.
         self._wake_armed_until: float = 0.0
@@ -505,7 +517,58 @@ class WhisperStream:
             except Exception as exc:
                 log.error("WhisperStream loop error: %s", exc)
 
+    def _check_approval_echo_guard(self) -> None:
+        """Drop the TTS echo of the approval question when the gate first opens.
+
+        approval_hook.py speaks "Approve …?" through the PC speakers, then writes
+        the ``pending`` signal file. The iPad mic captures that spoken question;
+        if transcribed it would be mistaken for the user's answer — and the
+        question text itself contains the word "approve". When the gate first
+        opens we flush whatever the mic captured during playback and briefly
+        suppress incoming audio so only the user's actual reply is transcribed.
+        Idempotent per gate: fires once on the not-open → open transition.
+        """
+        try:
+            pending = (_APPROVAL_DIR / "pending").exists()
+        except OSError:
+            pending = False
+        if pending and not self._approval_pending_active:
+            self._approval_pending_active = True
+            self.suppress(_APPROVAL_ECHO_GUARD_S)   # flush buffer + drop echo tail
+            log.debug("WhisperStream: approval gate opened — TTS echo guard %.1fs",
+                      _APPROVAL_ECHO_GUARD_S)
+        elif not pending and self._approval_pending_active:
+            self._approval_pending_active = False
+
+    def _handle_approval_gate(self, text: str) -> bool:
+        """Treat ``text`` as a candidate yes/no answer when the gate is open.
+
+        Returns True if the transcript was consumed by the gate (caller must NOT
+        forward it to FusionEngine). Only a *deliberate* confirmation word is
+        written to the response file — ambient speech, the TTS echo, or garbage
+        is discarded and the gate keeps waiting (approval_hook.py then times out,
+        failing safe to DENY). This is the core fix: random speech can no longer
+        silently approve or deny a destructive tool call.
+        """
+        if not (_APPROVAL_DIR / "pending").exists():
+            return False
+        verdict = classify_confirmation(text)
+        if verdict is None:
+            log.info("WhisperStream: ignoring non-confirmation during approval "
+                     "gate (still waiting): %r", text)
+            return True  # consume — never forward ambient audio downstream
+        try:
+            # Write the canonical token ("approve"/"deny") so approval_hook.py
+            # parses the verdict unambiguously regardless of the exact phrasing.
+            (_APPROVAL_DIR / "response").write_text(verdict, encoding="utf-8")
+            log.info("WhisperStream: approval response %s ← %r", verdict, text)
+        except Exception as exc:
+            log.warning("WhisperStream: could not write approval response: %s", exc)
+        return True
+
     async def _maybe_transcribe(self) -> None:
+        # Flush the TTS echo of the approval prompt before it can be transcribed.
+        self._check_approval_echo_guard()
         if not self._buffer_chunks:
             return
 
@@ -689,18 +752,12 @@ class WhisperStream:
         # ---------------------------------------------------------------------------
         # Approval gate intercept — check before forwarding to FusionEngine.
         # approval_hook.py (Claude Code PreToolUse) writes a "pending" signal file
-        # when waiting for a yes/no from the user. If we see it, write the
-        # transcript as the approval response and suppress it from the pipeline so
-        # "yes" / "no" never reaches the desktop action pipeline.
+        # when waiting for a yes/no from the user. Only a deliberate confirmation
+        # word (yes/approve vs no/cancel) is written as the response — ambient
+        # audio, the TTS echo of the question, and stray words are discarded so
+        # they can never silently approve or deny a destructive tool call.
         # ---------------------------------------------------------------------------
-        _approval_pending = _APPROVAL_DIR / "pending"
-        _approval_response = _APPROVAL_DIR / "response"
-        if _approval_pending.exists():
-            try:
-                _approval_response.write_text(text, encoding="utf-8")
-                log.info("WhisperStream: approval response → %r", text)
-            except Exception as exc:
-                log.warning("WhisperStream: could not write approval response: %s", exc)
+        if self._handle_approval_gate(text):
             return  # consumed by approval gate — do NOT forward to FusionEngine
 
         # Calibration capture: one-shot intercept for VoiceCalibrator sessions.

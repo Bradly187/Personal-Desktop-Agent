@@ -47,17 +47,24 @@ log = logging.getLogger(__name__)
 SAMPLE_RATE = 16_000
 _DIR = Path(__file__).parent
 
-_APPROVE_WORDS: frozenset[str] = frozenset({
-    "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "approve",
-    "go", "do it", "proceed", "continue", "affirmative", "correct",
-    "right", "absolutely", "definitely", "fine", "alright",
-})
+# Shared confirmation vocabulary — single source of truth in core/ so this hook
+# and sensors/whisper_stream.py parse identical yes/no language. Falls back to a
+# minimal inline classifier if core isn't importable (hook must never crash on
+# import), defaulting unknown text to None so the gate fails safe to DENY.
+try:
+    sys.path.insert(0, str(_DIR))
+    from core.approval_keywords import classify_confirmation
+except Exception:  # pragma: no cover - defensive import guard
+    _APPROVE = {"yes", "yeah", "yep", "ok", "okay", "approve", "confirm", "sure"}
+    _REJECT = {"no", "nope", "stop", "cancel", "deny", "reject", "abort", "dont"}
 
-_REJECT_WORDS: frozenset[str] = frozenset({
-    "no", "nope", "nah", "stop", "cancel", "reject", "don't",
-    "abort", "block", "deny", "negative", "wait", "hold", "skip",
-    "not", "never", "disallow", "refuse",
-})
+    def classify_confirmation(text: str):  # type: ignore[misc]
+        words = {w.strip(".,!?'\"").replace("'", "") for w in (text or "").lower().split()}
+        if words & _REJECT:
+            return "deny"
+        if words & _APPROVE:
+            return "approve"
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +76,9 @@ def _load_config() -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {"tools": {}, "timeout_action": "approve", "record_s": 4.0}
+        # Fail safe: if the config can't be read, default to denying on timeout
+        # so a destructive tool call is never auto-approved on silence/garbage.
+        return {"tools": {}, "timeout_action": "reject", "record_s": 4.0}
 
 
 def _needs_approval(tool_name: str, config: dict) -> bool:
@@ -197,14 +206,20 @@ def _request_ipad_approval(timeout_s: float = 7.0) -> str | None:
         _RESPONSE_FILE.unlink(missing_ok=True)
 
 
-def _parse_response(transcript: str, default: str) -> bool:
-    """Return True (approved) or False (rejected) from the transcript."""
-    words = set(transcript.lower().split())
-    if words & _REJECT_WORDS:
-        return False
-    if words & _APPROVE_WORDS:
+def _parse_response(transcript: str, default: str = "reject") -> bool:
+    """Return True (approved) or False (rejected) from the transcript.
+
+    Only a deliberate confirmation word approves. Ambiguous or unrecognised text
+    fails safe to the configured default — which is "reject" (deny) so that
+    ambient audio / garbage / silence can never grant consent.
+    """
+    verdict = classify_confirmation(transcript)
+    if verdict == "approve":
         return True
-    # Nothing recognised → fall back to configured default
+    if verdict == "deny":
+        return False
+    # Nothing recognised → fall back to configured default (deny unless the
+    # operator has explicitly opted into approve-on-ambiguity).
     return default == "approve"
 
 
@@ -256,7 +271,9 @@ def main() -> None:
     voice = config.get("voice_id", "Danielle")
     _polly_speak(message, voice)
 
-    timeout_action: str = config.get("timeout_action", "approve")
+    # Fail safe: ambiguity, silence, and timeout default to DENY. Background
+    # audio / the TTS echo / a stray word must never silently approve.
+    timeout_action: str = config.get("timeout_action", "reject")
 
     # --- Prefer iPad mic via WhisperStream (bridge must be running) -----------
     # Signal the bridge; if it responds within 7s the iPad utterance is used
