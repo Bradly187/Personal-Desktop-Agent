@@ -566,31 +566,57 @@ class WhisperStream:
             log.warning("WhisperStream: could not write approval response: %s", exc)
         return True
 
+    def _trailing_silence_from_chunks(self) -> bool:
+        """Trailing-silence check that concatenates only the tail chunks needed.
+
+        Walks the buffered chunks from the end until it has the last
+        ``silence_s`` worth of samples (≈ a handful of ~100 ms chunks) and tests
+        that window's RMS — instead of concatenating the entire (growing) buffer
+        on every 150 ms poll tick. Same result as
+        ``_has_trailing_silence(full_buffer, …)`` but O(silence window), not O(n).
+        """
+        n = int(self.SAMPLE_RATE * self._silence_s)
+        if n <= 0:
+            return False
+        tail: list = []
+        count = 0
+        for c in reversed(self._buffer_chunks):
+            tail.append(c)
+            count += len(c)
+            if count >= n:
+                break
+        if count < n:
+            return False  # not enough audio buffered yet
+        tail_audio = np.concatenate(list(reversed(tail)))
+        return _rms(tail_audio[-n:]) < self._silence_thresh
+
     async def _maybe_transcribe(self) -> None:
         # Flush the TTS echo of the approval prompt before it can be transcribed.
         self._check_approval_echo_guard()
         if not self._buffer_chunks:
             return
 
-        # Concatenate once (O(n) total, not O(n) per chunk)
-        buf = np.concatenate(self._buffer_chunks)
-        duration = len(buf) / self.SAMPLE_RATE
+        # Measure duration without concatenating: summing chunk lengths is
+        # O(#chunks) (~hundreds), not O(#samples) (up to 480k). Concatenation of
+        # the full buffer is deferred to the moment we actually transcribe — the
+        # whole point of the on_audio_chunk list accumulator. Re-concatenating
+        # the growing buffer on every poll tick would be O(n²) on the event loop.
+        total_samples = sum(len(c) for c in self._buffer_chunks)
+        duration = total_samples / self.SAMPLE_RATE
 
         # Too short to be speech
         if duration < self._min_speech_s:
             return
 
         force = duration >= self._max_buffer_s
-        silence_at_end = _has_trailing_silence(
-            buf, self.SAMPLE_RATE, self._silence_s, self._silence_thresh
-        )
 
-        if not force and not silence_at_end:
+        if not force and not self._trailing_silence_from_chunks():
             return
 
         # Claim the buffer — clear before awaiting so new chunks go into a
-        # fresh buffer while transcription runs on the old one
-        audio = buf
+        # fresh buffer while transcription runs on the old one. The single full
+        # concatenation happens here, exactly once per utterance.
+        audio = np.concatenate(self._buffer_chunks)
         self._buffer_chunks = []
         self._buffer_start_ts = None
 
