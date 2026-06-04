@@ -92,6 +92,17 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(tiltDwellDuration, forKey: "tiltDwellDuration") }
     }
 
+    /// Accelerometer tap-to-click threshold (g-force delta). LOWER = a lighter
+    /// tap registers (more sensitive). The Settings "Tap Sensitivity" slider maps
+    /// to this inversely. Clamped to [0.5, 3.0]; default 1.2.
+    @Published var tapThreshold: Double {
+        didSet {
+            let clamped = max(0.5, min(3.0, tapThreshold))
+            if clamped != tapThreshold { tapThreshold = clamped }
+            defaults.set(clamped, forKey: "tapThreshold")
+        }
+    }
+
     // MARK: — Neutral Gravity Persistence
 
     /// Persisted neutral gravity X component. Used to restore calibration across app restarts.
@@ -314,6 +325,8 @@ final class SettingsStore: ObservableObject {
         tiltPositionMode = defaults.object(forKey: "tiltPositionMode") as? Bool ?? true
         tiltDwellClickEnabled = defaults.object(forKey: "tiltDwellClickEnabled") as? Bool ?? false
         tiltDwellDuration = defaults.double(forKey: "tiltDwellDuration").nonZero ?? 1.0
+        let savedTap = defaults.double(forKey: "tapThreshold")
+        tapThreshold = savedTap > 0 ? max(0.5, min(3.0, savedTap)) : 1.2
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),

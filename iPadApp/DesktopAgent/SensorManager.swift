@@ -189,6 +189,16 @@ final class SensorManager: ObservableObject {
         }
         .store(in: &cancellables)
 
+        // Tap sensitivity changes — debounced so dragging the slider doesn't thrash.
+        settings.$tapThreshold
+            .removeDuplicates()
+            .dropFirst()
+            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.tiltSensor.updateSettings()
+            }
+            .store(in: &cancellables)
+
         settings.$tiltPositionMode
             .removeDuplicates()
             .dropFirst()
