@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.fusion_engine import FusionEngine
+import core.fusion_engine as fe_mod
 
 
 def _engine() -> FusionEngine:
@@ -173,3 +174,78 @@ def test_velocity_clamp_disabled_allows_large_move():
 
         assert mv.called
         assert any(abs(c[0][0]) > 150 or abs(c[0][1]) > 150 for c in mv.call_args_list)
+
+
+# ---------------------------------------------------------------------------
+# Multi-monitor / runtime screen-geometry update
+# ---------------------------------------------------------------------------
+
+def test_detect_virtual_screen_fallback_non_windows(monkeypatch):
+    """Off Windows (or on failure) the detector falls back to a primary screen."""
+    monkeypatch.setattr(fe_mod.sys, "platform", "linux", raising=False)
+    assert fe_mod._detect_virtual_screen(1920, 1080) == (0, 0, 1920, 1080)
+
+
+def test_engine_defaults_virtual_to_primary():
+    """Construction is deterministic — virtual bounds default to the primary."""
+    fe = _engine()
+    assert (fe._vleft, fe._vtop, fe._vw, fe._vh) == (0, 0, 1920, 1080)
+
+
+def test_refresh_screen_geometry_picks_up_side_monitor(monkeypatch):
+    fe = _engine()
+    # Left monitor (negative origin) + primary → virtual spans both.
+    monkeypatch.setattr(fe_mod, "_detect_virtual_screen",
+                        lambda w, h: (-1920, 0, 3840, 1080))
+    changed = fe.refresh_screen_geometry()
+    assert changed is True
+    assert (fe._vleft, fe._vtop, fe._vw, fe._vh) == (-1920, 0, 3840, 1080)
+    # Idempotent — no change on second call.
+    assert fe.refresh_screen_geometry() is False
+
+
+def test_absolute_tilt_reaches_left_side_monitor():
+    """Tilting toward the edge must land the cursor on the negative-origin monitor."""
+    with patch("pyautogui.moveTo") as mv, \
+         patch("pyautogui.moveRel"), \
+         patch("pyautogui.position", return_value=MagicMock(x=0, y=0)):
+        fe = _engine()
+        fe._vleft, fe._vtop, fe._vw, fe._vh = -1920, 0, 3840, 1080  # left monitor present
+
+        fe.on_tilt_position(0.02, 0.5)   # tilt hard left
+        asyncio.run(fe._tick())
+
+        assert mv.called
+        x, y = mv.call_args[0][:2]
+        assert x < 0, f"cursor did not reach the left monitor: x={x}"
+        assert -1920 <= x <= 1919   # within virtual bounds
+
+
+def test_absolute_tilt_reaches_right_side_monitor():
+    with patch("pyautogui.moveTo") as mv, \
+         patch("pyautogui.moveRel"), \
+         patch("pyautogui.position", return_value=MagicMock(x=0, y=0)):
+        fe = _engine()
+        fe._vleft, fe._vtop, fe._vw, fe._vh = 0, 0, 3840, 1080  # right monitor present
+
+        fe.on_tilt_position(0.98, 0.5)   # tilt hard right
+        asyncio.run(fe._tick())
+
+        assert mv.called
+        x, y = mv.call_args[0][:2]
+        assert x > 1920, f"cursor did not reach the right monitor: x={x}"
+        assert x <= 3839
+
+
+def test_absolute_tilt_clamps_within_virtual_bounds():
+    """Even an out-of-range tilt value stays inside the virtual desktop."""
+    with patch("pyautogui.moveTo") as mv, \
+         patch("pyautogui.moveRel"), \
+         patch("pyautogui.position", return_value=MagicMock(x=0, y=0)):
+        fe = _engine()
+        fe._vleft, fe._vtop, fe._vw, fe._vh = -1920, 0, 3840, 1080
+        fe.on_tilt_position(5.0, -3.0)   # absurd but finite
+        asyncio.run(fe._tick())
+        x, y = mv.call_args[0][:2]
+        assert -1920 <= x <= 1919
+        assert 0 <= y <= 1079
