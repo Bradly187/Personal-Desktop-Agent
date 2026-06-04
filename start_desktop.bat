@@ -1,10 +1,10 @@
 @echo off
 :: start_desktop.bat — Personal Desktop Agent launcher
 ::
-:: Starts all three services that must run together:
+:: Starts all services that must run together:
 ::   1. TTS sidecar   (Node.js  :8766)
-::   2. Main agent    (Python   :8765)
-::   3. (Ollama is assumed already running via its system tray app)
+::   2. Ollama serve  (LLM      :11434)  — launched if not already running
+::   3. Main agent    (Python   :8765)
 ::
 :: Each service opens in its own titled window so output is visible and
 :: services can be stopped independently by closing the window.
@@ -65,16 +65,35 @@ if %errorlevel%==0 (
 )
 
 :: ─────────────────────────────────────────────────────────────────────────
-:: 2. Ollama health check (advisory only — not managed here)
+:: 2. Ollama (:11434) — started here so the bridge + LLM come up together
 :: ─────────────────────────────────────────────────────────────────────────
 echo Checking Ollama (:11434)...
 curl -sf "http://127.0.0.1:11434/api/tags" >nul 2>&1
 if %errorlevel%==0 (
-    echo   [OK] Ollama running.
-) else (
-    echo   [WARN] Ollama not detected on :11434 — start the Ollama tray app first.
-    echo          Voice commands will fall back to Anthropic cloud.
+    echo   [SKIP] Ollama already running.
+    goto ollama_done
 )
+set OLLAMA=%LOCALAPPDATA%\Programs\Ollama\ollama.exe
+where ollama >nul 2>&1 && set OLLAMA=ollama
+if not exist "%OLLAMA%" if /i not "%OLLAMA%"=="ollama" (
+    echo   [WARN] ollama.exe not found at %OLLAMA% — skipping; voice falls back to cloud.
+    goto ollama_done
+)
+echo   [START] Ollama serve...
+start "Ollama :11434" cmd /k "title Ollama :11434 && %OLLAMA% serve > %ROOT%logs\ollama_serve.log 2>&1"
+:: Wait up to 15s for the API to answer (model-store scan can be slow on cold start)
+set /a _o=0
+:ollama_wait
+timeout /t 1 /nobreak >nul
+curl -sf "http://127.0.0.1:11434/api/tags" >nul 2>&1
+if %errorlevel%==0 goto ollama_ok
+set /a _o+=1
+if !_o! lss 15 goto ollama_wait
+echo   [WARN] Ollama did not respond within 15s — check logs\ollama_serve.log
+goto ollama_done
+:ollama_ok
+echo   [OK] Ollama ready.
+:ollama_done
 
 :: ─────────────────────────────────────────────────────────────────────────
 :: 3. Main agent (:8765) — runs in its own visible window
