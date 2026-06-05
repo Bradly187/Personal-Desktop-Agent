@@ -127,17 +127,20 @@ class TestLoopBehaviour:
             i = min(state["i"], len(hwnd_seq) - 1)
             return hwnd_seq[i]
 
-        def fake_sleep(dur):
+        def fake_wait(dur):
+            # Stands in for self._stop_event.wait(); records the interval and
+            # stops the loop after max_iters by setting the real event.
             state["sleeps"].append(dur)
             state["i"] += 1
             if state["i"] >= max_iters:
-                cache._running = False
+                cache._stop_event.set()
+            return cache._stop_event.is_set()
 
         fake_comtypes = MagicMock()
         with patch.dict(sys.modules, {"comtypes": fake_comtypes}), \
              patch("desktop.ui_automation.UIAutomationProvider", return_value=provider), \
              patch.object(cache, "_foreground_hwnd", side_effect=fake_hwnd), \
-             patch("time.sleep", side_effect=fake_sleep):
+             patch.object(cache._stop_event, "wait", side_effect=fake_wait):
             cache._running = True
             cache._loop()
         return state
@@ -202,6 +205,21 @@ class TestLoopBehaviour:
         poll = cache._poll_interval
         for s in state["sleeps"]:
             assert s <= poll + 0.25 + 1e-9
+
+    def test_stop_wakes_worker_via_event(self):
+        # #4: stop() must set the event so the worker exits promptly instead of
+        # waiting out the current poll/backoff sleep, and is_running() flips off.
+        cache = ClickableTargetCache()
+        cache._running = True
+        assert not cache._stop_event.is_set()
+        cache.stop()
+        assert cache._running is False
+        assert cache._stop_event.is_set()
+
+    def test_reads_are_lock_free(self):
+        # #2: the cache no longer holds a Lock — readers grab the snapshot ref.
+        cache = ClickableTargetCache()
+        assert not hasattr(cache, "_lock")
 
 
 # ---------------------------------------------------------------------------

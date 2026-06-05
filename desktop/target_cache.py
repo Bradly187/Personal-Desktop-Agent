@@ -74,17 +74,26 @@ class ClickableTargetCache:
         self._heartbeat_s = heartbeat_s
         self._max_targets = max_targets
         self._max_backoff_s = max_backoff_s
+        # Reads are lock-free: the worker only ever *rebinds* self._targets to a
+        # fresh list (never mutates one in place) and Target is frozen, so a
+        # reader grabbing the reference then iterating can never see a partial
+        # snapshot under the GIL. This keeps the 60 Hz FusionEngine tick from
+        # ever blocking on a lock held by the worker thread.
         self._targets: list[Target] = []
-        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
         self._available: bool | None = None   # None until first refresh attempt
+        # Set by stop() to wake the worker immediately instead of waiting out the
+        # current poll/backoff sleep — makes teardown prompt rather than lagging
+        # up to (poll_interval + max_backoff_s).
+        self._stop_event = threading.Event()
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
     def start(self) -> None:
         if self._running:
             return
+        self._stop_event.clear()
         self._running = True
         self._thread = threading.Thread(
             target=self._loop, name="target-cache", daemon=True
@@ -97,6 +106,7 @@ class ClickableTargetCache:
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()   # wake the worker out of its sleep at once
 
     def is_running(self) -> bool:
         return self._running and self._available is not False
@@ -155,7 +165,7 @@ class ClickableTargetCache:
             last_walk = 0.0
             backoff = 0.0             # extra sleep added after consecutive failures
 
-            while self._running:
+            while not self._stop_event.is_set():
                 now = time.monotonic()
                 hwnd = self._foreground_hwnd()
                 if self._walk_due(hwnd, last_hwnd, now, last_walk):
@@ -165,12 +175,12 @@ class ClickableTargetCache:
                         elems = provider.collect_snap_targets_for_window(
                             hwnd, self._max_targets
                         )
-                        snapshot = [
+                        # Build outside any lock, then publish with a single
+                        # atomic rebind — readers grab the reference lock-free.
+                        self._targets = [
                             Target(name=e.name, role=e.role, bounds=e.bounds)
                             for e in elems
                         ]
-                        with self._lock:
-                            self._targets = snapshot
                         backoff = 0.0   # success — clear any backoff
                     except Exception as exc:
                         # Grow the backoff so a persistently bad window can't
@@ -181,7 +191,9 @@ class ClickableTargetCache:
                             "ClickableTargetCache refresh failed (backoff %.2fs): %s",
                             backoff, exc,
                         )
-                time.sleep(self._poll_interval + backoff)
+                # Event.wait returns at once when stop() fires, so teardown is
+                # prompt instead of waiting out the full poll/backoff interval.
+                self._stop_event.wait(self._poll_interval + backoff)
         finally:
             self._running = False
             if com_inited:
@@ -194,12 +206,10 @@ class ClickableTargetCache:
     # ── read API (called from any thread) ───────────────────────────────────
 
     def snapshot(self) -> list[Target]:
-        with self._lock:
-            return list(self._targets)
+        return list(self._targets)   # grab ref + copy; rebind is atomic
 
     def count(self) -> int:
-        with self._lock:
-            return len(self._targets)
+        return len(self._targets)
 
     def nearest(self, x: int, y: int, radius: float) -> Target | None:
         """Nearest snap target within `radius` px of (x, y), or None.
@@ -207,20 +217,21 @@ class ClickableTargetCache:
         Distance is to the element's rectangle (0 if inside). Ties (e.g. nested
         controls both containing the point) break toward the smaller, more
         specific element. Pure Python over the cached snapshot — safe to call at
-        60 Hz from the FusionEngine tick.
+        60 Hz from the FusionEngine tick. Lock-free: grab the snapshot reference
+        once (atomic rebind) and iterate it; the worker only ever swaps in a new
+        list, never mutates this one, so it can't change under us.
         """
         best: Target | None = None
         best_d = float(radius) + 1.0
         best_area = float("inf")
-        with self._lock:
-            targets = self._targets
-            for tg in targets:
-                d = tg.distance_to(x, y)
-                if d > radius:
-                    continue
-                a = tg.area()
-                if d < best_d or (d == best_d and a < best_area):
-                    best_d, best_area, best = d, a, tg
+        targets = self._targets   # atomic reference grab
+        for tg in targets:
+            d = tg.distance_to(x, y)
+            if d > radius:
+                continue
+            a = tg.area()
+            if d < best_d or (d == best_d and a < best_area):
+                best_d, best_area, best = d, a, tg
         return best
 
 
