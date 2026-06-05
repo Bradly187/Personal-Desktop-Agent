@@ -8,8 +8,6 @@ struct SettingsView: View {
 
     @Environment(\.appTheme) private var theme
 
-    @State private var newSoundName = ""
-    @State private var newSoundAction = ""
     @State private var newKeyword = ""
     // Single source of truth for which modal is presented. Stacking multiple
     // `.sheet(isPresented:)` on the same view is undefined behavior in SwiftUI
@@ -131,14 +129,15 @@ struct SettingsView: View {
                     LabeledContent("Dead Zone: \(String(format: "%.1f°", settings.tiltDeadZone))") {
                         Slider(value: $settings.tiltDeadZone, in: 0.5...5.0)
                     }
-                    // Tap-to-click sensitivity. Slider 0→1 maps to tapThreshold 3.0→0.5 g
-                    // (higher slider = lighter tap registers). Inverted binding keeps
-                    // "right = more sensitive" intuitive.
-                    LabeledContent("Tap Sensitivity: \(Int((3.0 - settings.tapThreshold) / 2.5 * 100))%") {
+                    // Tap-to-click sensitivity. Slider 0→1 maps to tapThreshold 3.0→0.4 g
+                    // (higher slider = lighter tap registers). The 0.4 g floor sits just
+                    // above the ~0.3 g accel spikes that tilting the cursor produces, so
+                    // lighter taps register without cursor motion firing false clicks.
+                    LabeledContent("Tap Sensitivity: \(Int((3.0 - settings.tapThreshold) / 2.6 * 100))%") {
                         Slider(
                             value: Binding(
-                                get: { (3.0 - settings.tapThreshold) / 2.5 },
-                                set: { settings.tapThreshold = 3.0 - $0 * 2.5 }
+                                get: { (3.0 - settings.tapThreshold) / 2.6 },
+                                set: { settings.tapThreshold = 3.0 - $0 * 2.6 }
                             ),
                             in: 0...1
                         )
@@ -203,54 +202,6 @@ struct SettingsView: View {
                         .foregroundStyle(theme.textSecondary)
                 } header: {
                     DASectionHeader(title: "Audio Streaming")
-                }
-
-                // Sound mappings
-                Section {
-                    ForEach(settings.soundMappings.keys.sorted(), id: \.self) { sound in
-                        HStack {
-                            Text(sound)
-                                .foregroundStyle(theme.textPrimary)
-                            Spacer()
-                            TextField("Action", text: Binding(
-                                get: { settings.soundMappings[sound] ?? "" },
-                                set: { settings.soundMappings[sound] = $0 }
-                            ))
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.characters)
-                            .autocorrectionDisabled()
-                            .foregroundStyle(theme.textSecondary)
-                            .frame(width: 140)
-                        }
-                    }
-                    .onDelete { idx in
-                        let keys = settings.soundMappings.keys.sorted()
-                        idx.forEach { settings.soundMappings.removeValue(forKey: keys[$0]) }
-                    }
-                    HStack {
-                        TextField("Sound", text: $newSoundName)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                        Spacer()
-                        TextField("Action", text: $newSoundAction)
-                            .multilineTextAlignment(.trailing)
-                            .textInputAutocapitalization(.characters)
-                            .autocorrectionDisabled()
-                            .frame(width: 140)
-                    }
-                    .foregroundStyle(theme.textSecondary)
-                    Button("Add mapping…") {
-                        let key = newSoundName.trimmingCharacters(in: .whitespaces)
-                        let val = newSoundAction.trimmingCharacters(in: .whitespaces)
-                        guard !key.isEmpty, !val.isEmpty else { return }
-                        settings.soundMappings[key] = val
-                        newSoundName = ""
-                        newSoundAction = ""
-                    }
-                    .disabled(newSoundName.trimmingCharacters(in: .whitespaces).isEmpty ||
-                              newSoundAction.trimmingCharacters(in: .whitespaces).isEmpty)
-                } header: {
-                    DASectionHeader(title: "Sound Mappings")
                 }
 
                 // G1: Voice Calibration — G11: distinguish the two flows clearly

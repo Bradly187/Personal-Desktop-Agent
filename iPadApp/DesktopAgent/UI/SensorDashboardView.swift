@@ -98,12 +98,6 @@ struct SensorDashboardView: View {
             } else {
                 settings.keywordList = []
             }
-        case "sound":
-            if settings.soundMappings.isEmpty {
-                settings.soundMappings = ["cluck": "CLICK", "pop": "SCROLL down", "hiss": "SCROLL up"]
-            } else {
-                settings.soundMappings = [:]
-            }
         case "audio": settings.audioStreamEnabled.toggle()
         default: break
         }
@@ -122,7 +116,6 @@ struct SensorDashboardView: View {
         switch id {
         case "tilt": TiltDetailView(sensor: sensorManager.tiltSensor, settings: settings)
         case "keyword": KeywordDetailView(listener: sensorManager.keywordListener)
-        case "sound": SoundDetailView()
         case "audio": AudioDetailView(streamer: sensorManager.audioStreamer)
         default: EmptyView()
         }
@@ -233,7 +226,6 @@ private struct SensorCard<Detail: View>: View {
         switch state.id {
         case "tilt": return "Tilt Navigation"
         case "keyword": return "Voice Keywords"
-        case "sound": return "Sound Actions"
         case "audio": return "Audio Stream"
         default: return state.id.capitalized
         }
@@ -243,7 +235,6 @@ private struct SensorCard<Detail: View>: View {
         switch state.id {
         case "tilt": return "ipad.landscape"
         case "keyword": return "text.bubble"
-        case "sound": return "mouth"
         case "audio": return "mic.badge.plus"
         default: return "questionmark"
         }
@@ -334,38 +325,6 @@ private struct KeywordDetailView: View {
             Text("On-device Speech Framework (en-US). Restarts automatically on timeout.")
                 .font(DesignTokens.Typography.caption)
                 .foregroundStyle(theme.textSecondary)
-        }
-    }
-}
-
-private struct SoundDetailView: View {
-    @EnvironmentObject var wsManager: WebSocketManager
-    @EnvironmentObject var settings: SettingsStore
-    @Environment(\.appTheme) private var theme
-
-    @State private var showTraining = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
-            Text("Detects mouth sounds via FFT spectral analysis.")
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textSecondary)
-            Text("Supported: cluck (mid-freq burst), pop (broad burst), hiss (high-freq sustained)")
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textSecondary)
-            Text("200ms debounce between detections.")
-                .font(DesignTokens.Typography.caption)
-                .foregroundStyle(theme.textSecondary)
-
-            Button("Test Your Sounds…") {
-                showTraining = true
-            }
-            .font(DesignTokens.Typography.caption)
-            .foregroundStyle(theme.accent)
-            .padding(.top, DesignTokens.Spacing.xs)
-            .sheet(isPresented: $showTraining) {
-                SoundTrainingSheet(wsManager: wsManager, settings: settings)
-            }
         }
     }
 }

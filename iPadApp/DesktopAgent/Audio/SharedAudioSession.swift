@@ -8,9 +8,9 @@ typealias AudioTapHandler = (AVAudioPCMBuffer, AVAudioTime) -> Void
 
 /// Manages a single shared AVAudioEngine instance for all audio sensors.
 ///
-/// KeywordListener, SoundDetector, and AudioStreamer all install taps on the
-/// same engine's inputNode, eliminating the bug where three separate engines
-/// compete for the microphone.
+/// KeywordListener and AudioStreamer both install taps on the same engine's
+/// inputNode, eliminating the bug where separate engines compete for the
+/// microphone.
 ///
 /// Uses a fan-out pattern: a single tap on inputNode bus 0 distributes buffers
 /// to all registered handlers. This avoids the AVAudioEngine limitation of

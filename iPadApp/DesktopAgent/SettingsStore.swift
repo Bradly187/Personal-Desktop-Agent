@@ -94,10 +94,12 @@ final class SettingsStore: ObservableObject {
 
     /// Accelerometer tap-to-click threshold (g-force delta). LOWER = a lighter
     /// tap registers (more sensitive). The Settings "Tap Sensitivity" slider maps
-    /// to this inversely. Clamped to [0.5, 3.0]; default 1.2.
+    /// to this inversely. Clamped to [0.4, 3.0]; default 0.6. The 0.4 floor sits
+    /// just above the ~0.3 g accel spikes that tilting-to-move-the-cursor produces,
+    /// so lighter taps register without cursor motion firing false clicks.
     @Published var tapThreshold: Double {
         didSet {
-            let clamped = max(0.5, min(3.0, tapThreshold))
+            let clamped = max(0.4, min(3.0, tapThreshold))
             if clamped != tapThreshold { tapThreshold = clamped }
             defaults.set(clamped, forKey: "tapThreshold")
         }
@@ -286,15 +288,6 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(audioStreamEnabled, forKey: "audioStreamEnabled") }
     }
 
-    // MARK: — Sound mappings  {"cluck": "CLICK", "pop": "SCROLL down", ...}
-    @Published var soundMappings: [String: String] {
-        didSet {
-            if let data = try? JSONEncoder().encode(soundMappings) {
-                defaults.set(data, forKey: "soundMappings")
-            }
-        }
-    }
-
     // MARK: — CommandPad buttons  [{label, action, params}]
     @Published var commandButtons: [CommandButton] {
         didSet {
@@ -326,7 +319,7 @@ final class SettingsStore: ObservableObject {
         tiltDwellClickEnabled = defaults.object(forKey: "tiltDwellClickEnabled") as? Bool ?? false
         tiltDwellDuration = defaults.double(forKey: "tiltDwellDuration").nonZero ?? 1.0
         let savedTap = defaults.double(forKey: "tapThreshold")
-        tapThreshold = savedTap > 0 ? max(0.5, min(3.0, savedTap)) : 1.2
+        tapThreshold = savedTap > 0 ? max(0.4, min(3.0, savedTap)) : 0.6
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
@@ -379,13 +372,6 @@ final class SettingsStore: ObservableObject {
 
         voiceCondition = defaults.string(forKey: "voiceCondition") ?? "good_day"
         audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false
-
-        if let data = defaults.data(forKey: "soundMappings"),
-           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-            soundMappings = decoded
-        } else {
-            soundMappings = ["cluck": "CLICK", "pop": "SCROLL down", "hiss": "SCROLL up"]
-        }
 
         if let data = defaults.data(forKey: "commandButtons"),
            let decoded = try? JSONDecoder().decode([CommandButton].self, from: data) {

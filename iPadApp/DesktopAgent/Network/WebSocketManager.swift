@@ -469,11 +469,6 @@ extension WebSocketManager {
         commandFeed.send("Keyword: \(word)")
     }
 
-    func sendSoundAction(sound: String, confidence: Double) {
-        msgCounter += 1
-        send(["type": "sound_action", "id": "sa-\(msgCounter)", "sound": sound, "confidence": confidence])
-        commandFeed.send("Sound: \(sound)")
-    }
 
     func sendTrackpadMove(dx: Int, dy: Int) {
         send(["type": "trackpad", "event": "move", "dx": dx, "dy": dy])
