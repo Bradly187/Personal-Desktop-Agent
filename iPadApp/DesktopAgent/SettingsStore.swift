@@ -94,7 +94,7 @@ final class SettingsStore: ObservableObject {
 
     /// Accelerometer tap-to-click threshold (g-force delta). LOWER = a lighter
     /// tap registers (more sensitive). The Settings "Tap Sensitivity" slider maps
-    /// to this inversely. Clamped to [0.4, 3.0]; default 0.6. The 0.4 floor sits
+    /// to this inversely. Clamped to [0.4, 3.0]; default 0.4 (the sensitive floor). The 0.4 floor sits
     /// just above the ~0.3 g accel spikes that tilting-to-move-the-cursor produces,
     /// so lighter taps register without cursor motion firing false clicks.
     @Published var tapThreshold: Double {
@@ -319,7 +319,7 @@ final class SettingsStore: ObservableObject {
         tiltDwellClickEnabled = defaults.object(forKey: "tiltDwellClickEnabled") as? Bool ?? false
         tiltDwellDuration = defaults.double(forKey: "tiltDwellDuration").nonZero ?? 1.0
         let savedTap = defaults.double(forKey: "tapThreshold")
-        tapThreshold = savedTap > 0 ? max(0.4, min(3.0, savedTap)) : 0.6
+        tapThreshold = savedTap > 0 ? max(0.4, min(3.0, savedTap)) : 0.4
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
