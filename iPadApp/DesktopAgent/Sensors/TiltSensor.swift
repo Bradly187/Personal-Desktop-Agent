@@ -33,6 +33,14 @@ final class TiltSensor: ObservableObject {
     var lastSentX: Double = 0.5
     var lastSentY: Double = 0.5
 
+    /// Tilt-joystick integrator (rate-control mode): the accumulated virtual
+    /// cursor position and the last frame time used to integrate velocity →
+    /// position. Seeded from lastSentX/Y on the first frame so switching modes
+    /// mid-session doesn't jump the cursor.
+    private var joyPosX: Double = 0.5
+    private var joyPosY: Double = 0.5
+    private var lastJoyFrameTime: CFTimeInterval = 0
+
     /// Monotonic timestamp when the device first became stationary (angular velocity ≤ 0.01 rad/s)
     var stationaryStartTime: CFTimeInterval?
 
@@ -57,7 +65,7 @@ final class TiltSensor: ObservableObject {
     // Impulse detection state
     private var prevAccelMag: Double = 0
     // g-force delta that counts as a tap. User-tunable via the Settings "Tap
-    // Sensitivity" slider (SettingsStore.tapThreshold, default 1.2). Lower = a
+    // Sensitivity" slider (SettingsStore.tapThreshold, default 0.4). Lower = a
     // lighter tap registers. Snapshotted from MainActor so the motion queue
     // reads it without a cross-isolation access. Each accepted tap sends one
     // tilt_tap → one left click; two quick taps become an OS double-click.
@@ -97,6 +105,9 @@ final class TiltSensor: ObservableObject {
     private var snapshotTiltInverted: Bool = false
     private var snapshotTiltDwellEnabled: Bool = false
     private var snapshotTiltDwellDuration: Double = 1.0
+    private var snapshotTiltJoystickMode: Bool = true
+    private var snapshotTiltDriftMaxSpeed: Double = 1.2
+    private var snapshotTiltDriftSaturationDeg: Double = 30.0
 
     init(ws: WebSocketManager, settings: SettingsStore) {
         self.ws = ws
@@ -135,7 +146,11 @@ final class TiltSensor: ObservableObject {
             snapshotTiltDwellEnabled = s.tiltDwellClickEnabled
             snapshotTiltDwellDuration = s.tiltDwellDuration
             snapshotTapThreshold = s.tapThreshold
+            snapshotTiltJoystickMode = s.tiltJoystickMode
+            snapshotTiltDriftMaxSpeed = s.tiltDriftMaxSpeed
+            snapshotTiltDriftSaturationDeg = s.tiltDriftSaturationDeg
         }
+        lastJoyFrameTime = 0
 
         motion.deviceMotionUpdateInterval = 1.0 / 60.0
         let motionQueue = OperationQueue()
@@ -157,6 +172,9 @@ final class TiltSensor: ObservableObject {
         isRunning = false
         lastSentX = 0.5
         lastSentY = 0.5
+        joyPosX = 0.5
+        joyPosY = 0.5
+        lastJoyFrameTime = 0
         stationaryStartTime = nil
         lockedCoords = nil
         prevAccelMag = 0
@@ -175,6 +193,9 @@ final class TiltSensor: ObservableObject {
         snapshotTiltDwellEnabled = s.tiltDwellClickEnabled
         snapshotTiltDwellDuration = s.tiltDwellDuration
         snapshotTapThreshold = s.tapThreshold
+        snapshotTiltJoystickMode = s.tiltJoystickMode
+        snapshotTiltDriftMaxSpeed = s.tiltDriftMaxSpeed
+        snapshotTiltDriftSaturationDeg = s.tiltDriftSaturationDeg
     }
 
     // MARK: — Dwell-to-click
@@ -211,6 +232,87 @@ final class TiltSensor: ObservableObject {
             dwellActiveLocal = false
             DispatchQueue.main.async { [weak self] in self?.dwellInProgress = false }
         }
+    }
+
+    // MARK: — Tilt-joystick (rate-control)
+
+    /// Rate-control tilt: the tilt *angle* from the calibrated neutral sets the
+    /// cursor *velocity* (neutral = hold, more tilt = faster, saturating at
+    /// `snapshotTiltDriftSaturationDeg`). The velocity is integrated into a
+    /// virtual position each frame and sent over the existing tilt_position
+    /// path, so the cursor keeps gliding while the iPad is held tilted and stops
+    /// when returned to neutral — and the PC side (gravity, multi-monitor,
+    /// edge-clamp) is unchanged. Runs on the motion queue.
+    private func processJoystick(data: CMDeviceMotion) {
+        let now = CACurrentMediaTime()
+
+        // First frame after (re)start / mode switch: seed from the last sent
+        // position so the cursor doesn't jump, and use a nominal dt.
+        if lastJoyFrameTime == 0 {
+            joyPosX = lastSentX
+            joyPosY = lastSentY
+        }
+        var dt = now - lastJoyFrameTime
+        if lastJoyFrameTime == 0 || dt <= 0 || dt > 0.1 { dt = 1.0 / 60.0 }
+        lastJoyFrameTime = now
+
+        // Signed tilt offsets from neutral (degrees) — same basis computePosition
+        // uses, so the dead zone and "neutral = center" calibration carry over.
+        let g = SIMD3<Double>(data.gravity.x, data.gravity.y, data.gravity.z)
+        let neutralPitch = atan2(-neutralGravity.x, -neutralGravity.z)
+        let currentPitch = atan2(-g.x, -g.z)
+        let neutralRoll = atan2(-neutralGravity.y, -neutralGravity.z)
+        let currentRoll = atan2(-g.y, -g.z)
+        let deltaRollDeg = (currentRoll - neutralRoll) * (180.0 / .pi)
+        let deltaPitchDeg = (currentPitch - neutralPitch) * (180.0 / .pi)
+
+        // Per-axis velocity (screen-fraction/sec). Tilt up (pitch+) → move up (y-).
+        var vx = joystickAxisVelocity(deltaRollDeg)
+        var vy = -joystickAxisVelocity(deltaPitchDeg)
+        if snapshotTiltInverted { vx = -vx; vy = -vy }
+
+        // Integrate → virtual position, clamped to the screen.
+        joyPosX = max(0.0, min(1.0, joyPosX + vx * dt))
+        joyPosY = max(0.0, min(1.0, joyPosY + vy * dt))
+
+        let isMoving = (vx != 0.0 || vy != 0.0)
+
+        // Dwell-to-click: in joystick mode the cursor is "still" when the tilt is
+        // inside the dead zone (zero velocity), not when the device stops
+        // rotating. Drive the dwell timer off that.
+        if isMoving {
+            stationaryStartTime = nil
+            cancelDwell()
+        } else {
+            if stationaryStartTime == nil { stationaryStartTime = now }
+            updateDwell(now: now)
+        }
+
+        // Send only on an actual position change (suppress when held still / at
+        // an edge), matching the absolute path's suppression contract.
+        if abs(joyPosX - lastSentX) < 0.0005 && abs(joyPosY - lastSentY) < 0.0005 {
+            diagSendsSuppressed += 1
+        } else if let wsRef = ws {
+            wsRef.sendTiltPosition(x: joyPosX, y: joyPosY)
+            diagSendsAttempted += 1
+            lastSentX = joyPosX
+            lastSentY = joyPosY
+        } else {
+            diagWsNilCount += 1
+        }
+    }
+
+    /// Maps a signed tilt offset (deg from neutral) to a signed cursor velocity
+    /// (screen-fraction/sec). Zero inside the dead zone (no neutral drift), then
+    /// linear up to `snapshotTiltDriftMaxSpeed` at the saturation angle.
+    private func joystickAxisVelocity(_ deg: Double) -> Double {
+        let dead = snapshotTiltDeadZone
+        let mag = abs(deg)
+        if mag <= dead { return 0.0 }
+        let sat = max(dead + 1.0, snapshotTiltDriftSaturationDeg)
+        let frac = min(1.0, (mag - dead) / (sat - dead))
+        let speed = frac * snapshotTiltDriftMaxSpeed
+        return deg > 0 ? speed : -speed
     }
 
     // MARK: — Calibration
@@ -332,8 +434,11 @@ final class TiltSensor: ObservableObject {
 
         guard snapshotTiltEnabled else { return }
 
-        if snapshotTiltPositionMode {
-            // --- Position-mapped mode ---
+        if snapshotTiltPositionMode && snapshotTiltJoystickMode {
+            // --- Tilt-joystick (rate-control) mode: tilt angle → cursor velocity ---
+            processJoystick(data: data)
+        } else if snapshotTiltPositionMode {
+            // --- Position-mapped (absolute) mode ---
             var (x, y) = computePosition(gravity: data.gravity)
 
             // --- Stationary lock ---

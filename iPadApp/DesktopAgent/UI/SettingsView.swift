@@ -119,6 +119,20 @@ struct SettingsView: View {
                     Text("Maps tilt angle to absolute screen position. When off, uses legacy velocity mode.")
                         .font(DesignTokens.Typography.caption)
                         .foregroundStyle(theme.textSecondary)
+                    if settings.tiltPositionMode {
+                        Toggle("Joystick Mode", isOn: $settings.tiltJoystickMode)
+                        Text("Tilt angle drives cursor speed instead of position: the cursor keeps gliding while you hold a tilt and stops when you return to the calibrated neutral. Glides faster the more you tilt, up to the saturation angle.")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(theme.textSecondary)
+                        if settings.tiltJoystickMode {
+                            LabeledContent("Glide Speed: \(String(format: "%.1f", settings.tiltDriftMaxSpeed))×") {
+                                Slider(value: $settings.tiltDriftMaxSpeed, in: 0.2...4.0)
+                            }
+                            LabeledContent("Max-Speed Angle: \(Int(settings.tiltDriftSaturationDeg))°") {
+                                Slider(value: $settings.tiltDriftSaturationDeg, in: 10...60, step: 1)
+                            }
+                        }
+                    }
                     Toggle("Invert Tilt", isOn: $settings.tiltInverted)
                     LabeledContent("Tilt Range: \(Int(settings.tiltRange))°") {
                         Slider(value: $settings.tiltRange, in: 5...60, step: 1)

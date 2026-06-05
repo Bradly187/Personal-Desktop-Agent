@@ -82,6 +82,36 @@ final class SettingsStore: ObservableObject {
     @Published var tiltPositionMode: Bool {
         didSet { defaults.set(tiltPositionMode, forKey: "tiltPositionMode") }
     }
+    /// Tilt-joystick (rate-control) mode. When true AND Position Mode is on, the
+    /// tilt *angle* from the calibrated neutral drives cursor *velocity* (neutral
+    /// = hold still, more tilt = faster, up to the saturation angle) instead of
+    /// mapping to an absolute position — so the cursor keeps gliding while the
+    /// iPad is held tilted and stops when returned to neutral. The PC side is
+    /// unchanged: the iPad integrates velocity → position and still sends
+    /// tilt_position, so cursor gravity / multi-monitor / clamp all keep working.
+    @Published var tiltJoystickMode: Bool {
+        didSet { defaults.set(tiltJoystickMode, forKey: "tiltJoystickMode") }
+    }
+    /// Max joystick glide speed, in screen-widths/sec (fraction of the full
+    /// virtual desktop per second) reached at/after the saturation angle.
+    /// Clamped [0.2, 4.0]; default 1.2.
+    @Published var tiltDriftMaxSpeed: Double {
+        didSet {
+            let clamped = max(0.2, min(4.0, tiltDriftMaxSpeed))
+            if clamped != tiltDriftMaxSpeed { tiltDriftMaxSpeed = clamped }
+            defaults.set(clamped, forKey: "tiltDriftMaxSpeed")
+        }
+    }
+    /// Tilt angle (deg from neutral) at which the glide reaches max speed; the
+    /// velocity ramps linearly from the dead zone up to here. Clamped [10, 60];
+    /// default 30.
+    @Published var tiltDriftSaturationDeg: Double {
+        didSet {
+            let clamped = max(10.0, min(60.0, tiltDriftSaturationDeg))
+            if clamped != tiltDriftSaturationDeg { tiltDriftSaturationDeg = clamped }
+            defaults.set(clamped, forKey: "tiltDriftSaturationDeg")
+        }
+    }
     /// Tilt dwell-to-click: hold the cursor still to fire the active dwell
     /// action. Opt-in (off by default) to avoid accidental "Midas touch" clicks.
     @Published var tiltDwellClickEnabled: Bool {
@@ -316,6 +346,11 @@ final class SettingsStore: ObservableObject {
         let savedRange = defaults.double(forKey: "tiltRange")
         tiltRange = savedRange > 0 ? max(5.0, min(60.0, savedRange)) : 25.0
         tiltPositionMode = defaults.object(forKey: "tiltPositionMode") as? Bool ?? true
+        tiltJoystickMode = defaults.object(forKey: "tiltJoystickMode") as? Bool ?? true
+        let savedDriftSpeed = defaults.double(forKey: "tiltDriftMaxSpeed")
+        tiltDriftMaxSpeed = savedDriftSpeed > 0 ? max(0.2, min(4.0, savedDriftSpeed)) : 1.2
+        let savedSatDeg = defaults.double(forKey: "tiltDriftSaturationDeg")
+        tiltDriftSaturationDeg = savedSatDeg > 0 ? max(10.0, min(60.0, savedSatDeg)) : 30.0
         tiltDwellClickEnabled = defaults.object(forKey: "tiltDwellClickEnabled") as? Bool ?? false
         tiltDwellDuration = defaults.double(forKey: "tiltDwellDuration").nonZero ?? 1.0
         let savedTap = defaults.double(forKey: "tapThreshold")

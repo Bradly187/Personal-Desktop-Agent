@@ -190,6 +190,20 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Tilt-joystick settings — debounced so dragging the tuning sliders
+        // doesn't thrash the snapshot.
+        Publishers.CombineLatest3(
+            settings.$tiltJoystickMode.removeDuplicates(),
+            settings.$tiltDriftMaxSpeed.removeDuplicates(),
+            settings.$tiltDriftSaturationDeg.removeDuplicates()
+        )
+        .dropFirst()
+        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+        .sink { [weak self] _ in
+            self?.tiltSensor.updateSettings()
+        }
+        .store(in: &cancellables)
+
         // Audio stream toggle
         settings.$audioStreamEnabled
             .removeDuplicates()
