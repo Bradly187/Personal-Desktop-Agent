@@ -4,7 +4,7 @@ Multimodal accessibility desktop control for a single user with rheumatoid arthr
 
 ## What This Is
 
-The user controls a Windows desktop through voice, hand gesture, iPad tilt, mouth sounds, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). (Eye-gaze and head-pose control were removed — the standard iPad lacks the required TrueDepth sensor.) Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
+The user controls a Windows desktop through voice, hand gesture, iPad tilt, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). (Eye-gaze and head-pose control were removed — the standard iPad lacks the required TrueDepth sensor.) Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
 
 - Full requirements (17): `.kiro/specs/ipad-sensor-focus/requirements.md`
 - Architecture diagrams (13): `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md`
@@ -12,7 +12,10 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity (2026-06-05)
+## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity + mouth-sound removal (2026-06-05)
+
+**Done (Mouth-sound control removed — 2026-06-05):**
+- The mouth-sound pipeline (cluck/pop/hiss via AVFoundation) was removed **entirely** (PC + iPad) — the sounds fired incidentally and were not a reliable control surface. Removed iPad-side: `SoundDetector.swift`, `SoundTrainingSheet.swift`, and the `sound`/`SoundDetector` wiring across `SensorManager.swift`, `OnboardingView.swift`, `SettingsStore.swift`, `SensorActivityBar.swift`, `SensorDashboardView.swift`, `FlareProfileSheet.swift` (Swift source count 41 → 40). Removed PC-side: the `sound_action` handler and the priority-2 sound branch in `core/fusion_engine.py` (now **6-level** priority); the `sound_action` message type is no longer sent. The FusionEngine priority list shrinks 7 → 6 (see Sensor Priority below).
 
 **Done (Magnetic cursor — gravity re-enabled safely + overlay removed — 2026-06-05):**
 - Cursor gravity (magnetic-click Phase 3) re-enabled **headless**. The 2026-06-04 attempt destabilised the desktop two ways: `desktop/magnetic_overlay.py` (fullscreen `overrideredirect`/`-topmost`/layered Tk window repainting at 30 Hz) stalled the DWM compositor (soft hang), and `desktop/target_cache.py` blind-walked the whole UIA tree 3×/s rooted at `GetFocusedElement` + walk-up, spamming E_POINTER "Invalid pointer" 3×/s on stale elements.
@@ -245,7 +248,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 | File | Purpose |
 |------|---------|
-| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 26 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result`, `mic_state`, `recalibration_request` replies |
+| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 25 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result`, `mic_state`, `recalibration_request` replies |
 | `core/command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
 | `mcp_server/desktop_mcp_server.py` | MCP stdio server; 14 tools; `SAFE_MODE` env var |
 | `mcp_server/tools/mouse.py` | move, click, double_click, scroll, drag |
@@ -345,26 +348,25 @@ used instead (4-second recording window, auto-approve on silence).
 Gaze and head-pose message types (`gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`, `gaze_calibration_sample`, `gaze_calibration_start`, `head_pose`) were removed — the standard iPad has no TrueDepth sensor.
 
 **iPad → PC:**
-- *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `keyword`, `sound_action`, `audio_stream`, `camera_frame`, `depth_frame`
+- *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `keyword`, `audio_stream`, `camera_frame`, `depth_frame`
 - *Direct control:* `touch_command`, `trackpad`, `handwriting_image`, `dwell_click`, `ping`
 - *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `flare_profile`, `calibration_start`, `calibration_cancel`, `mic_mute`
 - *Diagnostics:* `ipad_log`
 
 **PC → iPad (6 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (voice drift/seasonal re-cal trigger → QuickRecalSheet), `mic_state` (mute/unmute echo so the iPad `MicMuteIndicator` stays in two-way sync)
 
-`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 7. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `set_feature_toggle` is still wired but currently has no valid features (all prior toggles were gaze features). `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (tilt, keyword, sound_action, etc.) are dispatched to FusionEngine.
+`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 6. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `set_feature_toggle` is still wired but currently has no valid features (all prior toggles were gaze features). `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (tilt, keyword, etc.) are dispatched to FusionEngine.
 
 ## Sensor Priority (FusionEngine — `core/fusion_engine.py`)
 
-7-level priority (gaze and head-pose removed — the standard iPad has no TrueDepth sensor):
+6-level priority (gaze, head-pose, and mouth-sound control all removed):
 
 1. iPad touch command — bypasses LLM entirely
-2. Sound action (mouth sounds via AVFoundation)
-3. Voice "click" keyword — clicks at the current cursor position (bypass, source `multimodal`)
-4. Tilt navigation (Core Motion) — 4a absolute position, 4b legacy velocity
-5. Gesture alone
-6. On-device voice keyword (Speech Framework)
-7. PC-transcribed voice (Whisper large-v3 on GPU)
+2. Voice "click" keyword — clicks at the current cursor position (bypass, source `multimodal`)
+3. Tilt navigation (Core Motion) — 3a absolute position, 3b legacy velocity
+4. Gesture alone
+5. On-device voice keyword (Speech Framework)
+6. PC-transcribed voice (Whisper large-v3 on GPU)
 
 ## Coding Conventions
 
