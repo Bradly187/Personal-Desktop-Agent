@@ -12,7 +12,16 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute (2026-06-03)
+## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity (2026-06-05)
+
+**Done (Magnetic cursor — gravity re-enabled safely + overlay removed — 2026-06-05):**
+- Cursor gravity (magnetic-click Phase 3) re-enabled **headless**. The 2026-06-04 attempt destabilised the desktop two ways: `desktop/magnetic_overlay.py` (fullscreen `overrideredirect`/`-topmost`/layered Tk window repainting at 30 Hz) stalled the DWM compositor (soft hang), and `desktop/target_cache.py` blind-walked the whole UIA tree 3×/s rooted at `GetFocusedElement` + walk-up, spamming E_POINTER "Invalid pointer" 3×/s on stale elements.
+- `desktop/magnetic_overlay.py` — **deleted** (overlay dropped entirely; gravity needs no window).
+- `desktop/target_cache.py` — `_loop` reworked: change-gated walk (`_walk_due` — only on a foreground-window change or a 1.5 s heartbeat; foreground hwnd read via cheap `GetForegroundWindow`, no COM), consecutive-failure backoff (caps at 2 s), `CoUninitialize` in `finally`. Read API (`nearest`/`snapshot`/`is_running`) unchanged.
+- `desktop/ui_automation.py` — new `collect_snap_targets_for_window(hwnd)` roots the BFS at `ElementFromHandle(hwnd)` (fresh, foreground-scoped — no stale parent-walk); shared BFS body `_bfs_snap_targets`; bounds tightened (200 results / 0.3 s).
+- `main.py` — starts the reworked cache + `fusion.set_target_cache()` behind kill-switch `DA_CURSOR_GRAVITY` (default on; `=0` disables → gravity no-ops); registered for graceful shutdown.
+- Gravity math unchanged: `fusion_engine._apply_gravity` (radius 90 px, max pull 18 px) at end of position-mode tick; Phase 1 tilt-tap snap (`command_executor._magnetic_snap`) unchanged, now also reads the healthy cache.
+- `tests/test_target_cache.py` — **new**; 24 tests (nearest/tie-break, `_walk_due` gating, backoff grow/reset/cap, UIA-unavailable no-op, `_apply_gravity` no-op/pull/settle). Full suite: **682 passed**. Stability smoke (`main.py --safe-mode`, ~100 s): 0 E_POINTER, 0 walk failures, 0 tracebacks.
 
 **Done (Voice control + goal sessions + mic mute — 2026-06-03):**
 - `core/goal_session.py` — **new file**; goal-level authorization: the user authorizes a high-level goal once (via voice) and the constituent Claude Code tool calls / DevAgent steps run silently without per-tool prompts; atomic-replace signal file `~/.claude/approval/goal_session.json` read by `approval_hook.py` and `DevAgent._confirm_destructive_op()`; voice `cancel`/`status`/`history` control
@@ -275,6 +284,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `desktop/ui_automation.py` | Win32 UIAutomation BFS tree search; fuzzy name scoring; 0.3s timeout; 1s cache; first fallback in `_resolve_coords` |
 | `desktop/action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |
 | `desktop/flick_engine.py` | Flick-to-snap gesture handler; maps GRAB_SNAP_* gestures to window snap zones; uses OneEuroFilter for smoothing |
+| `desktop/target_cache.py` | `ClickableTargetCache` — daemon thread publishing a lock-protected snapshot of clickable UI targets for magnetic snap + cursor gravity; change-gated COM walk (foreground-hwnd + 1.5 s heartbeat), failure backoff, `CoUninitialize`; started behind `DA_CURSOR_GRAVITY` |
 | `inference/kiro_client.py` | WebSocket client for Kiro/VS Code bridge extension on ws://127.0.0.1:8767; wired to DevAgent for code edits |
 | `inference/codebase_indexer.py` | ChromaDB RAG index over Python/Swift source + docs PDFs; incremental file watcher; fed to DevAgent for context |
 | `monitoring/metrics.py` | In-process metrics singleton; VRAM poller; optional `/metrics` HTTP endpoint |

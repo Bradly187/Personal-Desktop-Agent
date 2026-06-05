@@ -371,41 +371,75 @@ class UIAutomationProvider:
         50024,  # TreeItem
     })
 
+    def collect_snap_targets_for_window(
+        self, hwnd: int, max_results: int = 200, timeout_s: float = 0.3
+    ) -> list[UIElement]:
+        """Return snap-eligible clickable elements within a specific window.
+
+        Roots the BFS at ``ElementFromHandle(hwnd)`` — a fresh element scoped to
+        exactly that window — instead of walking up from the focused element.
+        That avoids the stale-pointer storm the old GetFocusedElement + walk-up
+        path caused when the tree mutates mid-walk (the E_POINTER thrash). The
+        background ClickableTargetCache uses this every refresh. Blocking.
+
+        Falls back to the legacy whole-tree collect when ``hwnd`` is 0/None.
+        """
+        uia = self._get_uia()
+        if uia is None:
+            return []
+        if not hwnd:
+            return self.collect_snap_targets(max_results, timeout_s)
+        try:
+            root = uia.ElementFromHandle(hwnd)
+            if root is None:
+                return []
+            return self._bfs_snap_targets(uia, root, max_results, timeout_s)
+        except Exception as exc:
+            # Demoted to debug: a window closing mid-walk is expected, not an error.
+            log.debug("collect_snap_targets_for_window failed: %s", exc)
+            return []
+
     def collect_snap_targets(
         self, max_results: int = 300, timeout_s: float = 0.5
     ) -> list[UIElement]:
         """Return all snap-eligible clickable elements in the top-level window.
 
         Unlike list_clickable (which starts at the focused element), this walks
-        up to the top-level window first so the whole window is enumerated — the
-        background ClickableTargetCache uses this to build its snapshot. Blocking.
+        up to the top-level window first so the whole window is enumerated.
+        Legacy fallback for when no foreground hwnd is available; prefer
+        collect_snap_targets_for_window. Blocking.
         """
         uia = self._get_uia()
         if uia is None:
             return []
         try:
-            return self._collect_snap_targets(uia, max_results, timeout_s)
+            root = uia.GetFocusedElement()
+            if root is None:
+                root = uia.GetRootElement()
+            walker = uia.CreateTreeWalker(uia.ControlViewCondition)
+            parent = root
+            for _ in range(10):
+                p = walker.GetParentElement(parent)
+                if p is None:
+                    break
+                parent = p
+            return self._bfs_snap_targets(uia, parent, max_results, timeout_s)
         except Exception as exc:
-            log.warning("UIAutomationProvider.collect_snap_targets failed: %s", exc)
+            log.debug("UIAutomationProvider.collect_snap_targets failed: %s", exc)
             return []
 
-    def _collect_snap_targets(
-        self, uia, max_results: int, timeout_s: float
+    def _bfs_snap_targets(
+        self, uia, root, max_results: int, timeout_s: float
     ) -> list[UIElement]:
-        root = uia.GetFocusedElement()
-        if root is None:
-            root = uia.GetRootElement()
-        walker = uia.CreateTreeWalker(uia.ControlViewCondition)
-        parent = root
-        for _ in range(10):
-            p = walker.GetParentElement(parent)
-            if p is None:
-                break
-            parent = p
+        """BFS the subtree under ``root``, collecting snap-eligible controls.
 
+        Each per-element property access is individually guarded so a single
+        stale/destroyed element only skips itself rather than aborting the walk.
+        """
+        walker = uia.CreateTreeWalker(uia.ControlViewCondition)
         deadline = time.monotonic() + timeout_s
         out: list[UIElement] = []
-        queue = [parent]
+        queue = [root]
         while queue and len(out) < max_results and time.monotonic() < deadline:
             elem = queue.pop(0)
             try:

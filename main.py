@@ -724,15 +724,26 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
     fusion.set_session_id(session_id)
 
-    # Magnetic cursor — Phase 1 (tilt-tap snap) and Phase 2b (dwell snap) use a
-    # per-click UIAutomation lookup in command_executor; nothing to start here.
+    # Magnetic cursor:
+    #   * Phase 1 (tilt-tap snap) / Phase 2b (dwell snap) — per-click UIA lookup
+    #     in command_executor; also reads the cache's cheap snapshot when running.
+    #   * Phase 3 (cursor gravity) — biases the tilt cursor toward a nearby
+    #     clickable at 60 Hz so the user can settle on buttons without precision.
     #
-    # DISABLED pending rework (2026-06-04): the background ClickableTargetCache
-    # (COM MTA thread) spammed E_POINTER "Invalid pointer" 3x/s, and the
-    # fullscreen top-most MagneticOverlay destabilised the desktop (soft hang —
-    # no kernel/GPU crash event, consistent with a DWM compositor stall). Cursor
-    # gravity (Phase 3) depended on the cache and is dormant without it. Do NOT
-    # start target_cache or MagneticOverlay until both are reworked safely.
+    # The background ClickableTargetCache was reworked (2026-06-05) to be
+    # change-gated (walk only on foreground change / heartbeat) with a failure
+    # backoff and a foreground-scoped UIA walk — fixing the E_POINTER thrash. The
+    # fullscreen overlay that caused the DWM soft-hang was removed entirely;
+    # gravity now runs headless. Kill-switch: DA_CURSOR_GRAVITY=0.
+    target_cache = None
+    if os.environ.get("DA_CURSOR_GRAVITY", "1") != "0":
+        from desktop.target_cache import get_target_cache
+        target_cache = get_target_cache()
+        target_cache.start()
+        fusion.set_target_cache(target_cache)
+        log.info("Cursor gravity enabled (DA_CURSOR_GRAVITY)")
+    else:
+        log.info("Cursor gravity disabled via DA_CURSOR_GRAVITY=0")
 
     # Priority-aware scheduler — gates DEV_AGENT/BACKGROUND tasks so they
     # cannot starve accessibility commands during a flare.
@@ -906,6 +917,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await governor.start()
     twin_state.set_resource_governor(governor)   # SVT fast-path: <100ms flare response
     shutdown.register(governor)
+    if target_cache is not None:
+        shutdown.register(target_cache)
 
     # --- Sync hotwords into WhisperStream once trainer is ready ---
     hotwords = await trainer.get_hotwords()
