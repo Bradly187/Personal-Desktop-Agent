@@ -4,7 +4,7 @@ Receives a Command from FusionEngine, decides whether to run local inference
 or fall back to the cloud, executes the resulting action, and logs the outcome.
 
 Gate logic (source-dependent):
-  touch / sound_action / multimodal → bypass all 4 gates → local
+  touch / multimodal                → bypass all 4 gates → local
   voice_local                       → skip Gate 1 → gates 2-4
   gesture / voice                   → full 4-gate evaluation
 
@@ -230,7 +230,7 @@ async def _retranscribe(cmd: Command) -> Command:
 # HybridCoordinator
 # ---------------------------------------------------------------------------
 
-_BYPASS_SOURCES = {"touch", "sound_action", "multimodal"}
+_BYPASS_SOURCES = {"touch", "multimodal"}
 _SKIP_GATE1_SOURCES = {"voice_local"}
 
 # Output schema for the command-path LLM. The local/cloud command models are
@@ -536,7 +536,16 @@ class HybridCoordinator:
         # --- Dev-agent pre-gate: intercept non-command domains ---
         # Skip for voice system-control keywords so they reach the keyword block
         # below instead of being misrouted to an LLM (e.g. "pain day on").
-        if self._dev_agent and not _is_system_control_voice(cmd):
+        # Skip for bypass sources (touch / multimodal): these arrive
+        # with a concrete accessibility action already resolved (e.g. a tilt-tap is
+        # source="touch" action="CLICK" text="tilt_tap"). Classifying their text
+        # would send "tilt_tap" to the DevAgent as a general-domain query and the
+        # click would never fire — they must fall through to the gate-bypass path.
+        if (
+            self._dev_agent
+            and not _is_system_control_voice(cmd)
+            and cmd.source not in _BYPASS_SOURCES
+        ):
             domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
                 # Cloud DevAgent branch — route to Claude when configured to,
@@ -762,12 +771,8 @@ class HybridCoordinator:
             # consumer relaxes only if its flare_profile degrade flag is set,
             # and apply_pain_day is idempotent so calling every command is cheap.
             if self._fusion is not None:
-                # Tilt and sound are independent flare_profile flags, so a
-                # user who tilts fine but whose mouth-sounds weaken (or vice
-                # versa) gets exactly the relaxation they configured.
                 self._fusion.apply_pain_day(
                     tilt=snapshot.pain_day_active and snapshot.flare_tilt_degrades,
-                    sound=snapshot.pain_day_active and snapshot.flare_sound_degrades,
                 )
             if self._whisper is not None:
                 self._whisper.apply_pain_day(
@@ -809,7 +814,17 @@ class HybridCoordinator:
 
                 # --- Bypass path -----------------------------------------------
                 elif source in _BYPASS_SOURCES:
-                    action_str = await self._run_local(cmd)
+                    # Touch commands (iPad CommandPad taps, tilt-tap) arrive with a
+                    # concrete action already resolved — the text is just a label
+                    # ("tilt_tap"). Honor that action directly instead of asking the
+                    # LLM to infer it from the label, which yields CLARIFY ("What is
+                    # the target of the click?") because the model can't read
+                    # "tilt_tap" as a verb. Sound/multimodal still infer via the LLM
+                    # (their action depends on which sound / phrase fired).
+                    if cmd.source == "touch" and cmd.action in _VALID_COMMAND_VERBS:
+                        action_str = cmd.action
+                    else:
+                        action_str = await self._run_local(cmd)
                     route_label = "local"
                     gate_that_decided = "bypass"
 
@@ -1276,7 +1291,14 @@ class HybridCoordinator:
             params = {"direction": direction, "amount": amount}
 
         elif verb == "CLICK":
-            if original.gaze_coords:
+            # Carry through explicit touch coords (tilt-tap pins cursor x/y +
+            # snap_nearest in FusionEngine.on_touch). Without this the coords are
+            # dropped and the click falls back to re-searching UIA for the text.
+            if "x" in original.params and "y" in original.params:
+                params = {"x": original.params["x"], "y": original.params["y"]}
+                if original.params.get("snap_nearest"):
+                    params["snap_nearest"] = True
+            elif original.gaze_coords:
                 x, y = original.gaze_coords
                 params = {"x": x, "y": y}
 

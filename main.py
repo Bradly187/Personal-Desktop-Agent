@@ -724,6 +724,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
     fusion.set_session_id(session_id)
 
+    # Magnetic cursor — Phase 1 (tilt-tap snap) and Phase 2b (dwell snap) use a
+    # per-click UIAutomation lookup in command_executor; nothing to start here.
+    #
+    # DISABLED pending rework (2026-06-04): the background ClickableTargetCache
+    # (COM MTA thread) spammed E_POINTER "Invalid pointer" 3x/s, and the
+    # fullscreen top-most MagneticOverlay destabilised the desktop (soft hang —
+    # no kernel/GPU crash event, consistent with a DWM compositor stall). Cursor
+    # gravity (Phase 3) depended on the cache and is dormant without it. Do NOT
+    # start target_cache or MagneticOverlay until both are reworked safely.
+
     # Priority-aware scheduler — gates DEV_AGENT/BACKGROUND tasks so they
     # cannot starve accessibility commands during a flare.
     from core.scheduler import AccessibilityScheduler

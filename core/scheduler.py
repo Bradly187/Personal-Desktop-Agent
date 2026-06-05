@@ -1,7 +1,7 @@
 """Priority-aware task scheduler for the accessibility pipeline.
 
 Priority tiers (lower int = higher priority):
-    0  ACCESSIBILITY  — touch, sound_action, voice click (bypass sources)
+    0  ACCESSIBILITY  — touch, voice click (bypass sources)
     1  VOICE          — WhisperStream transcription commands
     2  GESTURE        — MediaPipe gesture commands
     3  DEV_AGENT      — DevAgent plan/execute chains

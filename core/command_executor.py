@@ -47,6 +47,61 @@ else:
 _ui_provider: "UIAutomationProvider | None" = None
 _action_verifier: "ActionVerifier | None" = None
 
+# Magnetic-click ("area cursor") radius in pixels: a tilt-tap clicks the nearest
+# clickable target within this distance of the cursor instead of the exact pixel,
+# so coarse tilt positioning is enough. Env-overridable for live tuning without a
+# restart-edit; 0 (or negative) disables snapping → click lands at the cursor.
+import os as _os
+try:
+    _SNAP_RADIUS_PX = int(_os.environ.get("DA_SNAP_RADIUS_PX", "200"))
+except ValueError:
+    _SNAP_RADIUS_PX = 200
+
+
+def _magnetic_snap(x: int, y: int) -> "tuple[int, int] | None":
+    """Return the center of the nearest clickable target within the snap radius
+    of (x, y), or None if snapping is disabled / unavailable / nothing is near.
+
+    Prefers the background ClickableTargetCache (cheap, no COM call on this
+    thread); falls back to a direct per-click UIA tree walk when the cache isn't
+    running yet (e.g. first click before the first refresh).
+    """
+    if _SNAP_RADIUS_PX <= 0:
+        return None
+
+    # Fast path — read the background snapshot.
+    try:
+        from desktop.target_cache import get_target_cache
+        cache = get_target_cache()
+        if cache.is_running():
+            tg = cache.nearest(x, y, _SNAP_RADIUS_PX)
+            if tg is None:
+                return None
+            cx, cy = tg.center()
+            log.info("Magnetic snap [cache]: (%d,%d) → %r [%s] (%d,%d)",
+                     x, y, tg.name or "?", tg.role, cx, cy)
+            return cx, cy
+    except Exception as exc:
+        log.debug("magnetic snap cache lookup failed: %s", exc)
+
+    # Fallback — direct UIA walk.
+    provider = _get_ui_provider()
+    if not (provider and provider.is_available()):
+        return None
+    try:
+        elem = provider.find_nearest_clickable(x, y, max_radius=_SNAP_RADIUS_PX)
+    except Exception as exc:
+        log.debug("magnetic snap lookup failed: %s", exc)
+        return None
+    if elem is None:
+        return None
+    cx, cy = elem.center()
+    log.info(
+        "Magnetic snap: cursor (%d,%d) → %r [%s] (%d,%d)",
+        x, y, elem.name or "?", elem.role, cx, cy,
+    )
+    return cx, cy
+
 def _get_action_verifier():
     global _action_verifier
     if _action_verifier is None:
@@ -513,13 +568,20 @@ class CommandExecutor:
 
         Fallback chain:
           1. Explicit x/y in params  (vision grounder, touch)
+             — if params["snap_nearest"] is set (tilt-tap), magnetically snap to
+               the nearest clickable target within the snap radius first.
           2. UIAutomation structured element lookup  ← Sprint 6
           3. Explicit click coords from Command (gaze_coords)
           4. Current cursor position
         """
         p = cmd.params
         if "x" in p and "y" in p:
-            return int(p["x"]), int(p["y"])
+            x, y = int(p["x"]), int(p["y"])
+            if p.get("snap_nearest"):
+                snapped = _magnetic_snap(x, y)
+                if snapped is not None:
+                    return snapped
+            return x, y
 
         # UIAutomation: try structured element lookup when target text is available
         target = (p.get("target") or cmd.text or "").strip()
