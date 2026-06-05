@@ -159,6 +159,12 @@ struct SettingsView: View {
                     Text("How light a tap on the iPad registers as a click. Higher = lighter taps. Two quick taps make a double-click.")
                         .font(DesignTokens.Typography.caption)
                         .foregroundStyle(theme.textSecondary)
+                    LabeledContent("Tap Stabilization: \(Int(settings.tapStabilizeMs)) ms") {
+                        Slider(value: $settings.tapStabilizeMs, in: 0...400, step: 10)
+                    }
+                    Text("Briefly holds the cursor still when you tap so the tap can't nudge the click off the target. Higher = stickier; 0 = off.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(theme.textSecondary)
                     Toggle("Dwell Click", isOn: $settings.tiltDwellClickEnabled)
                     Text("Hold the cursor still to click. Fires the action selected in the dwell toolbar.")
                         .font(DesignTokens.Typography.caption)

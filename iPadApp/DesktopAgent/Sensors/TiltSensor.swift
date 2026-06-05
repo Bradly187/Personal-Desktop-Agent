@@ -76,6 +76,10 @@ final class TiltSensor: ObservableObject {
     // both register and land inside the OS double-click window, while still
     // suppressing a single tap's acceleration ring from double-firing.
     private let tapCooldownDuration: Double = 0.18
+    /// Cursor-motion freeze window (motion stabilization): while now < this, the
+    /// position paths hold so a tap's follow-through wobble can't drag the cursor
+    /// off the target. Opened by the tap-detection block; length = tapStabilizeMs.
+    private var tapFreezeUntil: CFTimeInterval = 0
 
     // Diagnostic counters — logged once per second by `handle()` so we can verify
     // from the PC's ipad_logs table whether the motion handler is alive, what
@@ -108,6 +112,7 @@ final class TiltSensor: ObservableObject {
     private var snapshotTiltJoystickMode: Bool = true
     private var snapshotTiltDriftMaxSpeed: Double = 1.2
     private var snapshotTiltDriftSaturationDeg: Double = 30.0
+    private var snapshotTapStabilizeMs: Double = 180.0
 
     init(ws: WebSocketManager, settings: SettingsStore) {
         self.ws = ws
@@ -149,6 +154,7 @@ final class TiltSensor: ObservableObject {
             snapshotTiltJoystickMode = s.tiltJoystickMode
             snapshotTiltDriftMaxSpeed = s.tiltDriftMaxSpeed
             snapshotTiltDriftSaturationDeg = s.tiltDriftSaturationDeg
+            snapshotTapStabilizeMs = s.tapStabilizeMs
         }
         lastJoyFrameTime = 0
 
@@ -175,6 +181,7 @@ final class TiltSensor: ObservableObject {
         joyPosX = 0.5
         joyPosY = 0.5
         lastJoyFrameTime = 0
+        tapFreezeUntil = 0
         stationaryStartTime = nil
         lockedCoords = nil
         prevAccelMag = 0
@@ -196,6 +203,7 @@ final class TiltSensor: ObservableObject {
         snapshotTiltJoystickMode = s.tiltJoystickMode
         snapshotTiltDriftMaxSpeed = s.tiltDriftMaxSpeed
         snapshotTiltDriftSaturationDeg = s.tiltDriftSaturationDeg
+        snapshotTapStabilizeMs = s.tapStabilizeMs
     }
 
     // MARK: — Dwell-to-click
@@ -243,8 +251,19 @@ final class TiltSensor: ObservableObject {
     /// path, so the cursor keeps gliding while the iPad is held tilted and stops
     /// when returned to neutral — and the PC side (gravity, multi-monitor,
     /// edge-clamp) is unchanged. Runs on the motion queue.
-    private func processJoystick(data: CMDeviceMotion) {
+    private func processJoystick(data: CMDeviceMotion, frozen: Bool) {
         let now = CACurrentMediaTime()
+
+        // Tap freeze: hold position — don't integrate or send. Keep the frame
+        // clock current so dt doesn't spike when the freeze ends, and reset the
+        // dwell timer (a tap isn't a dwell).
+        if frozen {
+            lastJoyFrameTime = now
+            stationaryStartTime = nil
+            cancelDwell()
+            diagSendsSuppressed += 1
+            return
+        }
 
         // First frame after (re)start / mode switch: seed from the last sent
         // position so the cursor doesn't jump, and use a nominal dt.
@@ -434,9 +453,18 @@ final class TiltSensor: ObservableObject {
 
         guard snapshotTiltEnabled else { return }
 
+        // Cursor-motion freeze: while a recent tap's stabilization window is open,
+        // the position paths hold (neither integrate nor send) so the tap's
+        // follow-through wobble can't drag the cursor off-target. The window is
+        // opened by the tap-detection block below.
+        let frozen = CACurrentMediaTime() < tapFreezeUntil
+
         if snapshotTiltPositionMode && snapshotTiltJoystickMode {
             // --- Tilt-joystick (rate-control) mode: tilt angle → cursor velocity ---
-            processJoystick(data: data)
+            processJoystick(data: data, frozen: frozen)
+        } else if snapshotTiltPositionMode && frozen {
+            // Tap freeze: hold the cursor (no send → the PC keeps the last position).
+            diagSendsSuppressed += 1
         } else if snapshotTiltPositionMode {
             // --- Position-mapped (absolute) mode ---
             var (x, y) = computePosition(gravity: data.gravity)
@@ -547,6 +575,11 @@ final class TiltSensor: ObservableObject {
             ws?.sendTiltTap()
             lastTapFireTime = now
             diagTapsFired += 1
+            // Open the cursor-freeze window so the tap's follow-through wobble
+            // can't drag the cursor off the target before the click resolves.
+            if snapshotTapStabilizeMs > 0 {
+                tapFreezeUntil = now + snapshotTapStabilizeMs / 1000.0
+            }
         }
         prevAccelMag = mag
     }

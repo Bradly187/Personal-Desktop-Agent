@@ -134,6 +134,16 @@ final class SettingsStore: ObservableObject {
             defaults.set(clamped, forKey: "tapThreshold")
         }
     }
+    /// Tap motion-stabilization window (ms). After a tap fires, the cursor is
+    /// held still for this long so the tap's follow-through wobble can't nudge
+    /// the click off the target. Clamped [0, 400]; 0 = off; default 180.
+    @Published var tapStabilizeMs: Double {
+        didSet {
+            let clamped = max(0.0, min(400.0, tapStabilizeMs))
+            if clamped != tapStabilizeMs { tapStabilizeMs = clamped }
+            defaults.set(clamped, forKey: "tapStabilizeMs")
+        }
+    }
 
     // MARK: — Neutral Gravity Persistence
 
@@ -355,6 +365,9 @@ final class SettingsStore: ObservableObject {
         tiltDwellDuration = defaults.double(forKey: "tiltDwellDuration").nonZero ?? 1.0
         let savedTap = defaults.double(forKey: "tapThreshold")
         tapThreshold = savedTap > 0 ? max(0.4, min(3.0, savedTap)) : 0.4
+        // 0 is a valid value (off), so key the default on presence, not >0.
+        let savedStab = defaults.double(forKey: "tapStabilizeMs")
+        tapStabilizeMs = defaults.object(forKey: "tapStabilizeMs") != nil ? max(0.0, min(400.0, savedStab)) : 180.0
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
