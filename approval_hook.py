@@ -258,7 +258,7 @@ def main() -> None:
     try:
         from core.goal_session import GoalSessionStore
         _gs = GoalSessionStore.get_active()
-        if _gs and _gs.allows(tool_name):
+        if _gs and _gs.allows_action(tool_name, tool_input):
             GoalSessionStore.consume()
             log.info("approval_hook: auto-approved %r under goal session %r",
                      tool_name, _gs.goal[:60])

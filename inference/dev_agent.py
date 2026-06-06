@@ -185,6 +185,15 @@ class DevAgent:
         "WRITE_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR",
     })
 
+    # Pure context-gathering verbs (gap #1 fan-out): read-only, no side effects,
+    # and no inter-step dependency worth serialising. A LEADING run of these in a
+    # plan can be executed concurrently via the scheduler's sub-agent pool before
+    # the sequential action loop. Subset of _RETRYABLE_VERBS (excludes SEARCH_WEB,
+    # which opens a browser, and EXPLAIN, which is ordering-sensitive narration).
+    _PARALLEL_VERBS: frozenset[str] = frozenset({
+        "READ_FILE", "GREP", "FETCH_URL", "READ_SCREEN", "GIT_STATUS", "GIT_DIFF",
+    })
+
     def __init__(
         self,
         router: ModelRouter,
@@ -401,6 +410,11 @@ class DevAgent:
         cancelled = False
         halted_reason: Optional[str] = None
 
+        # Parallel context-gathering (gap #1): fan out a leading run of independent
+        # read-only steps before the sequential action loop. No-op without a
+        # scheduler or with < 2 such steps; failure falls back to sequential.
+        await self._gather_readonly_prefix(remaining, executed, run_id)
+
         while remaining:
             if len(executed) >= self.MAX_STEPS:
                 halted_reason = f"reached MAX_STEPS ({self.MAX_STEPS})"
@@ -491,6 +505,60 @@ class DevAgent:
                     step.action, attempt + 1, attempts, exc,
                 )
         return False
+
+    # ── Parallel context-gathering (gap #1) ─────────────────────────────────
+
+    def _leading_parallel_prefix(self, remaining: list[AgentStep]) -> list[AgentStep]:
+        """The leading contiguous run of pure read-only steps at the front of `remaining`."""
+        prefix: list[AgentStep] = []
+        for s in remaining:
+            if s.action.upper() in self._PARALLEL_VERBS:
+                prefix.append(s)
+            else:
+                break
+        return prefix
+
+    async def _gather_readonly_prefix(
+        self,
+        remaining: list[AgentStep],
+        executed: list[AgentStep],
+        run_id: int,
+    ) -> None:
+        """Fan out a leading run of independent read-only steps concurrently.
+
+        Closes gap #1 for the common 'gather context, then act' plan shape. No-op
+        unless a scheduler is wired and >= 2 such steps lead the plan.
+
+        Failure semantics are preserved EXACTLY: on any failed/timed-out child the
+        parallel results are discarded and the steps are left in `remaining` for
+        the normal sequential loop (which applies retry + replan-on-failure). Read
+        verbs are idempotent, so the rare re-run is safe and side-effect-free.
+        """
+        if self._scheduler is None or self._cancel_event.is_set():
+            return
+        prefix = self._leading_parallel_prefix(remaining)
+        if len(prefix) < 2:
+            return
+
+        results = await self._scheduler.fan_out(
+            [self._run_step_with_retry(s) for s in prefix],
+            label=f"devagent_readonly[{len(prefix)}]",
+        )
+        if not all(r is True for r in results):
+            log.info(
+                "DevAgent: parallel read-only prefix had a failure — falling back "
+                "to sequential execution (replan-on-failure preserved)"
+            )
+            return
+
+        # All succeeded — adopt the batch: advance `executed` and persist in order.
+        del remaining[: len(prefix)]
+        for s in prefix:
+            executed.append(s)
+            await self._persist_step(run_id, len(executed), s)
+        self._current_step = len(executed)
+        self._total_steps = len(executed) + len(remaining)
+        log.info("DevAgent: ran %d read-only context step(s) in parallel", len(prefix))
 
     async def _replan(
         self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]

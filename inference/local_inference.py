@@ -314,6 +314,10 @@ class OllamaInference(LocalInference):
         # tool-capable model + Ollama 0.30+ ("ollama show <model>" → tools cap).
         self.use_tools = use_tools
         self._available: bool | None = None  # None = not yet checked
+        # Latched breaker (gap #4): once Ollama looks down, fail fast instead of
+        # paying the full timeout on every request until it recovers.
+        from core.circuit_breaker import CircuitBreaker
+        self._breaker = CircuitBreaker(name="ollama", fail_threshold=3, cooldown_s=30.0)
 
     async def infer(
         self,
@@ -327,6 +331,9 @@ class OllamaInference(LocalInference):
             import aiohttp
         except ImportError:
             return "CLARIFY aiohttp not installed"
+
+        if not self._breaker.allow():
+            return "CLARIFY inference backend unavailable (circuit open)"
 
         prompt = _build_prompt(cmd, few_shot_examples)
         payload = {
@@ -351,9 +358,11 @@ class OllamaInference(LocalInference):
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
+                    self._breaker.record_success()
                     return action
         except Exception as exc:
             self._available = False
+            self._breaker.record_failure()
             log.error("OllamaInference failed: %s", exc)
             return f"CLARIFY inference error: {exc}"
 
@@ -401,16 +410,21 @@ class OllamaInference(LocalInference):
         except ImportError:
             return "CLARIFY aiohttp not installed"
 
+        if not self._breaker.allow():
+            return "CLARIFY inference backend unavailable (circuit open)"
+
         messages = _build_chat_messages(cmd, few_shot_examples)
         t0 = time.monotonic()
         try:
             data = await self._chat(messages, tools=[_DESKTOP_ACTION_TOOL])
         except Exception as exc:
             self._available = False
+            self._breaker.record_failure()
             log.error("OllamaInference[tools] failed: %s", exc)
             return f"CLARIFY inference error: {exc}"
 
         self._available = True
+        self._breaker.record_success()
         latency_ms = (time.monotonic() - t0) * 1000
         message = data.get("message", {}) or {}
 

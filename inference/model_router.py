@@ -348,15 +348,11 @@ _LIGHT_MODELS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 def _free_vram_gb() -> float:
-    try:
-        import pynvml as nvml
-        nvml.nvmlInit()
-        h = nvml.nvmlDeviceGetHandleByIndex(0)
-        info = nvml.nvmlDeviceGetMemoryInfo(h)
-        nvml.nvmlShutdown()
-        return info.free / (1024 ** 3)
-    except Exception:
-        return 999.0  # assume unlimited if can't check
+    # Delegates to the shared VRAM probe (core.vram) so every component reads the
+    # SAME signal. Behaviour is identical to the prior inline pynvml call,
+    # including the 999.0 fail-open sentinel when VRAM can't be measured.
+    from core.vram import free_vram_gb
+    return free_vram_gb()
 
 
 # ---------------------------------------------------------------------------

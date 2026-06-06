@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -26,6 +27,52 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 _SESSION_PATH = Path.home() / ".claude" / "approval" / "goal_session.json"
+
+# High-risk shell patterns that ALWAYS require an explicit per-call voice gate,
+# even inside an authorized goal session (gap #5). These are destructive,
+# irreversible, or remote-code-exec shaped — auto-approving them under a broad
+# "coding goal" is exactly the over-trust we want to avoid.
+_HIGH_RISK_BASH: tuple[re.Pattern, ...] = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\brm\s+-[a-z]*[rf]",            # rm -rf / -fr / -r / -f
+    r"\bsudo\b",
+    r"\bmkfs\b", r"\bdd\b",
+    r">\s*/dev/sd", r"\bof=/dev/",
+    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b",
+    r":\s*\(\s*\)\s*\{",              # fork bomb :(){
+    r"\bchmod\s+-R\b", r"\bchown\s+-R\b",
+    r"\bgit\s+push\b.*--force", r"\bgit\s+push\b.*\s-f\b",
+    r"\bgit\s+reset\s+--hard\b", r"\bgit\s+clean\s+-[a-z]*f",
+    r"\b(curl|wget)\b.*\|\s*(sudo\s+)?(sh|bash|zsh)\b",   # curl … | sh
+))
+
+
+def _is_high_risk_bash(command: str) -> bool:
+    """True if a shell command matches any always-gated high-risk pattern."""
+    if not command:
+        return False
+    return any(p.search(command) for p in _HIGH_RISK_BASH)
+
+
+def _path_in_scope(path: str, scopes: list[str]) -> bool:
+    """True if `path` resolves under one of the allowed scope prefixes.
+
+    Uses real-path normalisation so `..` traversal can't escape the scope.
+    An empty/missing path is out of scope (fail-safe: can't validate → deny).
+    """
+    if not path:
+        return False
+    try:
+        target = os.path.normcase(os.path.abspath(path))
+    except Exception:
+        return False
+    for scope in scopes:
+        try:
+            root = os.path.normcase(os.path.abspath(scope))
+        except Exception:
+            continue
+        if target == root or target.startswith(root + os.sep):
+            return True
+    return False
 
 # Claude Code tool names that are safe to auto-approve under any coding goal
 _CODING_TOOLS: frozenset[str] = frozenset({
@@ -57,6 +104,10 @@ class GoalSession:
     action_count: int = 0
     max_actions: int = 50
     domain: str = "coding"
+    # Optional path scope (gap #5): when non-empty, Write/Edit are auto-approved
+    # only for files resolving under one of these prefixes. Empty = unrestricted
+    # (backward-compatible default).
+    cwd_scope: list[str] = field(default_factory=list)
 
     def is_active(self) -> bool:
         return time.time() < self.expires_at and self.action_count < self.max_actions
@@ -65,6 +116,29 @@ class GoalSession:
         if tool_name in _NEVER_AUTO:
             return False
         return tool_name in self.allowed_tools and self.is_active()
+
+    def allows_action(self, tool_name: str, tool_input: Optional[dict] = None) -> bool:
+        """Tool-name allowance PLUS argument-level scoping (gap #5).
+
+        Adds two guards on top of allows():
+          - Write/Edit outside cwd_scope (when set) are NOT auto-approved.
+          - High-risk Bash commands (rm -rf, sudo, curl|sh, force-push, ...) are
+            NEVER auto-approved — they always fall through to the explicit voice
+            gate regardless of the active goal.
+        Everything else an authorized goal allows still auto-approves.
+        """
+        if not self.allows(tool_name):
+            return False
+        tool_input = tool_input or {}
+        if tool_name in ("Write", "Edit") and self.cwd_scope:
+            if not _path_in_scope(tool_input.get("file_path", ""), self.cwd_scope):
+                log.info("GoalSession: %s outside cwd_scope — requires explicit approval",
+                         tool_name)
+                return False
+        if tool_name == "Bash" and _is_high_risk_bash(tool_input.get("command", "")):
+            log.info("GoalSession: high-risk Bash command — requires explicit approval")
+            return False
+        return True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -92,8 +166,13 @@ class GoalSessionStore:
         domain: str = "coding",
         duration_s: float = 900.0,
         max_actions: int = 50,
+        cwd_scope: Optional[list[str]] = None,
     ) -> GoalSession:
-        """Create and persist a new goal session.  Overwrites any existing session."""
+        """Create and persist a new goal session.  Overwrites any existing session.
+
+        cwd_scope: optional path prefixes that bound auto-approved Write/Edit
+        (gap #5). None/empty leaves writes unrestricted (backward-compatible).
+        """
         tools = list(_tools_for_domain(domain))
         session = GoalSession(
             goal=goal,
@@ -102,6 +181,7 @@ class GoalSessionStore:
             action_count=0,
             max_actions=max_actions,
             domain=domain,
+            cwd_scope=list(cwd_scope or []),
         )
         cls._write(session)
         log.info("GoalSession created: goal=%r domain=%s tools=%d expires_in=%.0fs",

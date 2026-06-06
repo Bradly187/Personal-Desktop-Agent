@@ -40,11 +40,12 @@ Resource invariants (the one finite resource is `_dev_sem`, a single permit):
     4. stop() cancels in-flight dispatched tasks so no permit/task is held with
        no one left to need it.
 
-Multi-agent fan-out (deferred — design note): to run sub-steps concurrently from
-    within a dev task, gather independent READ-ONLY coroutines directly
-    (asyncio.gather), or use a SEPARATE sub-task semaphore with N>1 permits that
-    is distinct from `_dev_sem`. Never await children that contend for a permit
-    the parent is holding (invariant 2).
+Multi-agent fan-out (IMPLEMENTED — see fan_out()): to run sub-steps concurrently
+    from within a dev task, call `fan_out(coros)`. It gathers the children under
+    a SEPARATE sub-task semaphore (`_subagent_sem`, N>1 permits) that is distinct
+    from `_dev_sem`, so children never contend for the permit the parent is
+    holding (invariant 2). Only fan out genuinely independent (ideally read-only)
+    sub-steps — ordering/dependencies are the caller's responsibility.
 
 Design notes:
     - Uses asyncio.PriorityQueue (stdlib, no new deps).
@@ -67,6 +68,21 @@ log = logging.getLogger(__name__)
 _MAX_CONCURRENT_DEV = 1    # only one heavy dev/background task at a time
 _DEV_TASK_TIMEOUT_S = 30   # ceiling for single specialist-model inferences
 _PLAN_TASK_TIMEOUT_S = 300 # ceiling for full DevAgent plan_and_run() (5 min)
+
+# Queue bound (gap #4): cap pending items so a runaway producer (gesture
+# misfires, a voice-hallucination loop, a stuck dev replan) can't grow the queue
+# without limit. Only DEV_AGENT/BACKGROUND submissions are shed when full — the
+# fast accessibility/voice/gesture path is NEVER shed (those are tiny and bounded
+# by sensor rates; dropping a user's command is unacceptable).
+_MAX_QUEUE_DEPTH = 256
+
+# Sub-agent fan-out (gap #1): how many independent sub-steps of ONE dev plan may
+# run concurrently. This permit pool is DISTINCT from `_dev_sem` — that is what
+# makes fan-out deadlock-free (scheduler invariant 2): the parent dev task holds
+# the single `_dev_sem` permit while its children take `_subagent_sem` permits,
+# so children never contend for the permit the parent is holding. Kept modest so
+# parallel read-heavy sub-steps don't saturate the box during accessibility use.
+_MAX_CONCURRENT_SUBAGENTS = 3
 
 
 class Priority(IntEnum):
@@ -99,9 +115,16 @@ class AccessibilityScheduler:
         self._worker_task: asyncio.Task | None = None
         self._running = False
         self._dev_sem = asyncio.Semaphore(_MAX_CONCURRENT_DEV)
+        self._subagent_sem = asyncio.Semaphore(_MAX_CONCURRENT_SUBAGENTS)  # gap #1 fan-out
         self._metrics = None                              # set via set_metrics()
         self._dev_inflight: int = 0                       # DEV/BACKGROUND tasks holding the permit
+        self._subagent_inflight: int = 0                  # sub-agent fan-out tasks in flight
+        self._shed_count: int = 0                         # DEV/BACKGROUND submissions shed (queue full)
         self._inflight_tasks: set[asyncio.Task] = set()   # dispatched tasks, for stop() cleanup
+        # Flare admission gate (gap #3): set == dev work admitted; cleared == paused.
+        self._dev_resume_event = asyncio.Event()
+        self._dev_resume_event.set()
+        self._dev_paused: bool = False
 
     def set_metrics(self, metrics) -> None:
         """Wire the Metrics singleton for queue-depth / in-flight visibility."""
@@ -115,6 +138,7 @@ class AccessibilityScheduler:
         try:
             self._metrics.set("scheduler_queue_depth", self._queue.qsize())
             self._metrics.set("scheduler_dev_inflight", self._dev_inflight)
+            self._metrics.set("scheduler_subagent_inflight", self._subagent_inflight)
         except Exception:
             pass
 
@@ -156,6 +180,29 @@ class AccessibilityScheduler:
 
     # ── Public submit API ──────────────────────────────────────────────────────
 
+    def _shed_if_full(self, priority: "Priority", future: asyncio.Future, label: str) -> bool:
+        """Reject a DEV/BACKGROUND submission when the queue is at capacity (gap #4).
+
+        Returns True (resolving `future` with QueueFull) if shed. The fast
+        accessibility/voice/gesture path is never shed — it returns False here.
+        """
+        if priority < Priority.DEV_AGENT:
+            return False
+        if self._queue.qsize() < _MAX_QUEUE_DEPTH:
+            return False
+        self._shed_count += 1
+        msg = (f"scheduler queue full ({_MAX_QUEUE_DEPTH}) — shed {priority.name} "
+               f"task {label!r}")
+        log.warning("AccessibilityScheduler: %s (total shed=%d)", msg, self._shed_count)
+        if self._metrics is not None:
+            try:
+                self._metrics.set("scheduler_shed_total", self._shed_count)
+            except Exception:
+                pass
+        if not future.done():
+            future.set_exception(asyncio.QueueFull(msg))
+        return True
+
     def submit_plan(
         self,
         coro: Coroutine[Any, Any, Any],
@@ -174,6 +221,9 @@ class AccessibilityScheduler:
         self._seq += 1
         loop = asyncio.get_event_loop()
         future: asyncio.Future = loop.create_future()
+        if self._shed_if_full(Priority.DEV_AGENT, future, label):
+            coro.close()   # shed → never enqueued; close it so it isn't leaked
+            return future
         self._queue.put_nowait(
             (Priority.DEV_AGENT.value, self._seq, coro, future, label,
              _PLAN_TASK_TIMEOUT_S, trace_id, time.monotonic())
@@ -196,12 +246,62 @@ class AccessibilityScheduler:
         self._seq += 1
         loop = asyncio.get_event_loop()
         future: asyncio.Future = loop.create_future()
+        if self._shed_if_full(priority, future, label):
+            coro.close()   # shed → never enqueued; close it so it isn't leaked
+            return future
         self._queue.put_nowait(
             (priority.value, self._seq, coro, future, label,
              _DEV_TASK_TIMEOUT_S, trace_id, time.monotonic())
         )
         self._publish_gauges()
         return future
+
+    # ── Sub-agent fan-out (gap #1) ──────────────────────────────────────────────
+
+    async def fan_out(
+        self,
+        coros: list[Coroutine[Any, Any, Any]],
+        label: str = "",
+        timeout_s: float = _DEV_TASK_TIMEOUT_S,
+        return_exceptions: bool = True,
+    ) -> list[Any]:
+        """Run independent sub-step coroutines concurrently and await all of them.
+
+        Bypasses the priority queue: the CALLER (a dev task already holding the
+        single `_dev_sem` permit) awaits the batch directly. Children run under
+        `_subagent_sem` (N>1), DISTINCT from `_dev_sem`, so they never contend for
+        the parent's permit — this is what keeps fan-out deadlock-free (invariant
+        2). Accessibility / voice / gesture remain ungated and unaffected.
+
+        Each child is wrapped in its own `timeout_s` guard so one hung sub-step
+        can't stall the batch. Results are returned in input order. With
+        `return_exceptions=True` (default) a failed/timed-out child yields its
+        exception object instead of aborting the batch.
+
+        IMPORTANT: only fan out steps that are genuinely INDEPENDENT (ideally
+        read-only / idempotent). Ordering and inter-step dependencies are the
+        caller's responsibility — this method does not serialise anything.
+        """
+        if not coros:
+            return []
+
+        async def _run_one(coro: Coroutine[Any, Any, Any]) -> Any:
+            async with self._subagent_sem:
+                self._subagent_inflight += 1
+                self._publish_gauges()
+                try:
+                    return await asyncio.wait_for(coro, timeout=timeout_s)
+                finally:
+                    self._subagent_inflight -= 1
+                    self._publish_gauges()
+
+        log.info(
+            "Scheduler.fan_out: %d sub-task(s) %r (max_parallel=%d, timeout=%.0fs)",
+            len(coros), label, _MAX_CONCURRENT_SUBAGENTS, timeout_s,
+        )
+        return await asyncio.gather(
+            *[_run_one(c) for c in coros], return_exceptions=return_exceptions
+        )
 
     # ── Worker ────────────────────────────────────────────────────────────────
 
@@ -280,6 +380,12 @@ class AccessibilityScheduler:
         timeout_s: float = _DEV_TASK_TIMEOUT_S,
     ) -> None:
         """Run a gated dev/background coroutine under the semaphore with timeout."""
+        # Flare admission gate (gap #3): park here — holding NO permit and not
+        # counting against the timeout — until dev work is resumed. Accessibility
+        # never reaches this path. A parked task is still cancellable by stop().
+        if not self._dev_resume_event.is_set():
+            log.info("Scheduler: dev task %r parked — admission paused (flare)", label)
+            await self._dev_resume_event.wait()
         async with self._dev_sem:
             # `_dev_inflight` mirrors the held permit. Increment after acquire and
             # decrement in `finally` so the gauge can NEVER leak on timeout,
@@ -303,6 +409,63 @@ class AccessibilityScheduler:
                 self._dev_inflight -= 1
                 self._publish_gauges()
 
+    # ── Flare admission control (gap #3) ────────────────────────────────────
+
+    def pause_dev(self) -> None:
+        """Stop admitting NEW DEV_AGENT/BACKGROUND tasks (called by ResourceGovernor
+        on a flare). In-flight dev tasks are not force-killed — asyncio can't
+        preempt a running coroutine — but the governor's VRAM eviction reclaims
+        their resources and no new heavy task starts until resume_dev(). The fast
+        accessibility/voice/gesture path is never gated. Idempotent."""
+        if not self._dev_paused:
+            self._dev_paused = True
+            self._dev_resume_event.clear()
+            log.info("AccessibilityScheduler: DEV/BACKGROUND admission PAUSED (flare)")
+
+    def resume_dev(self) -> None:
+        """Resume admitting dev/background tasks (flare ended / shutdown). Idempotent."""
+        if self._dev_paused:
+            self._dev_paused = False
+            self._dev_resume_event.set()
+            log.info("AccessibilityScheduler: DEV/BACKGROUND admission RESUMED")
+
+    @property
+    def dev_paused(self) -> bool:
+        return self._dev_paused
+
+    # ── Supervision (gap #2) ────────────────────────────────────────────────
+
+    def is_healthy(self) -> bool:
+        """True iff the worker task is supposed to be and actually still running.
+
+        Cheap, non-blocking — safe for the Supervisor to poll. False when the
+        worker died unexpectedly while `_running` is still set.
+        """
+        return (
+            self._running
+            and self._worker_task is not None
+            and not self._worker_task.done()
+        )
+
+    async def restart(self) -> None:
+        """Relaunch a dead worker without disturbing the queue (Supervisor-driven).
+
+        Idempotent: no-op if not running (deliberate teardown) or already healthy.
+        Surfaces the dead task's exception before relaunching so a recurring crash
+        is visible rather than silently papered over.
+        """
+        if not self._running:
+            return  # deliberately stopped — don't fight shutdown
+        if self._worker_task is not None and not self._worker_task.done():
+            return  # already healthy
+        if self._worker_task is not None and self._worker_task.done() \
+                and not self._worker_task.cancelled():
+            exc = self._worker_task.exception()
+            if exc is not None:
+                log.error("Scheduler worker had died with %r — relaunching", exc)
+        self._worker_task = asyncio.create_task(self._worker(), name="scheduler_worker")
+        log.warning("AccessibilityScheduler: worker relaunched by supervisor")
+
     # ── Status ────────────────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
@@ -311,4 +474,10 @@ class AccessibilityScheduler:
             "running": self._running,
             "max_concurrent_dev": _MAX_CONCURRENT_DEV,
             "dev_inflight": self._dev_inflight,
+            "max_concurrent_subagents": _MAX_CONCURRENT_SUBAGENTS,
+            "subagent_inflight": self._subagent_inflight,
+            "dev_paused": self._dev_paused,
+            "max_queue_depth": _MAX_QUEUE_DEPTH,
+            "shed_count": self._shed_count,
+            "worker_alive": self.is_healthy(),
         }

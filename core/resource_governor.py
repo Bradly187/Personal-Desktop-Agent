@@ -82,6 +82,7 @@ class ResourceGovernor:
         self._whisper: Optional["WhisperStream"] = None
         self._indexer: Optional["CodebaseIndexer"] = None
         self._router = None   # ModelRouter — set via set_model_router()
+        self._scheduler = None  # AccessibilityScheduler — set via set_scheduler()
         self._flare_active: bool = False
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -103,6 +104,13 @@ class ResourceGovernor:
         router can actually load (not a hardcoded name) and can sleep the vLLM
         specialist pool when active."""
         self._router = router
+
+    def set_scheduler(self, scheduler) -> None:
+        """Wire the AccessibilityScheduler so a flare can pause NEW dev/background
+        admission (gap #3). Evicting VRAM alone left already-queued heavy work
+        free to start the instant VRAM frees up — pausing admission stops that
+        until the flare clears. The fast accessibility path is never gated."""
+        self._scheduler = scheduler
 
     def _heavy_models(self) -> list[str]:
         """The heavy specialist model names to evict on a flare."""
@@ -138,6 +146,12 @@ class ResourceGovernor:
             try:
                 await self._task
             except asyncio.CancelledError:
+                pass
+        # Never leave the scheduler paused after we're gone (resume on the loop).
+        if self._scheduler is not None:
+            try:
+                self._scheduler.resume_dev()
+            except Exception:
                 pass
         # Always restore defaults on shutdown regardless of current flare state.
         # Run in a thread — _restore_resources_sync() makes blocking urllib calls.
@@ -208,7 +222,15 @@ class ResourceGovernor:
         # 3. Raise WhisperStream VAD thread priority (Windows only, non-blocking)
         await asyncio.to_thread(self._raise_whisper_priority)
 
-        # 4. Evict heavy specialist models from VRAM.
+        # 4. Pause NEW dev/background admission so freed VRAM isn't immediately
+        #    re-consumed by queued heavy work (gap #3). Sync, on the event loop.
+        if self._scheduler is not None:
+            try:
+                self._scheduler.pause_dev()
+            except Exception as exc:
+                log.debug("ResourceGovernor: scheduler.pause_dev() failed: %s", exc)
+
+        # 5. Evict heavy specialist models from VRAM.
         #    Ollama path: keep_alive=0 for each router-derived heavy model.
         #    vLLM path: tear down any resident specialist via the pool.
         await asyncio.to_thread(self._evict_heavy_models)
@@ -224,6 +246,13 @@ class ResourceGovernor:
             "ResourceGovernor: FLARE END (score=%.2f) — restoring resources",
             score,
         )
+        # Resume dev admission on the event loop (asyncio.Event is not
+        # thread-safe, so this must NOT go inside the threaded restore below).
+        if self._scheduler is not None:
+            try:
+                self._scheduler.resume_dev()
+            except Exception as exc:
+                log.debug("ResourceGovernor: scheduler.resume_dev() failed: %s", exc)
         await asyncio.to_thread(self._restore_resources_sync)
 
     # ── Resource actions (blocking; run in asyncio.to_thread) ─────────────────
@@ -331,11 +360,43 @@ class ResourceGovernor:
             except Exception as exc:
                 log.debug("ResourceGovernor: restore %s failed: %s", model, exc)
 
+    # ── Supervision (gap #2) ────────────────────────────────────────────────
+
+    def is_healthy(self) -> bool:
+        """True iff the poll loop is supposed to be and actually still running."""
+        return (
+            self._running
+            and self._task is not None
+            and not self._task.done()
+        )
+
+    async def restart(self) -> None:
+        """Relaunch a dead poll loop (Supervisor-driven). Idempotent.
+
+        Preserves `_flare_active` so a restart mid-flare does NOT re-trigger the
+        full eviction sequence — the loop simply resumes polling from current
+        state and will react to the next threshold crossing.
+        """
+        if not self._running:
+            return
+        if self._task is not None and not self._task.done():
+            return
+        if self._task is not None and self._task.done() and not self._task.cancelled():
+            exc = self._task.exception()
+            if exc is not None:
+                log.error("ResourceGovernor poll loop had died with %r — relaunching", exc)
+        self._task = asyncio.create_task(self._poll_loop(), name="resource_governor")
+        log.warning("ResourceGovernor: poll loop relaunched by supervisor")
+
     # ── Status ────────────────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
+        from core.vram import free_vram_gb
         return {
             "flare_active": self._flare_active,
             "pain_day_score": round(self._memory.get_pain_day_score(), 3),
             "running": self._running,
+            "loop_alive": self.is_healthy(),
+            "dev_paused": (self._scheduler.dev_paused if self._scheduler is not None else None),
+            "vram_free_gb": round(free_vram_gb(), 1),
         }
