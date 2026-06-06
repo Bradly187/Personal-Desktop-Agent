@@ -87,8 +87,8 @@ _STEP_PATTERN = re.compile(
     r"(WRITE_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
     r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE"
     r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL)"
-    r"(?:\s+([^\]]*?))?"                    # optional args
-    r"\]?",                                 # optional ]
+    r"(?:\s+([^\]\n]+))?"                   # optional args (up to a closing ] or EOL)
+    r"\s*\]?",                              # optional ]
     re.IGNORECASE,
 )
 
@@ -162,6 +162,28 @@ class DevAgent:
 
     # How many steps we'll run autonomously before pausing
     MAX_STEPS = 20
+
+    # How many times the controller may revise the plan after a step failure
+    # before giving up (bounds the observe→act→replan loop).
+    MAX_REPLANS = 2
+
+    # Read-only / idempotent verbs that are safe to retry once on a transient
+    # failure. Destructive verbs are NEVER retried (re-running a commit / write /
+    # shell command could double-apply) — they go straight to replan-or-halt.
+    _RETRYABLE_VERBS: frozenset[str] = frozenset({
+        "READ_FILE", "GREP", "READ_SCREEN", "GIT_STATUS", "GIT_DIFF",
+        "FETCH_URL", "SEARCH_WEB", "EXPLAIN",
+    })
+
+    # Verbs whose execution has side effects (writes files, runs shell, mutates
+    # git, opens a PR). A plan containing ANY of these is "destructive": its
+    # upfront approval, and any per-op confirmation, must fail-safe to DENY on
+    # silence / ambiguity / hardware failure — mirroring the hardened voice
+    # approval gate (approval_hook.py, timeout_action="reject"). Read-only plans
+    # keep their convenient auto-approve-on-silence.
+    _DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
+        "WRITE_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR",
+    })
 
     def __init__(
         self,
@@ -365,58 +387,215 @@ class DevAgent:
         self._total_steps = min(len(steps), self.MAX_STEPS)
         self._current_step = 0
 
-        # Step 2: Execute
+        # Durable ledger: write a 'running' run row now so a crash mid-plan is
+        # recoverable (reconciled to 'interrupted' on next startup).
+        run_id = await self._start_run(goal, plan_result.model)
+
+        # Step 2: Closed-loop execution (observe → act → replan-on-failure).
+        # A failed step never blindly continues (that compounds errors): the
+        # controller asks the planner for a bounded recovery plan, and halts if
+        # none is available or the replan budget is spent.
         executed: list[AgentStep] = []
+        remaining: list[AgentStep] = list(steps[: self.MAX_STEPS])
+        replans = 0
         cancelled = False
-        for i, step in enumerate(steps[: self.MAX_STEPS]):
+        halted_reason: Optional[str] = None
+
+        while remaining:
+            if len(executed) >= self.MAX_STEPS:
+                halted_reason = f"reached MAX_STEPS ({self.MAX_STEPS})"
+                log.warning("DevAgent: %s", halted_reason)
+                break
             if self._cancel_event.is_set():
-                log.info("DevAgent: plan cancelled before step %d", i + 1)
+                log.info("DevAgent: plan cancelled at step %d", len(executed) + 1)
                 cancelled = True
                 break
-            self._current_step = i + 1
-            log.info("DevAgent: step %d/%d  action=%s  args=%r",
-                     i + 1, len(steps), step.action, step.args[:60])
-            step_t0 = time.monotonic()
-            try:
-                step.result = await self._execute_step(step)
-                step.success = True
-            except Exception as exc:
-                log.error("DevAgent: step %d failed: %s", i + 1, exc)
-                step.result = f"ERROR: {exc}"
-                step.success = False
-            step.latency_ms = (time.monotonic() - step_t0) * 1000
+
+            step = remaining.pop(0)
+            self._current_step = len(executed) + 1
+            self._total_steps = len(executed) + 1 + len(remaining)
+            log.info("DevAgent: step %d  action=%s  args=%r",
+                     self._current_step, step.action, step.args[:60])
+
+            ok = await self._run_step_with_retry(step)
             executed.append(step)
+            await self._persist_step(run_id, len(executed), step)
+            if ok:
+                continue
 
-            if step.action in ("RUN_TERMINAL",) and not step.success:
-                log.warning("DevAgent: step %d failed, stopping plan", i + 1)
-                break
+            # Step failed — try a bounded recovery replan; otherwise halt.
+            if replans < self.MAX_REPLANS and not self._cancel_event.is_set():
+                replans += 1
+                new_steps = await self._replan(goal, executed, remaining)
+                if new_steps:
+                    budget = max(0, self.MAX_STEPS - len(executed))
+                    remaining = new_steps[:budget]
+                    self._total_steps = len(executed) + len(remaining)
+                    log.info(
+                        "DevAgent: replanned after failed %s — %d new step(s) (replan %d/%d)",
+                        step.action, len(remaining), replans, self.MAX_REPLANS,
+                    )
+                    continue
+            halted_reason = f"halted after failed {step.action} (no recovery plan)"
+            log.warning("DevAgent: %s", halted_reason)
+            break
 
-        # Step 3: Reflect — ask the model to summarise what was accomplished
-        # and surface any problems from step outputs.
+        # Step 3: Reflect — summarise outcomes for the user.
         reflect_text = await self._reflect(goal, executed, plan_result.model)
 
-        self._push_context(f"Completed plan: {goal}\n"
-                           + "\n".join(f"  {s.action} → {'ok' if s.success else 'failed'}"
-                                       for s in executed))
+        self._push_context(
+            f"Completed plan: {goal}\n"
+            + "\n".join(f"  {s.action} → {'ok' if s.success else 'failed'}" for s in executed)
+        )
 
-        all_ok = all(s.success for s in executed) if executed else True
+        succeeded = (not cancelled) and (halted_reason is None)
         result = AgentResult(
             goal=goal,
             domain="plan",
             model_used=plan_result.model,
             steps=executed,
             response_text=reflect_text or plan_result.text,
-            success=all_ok and not cancelled,
+            success=succeeded,
             total_latency_ms=(time.monotonic() - t0) * 1000,
         )
         self._results_log.append(result)
-        await self._persist_run(result, command_id=None)
+        status = "cancelled" if cancelled else ("completed" if succeeded else "failed")
+        await self._finalize_run(run_id, result, status)
 
         # Speak completion summary and clean up goal-session state
         await self._speak_plan_completion(result, cancelled)
         self._reset_plan_state()
 
         return result
+
+    async def _run_step_with_retry(self, step: AgentStep) -> bool:
+        """Execute one step, retrying once for retryable (read-only) verbs.
+
+        Records result/success/latency on `step` and returns its success bool.
+        Destructive verbs are attempted exactly once (no retry).
+        """
+        attempts = 2 if step.action.upper() in self._RETRYABLE_VERBS else 1
+        for attempt in range(attempts):
+            step_t0 = time.monotonic()
+            try:
+                step.result = await self._execute_step(step)
+                step.success = True
+                step.latency_ms = (time.monotonic() - step_t0) * 1000
+                return True
+            except Exception as exc:
+                step.result = f"ERROR: {exc}"
+                step.success = False
+                step.latency_ms = (time.monotonic() - step_t0) * 1000
+                log.error(
+                    "DevAgent: step %s failed (attempt %d/%d): %s",
+                    step.action, attempt + 1, attempts, exc,
+                )
+        return False
+
+    async def _replan(
+        self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
+    ) -> list[AgentStep]:
+        """Ask the planner for a revised plan for the REMAINING work after a failure.
+
+        Feeds the executed steps + their outcomes (the observation signal) back to
+        the plan-domain model so it can recover. Returns parsed steps, or [] if the
+        planner errors or declines.
+        """
+        lines = [f"Goal: {goal}", "", "Steps already executed (with outcomes):"]
+        for i, s in enumerate(executed, 1):
+            status = "ok" if s.success else "FAILED"
+            snippet = (s.result or "")[:300]
+            lines.append(f"  {i}. [{status}] {s.action} {s.args[:60]} → {snippet}")
+        if remaining:
+            lines.append("")
+            lines.append("Original remaining steps (not yet run):")
+            for s in remaining:
+                lines.append(f"  [{s.action} {s.args[:60]}]")
+        lines += [
+            "",
+            "The last step FAILED. Produce a REVISED numbered plan for the remaining "
+            "work that recovers from the failure, using the same [ACTION args] step "
+            "format. Do not repeat already-completed work. If the goal cannot proceed, "
+            "reply with a single [EXPLAIN <reason>] step.",
+        ]
+        prompt = "\n".join(lines)
+        try:
+            r = await self._router.infer(domain="plan", user_text=prompt, context=None)
+            if r.ok and r.text:
+                return _parse_plan(r.text)
+        except Exception as exc:
+            log.debug("DevAgent._replan failed: %s", exc)
+        return []
+
+    # ---------------------------------------------------------------------- #
+    # Durable plan ledger (resumable across crashes)
+    # ---------------------------------------------------------------------- #
+
+    def _db(self):
+        """The AgentDB handle (via MemoryManager when wired, else direct)."""
+        if self._memory is not None:
+            return getattr(self._memory, "_db", None)
+        return self._agent_db
+
+    async def _start_run(self, goal: str, model_used: Optional[str]) -> int:
+        db = self._db()
+        if not db or not getattr(db, "available", False):
+            return -1
+        try:
+            return await db.start_agent_run(goal=goal, domain="plan", model_used=model_used)
+        except Exception as exc:
+            log.debug("DevAgent._start_run failed: %s", exc)
+            return -1
+
+    async def _persist_step(self, run_id: int, step_num: int, step: AgentStep) -> None:
+        db = self._db()
+        if run_id < 0 or not db or not getattr(db, "available", False):
+            return
+        try:
+            await db.insert_agent_step(
+                run_id=run_id, step_num=step_num, action=step.action,
+                args=step.args or None, body=step.body or None,
+                result=step.result, success=step.success, latency_ms=step.latency_ms,
+            )
+        except Exception as exc:
+            log.debug("DevAgent._persist_step failed: %s", exc)
+
+    async def _finalize_run(self, run_id: int, result: AgentResult, status: str) -> None:
+        db = self._db()
+        if run_id < 0 or not db or not getattr(db, "available", False):
+            return
+        try:
+            await db.update_agent_run(
+                run_id=run_id, status=status, step_count=len(result.steps),
+                success=result.success, total_latency_ms=result.total_latency_ms,
+                error=result.error,
+            )
+        except Exception as exc:
+            log.debug("DevAgent._finalize_run failed: %s", exc)
+
+    async def resume_pending_plan(self) -> Optional[dict]:
+        """Offer to resume the most recent interrupted plan, gated on voice confirm.
+
+        Accessibility safety: never auto-resumes — an interrupted plan may contain
+        destructive steps, so it requires an explicit spoken "yes" (via
+        _confirm_destructive_op). Re-runs plan_and_run for the goal (a fresh plan
+        that the closed-loop controller adapts), and returns the resumed run dict,
+        or None if there's nothing to resume / the user declines.
+        """
+        db = self._db()
+        if not db or not getattr(db, "available", False):
+            return None
+        runs = await db.get_interrupted_runs(limit=1)
+        if not runs:
+            return None
+        run = runs[0]
+        goal = run.get("goal", "")
+        if not await self._confirm_destructive_op(f"Resume the interrupted task: {goal[:60]}?"):
+            log.info("DevAgent.resume_pending_plan: user declined resume of run %s", run.get("id"))
+            return None
+        log.info("DevAgent.resume_pending_plan: resuming run %s — %r", run.get("id"), goal[:60])
+        await self.plan_and_run(goal)
+        return run
 
     # ---------------------------------------------------------------------- #
     # Plan-level authorization helpers
@@ -439,14 +618,36 @@ class DevAgent:
 
         log.info("DevAgent: requesting plan approval — %s", message)
 
+        plan_is_destructive = any(
+            s.action.upper() in self._DESTRUCTIVE_VERBS for s in steps[: self.MAX_STEPS]
+        )
+
+        def _grant() -> bool:
+            GoalSessionStore.create(goal=goal, domain="plan")
+            return True
+
+        def _fallback(reason: str) -> bool:
+            """No clear consent obtained (hardware failure / silence / ambiguity).
+
+            Read-only plans auto-approve for convenience; destructive plans
+            fail-safe to DENY — never run side effects without an explicit yes.
+            """
+            if plan_is_destructive:
+                log.info(
+                    "DevAgent._approve_plan_upfront: %s + destructive plan → DENY", reason
+                )
+                return False
+            log.info(
+                "DevAgent._approve_plan_upfront: %s + read-only plan → auto-approve", reason
+            )
+            return _grant()
+
         # Speak via TTS
         try:
             from tts.polly_stream import get_client as _get_tts
             await asyncio.to_thread(_get_tts().speak_sync, message)
         except Exception as exc:
-            log.debug("DevAgent._approve_plan_upfront: TTS unavailable (%s) — auto-approving", exc)
-            GoalSessionStore.create(goal=goal, domain="plan")
-            return True
+            return _fallback(f"TTS unavailable ({exc})")
 
         # Wait for iPad approval signal (7 s window, same as approval_hook.py)
         _APPROVAL_DIR = Path.home() / ".claude" / "approval"
@@ -481,31 +682,27 @@ class DevAgent:
                 await asyncio.to_thread(sd.wait)
                 rms = float(np.sqrt(np.mean(audio ** 2)))
                 if rms < 0.005:
-                    # Silence → auto-approve
-                    log.info("DevAgent._approve_plan_upfront: silence → auto-approved")
-                    GoalSessionStore.create(goal=goal, domain="plan")
-                    return True
+                    return _fallback("silence")
                 if self._confirm_whisper is None:
                     from faster_whisper import WhisperModel
                     self._confirm_whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
                 segs, _ = self._confirm_whisper.transcribe(audio, language="en", beam_size=1, vad_filter=False)
                 transcript = " ".join(s.text for s in segs).lower().strip()
             except Exception as exc:
-                log.debug("DevAgent._approve_plan_upfront: mic fallback failed (%s) — auto-approving", exc)
-                GoalSessionStore.create(goal=goal, domain="plan")
-                return True
+                return _fallback(f"mic fallback failed ({exc})")
 
-        # Shared confirmation vocabulary (core/approval_keywords). Only an
-        # explicit deny blocks goal authorization; an explicit yes, silence, or
-        # an ambiguous reply all proceed (the user opted into a whole-goal grant).
-        if classify_confirmation(transcript) == "deny":
+        # Shared confirmation vocabulary (core/approval_keywords). An explicit
+        # deny always blocks. An explicit yes grants. Anything else (ambiguous /
+        # unrecognised) defers to _fallback: auto-approve for read-only plans,
+        # fail-safe DENY for destructive ones.
+        verdict = classify_confirmation(transcript)
+        if verdict == "deny":
             log.info("DevAgent._approve_plan_upfront: REJECTED — %r", transcript)
             return False
-
-        # Approved (explicit yes, or silence-auto, or ambiguous → approve)
-        log.info("DevAgent._approve_plan_upfront: approved — %r", transcript)
-        GoalSessionStore.create(goal=goal, domain="plan")
-        return True
+        if verdict == "approve":
+            log.info("DevAgent._approve_plan_upfront: approved — %r", transcript)
+            return _grant()
+        return _fallback(f"ambiguous reply {transcript!r}")
 
     async def _speak_plan_completion(self, result: AgentResult, cancelled: bool) -> None:
         """Speak a short TTS summary after a plan finishes."""
@@ -797,11 +994,11 @@ class DevAgent:
     async def _confirm_destructive_op(self, description: str) -> bool:
         """Speak the action description and wait for voice confirmation.
 
-        Returns True (proceed) if the user says yes or stays silent within the
-        timeout window.  Returns False if the user says no/cancel/stop.
-
-        Falls back to auto-approve (True) when TTS or microphone are unavailable
-        so the agent never silently drops work due to audio hardware issues.
+        This op is destructive by definition, so it fails SAFE to DENY: only an
+        explicit spoken "yes" (or a prior whole-plan authorization) proceeds.
+        Silence, an ambiguous reply, or unavailable TTS/microphone all return
+        False — the op is skipped rather than run without clear consent. Mirrors
+        the hardened voice approval gate (approval_hook.py, timeout→reject).
         """
         import numpy as np
 
@@ -818,8 +1015,8 @@ class DevAgent:
             _tts = _get_tts()
             await asyncio.to_thread(_tts.speak_sync, description)
         except Exception as exc:
-            log.debug("DevAgent._confirm: TTS unavailable (%s) — auto-approving", exc)
-            return True
+            log.info("DevAgent._confirm: TTS unavailable (%s) — DENY (fail-safe)", exc)
+            return False
 
         # --- 2. Record 4 s of mic audio --------------------------------------
         try:
@@ -832,14 +1029,14 @@ class DevAgent:
             )
             await asyncio.to_thread(sd.wait)
         except Exception as exc:
-            log.debug("DevAgent._confirm: mic unavailable (%s) — auto-approving", exc)
-            return True
+            log.info("DevAgent._confirm: mic unavailable (%s) — DENY (fail-safe)", exc)
+            return False
 
-        # --- 3. Check for voice activity; silence → auto-approve -------------
+        # --- 3. Check for voice activity; silence → DENY (fail-safe) ---------
         rms = float(np.sqrt(np.mean(audio ** 2)))
         if rms < 0.005:
-            log.info("DevAgent._confirm: silence → auto-approved")
-            return True
+            log.info("DevAgent._confirm: silence → DENY (fail-safe)")
+            return False
 
         # --- 4. Transcribe with tiny Whisper on CPU (no GPU contention) ------
         # Model is cached on self so the ~600ms load cost is paid once.
@@ -852,8 +1049,8 @@ class DevAgent:
             text = " ".join(s.text for s in segs).lower().strip()
             log.info("DevAgent._confirm: heard %r", text)
         except Exception as exc:
-            log.debug("DevAgent._confirm: transcription failed (%s) — auto-approving", exc)
-            return True
+            log.info("DevAgent._confirm: transcription failed (%s) — DENY (fail-safe)", exc)
+            return False
 
         # --- 5. Keyword detection (shared vocabulary, core/approval_keywords) -
         verdict = classify_confirmation(text)
@@ -864,12 +1061,10 @@ class DevAgent:
             log.info("DevAgent._confirm: approved — %r", text)
             return True
 
-        # Ambiguous response → auto-approve. Unlike the iPad approval gate (which
-        # listens to a continuous ambient mic and must fail safe to DENY), this
-        # path records a deliberate 4 s answer to a spoken prompt, so the agent
-        # never silently drops work on an unrecognised reply.
-        log.info("DevAgent._confirm: ambiguous response %r → auto-approved", text)
-        return True
+        # Ambiguous / unrecognised reply → DENY. This op is destructive, so the
+        # only outcome that proceeds is an explicit "yes" (handled above).
+        log.info("DevAgent._confirm: ambiguous response %r → DENY (fail-safe)", text)
+        return False
 
     # ── Git implementations ──────────────────────────────────────────────────
 
