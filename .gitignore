@@ -6,6 +6,9 @@
 chroma_db/
 .codebase_index_state.json
 
+# Generated benchmark artifacts (see monitoring/benchmark_models.py)
+benchmark_results.json
+
 # Apple credentials and certificates
 *.p8
 *.p12
