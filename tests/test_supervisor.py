@@ -141,6 +141,57 @@ async def _noop():
 
 
 # ---------------------------------------------------------------------------
+# Escalation on FAILED (gap E)
+# ---------------------------------------------------------------------------
+
+async def test_on_failed_fires_once_when_latched():
+    fired: list[str] = []
+
+    async def _handler(name):
+        fired.append(name)
+
+    sup = Supervisor(max_restarts=2, window_s=1000.0, on_failed=_handler)
+    f = _Fake(alive=False, enabled=True)
+    async def _no_revive():
+        f.restarts += 1
+    f.restart = _no_revive
+    sup.supervise(_spec(f, name="sched"))
+
+    for _ in range(5):          # restart, restart, latch, then skip…
+        await sup._check_once()
+
+    assert fired == ["sched"]   # exactly once, at the latch — not per restart
+
+
+async def test_on_failed_sync_handler_supported():
+    fired = []
+    sup = Supervisor(max_restarts=1, window_s=1000.0)
+    sup.set_on_failed(lambda name: fired.append(name))   # sync handler
+    f = _Fake(alive=False, enabled=True)
+    async def _no_revive():
+        f.restarts += 1
+    f.restart = _no_revive
+    sup.supervise(_spec(f, name="gov"))
+    await sup._check_once()     # restart #1 (budget=1 full)
+    await sup._check_once()     # latch → escalate
+    assert fired == ["gov"]
+
+
+async def test_on_failed_handler_exception_does_not_crash_pass():
+    async def _boom(name):
+        raise RuntimeError("tts down")
+    sup = Supervisor(max_restarts=1, window_s=1000.0, on_failed=_boom)
+    f = _Fake(alive=False, enabled=True)
+    async def _no_revive():
+        f.restarts += 1
+    f.restart = _no_revive
+    sup.supervise(_spec(f, name="x"))
+    await sup._check_once()
+    await sup._check_once()     # must not raise despite handler exploding
+    assert sup._subsystems["x"].failed is True
+
+
+# ---------------------------------------------------------------------------
 # Scheduler integration
 # ---------------------------------------------------------------------------
 

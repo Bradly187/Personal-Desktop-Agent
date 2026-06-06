@@ -86,6 +86,7 @@ class Supervisor:
         interval_s: float = 2.0,
         max_restarts: int = 5,
         window_s: float = 60.0,
+        on_failed: Optional[Callable[[str], object]] = None,
     ) -> None:
         self._interval_s = interval_s
         self._max_restarts = max_restarts
@@ -94,6 +95,11 @@ class Supervisor:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._metrics = None
+        # Escalation hook (gap E): invoked ONCE per subsystem when it latches
+        # FAILED. May be sync or async. Used to notify the user (TTS/iPad) and
+        # trigger degraded-mode fallback — detection alone is not enough for an
+        # unattended user. A raising handler never destabilises the loop.
+        self._on_failed = on_failed
 
     # ── Registration / wiring ────────────────────────────────────────────────
 
@@ -104,6 +110,21 @@ class Supervisor:
 
     def set_metrics(self, metrics) -> None:
         self._metrics = metrics
+
+    def set_on_failed(self, handler: Optional[Callable[[str], object]]) -> None:
+        """Register the escalation handler invoked once when a subsystem latches FAILED."""
+        self._on_failed = handler
+
+    async def _invoke_failed(self, name: str) -> None:
+        """Fire the escalation handler (sync or async) once, defensively."""
+        if self._on_failed is None:
+            return
+        try:
+            result = self._on_failed(name)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            log.error("Supervisor: on_failed(%r) handler raised: %s", name, exc)
 
     def _bump(self, name: str, value: int) -> None:
         if self._metrics is None:
@@ -176,6 +197,9 @@ class Supervisor:
                     spec.name, self._max_restarts, self._window_s,
                 )
                 self._bump(f"{spec.name}::failed", 1)
+                # Escalate (gap E): notify the user + degrade. Fires exactly once
+                # — a FAILED subsystem is skipped on every subsequent pass above.
+                await self._invoke_failed(spec.name)
                 continue
 
             state.restart_times.append(now)

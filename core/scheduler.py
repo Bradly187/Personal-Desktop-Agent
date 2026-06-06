@@ -264,6 +264,7 @@ class AccessibilityScheduler:
         label: str = "",
         timeout_s: float = _DEV_TASK_TIMEOUT_S,
         return_exceptions: bool = True,
+        trace_id: str = "",
     ) -> list[Any]:
         """Run independent sub-step coroutines concurrently and await all of them.
 
@@ -299,9 +300,25 @@ class AccessibilityScheduler:
             "Scheduler.fan_out: %d sub-task(s) %r (max_parallel=%d, timeout=%.0fs)",
             len(coros), label, _MAX_CONCURRENT_SUBAGENTS, timeout_s,
         )
-        return await asyncio.gather(
-            *[_run_one(c) for c in coros], return_exceptions=return_exceptions
-        )
+        # Gap C: mark the fan-out boundary in the run trace. The children run as
+        # gather-spawned tasks that copy the current ContextVar trace, so their
+        # own spans attach to the same run tree automatically.
+        from monitoring.trace import get_tracer
+        _t0 = time.monotonic()
+        try:
+            results = await asyncio.gather(
+                *[_run_one(c) for c in coros], return_exceptions=return_exceptions
+            )
+        finally:
+            try:
+                get_tracer().record_span(
+                    "fan_out", trace_id=trace_id or None,
+                    dur_ms=(time.monotonic() - _t0) * 1000,
+                    count=len(coros), label=label,
+                )
+            except Exception:
+                pass
+        return results
 
     # ── Worker ────────────────────────────────────────────────────────────────
 

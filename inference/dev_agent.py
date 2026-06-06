@@ -358,6 +358,17 @@ class DevAgent:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
+        # Unified agent-run trace (gap C): one trace_id spans the whole plan.
+        # Setting it as the current ContextVar means every awaited descendant —
+        # ModelRouter.infer's inference spans, scheduler.fan_out children — attach
+        # to THIS trace automatically, reconstructing the run as one tree. Zero
+        # cost when DA_TRACE is off (new_trace returns "" and spans no-op).
+        from monitoring.trace import get_tracer
+        _tracer = get_tracer()
+        trace_id = _tracer.new_trace(kind="plan", goal=goal[:80])
+        _trace_tok = _tracer.set_current(trace_id)
+        _tracer.record_span("plan", trace_id=trace_id, goal=goal[:80])
+
         # Step 1: Generate plan — inject RAG context + git/IDE context
         extra_ctx = self._format_context()
         rag = await self._rag_context(goal, n=4)
@@ -375,6 +386,8 @@ class DevAgent:
             context=extra_ctx,
         )
         if not plan_result.ok:
+            _tracer.record_span("plan_done", trace_id=trace_id, status="plan_error")
+            _tracer.reset_current(_trace_tok)
             return AgentResult(
                 goal=goal, domain="plan",
                 model_used=plan_result.model,
@@ -432,6 +445,7 @@ class DevAgent:
                      self._current_step, step.action, step.args[:60])
 
             ok = await self._run_step_with_retry(step)
+            _tracer.record_span("step", trace_id=trace_id, action=step.action, ok=ok)
             executed.append(step)
             await self._persist_step(run_id, len(executed), step)
             if ok:
@@ -480,6 +494,9 @@ class DevAgent:
         await self._speak_plan_completion(result, cancelled)
         self._reset_plan_state()
 
+        _tracer.record_span("plan_done", trace_id=trace_id,
+                            steps=len(executed), success=succeeded, status=status)
+        _tracer.reset_current(_trace_tok)
         return result
 
     async def _run_step_with_retry(self, step: AgentStep) -> bool:

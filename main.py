@@ -964,6 +964,30 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         restart=governor.restart,
         enabled=lambda: governor._running,
     ))
+
+    # Escalation (gap E): when a subsystem can't be restarted, TELL the user
+    # (spoken warning — they may be unattended) and degrade rather than silently
+    # die. A FAILED scheduler → bypass it: FusionEngine._emit falls back to direct
+    # create_task dispatch when set_scheduler(None), so accessibility keeps working.
+    async def _on_subsystem_failed(name: str) -> None:
+        log.critical("Supervisor escalation: subsystem %r is FAILED (unrecoverable)", name)
+        if name == "scheduler":
+            try:
+                fusion.set_scheduler(None)   # degrade to direct dispatch
+                log.warning("Degraded mode: FusionEngine now dispatches directly "
+                            "(scheduler bypassed); accessibility unaffected, "
+                            "dev/background gating lost until restart")
+            except Exception as exc:
+                log.error("Degraded-mode handoff failed: %s", exc)
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            msg = (f"Warning. The {name.replace('_', ' ')} stopped responding and "
+                   "could not be restarted. The system is running in a reduced mode.")
+            await asyncio.to_thread(_get_tts().speak_sync, msg)
+        except Exception as exc:
+            log.debug("Supervisor escalation TTS unavailable: %s", exc)
+
+    supervisor.set_on_failed(_on_subsystem_failed)
     supervisor.set_metrics(m)
     await supervisor.start()
     shutdown.register(supervisor)
