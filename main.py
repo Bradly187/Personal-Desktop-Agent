@@ -513,6 +513,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await agent_db.prune_gesture_velocity_samples(days=90)
     await agent_db.prune_ipad_logs(days=60)
 
+    # --- Crash recovery: reconcile plans left mid-run by a previous process ---
+    # Any agent_run still 'running' means the process died during a plan. Mark
+    # them 'interrupted'; DevAgent.resume_pending_plan() can offer a gated resume.
+    _interrupted = await agent_db.mark_interrupted_runs()
+    if _interrupted:
+        log.warning(
+            "Recovered %d interrupted plan run(s) from a previous session — "
+            "say 'resume task' to continue the most recent one.", _interrupted,
+        )
+
     # --- Open audit log (separate append-only DB) ---
     audit = AuditLog()
     await audit.open(Path("audit.db"))
@@ -750,6 +760,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from core.scheduler import AccessibilityScheduler
     scheduler = AccessibilityScheduler()
     await scheduler.start()
+    scheduler.set_metrics(m)        # queue-depth / dev-inflight visibility in /metrics
     fusion.set_scheduler(scheduler)
     dev_agent.set_scheduler(scheduler)
 
@@ -912,6 +923,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     governor = ResourceGovernor(memory=memory)
     governor.set_fusion_engine(fusion)
     governor.set_whisper_stream(whisper)
+    governor.set_model_router(router)   # eviction targets the live model lineup
     if indexer is not None:
         governor.set_indexer(indexer)
     await governor.start()
