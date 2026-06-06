@@ -196,6 +196,9 @@ class Metrics:
             "gate1_threshold": -1.0,
             "cloud_rate_1m": None,
             "success_rate_1m": None,
+            # Scheduler visibility (AccessibilityScheduler.set_metrics)
+            "scheduler_queue_depth": 0.0,
+            "scheduler_dev_inflight": 0.0,
         }
 
         # ── Histograms ────────────────────────────────────────────────────
