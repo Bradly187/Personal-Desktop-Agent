@@ -15,7 +15,52 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import inference.sandbox as sb
-from inference.sandbox import build_sandbox_argv, run_sandboxed, sandbox_tool
+from inference.sandbox import (
+    build_sandbox_argv, run_sandboxed, sandbox_tool, command_needs_network,
+)
+
+
+# ---------------------------------------------------------------------------
+# command_needs_network classifier
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    "pip install requests",
+    "pip3 download numpy",
+    "uv sync",
+    "uv add httpx",
+    "npm install",
+    "yarn add react",
+    "cargo fetch",
+    "go get ./...",
+    "git push origin main",
+    "git fetch --all",
+    "git clone https://x/y",
+    "gh pr create",
+    "curl https://example.com",
+    "wget https://example.com/f",
+    "poetry add flask",
+    "pytest && pip install foo",        # any segment needing net → True
+])
+def test_commands_needing_network(cmd):
+    assert command_needs_network(cmd) is True
+
+
+@pytest.mark.parametrize("cmd", [
+    "pytest -q",
+    "pip list",                          # read-only pip subcommand
+    "pip show numpy",
+    "git status",                        # local git
+    "git diff",
+    "git commit -m x",
+    "ls -la",
+    "python script.py",
+    "npm test",                          # 'test' is not a net subcommand
+    "cargo build",
+    "",
+])
+def test_commands_not_needing_network(cmd):
+    assert command_needs_network(cmd) is False
 
 
 # ---------------------------------------------------------------------------

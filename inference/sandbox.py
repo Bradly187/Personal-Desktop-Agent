@@ -57,6 +57,72 @@ def sandbox_tool() -> Optional[str]:
     return None
 
 
+# Curated network-needing operations (the only commands granted network inside
+# the jail). Maps an executable → the subcommands that legitimately need the
+# network; None means "any invocation needs it". Everything NOT listed runs with
+# --unshare-net. These are still gated by the goal-session allowlist (e.g.
+# `pip install` is not auto-approved), so network is only granted to a command
+# that already passed approval AND matches a known package/VCS/fetch operation.
+_NETWORK_OPS: "dict[str, Optional[frozenset]]" = {
+    "pip": frozenset({"install", "download", "wheel"}),       # NOT list/show/freeze
+    "pip3": frozenset({"install", "download", "wheel"}),
+    "uv": frozenset({"add", "sync", "lock", "pip"}),
+    "pipx": frozenset({"install", "run", "upgrade"}),
+    "poetry": frozenset({"add", "install", "update", "lock"}),
+    "conda": frozenset({"install", "update", "create"}),
+    "mamba": frozenset({"install", "update", "create"}),
+    "npm": frozenset({"install", "i", "ci", "add", "update", "up"}),
+    "yarn": frozenset({"install", "add", "up", "upgrade"}),
+    "pnpm": frozenset({"install", "i", "add", "update"}),
+    "cargo": frozenset({"fetch", "add", "install", "update", "publish"}),
+    "go": frozenset({"get", "install", "mod"}),
+    "git": frozenset({"fetch", "pull", "push", "clone", "remote", "submodule"}),
+    "gh": None,        # GitHub CLI — inherently networked
+    "curl": None, "wget": None,   # fetch tools (approval-gated by the allowlist)
+    "apt": frozenset({"install", "update", "upgrade"}),
+    "apt-get": frozenset({"install", "update", "upgrade"}),
+    "brew": frozenset({"install", "update", "upgrade", "tap"}),
+}
+
+
+def command_needs_network(command: str) -> bool:
+    """True if any segment runs a curated network-needing operation.
+
+    Drives `allow_network` so `pip install` / `git push` / `npm install` work
+    inside the jail while `pytest`, `ls`, and arbitrary commands stay offline.
+    Still gated by the goal-session allowlist upstream — network is only granted
+    to a command that already passed approval AND matches a known network op.
+    """
+    import re
+    import shlex
+
+    if not command:
+        return False
+    for seg in re.split(r"[;&|\n]+", command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            continue
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        exe = tokens[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+        if exe.endswith(".exe"):
+            exe = exe[:-4]
+        if exe not in _NETWORK_OPS:
+            continue
+        subs = _NETWORK_OPS[exe]
+        if subs is None:
+            return True
+        if any(t in subs for t in tokens[1:]):
+            return True
+    return False
+
+
 def _project_dir(explicit: Optional[str]) -> str:
     if explicit:
         return str(Path(explicit).resolve())

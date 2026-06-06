@@ -582,15 +582,18 @@ class CommandExecutor:
         if action == "RUN_TERMINAL":
             command = p.get("command", cmd.text)
             cwd = p.get("cwd") or None
-            # Sandbox (mistake-containment): cwd-jail + no-network + caps when
-            # bwrap/firejail is available; graceful fallback otherwise.
-            from inference.sandbox import run_sandboxed
-            result = run_sandboxed(command, project_dir=cwd, timeout=60)
+            # Sandbox (mistake-containment): cwd-jail + caps. Network granted only
+            # for curated package/VCS/fetch ops, or when the caller explicitly
+            # passes allow_network in params (e.g. an approved network step).
+            from inference.sandbox import run_sandboxed, command_needs_network
+            net = bool(p.get("allow_network")) or command_needs_network(command)
+            result = run_sandboxed(command, project_dir=cwd, timeout=60, allow_network=net)
             return {
                 "stdout": result.stdout.strip(),
                 "stderr": result.stderr.strip(),
                 "returncode": result.returncode,
                 "sandboxed": result.sandboxed,
+                "network": net,
             }
 
         # ------------------------------------------------------------------ #
