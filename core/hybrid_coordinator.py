@@ -120,10 +120,11 @@ class CoordinatorConfig:
 
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
-    # Anthropic API (cloud fallback). Haiku 4.5 — matches the model documented
-    # in CLAUDE.md (8/8 on voice misrecognitions) and exercised by the tests;
-    # the prior default ("claude-sonnet-4-6-20250514") was a stale/typo'd ID.
-    anthropic_model: str = "claude-haiku-4-5-20251001"
+    # Anthropic API (cloud fallback). Haiku 4.5 — fast/cheap, 8/8 on voice
+    # misrecognitions; the alias floats to the latest 4.5 snapshot. The command
+    # path needs only a one-line verb, so Haiku is the right tier here (the dev
+    # path uses Opus 4.8 via CloudDevAgent).
+    anthropic_model: str = "claude-haiku-4-5"
 
 
 # ---------------------------------------------------------------------------

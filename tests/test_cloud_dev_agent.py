@@ -109,11 +109,11 @@ def test_extract_paths_empty():
 # ---------------------------------------------------------------------------
 
 def test_get_status_shape():
-    agent = CloudDevAgent(api_key="k", model="claude-sonnet-4-6")
+    agent = CloudDevAgent(api_key="k", model="claude-opus-4-8")
     st = agent.get_status()
     assert set(st) == {"available", "model", "domain_count", "backend"}
     assert st["backend"] == "anthropic_cloud"
-    assert st["model"] == "claude-sonnet-4-6"
+    assert st["model"] == "claude-opus-4-8"
     assert st["domain_count"] == len(_SYSTEM_PROMPTS)
     assert st["available"] is True  # key provided
 
@@ -133,7 +133,7 @@ async def test_run_returns_text_and_uses_domain_prompt():
     out = await agent.run("write a function", domain="code")
     assert out == "def f(): pass"
     kw = client.messages.last_kwargs
-    assert kw["model"] == "claude-sonnet-4-6"
+    assert kw["model"] == "claude-opus-4-8"
     assert kw["system"][0]["text"] == _SYSTEM_PROMPTS["code"]
     # code is not a thinking domain
     assert kw["thinking"] == {"type": "disabled"}

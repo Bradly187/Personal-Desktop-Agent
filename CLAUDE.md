@@ -76,7 +76,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 **Done (Phase 6 — cloud fallback):**
 - `hybrid_coordinator.py` — `_retranscribe()`: phonetic vocabulary correction (6 misrecognitions, 0ms) on low-confidence voice before Gate 2 (Amazon Transcribe Stage 2 removed in the Anthropic migration); Gate 1 route label propagated to executor
 - `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Danielle neural, 16kHz PCM) sidecar-down fallback for CLARIFY; primary path uses `polly_stream.get_client().speak_sync()`; SEARCH_WEB URL-encoded via `urllib.parse`
-- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5-20251001` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. (Migrated off AWS Bedrock; AgentCore deployment deferred and source deleted.)
+- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. The dev-domain cloud path (`CloudDevAgent`) uses `claude-opus-4-8`. (Migrated off AWS Bedrock; AgentCore deployment deferred and source deleted.)
 
 **Done (LiDAR gesture depth + Settings UI + housekeeping — 2026-05-16):**
 - `LiDARStreamer.swift` — ARWorldTrackingConfiguration + `.smoothedSceneDepth`; 5 fps depth / 10 fps camera; serialises `depth_frame` (float32 + uint8 conf) and `camera_frame` (JPEG 480px) matching PC bridge protocol; publishes UIImages for debug view
