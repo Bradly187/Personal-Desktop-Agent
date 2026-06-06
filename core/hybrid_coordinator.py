@@ -114,8 +114,9 @@ class CoordinatorConfig:
 
     # Local-inference circuit-breaker — a hung local call (Ollama wedged, GPU
     # stuck mid-flare, model reload stall) must not stall the accessibility
-    # pipeline indefinitely. Warm p50 is ~373ms and an 8B cold load ~2.5s, so
-    # 15s is ~6x the worst legitimate case while still catching a true hang.
+    # pipeline indefinitely. Warm wall p50 is ~190ms and an 8B cold load ~2.6s
+    # (Ollama 0.30.6, RTX 5090), so 15s is ~6x the worst legitimate case while
+    # still catching a true hang.
     local_timeout_s: float = 15.0
 
     # (routing_log_path removed — outcomes written to agent.db commands table)
