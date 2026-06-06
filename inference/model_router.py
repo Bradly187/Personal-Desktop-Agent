@@ -78,6 +78,8 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
+from monitoring.trace import get_tracer
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -907,6 +909,12 @@ class ModelRouter:
                 latency_ms = (time.monotonic() - t0) * 1000
                 log.info("ModelRouter[vllm]: %s → %r (%.0f ms) [domain=%s]",
                          profile.name, response[:80], latency_ms, domain)
+                try:
+                    get_tracer().record_span("inference", route="dev", backend="vllm",
+                                             model=profile.name, domain=domain,
+                                             dur_ms=round(latency_ms, 1))
+                except Exception:
+                    pass
                 return RouterResult(
                     text=response,
                     model=profile.name,
@@ -934,6 +942,12 @@ class ModelRouter:
             latency_ms = (time.monotonic() - t0) * 1000
             log.info("ModelRouter[ollama]: %s → %r (%.0f ms) [domain=%s]",
                      profile.name, response[:80], latency_ms, domain)
+            try:
+                get_tracer().record_span("inference", route="dev", backend="ollama",
+                                         model=profile.name, domain=domain,
+                                         dur_ms=round(latency_ms, 1))
+            except Exception:
+                pass
             return RouterResult(
                 text=response,
                 model=profile.name,

@@ -329,6 +329,7 @@ class Command:
     session_context: list[str] = field(default_factory=list)
     gaze_coords: tuple[int, int] | None = None  # explicit click pixel coords (vision grounder, touch)
     params: dict[str, Any] = field(default_factory=dict)
+    trace_id: str = ""                   # cross-layer trace id (set when DA_TRACE on); see monitoring/trace.py
 
 
 # ---------------------------------------------------------------------------

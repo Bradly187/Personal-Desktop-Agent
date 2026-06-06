@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS commands (
     gaze_y             REAL,
     success            INTEGER,
     error_msg          TEXT,
-    corrected_to       TEXT
+    corrected_to       TEXT,
+    trace_id           TEXT          -- cross-layer trace id (DA_TRACE); links to monitoring/trace.py spans
 );
 CREATE INDEX IF NOT EXISTS idx_commands_session ON commands(session_id);
 CREATE INDEX IF NOT EXISTS idx_commands_ts      ON commands(ts);
@@ -572,6 +573,7 @@ class AgentDB:
         for table, column, ddl in (
             ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
             ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
+            ("commands", "trace_id", "TEXT"),
         ):
             try:
                 await self._conn.execute(
@@ -763,6 +765,7 @@ class AgentDB:
         latency_ms: Optional[float],
         success: Optional[bool] = None,
         error_msg: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> int:
         """Insert a command routing record and return its id."""
         if not self._conn:
@@ -777,8 +780,8 @@ class AgentDB:
                    (session_id, ts, source, text, action, params,
                     route, gate_that_decided, latency_ms,
                     whisper_logprob, gesture_confidence,
-                    gaze_x, gaze_y, success, error_msg)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    gaze_x, gaze_y, success, error_msg, trace_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     session_id, time.time(), cmd.source, cmd.text,
                     action, json.dumps(
@@ -788,7 +791,7 @@ class AgentDB:
                     route, gate_that_decided,
                     round(latency_ms, 1) if latency_ms is not None else None,
                     cmd.whisper_logprob, cmd.gesture_confidence,
-                    gaze_x, gaze_y, success_int, error_msg,
+                    gaze_x, gaze_y, success_int, error_msg, trace_id,
                 ),
             )
             await self._conn.commit()

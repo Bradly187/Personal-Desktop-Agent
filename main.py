@@ -873,8 +873,21 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if args.metrics_port:
         try:
             from aiohttp import web as _aio_web
+            from monitoring.trace import get_tracer as _get_tracer
             _metrics_app = _aio_web.Application()
             _metrics_app.router.add_get("/metrics", m.aiohttp_handler)
+
+            async def _trace_recent(_req):
+                return _aio_web.json_response({"traces": _get_tracer().get_recent(50)})
+
+            async def _trace_one(req):
+                tr = _get_tracer().get_trace(req.match_info["tid"])
+                if tr is None:
+                    return _aio_web.json_response({"error": "not found"}, status=404)
+                return _aio_web.json_response(tr)
+
+            _metrics_app.router.add_get("/trace", _trace_recent)
+            _metrics_app.router.add_get("/trace/{tid}", _trace_one)
             _metrics_runner = _aio_web.AppRunner(_metrics_app)
             await _metrics_runner.setup()
             _metrics_site = _aio_web.TCPSite(_metrics_runner, "0.0.0.0", args.metrics_port)

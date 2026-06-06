@@ -52,6 +52,7 @@ from core.command_executor import Command, CommandExecutor
 from dataclasses import replace as _dc_replace
 from inference.local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
 from desktop.vision_grounder import VisionGrounder
+from monitoring.trace import get_tracer
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog
@@ -557,6 +558,16 @@ class HybridCoordinator:
         Dev-domain queries (code, math, vision, plan, general) are intercepted
         here and forwarded to DevAgent before the accessibility pipeline runs.
         """
+        # Cross-layer trace: set the current-trace ContextVar so every awaited
+        # descendant (router, executor) attaches spans without new params. Runs
+        # as its own scheduler task, so no reset is needed. No-op unless DA_TRACE.
+        _tracer = get_tracer()
+        if _tracer.enabled:
+            _tid = cmd.trace_id or _tracer.new_trace(source=cmd.source)
+            if not cmd.trace_id:
+                cmd.trace_id = _tid
+            _tracer.set_current(_tid)
+
         # --- Dev-agent pre-gate: intercept non-command domains ---
         # Skip for voice system-control keywords so they reach the keyword block
         # below instead of being misrouted to an LLM (e.g. "pain day on").
@@ -914,6 +925,7 @@ class HybridCoordinator:
                         latency_ms=latency_ms,
                         success=success,
                         error_msg=error_msg,
+                        trace_id=cmd.trace_id or None,
                     )
                 except Exception as db_exc:
                     log.warning("AgentDB.insert_command failed: %s", db_exc)
@@ -979,6 +991,15 @@ class HybridCoordinator:
                     )
                 except Exception:
                     pass
+            # Cross-layer trace: the decisive routing span (no-op unless DA_TRACE)
+            try:
+                _tracer.record_span(
+                    "route_decision", route=route_label, gate=gate_that_decided,
+                    action=action_str or None, success=success,
+                    dur_ms=round(latency_ms, 1),
+                )
+            except Exception:
+                pass
 
         return result
 
@@ -1154,6 +1175,14 @@ class HybridCoordinator:
                 backend=status.get("backend", "ollama"),
                 error=error,
             )
+        try:
+            _st = self._local.get_status()
+            get_tracer().record_span(
+                "inference", route="local", backend=_st.get("backend"),
+                model=_st.get("model"), dur_ms=round(latency_ms, 1),
+            )
+        except Exception:
+            pass
         return action_str
 
     _CLOUD_TIMEOUT_S = 10.0  # circuit-breaker: cloud inference must complete within this window
@@ -1180,7 +1209,8 @@ class HybridCoordinator:
 
         try:
             async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
-                return await self._cloud.infer(cmd)
+                with get_tracer().timed("inference", route="cloud"):
+                    return await self._cloud.infer(cmd)
         except TimeoutError:
             log.error(
                 "HybridCoordinator: cloud inference timed out after %.0fs — CLARIFY fallback",
@@ -1261,7 +1291,8 @@ class HybridCoordinator:
             self._whisper.suppress(pre_suppress_s)
             log.debug("Pre-CLARIFY mic suppressed for %.1fs", pre_suppress_s)
 
-        result = await self._executor.execute(exec_cmd)
+        with get_tracer().timed("execute", verb=verb):
+            result = await self._executor.execute(exec_cmd)
 
         # Post-action suppression:
         #   CLARIFY  — long suppress covers TTS echo (already pre-suppressed too)

@@ -851,6 +851,13 @@ class FusionEngine:
         if self._metrics is not None:
             self._metrics.record_command_routed(cmd.source)
         if self._coordinator:
+            # Cross-layer trace: stamp the command at its birth (no-op unless
+            # DA_TRACE is on) so the id survives the scheduler create_task hop.
+            from monitoring.trace import get_tracer
+            _tracer = get_tracer()
+            if _tracer.enabled and not cmd.trace_id:
+                cmd.trace_id = _tracer.new_trace(source=cmd.source)
+                _tracer.record_span("enqueue", trace_id=cmd.trace_id, source=cmd.source)
             if self._scheduler is not None:
                 # Priority-aware dispatch: DEV_AGENT/BACKGROUND tasks are gated
                 # so they cannot starve accessibility commands during a flare.
@@ -859,6 +866,7 @@ class FusionEngine:
                     self._coordinator.route(cmd),
                     priority=priority,
                     label=cmd.source,
+                    trace_id=cmd.trace_id,
                 )
             else:
                 # Fallback: bare fire-and-forget (scheduler not yet wired)

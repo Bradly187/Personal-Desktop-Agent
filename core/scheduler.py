@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from enum import IntEnum
 from typing import Any, Coroutine
 
@@ -159,17 +160,23 @@ class AccessibilityScheduler:
         self,
         coro: Coroutine[Any, Any, Any],
         label: str = "",
+        trace_id: str = "",
     ) -> asyncio.Future:
         """Schedule a full DevAgent plan at DEV_AGENT priority with the 5-min ceiling.
 
         Use this instead of submit(..., Priority.DEV_AGENT) when the coroutine is
         plan_and_run() rather than a single specialist-model inference.
+
+        NOTE (resource invariant 2/3): this holds the single `_dev_sem` permit for
+        up to _PLAN_TASK_TIMEOUT_S. The submitted coroutine MUST NOT itself
+        submit-and-await another DEV/BACKGROUND task on this scheduler.
         """
         self._seq += 1
         loop = asyncio.get_event_loop()
         future: asyncio.Future = loop.create_future()
         self._queue.put_nowait(
-            (Priority.DEV_AGENT.value, self._seq, coro, future, label, _PLAN_TASK_TIMEOUT_S)
+            (Priority.DEV_AGENT.value, self._seq, coro, future, label,
+             _PLAN_TASK_TIMEOUT_S, trace_id, time.monotonic())
         )
         self._publish_gauges()
         return future
@@ -179,6 +186,7 @@ class AccessibilityScheduler:
         coro: Coroutine[Any, Any, Any],
         priority: Priority,
         label: str = "",
+        trace_id: str = "",
     ) -> asyncio.Future:
         """Schedule a coroutine at the given priority.
 
@@ -189,7 +197,8 @@ class AccessibilityScheduler:
         loop = asyncio.get_event_loop()
         future: asyncio.Future = loop.create_future()
         self._queue.put_nowait(
-            (priority.value, self._seq, coro, future, label, _DEV_TASK_TIMEOUT_S)
+            (priority.value, self._seq, coro, future, label,
+             _DEV_TASK_TIMEOUT_S, trace_id, time.monotonic())
         )
         self._publish_gauges()
         return future
@@ -208,9 +217,21 @@ class AccessibilityScheduler:
         """
         while self._running:
             try:
-                priority_val, _seq, coro, future, label, timeout_s = await self._queue.get()
+                (priority_val, _seq, coro, future, label,
+                 timeout_s, trace_id, enqueue_ts) = await self._queue.get()
                 self._publish_gauges()   # depth dropped by one
                 priority = Priority(priority_val)
+
+                # Cross-layer trace: record the queue-wait as a `dispatch` span.
+                if trace_id:
+                    from monitoring.trace import get_tracer
+                    _t = get_tracer()
+                    if _t.enabled:
+                        _t.record_span(
+                            "dispatch", trace_id=trace_id,
+                            dur_ms=(time.monotonic() - enqueue_ts) * 1000,
+                            priority=priority.name,
+                        )
 
                 if priority >= Priority.DEV_AGENT:
                     # Heavy task — acquire semaphore, launch with timeout
