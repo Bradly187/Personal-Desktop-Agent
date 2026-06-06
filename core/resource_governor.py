@@ -58,6 +58,13 @@ _THREAD_ACCESS = 0x0060
 _THREAD_PRIORITY_ABOVE_NORMAL = 1
 _THREAD_PRIORITY_NORMAL = 0
 
+# Fallback heavy-model list used only when no ModelRouter is wired (preserves a
+# sane eviction target). The live set normally comes from
+# ModelRouter.heavy_model_names() so it can never go stale.
+_DEFAULT_HEAVY_MODELS: tuple[str, ...] = (
+    "qwen3-coder:30b", "qwen3-vl:30b", "gemma3:27b",
+)
+
 
 class ResourceGovernor:
     """Translates pain-day state into OS + inference resource changes.
@@ -74,6 +81,7 @@ class ResourceGovernor:
         self._fusion: Optional["FusionEngine"] = None
         self._whisper: Optional["WhisperStream"] = None
         self._indexer: Optional["CodebaseIndexer"] = None
+        self._router = None   # ModelRouter — set via set_model_router()
         self._flare_active: bool = False
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -89,6 +97,23 @@ class ResourceGovernor:
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         self._indexer = indexer
+
+    def set_model_router(self, router) -> None:
+        """Wire the ModelRouter so flare-time eviction targets the models the
+        router can actually load (not a hardcoded name) and can sleep the vLLM
+        specialist pool when active."""
+        self._router = router
+
+    def _heavy_models(self) -> list[str]:
+        """The heavy specialist model names to evict on a flare."""
+        if self._router is not None:
+            try:
+                names = self._router.heavy_model_names()
+                if names:
+                    return names
+            except Exception as exc:
+                log.debug("ResourceGovernor._heavy_models: router query failed: %s", exc)
+        return list(_DEFAULT_HEAVY_MODELS)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -183,8 +208,15 @@ class ResourceGovernor:
         # 3. Raise WhisperStream VAD thread priority (Windows only, non-blocking)
         await asyncio.to_thread(self._raise_whisper_priority)
 
-        # 4. Reduce Ollama VRAM keepalive for heavy vision model
-        await asyncio.to_thread(self._reduce_ollama_keepalive)
+        # 4. Evict heavy specialist models from VRAM.
+        #    Ollama path: keep_alive=0 for each router-derived heavy model.
+        #    vLLM path: tear down any resident specialist via the pool.
+        await asyncio.to_thread(self._evict_heavy_models)
+        if self._router is not None:
+            try:
+                await self._router.sleep_specialists()
+            except Exception as exc:
+                log.debug("ResourceGovernor: sleep_specialists failed: %s", exc)
 
     async def _on_flare_end(self, score: float) -> None:
         self._flare_active = False
@@ -209,7 +241,7 @@ class ResourceGovernor:
             except Exception:
                 pass
         self._restore_whisper_priority()
-        self._restore_ollama_keepalive()
+        self._restore_heavy_models()
 
     def _raise_whisper_priority(self) -> None:
         """Raise the WhisperStream VAD thread priority on Windows."""
@@ -263,41 +295,41 @@ class ResourceGovernor:
         except Exception as exc:
             log.debug("ResourceGovernor._restore_whisper_priority failed: %s", exc)
 
-    def _reduce_ollama_keepalive(self) -> None:
-        """POST to Ollama to evict qwen3-vl:30b from VRAM (keepalive=0)."""
-        try:
-            import urllib.request, json as _json
-            body = _json.dumps({"model": "qwen3-vl:30b", "keep_alive": "0"}).encode()
-            req = urllib.request.Request(
-                "http://localhost:11434/api/generate",
-                data=body,
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(req, timeout=5)
-            log.info(
-                "ResourceGovernor: qwen3-vl:30b VRAM keepalive set to 0 (flare mode)"
-            )
-        except Exception as exc:
-            log.debug("ResourceGovernor._reduce_ollama_keepalive failed: %s", exc)
+    def _post_keepalive(self, model: str, keep_alive: str) -> None:
+        """POST a single keep_alive directive to Ollama for `model`."""
+        import urllib.request, json as _json
+        body = _json.dumps({"model": model, "keep_alive": keep_alive}).encode()
+        req = urllib.request.Request(
+            "http://localhost:11434/api/generate",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=5)
 
-    def _restore_ollama_keepalive(self) -> None:
-        """Restore qwen3-vl:30b VRAM keepalive to the Ollama default (5 min)."""
-        try:
-            import urllib.request, json as _json
-            body = _json.dumps({"model": "qwen3-vl:30b", "keep_alive": "5m"}).encode()
-            req = urllib.request.Request(
-                "http://localhost:11434/api/generate",
-                data=body,
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(req, timeout=5)
-            log.info(
-                "ResourceGovernor: qwen3-vl:30b VRAM keepalive restored to 5m"
-            )
-        except Exception as exc:
-            log.debug("ResourceGovernor._restore_ollama_keepalive failed: %s", exc)
+    def _evict_heavy_models(self) -> None:
+        """Set keep_alive=0 for every heavy specialist so Ollama evicts it.
+
+        Targets the router-derived heavy set (falls back to _DEFAULT_HEAVY_MODELS
+        when no router is wired), so it can never go stale against the lineup.
+        Per-model failures are non-fatal (a model that isn't loaded is a no-op).
+        """
+        models = self._heavy_models()
+        for model in models:
+            try:
+                self._post_keepalive(model, "0")
+            except Exception as exc:
+                log.debug("ResourceGovernor: evict %s failed: %s", model, exc)
+        log.info("ResourceGovernor: heavy-model VRAM eviction requested (flare): %s", models)
+
+    def _restore_heavy_models(self) -> None:
+        """Restore keep_alive=5m for every heavy specialist (Ollama default)."""
+        models = self._heavy_models()
+        for model in models:
+            try:
+                self._post_keepalive(model, "5m")
+            except Exception as exc:
+                log.debug("ResourceGovernor: restore %s failed: %s", model, exc)
 
     # ── Status ────────────────────────────────────────────────────────────────
 

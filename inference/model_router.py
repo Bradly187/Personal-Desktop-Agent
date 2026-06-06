@@ -13,19 +13,26 @@ Supports two backends:
     Warm wake from DRAM: ~3-8s (192 GB DRAM → 32 GB VRAM via PCIe).
     TTL sleep after 60s idle: frees VRAM for the next specialist.
 
-Model lineup (RTX 5090, 32 GB VRAM — updated 2026-05-30):
-  command  → gemma4-E4B-it   BnB INT4  ~2.5 GB  Gemma 4 4.5B; grammar-constrained output
-  code     → gemma4:31b      AWQ INT4  ~16 GB   Gemma 4 31B; thinking ON; 80% HumanEval
-  math     → gemma4:31b      AWQ INT4  ~16 GB   Gemma 4 31B; thinking ON; 89% AIME 2026
-  vision   → gemma4:31b      AWQ INT4  ~16 GB   Gemma 4 31B; native multimodal; 256K ctx
-  plan     → gemma4:31b      AWQ INT4  ~16 GB   same instance as code/math → zero extra swap
-  general  → gemma4:31b      AWQ INT4  ~16 GB   84% GPQA Diamond; research synthesis
+Model lineup — VERIFIED Ollama defaults (RTX 5090, 32 GB VRAM):
+  command  → llama3.1:8b     GGUF Q4   ~4.6 GB  verb-first; 100% on command eval (2026-05-13)
+  code     → qwen3-coder:30b GGUF Q4   ~18 GB   thinking ON (trace stripped from output)
+  math     → deepseek-r1:8b  FP16      ~4.9 GB  chain-of-thought kept (it IS the answer)
+  vision   → qwen3-vl:30b    GGUF Q4   ~19 GB   multimodal screen grounding
+  plan     → qwen3-coder:30b GGUF Q4   ~18 GB   thinking ON (trace stripped)
+  general  → gemma3:27b      GGUF Q4   ~16 GB   research synthesis
 
-Key consolidation: 5 specialist models → 1 (Gemma 4 31B-IT).
-  All specialist domains share the same LLM instance in the pool.
-  Code→math→vision→plan→general switches are instant (no sleep/wake).
-  Only domain boundary that incurs latency: command ↔ any specialist
-  (~0.1s sleep E4B-IT + ~3-5s wake Gemma 4 31B vs Ollama's ~60s cold load).
+These are the models the default (Ollama) backend actually runs. A heavy 30B
+specialist does not co-reside with Whisper + the command model on 32 GB, so the
+ResourceGovernor evicts the resident specialist on a flare (keep_alive=0; see
+ModelRouter.heavy_model_names).
+
+PLANNED / opt-in — Gemma 4 single-instance consolidation (NOT the default):
+  The vLLM specialist pool (_DEFAULT_SPECIALIST_CONFIGS, --backend vllm) was
+  intended to serve all specialist domains from one Gemma 4 instance. Those
+  checkpoints are UNVERIFIED and the 31B-dense does not fit 32 GB, so the default
+  profiles above use verified Ollama models and the vLLM path falls back to
+  Ollama. To opt in once the weights are validated, re-point the specialist
+  profiles' `name` at "gemma4:31b" (the pool config key already exists).
 
 VRAM reality with 32 GB RTX 5090:
   Ollama GGUF Q4_K_M ≈ HuggingFace AWQ INT4 (both are ~4-bit; same size).
@@ -232,11 +239,11 @@ _PROFILES: dict[str, ModelProfile] = {
     # ── Command classifier — Gemma 4 E4B-IT (4.5B dense) ─────────────────
     # Primary path: VLLMInference with grammar-constrained decoding.
     # This profile is used only for the Ollama fallback path.
-    "command": ModelProfile(
-        name="gemma4:4b",     # Ollama model name (pull when available)
+    "command": ModelProfile(   # VERIFIED — Ollama default for the command domain
+        name="llama3.1:8b",
         domain="command",
         system_prompt=_COMMAND_PROMPT,
-        vram_gb=5.3,
+        vram_gb=4.6,
         max_tokens=32,
         free_form=False,
     ),
@@ -255,88 +262,83 @@ _PROFILES: dict[str, ModelProfile] = {
         free_form=False,
         inference_host=None,   # set by ModelRouter.set_cluster()
     ),
-    # ── All specialist domains → Gemma 4 31B-IT ───────────────────────────
-    # Single dense model covers code, math, vision, plan, and general.
-    # In the vLLM pool all five domains share one LLM instance — switching
-    # between them (code→math, math→vision, etc.) incurs zero sleep/wake
-    # overhead.  Only boundary with latency: command ↔ any specialist.
-    #
-    # Benchmark (2026-05-30): 80% HumanEval, 89% AIME 2026, 84% GPQA,
-    # 86% τ2-bench agentic, 256K context window, native multimodal.
-    #
-    # thinking=True triggers: Ollama option {"think": true}
-    #                         vLLM extra_body {"enable_thinking": True}
-    # Note: Gemma 4 thinking API needs validation against vLLM — may require
-    #       a different parameter. strip_thinking handles <thinking>...</thinking>
-    #       (Gemma 4) and <think>...</think> (Qwen3/DeepSeek) tag formats.
-    # Latency tuning (measured 2026-05-30): thinking-mode generation of the 26B
-    # dominates dev latency (~78s even warm) — far more than the engine reload.
-    # So thinking is ON only where the reasoning trace IS the value (math, plan);
-    # OFF for routine generation (code, general, vision). Token budgets capped to
-    # bound worst-case latency (gen rate ~50 tok/s on eager-mode 26B MoE).
+    # ── Specialist domains — distinct VERIFIED Ollama models ───────────────
+    # Per-domain specialists (not a single shared instance — that's the PLANNED
+    # gemma4 vLLM path). thinking=True triggers Ollama option {"think": true};
+    # strip_thinking removes <think>…</think> (Qwen3/DeepSeek) traces from output.
+    # VERIFIED Ollama specialist profiles (see module docstring). thinking is ON
+    # where the reasoning trace adds value: code/plan (stripped from output) and
+    # math (kept — the CoT IS the answer).
     "code": ModelProfile(
-        name="gemma4:31b",
+        name="qwen3-coder:30b",
         domain="code",
         system_prompt=_CODE_PROMPT,
-        vram_gb=16.0,
-        max_tokens=1536,       # code answers are short; was 4096
+        vram_gb=18.0,
+        max_tokens=1536,
         free_form=True,
-        thinking=False,        # was True — thinking added ~60s for little code-gen gain
-        strip_thinking=True,   # safety net if a trace still appears
+        thinking=True,
+        strip_thinking=True,   # remove the <think> trace from code output
     ),
     "math": ModelProfile(
-        name="gemma4:31b",
+        name="deepseek-r1:8b",
         domain="math",
         system_prompt=_MATH_PROMPT,
-        vram_gb=16.0,
-        max_tokens=2048,       # was 4096 — bound latency while keeping room for CoT
+        vram_gb=4.9,           # FP16 (INT4 degrades math reasoning)
+        max_tokens=2048,
         free_form=True,
         thinking=True,         # KEEP: chain-of-thought IS the math answer
         strip_thinking=False,
     ),
     "vision": ModelProfile(
-        name="gemma4:31b",
+        name="qwen3-vl:30b",
         domain="vision",
         system_prompt=_VISION_PROMPT,
-        vram_gb=16.0,
-        max_tokens=1024,       # grounding answers are short; was 2048
+        vram_gb=19.0,
+        max_tokens=1024,
         supports_images=True,
         free_form=True,
         thinking=False,
     ),
     "plan": ModelProfile(
-        name="gemma4:31b",
+        name="qwen3-coder:30b",
         domain="plan",
         system_prompt=_PLAN_PROMPT,
-        vram_gb=16.0,
-        max_tokens=2048,       # was 4096 — multi-step plans rarely need more
+        vram_gb=18.0,
+        max_tokens=2048,
         free_form=True,
-        thinking=True,         # KEEP: planning benefits from reasoning
+        thinking=True,         # planning benefits from reasoning
         strip_thinking=True,
     ),
     "general": ModelProfile(
-        name="gemma4:31b",
+        name="gemma3:27b",
         domain="general",
         system_prompt=_GENERAL_PROMPT,
         vram_gb=16.0,
-        max_tokens=1536,       # was 2048
+        max_tokens=1536,
         free_form=True,
         thinking=False,        # general Q&A: speed > deep reasoning trace
     ),
 }
 
-# Fallback chain per domain.
-# vLLM pool path: tries gemma4:31b first; if pool raises → Ollama with these names.
-# Ollama path (no pool): works down the list until a model fits in free VRAM.
-# gemma4:31b in Ollama requires: ollama pull gemma4:31b (when available)
+# Fallback chain per domain (VERIFIED Ollama models, largest-first).
+# select_profile works down the list until a model fits in free VRAM; the last
+# entry always fits so there is a guaranteed selection. To opt into the PLANNED
+# gemma4 consolidation, prepend "gemma4:31b" here and re-point the profiles.
 _FALLBACK: dict[str, list[str]] = {
-    "code":    ["gemma4:31b", "qwen3-coder:30b", "gemma3:27b",  "llama3.1:8b"],
-    "math":    ["gemma4:31b", "deepseek-r1:8b",  "llama3.1:8b"],
-    "vision":  ["gemma4:31b", "qwen3-vl:30b",    "gemma3:27b",  "llama3.1:8b"],
-    "plan":    ["gemma4:31b", "qwen3-coder:30b", "gemma3:27b",  "llama3.1:8b"],
-    "general": ["gemma4:31b", "gemma3:27b",       "llama3.1:8b"],
-    "command": ["gemma4:4b",  "llama3.1:8b",      "llama3.2:3b"],
+    "code":    ["qwen3-coder:30b", "gemma3:27b",  "llama3.1:8b"],
+    "math":    ["deepseek-r1:8b",  "llama3.1:8b"],
+    "vision":  ["qwen3-vl:30b",    "gemma3:27b",  "llama3.1:8b"],
+    "plan":    ["qwen3-coder:30b", "gemma3:27b",  "llama3.1:8b"],
+    "general": ["gemma3:27b",      "llama3.1:8b"],
+    "command": ["llama3.1:8b",     "llama3.2:3b"],
 }
+
+# Models small enough to co-reside with the command model + Whisper on 32 GB —
+# never worth evicting during a flare. Everything else that can be selected is
+# treated as a heavy specialist (see ModelRouter.heavy_model_names).
+_LIGHT_MODELS: frozenset[str] = frozenset({
+    "llama3.1:8b", "llama3.2:3b", "gemma4:4b", "deepseek-r1:8b",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -795,6 +797,39 @@ class ModelRouter:
         else:
             self._lightweight_profile = None
             log.info("ModelRouter: command-domain offload disabled (local only)")
+
+    def heavy_model_names(self, min_vram_gb: float = 12.0) -> list[str]:
+        """Distinct heavy specialist model names this router can load.
+
+        Used by ResourceGovernor to know which Ollama models to evict on a flare,
+        instead of hardcoding a single (easily-stale) name. Combines two sources:
+          - profiles whose declared vram_gb >= min_vram_gb
+          - fallback-chain entries that aren't in _LIGHT_MODELS (fallback names
+            carry no vram metadata, so we treat any non-light fallback as heavy)
+        Returns a stable, de-duplicated, sorted list.
+        """
+        heavy: set[str] = set()
+        for profile in self._profiles.values():
+            if profile.vram_gb >= min_vram_gb and profile.name not in _LIGHT_MODELS:
+                heavy.add(profile.name)
+        for chain in _FALLBACK.values():
+            for name in chain:
+                if name not in _LIGHT_MODELS:
+                    heavy.add(name)
+        return sorted(heavy)
+
+    async def sleep_specialists(self) -> None:
+        """Tear down any GPU-resident vLLM specialist (no-op on the Ollama path).
+
+        Reuses VLLMSpecialistPool.sleep_all_specialists(). Safe to call when no
+        pool is wired or when none are loaded.
+        """
+        if self._vllm_pool is None:
+            return
+        try:
+            await self._vllm_pool.sleep_all_specialists()
+        except Exception as exc:
+            log.warning("ModelRouter.sleep_specialists failed: %s", exc)
 
     def _should_offload(self, domain: str) -> bool:
         """True when this domain's inference should run on the laptop node."""
