@@ -183,11 +183,16 @@ Rules:
 - Python environment: Windows, .venv, pytest, pyproject.toml or requirements.txt
 - For ML tasks: default to PyTorch unless JAX/Qiskit/PennyLane is explicitly needed
 - For git tasks: run GIT_STATUS first, commit at the end
+- PARALLELISM: by default steps run in order. If a step depends ONLY on specific
+  earlier steps, annotate it with `(after: N, M)` — independent steps with no
+  such annotation may then run concurrently. Reads and writes to DISTINCT files
+  are independent; anything sharing the shell, git, or one file must declare the
+  dependency. When unsure, omit the annotation (it runs sequentially — safe).
 
 Format:
 Step 1: [ACTION args]
 <optional content / detail for this step>
-Step 2: [ACTION args]
+Step 2: [ACTION args] (after: 1)
 ..."""
 
 _GENERAL_PROMPT = """\
@@ -764,6 +769,10 @@ class ModelRouter:
         self._timeout = timeout
         self._profiles = _PROFILES.copy()
         self._vllm_pool: Optional[VLLMSpecialistPool] = None
+        # Single source of VRAM admission policy (gap B). Owns the tolerance that
+        # was previously the inline `+ 2.0` magic number in select_profile.
+        from core.vram_arbiter import VramArbiter
+        self._arbiter = VramArbiter(tolerance_gb=2.0)
         # Cluster offload state (set via set_cluster()).
         self._cluster_config = None          # ClusterConfig | None
         self._cluster_health = None          # ClusterHealthMonitor | None
@@ -854,7 +863,7 @@ class ModelRouter:
             )
             if profile is None:
                 continue
-            if profile.vram_gb <= free_gb + 2.0:  # 2 GB tolerance for VRAM fluctuation
+            if self._arbiter.can_admit(profile.vram_gb, free_gb):  # gap B: single admission policy
                 log.info(
                     "ModelRouter: domain=%s → %s (%.1f GB, %.1f GB free)",
                     domain, model_name, profile.vram_gb, free_gb,
@@ -1088,12 +1097,13 @@ class ModelRouter:
         available = {
             domain: str(p)
             for domain, p in self._profiles.items()
-            if p.vram_gb <= free + 2.0
+            if self._arbiter.can_admit(p.vram_gb, free)
         }
         status: dict = {
             "free_vram_gb": round(free, 1),
             "available_specialists": available,
             "backend": "vllm" if self._vllm_pool is not None else "ollama",
+            "vram_arbiter": self._arbiter.get_status(),
         }
         if self._vllm_pool is not None:
             status["vllm_pool"] = self._vllm_pool.get_status()
