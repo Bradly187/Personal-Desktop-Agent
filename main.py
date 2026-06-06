@@ -523,6 +523,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             "say 'resume task' to continue the most recent one.", _interrupted,
         )
 
+    # Durable goal backlog (gap D): a goal left 'running' means the process died
+    # mid-goal. Requeue it (idempotency_key prevents duplicates; poison goals that
+    # exhausted max_attempts are marked failed). The drainer is kicked after the
+    # pipeline is wired (see below) so queued goals from a previous session run.
+    _requeued = await agent_db.requeue_stale_running()
+    if _requeued:
+        log.warning("Re-queued %d goal(s) from the durable backlog after a crash.", _requeued)
+
     # --- Open audit log (separate append-only DB) ---
     audit = AuditLog()
     await audit.open(Path("audit.db"))
@@ -1015,6 +1023,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                   f"  offload={'on' if cluster_cfg.offload_lightweight else 'off'}")
             print(f"    Whisper              : {cluster_cfg.laptop_whisper_url or '-'}  [{_mark('whisper')}]")
             print(f"    Indexer              : {cluster_cfg.laptop_indexer_url or '-'}  [{_mark('indexer')}]")
+
+    # Durable goal backlog (gap D): drain any goals queued/requeued from a previous
+    # session now that the full pipeline is wired. Fire-and-forget — each goal runs
+    # through plan_and_run with its own approval gate + crash-recoverable ledger.
+    from core.async_utils import fire_and_log
+    fire_and_log(dev_agent.drain_goal_queue(), log, label="startup_goal_drain")
 
     # --- Run bridge + fusion + watchdog concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))

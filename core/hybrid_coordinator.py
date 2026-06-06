@@ -757,6 +757,17 @@ class HybridCoordinator:
                     max_act = self._approval_config().get("goal_session_max_actions", 50)
                     GoalSessionStore.create(goal=goal_text, domain="plan",
                                             duration_s=duration, max_actions=max_act)
+                    # Durable goal backlog (gap D): persist the goal so it survives a
+                    # crash/restart, then kick the drainer to run it. idempotency_key
+                    # is unique per authorize so a re-issue can't double-queue.
+                    if self._agent_db and self._agent_db.available:
+                        import time as _t
+                        key = f"authorize:{goal_text[:80]}:{_t.time():.0f}"
+                        await self._agent_db.enqueue_goal(
+                            goal_text, domain="plan", idempotency_key=key,
+                        )
+                        if self._dev_agent is not None:
+                            asyncio.create_task(self._dev_agent.drain_goal_queue())
                     mins = int(duration / 60)
                     asyncio.create_task(
                         self._tts_speak(f"Goal authorized for {mins} minutes: {goal_text[:40]}")
