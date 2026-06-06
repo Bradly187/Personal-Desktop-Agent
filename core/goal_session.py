@@ -53,6 +53,86 @@ def _is_high_risk_bash(command: str) -> bool:
     return any(p.search(command) for p in _HIGH_RISK_BASH)
 
 
+# Allowlist (gap G): auto-approval under a goal is DENY-by-default. A Bash command
+# is auto-approved only if EVERY segment of it (split on ; | & && ||) runs a
+# known-safe executable. This inverts the weak denylist (which a clever command
+# could slip past) into a positive list, and — because all segments must pass —
+# it defeats compound-command injection like `pytest && rm -rf /` (rm is not on
+# the list) and `curl x | sh` (sh is not on the list).
+#
+# Executables auto-approvable with any args (read-only, build, test, format).
+_SAFE_BASH_EXE: frozenset[str] = frozenset({
+    "ls", "dir", "pwd", "cat", "type", "head", "tail", "wc", "echo", "printf",
+    "grep", "rg", "find", "tree", "diff", "sort", "uniq", "cut", "awk", "sed",
+    "pytest", "tox", "nox", "coverage", "ruff", "black", "mypy", "flake8",
+    "isort", "pylint", "pyright",
+    "node", "npm", "npx", "yarn", "pnpm", "tsc", "eslint", "prettier",
+    "cargo", "rustc", "go", "make", "cmake", "ctest",
+    "true", "false", "which", "where", "whoami", "date", "env", "test",
+})
+# Multi-mode tools whose first SUBCOMMAND must be on the safe list. Mutating /
+# remote / history-rewriting subcommands (push, reset, checkout, clean, rebase,
+# install, …) are intentionally absent → they require explicit approval.
+_SAFE_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "git": frozenset({
+        "status", "diff", "log", "show", "branch", "add", "commit", "stash",
+        "fetch", "rev-parse", "describe", "blame", "remote", "tag", "config",
+    }),
+    "pip": frozenset({"list", "show", "freeze", "check"}),       # NOT install/uninstall
+    "pip3": frozenset({"list", "show", "freeze", "check"}),
+    "uv": frozenset({"run", "lock", "sync", "tree", "pip"}),
+    "python": frozenset(),    # handled specially below (script ok, -c inline NOT)
+    "python3": frozenset(),
+    "py": frozenset(),
+}
+# Interpreters: a script invocation is fine, but inline-code flags are arbitrary
+# execution → require approval even though the interpreter itself is "safe".
+_INLINE_CODE_FLAGS: frozenset[str] = frozenset({"-c", "-e", "--eval", "--command"})
+_INTERPRETERS: frozenset[str] = frozenset({"python", "python3", "py", "node"})
+
+
+def _bash_is_allowlisted(command: str) -> bool:
+    """True if EVERY segment of `command` runs a known-safe executable (gap G).
+
+    Deny-by-default: unknown executables, inline interpreter code (`python -c`),
+    unbalanced quotes, or any unsafe segment → False (requires explicit approval).
+    """
+    import shlex
+
+    if not command or not command.strip():
+        return False
+    # Split on shell operators: ; | & cover ;, |, ||, &&, & (and their doublings).
+    for seg in re.split(r"[;&|\n]+", command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            return False   # unbalanced quotes etc. → unsafe
+        # Drop leading VAR=value env assignments.
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        exe = tokens[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+        if exe.endswith(".exe"):
+            exe = exe[:-4]
+        rest = tokens[1:]
+
+        if exe in _INTERPRETERS and any(t in _INLINE_CODE_FLAGS for t in rest):
+            return False   # inline code execution → approval
+        if exe in _SAFE_SUBCOMMANDS:
+            if exe in _INTERPRETERS:
+                continue   # interpreter with a script (no inline flag) → safe
+            sub = next((t for t in rest if not t.startswith("-")), None)
+            if sub not in _SAFE_SUBCOMMANDS[exe]:
+                return False
+        elif exe not in _SAFE_BASH_EXE:
+            return False
+    return True
+
+
 def _path_in_scope(path: str, scopes: list[str]) -> bool:
     """True if `path` resolves under one of the allowed scope prefixes.
 
@@ -122,10 +202,17 @@ class GoalSession:
 
         Adds two guards on top of allows():
           - Write/Edit outside cwd_scope (when set) are NOT auto-approved.
-          - High-risk Bash commands (rm -rf, sudo, curl|sh, force-push, ...) are
-            NEVER auto-approved — they always fall through to the explicit voice
-            gate regardless of the active goal.
+          - Bash is DENY-by-default (gap G): auto-approved only when every segment
+            of the command runs a known-safe executable (_bash_is_allowlisted) and
+            it trips no high-risk pattern. Unknown commands, inline interpreter
+            code (`python -c`), and compound injections (`pytest && rm -rf`) all
+            fall through to the explicit voice gate.
         Everything else an authorized goal allows still auto-approves.
+
+        NOTE: a coding goal allows `python`/`pytest`/`node`, which is arbitrary
+        code execution by nature — the allowlist blocks the obvious/accidental
+        dangerous commands and injection, but true isolation needs a sandbox
+        (cwd jail / container), tracked as a future hardening step.
         """
         if not self.allows(tool_name):
             return False
@@ -135,9 +222,12 @@ class GoalSession:
                 log.info("GoalSession: %s outside cwd_scope — requires explicit approval",
                          tool_name)
                 return False
-        if tool_name == "Bash" and _is_high_risk_bash(tool_input.get("command", "")):
-            log.info("GoalSession: high-risk Bash command — requires explicit approval")
-            return False
+        if tool_name == "Bash":
+            cmd = tool_input.get("command", "")
+            # Deny-by-default allowlist (gap G) + denylist as defense-in-depth.
+            if not _bash_is_allowlisted(cmd) or _is_high_risk_bash(cmd):
+                log.info("GoalSession: Bash command not allowlisted — requires explicit approval")
+                return False
         return True
 
     def to_dict(self) -> dict:

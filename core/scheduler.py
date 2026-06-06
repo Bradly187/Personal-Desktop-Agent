@@ -69,6 +69,13 @@ _MAX_CONCURRENT_DEV = 1    # only one heavy dev/background task at a time
 _DEV_TASK_TIMEOUT_S = 30   # ceiling for single specialist-model inferences
 _PLAN_TASK_TIMEOUT_S = 300 # ceiling for full DevAgent plan_and_run() (5 min)
 
+# Parked-task bound (gap F): during a long flare, dev tasks dequeued by the worker
+# park in _run_dev_task waiting for resume. Without a cap they accumulate unbounded
+# (off-queue, so the queue bound doesn't cover them). Beyond this many parked, new
+# dev tasks are shed instead of parked — a brief flare still parks-and-resumes, a
+# long one stops growing memory.
+_MAX_PARKED_DEV = 16
+
 # Queue bound (gap #4): cap pending items so a runaway producer (gesture
 # misfires, a voice-hallucination loop, a stuck dev replan) can't grow the queue
 # without limit. Only DEV_AGENT/BACKGROUND submissions are shed when full — the
@@ -119,7 +126,8 @@ class AccessibilityScheduler:
         self._metrics = None                              # set via set_metrics()
         self._dev_inflight: int = 0                       # DEV/BACKGROUND tasks holding the permit
         self._subagent_inflight: int = 0                  # sub-agent fan-out tasks in flight
-        self._shed_count: int = 0                         # DEV/BACKGROUND submissions shed (queue full)
+        self._shed_count: int = 0                         # DEV/BACKGROUND submissions shed (queue full or parked cap)
+        self._dev_parked: int = 0                          # dev tasks parked at the flare gate
         self._inflight_tasks: set[asyncio.Task] = set()   # dispatched tasks, for stop() cleanup
         # Flare admission gate (gap #3): set == dev work admitted; cleared == paused.
         self._dev_resume_event = asyncio.Event()
@@ -138,6 +146,7 @@ class AccessibilityScheduler:
         try:
             self._metrics.set("scheduler_queue_depth", self._queue.qsize())
             self._metrics.set("scheduler_dev_inflight", self._dev_inflight)
+            self._metrics.set("scheduler_dev_parked", self._dev_parked)
             self._metrics.set("scheduler_subagent_inflight", self._subagent_inflight)
         except Exception:
             pass
@@ -401,8 +410,28 @@ class AccessibilityScheduler:
         # counting against the timeout — until dev work is resumed. Accessibility
         # never reaches this path. A parked task is still cancellable by stop().
         if not self._dev_resume_event.is_set():
-            log.info("Scheduler: dev task %r parked — admission paused (flare)", label)
-            await self._dev_resume_event.wait()
+            # Bound parked tasks (gap F): a long flare must not pile up unbounded
+            # parked coroutines. Beyond the cap, shed rather than park.
+            if self._dev_parked >= _MAX_PARKED_DEV:
+                self._shed_count += 1
+                msg = (f"dev task {label!r} shed — {_MAX_PARKED_DEV} already parked "
+                       f"(flare admission paused)")
+                log.warning("Scheduler: %s (total shed=%d)", msg, self._shed_count)
+                self._publish_gauges()
+                coro.close()   # never awaited — release it
+                if not future.done():
+                    future.set_exception(asyncio.QueueFull(msg))
+                return
+            self._dev_parked += 1
+            self._publish_gauges()
+            log.info("Scheduler: dev task %r parked (%d/%d) — admission paused (flare)",
+                     label, self._dev_parked, _MAX_PARKED_DEV)
+            try:
+                await self._dev_resume_event.wait()
+            finally:
+                # finally → decremented on resume, cancellation, or error.
+                self._dev_parked -= 1
+                self._publish_gauges()
         async with self._dev_sem:
             # `_dev_inflight` mirrors the held permit. Increment after acquire and
             # decrement in `finally` so the gauge can NEVER leak on timeout,
@@ -494,6 +523,8 @@ class AccessibilityScheduler:
             "max_concurrent_subagents": _MAX_CONCURRENT_SUBAGENTS,
             "subagent_inflight": self._subagent_inflight,
             "dev_paused": self._dev_paused,
+            "dev_parked": self._dev_parked,
+            "max_parked_dev": _MAX_PARKED_DEV,
             "max_queue_depth": _MAX_QUEUE_DEPTH,
             "shed_count": self._shed_count,
             "worker_alive": self.is_healthy(),
