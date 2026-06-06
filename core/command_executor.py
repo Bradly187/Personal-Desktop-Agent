@@ -582,14 +582,15 @@ class CommandExecutor:
         if action == "RUN_TERMINAL":
             command = p.get("command", cmd.text)
             cwd = p.get("cwd") or None
-            result = subprocess.run(
-                command, shell=True, capture_output=True,
-                text=True, timeout=60, cwd=cwd,
-            )
+            # Sandbox (mistake-containment): cwd-jail + no-network + caps when
+            # bwrap/firejail is available; graceful fallback otherwise.
+            from inference.sandbox import run_sandboxed
+            result = run_sandboxed(command, project_dir=cwd, timeout=60)
             return {
                 "stdout": result.stdout.strip(),
                 "stderr": result.stderr.strip(),
                 "returncode": result.returncode,
+                "sandboxed": result.sandboxed,
             }
 
         # ------------------------------------------------------------------ #

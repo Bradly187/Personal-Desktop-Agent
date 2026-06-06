@@ -1225,16 +1225,14 @@ class DevAgent:
     def _run_terminal(cmd: str) -> str:
         cmd = cmd.strip()
         log.info("DevAgent: running terminal command: %s", cmd)
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        # Sandbox (mistake-containment): cwd-jail + no-network + resource/output
+        # caps when bwrap/firejail is available; graceful fallback otherwise.
+        from inference.sandbox import run_sandboxed
+        result = run_sandboxed(cmd, timeout=60)
         output = (result.stdout + result.stderr).strip()
         status = "ok" if result.returncode == 0 else f"exit {result.returncode}"
-        log.info("DevAgent: terminal %s → %s", status, output[:120])
+        log.info("DevAgent: terminal %s%s → %s",
+                 status, "" if result.sandboxed else " [unsandboxed]", output[:120])
         if result.returncode != 0:
             raise RuntimeError(f"Command failed ({status}): {output[:200]}")
         return output or status
