@@ -594,6 +594,7 @@ class AgentDB:
             ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
             ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
             ("commands", "trace_id", "TEXT"),
+            ("adaptation_log", "domain", "TEXT"),   # gap H: per-domain SLO adaptation
         ):
             try:
                 await self._conn.execute(
@@ -1983,23 +1984,61 @@ class AgentDB:
         metric_after: float,
         cloud_rate: float = 0.0,
         failure_rate: float = 0.0,
+        domain: Optional[str] = None,
     ) -> int:
-        """Insert one adaptation_log row. Returns the new row id."""
+        """Insert one adaptation_log row. Returns the new row id.
+
+        `domain` tags per-domain SLO adaptations (gap H); None for global ones.
+        """
         if not self._conn:
             return -1
         try:
             cur = await self._conn.execute(
                 """INSERT INTO adaptation_log
-                   (ts, component, metric_before, metric_after, cloud_rate, failure_rate)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   (ts, component, metric_before, metric_after, cloud_rate, failure_rate, domain)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (time.time(), component, metric_before, metric_after,
-                 cloud_rate, failure_rate),
+                 cloud_rate, failure_rate, domain),
             )
             await self._conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
         except Exception as exc:
             log.warning("AgentDB.log_adaptation failed: %s", exc)
             return -1
+
+    async def get_inference_stats_by_domain(self, limit: int = 1000) -> dict:
+        """Per-domain rolling stats from the inferences table (gap H).
+
+        Returns {domain: {count, p50_latency_ms, success_rate}} over the most
+        recent `limit` inference rows. p50 + success-rate are computed in Python
+        (SQLite has no median); success = the inference recorded no error.
+        """
+        if not self._conn:
+            return {}
+        try:
+            async with self._conn.execute(
+                "SELECT domain, latency_ms, error FROM inferences ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            ) as cur:
+                rows = await cur.fetchall()
+        except Exception as exc:
+            log.warning("AgentDB.get_inference_stats_by_domain failed: %s", exc)
+            return {}
+
+        buckets: dict[str, list] = {}
+        for r in rows:
+            buckets.setdefault(r["domain"], []).append((r["latency_ms"], r["error"]))
+        out: dict[str, dict] = {}
+        for domain, items in buckets.items():
+            lats = sorted(l for l, _ in items if l is not None)
+            p50 = lats[len(lats) // 2] if lats else None
+            ok = sum(1 for _, e in items if e is None)
+            out[domain] = {
+                "count": len(items),
+                "p50_latency_ms": round(p50, 1) if p50 is not None else None,
+                "success_rate": round(ok / len(items), 3) if items else None,
+            }
+        return out
 
     async def get_recent_adaptation_log(
         self, component: str, limit: int = 5

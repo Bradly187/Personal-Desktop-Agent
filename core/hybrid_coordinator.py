@@ -52,6 +52,7 @@ from core.command_executor import Command, CommandExecutor
 from dataclasses import replace as _dc_replace
 from inference.local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
 from desktop.vision_grounder import VisionGrounder
+from core.slo import SLOConfig
 from monitoring.trace import get_tracer
 
 if TYPE_CHECKING:
@@ -109,8 +110,14 @@ class CoordinatorConfig:
     vram_free_min_gb: float = 8.0
 
     # Gate 4 thresholds
-    latency_budget_ms: float = 600.0
+    latency_budget_ms: float = 600.0        # global default / command-domain fallback
     latency_ema_alpha: float = 0.1          # smoothing factor for EMA
+
+    # Per-domain SLOs (gap H). Gate 4 sources its budget via latency_budget_for();
+    # the trainer may set per-domain overrides from observed SLO breaches. Command
+    # keeps the 600 ms default (preserves prior Gate-4 behaviour exactly).
+    slo: SLOConfig = field(default_factory=SLOConfig)
+    per_domain_latency_budget: dict = field(default_factory=dict)
 
     # Local-inference circuit-breaker — a hung local call (Ollama wedged, GPU
     # stuck mid-flare, model reload stall) must not stall the accessibility
@@ -125,6 +132,20 @@ class CoordinatorConfig:
     # in CLAUDE.md (8/8 on voice misrecognitions) and exercised by the tests;
     # the prior default ("claude-sonnet-4-6-20250514") was a stale/typo'd ID.
     anthropic_model: str = "claude-haiku-4-5-20251001"
+
+    def latency_budget_for(self, domain: str = "command") -> float:
+        """Gate-4 latency budget for a domain (gap H).
+
+        Resolution order: per-domain override (trainer-set) → per-domain SLO →
+        the legacy global `latency_budget_ms`. Command + unknown domains fall back
+        to the legacy field, so Gate-4 behaviour is unchanged until an override or
+        non-command SLO applies.
+        """
+        if domain in self.per_domain_latency_budget:
+            return self.per_domain_latency_budget[domain]
+        if domain != "command":
+            return self.slo.latency_budget_ms(domain)
+        return self.latency_budget_ms
 
 
 # ---------------------------------------------------------------------------
@@ -1140,10 +1161,15 @@ class HybridCoordinator:
         return result
 
     def _gate4(self) -> bool:
-        """Gate 4 — Latency EMA. True = pass."""
+        """Gate 4 — Latency EMA. True = pass.
+
+        Budget is sourced per-domain via the SLO layer (gap H); the gated path is
+        the command domain, so this resolves to the command budget (600 ms default)
+        unless the trainer has set a per-domain override.
+        """
         if self._latency_ema is None:
             return True  # no history yet — optimistically run local
-        return self._latency_ema <= self._cfg.latency_budget_ms
+        return self._latency_ema <= self._cfg.latency_budget_for("command")
 
     # ---------------------------------------------------------------------- #
     # Inference helpers

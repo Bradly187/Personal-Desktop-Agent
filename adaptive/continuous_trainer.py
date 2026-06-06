@@ -72,6 +72,7 @@ class ContinuousTrainer:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._memory = None   # MemoryManager — wired via set_memory()
+        self.slo_status: dict[str, str] = {}   # gap H: latest per-domain SLO verdicts
         # D9: intra-session velocity calibration trigger
         self._velocity_sample_counter: int = 0
         self._velocity_intra_session_threshold: int = 20
@@ -238,6 +239,49 @@ class ContinuousTrainer:
         await self._db.promote_hotwords(self._hotword_threshold)
         await self._update_gesture_calibration(pain_day_active=snapshot.pain_day_active)
         await self._update_gesture_velocity_calibration(pain_day_active=snapshot.pain_day_active)
+        await self._adapt_per_domain_slo()
+
+    async def _adapt_per_domain_slo(self) -> None:
+        """Evaluate rolling per-domain inference stats against per-domain SLOs (gap H).
+
+        Conservative by design: it LOGS breaches to adaptation_log (domain-tagged)
+        and exposes them via `self.slo_status` for the operator/UI — it does not
+        aggressively re-tune dev model selection (risky) or train a route
+        classifier (data-blocked). The one concrete knob it sets is a per-domain
+        Gate-4 latency override on the config for domains chronically breaching
+        their latency SLO, so the gated path can escalate sooner for them.
+        """
+        if not self._config:
+            return
+        try:
+            from core.slo import evaluate, BREACH_LATENCY, BREACH_SUCCESS, HEADROOM
+            stats = await self._db.get_inference_stats_by_domain(limit=1000)
+        except Exception as exc:
+            log.debug("ContinuousTrainer._adapt_per_domain_slo: stats failed: %s", exc)
+            return
+
+        status: dict[str, str] = {}
+        for domain, s in stats.items():
+            if s.get("count", 0) < self._gesture_min:
+                continue   # not enough data to judge this domain yet
+            slo = self._config.slo.get(domain)
+            verdict = evaluate(slo, s.get("p50_latency_ms"), s.get("success_rate"))
+            status[domain] = verdict
+            if verdict in (BREACH_LATENCY, BREACH_SUCCESS):
+                log.info("SLO breach: domain=%s verdict=%s p50=%.0fms success=%.2f (budget=%.0fms)",
+                         domain, verdict, s.get("p50_latency_ms") or 0,
+                         s.get("success_rate") or 0, slo.latency_budget_ms)
+                await self._db.log_adaptation(
+                    component=f"slo:{domain}",
+                    metric_before=slo.latency_budget_ms,
+                    metric_after=s.get("p50_latency_ms") or slo.latency_budget_ms,
+                    domain=domain,
+                )
+                if verdict == BREACH_LATENCY and domain != "command":
+                    # Tighten this domain's Gate-4 budget toward observed p50 so the
+                    # gated path (if it ever routes this domain) escalates sooner.
+                    self._config.per_domain_latency_budget[domain] = slo.latency_budget_ms
+        self.slo_status = status
 
     async def _adapt_gate1_threshold(self, entries: list[dict], pain_day_active: bool = False) -> None:
         """Requirement 14.3 — relax Gate 1 when cloud escalation is high."""
