@@ -10,9 +10,16 @@ Gate logic (source-dependent):
 
 Gate 0 — Privacy:     command text contains no sensitive-data patterns
   fail → force local (never send to cloud)
+  NOTE: bypass sources (touch / multimodal) are already local-only and never
+  reach the cloud, so Gate 0 does not apply to them — a resolved touch action
+  executes directly without LLM interference even when its text matches a
+  sensitive pattern.
 
 Gate 1 — Confidence:  whisper_logprob ≥ min AND gesture_conf ≥ min
-  fail-voice    → vocabulary correction → retry Gate 2
+  fail-voice, KNOWN misrecognition (vocab pass already fixed it) → local
+  fail-voice, UNKNOWN low-confidence transcript                  → cloud
+    (the cloud system prompt is tuned to repair voice misrecognitions the
+     local dictionary cannot)
   fail-gesture  → discard silently
 
 Gate 2 — Complexity:  token_count ≤ max AND no complexity keywords
@@ -25,9 +32,11 @@ Gate 4 — Latency EMA:  latency_ema_ms ≤ latency_budget_ms
   fail → Anthropic API
 
 After inference: log outcome to agent.db (AgentDB), call CommandExecutor.execute().
-Each log entry includes `gate_that_decided`: which gate was the decisive routing
-factor ("bypass", "gate0_privacy", "gate2_complexity", "gate3_vram",
-"gate4_latency", "all_pass", "discard").
+Each log entry includes `gate_that_decided`: the decisive routing factor, one of
+_GATE_DECISION_LABELS ("bypass", "gate0_privacy", "gate1_voice_conf",
+"gate2_complexity", "gate3_vram", "gate4_latency", "all_pass"). Silently
+discarded gestures (Gate 1, low confidence) return early WITHOUT a DB row, so
+"discard" is intentionally not a logged label.
 """
 
 from __future__ import annotations
@@ -242,6 +251,21 @@ _SKIP_GATE1_SOURCES = {"voice_local"}
 _VALID_COMMAND_VERBS: frozenset[str] = frozenset({
     "CLICK", "MOUSEDOWN", "MOUSEUP", "SCROLL", "TYPE", "OPEN",
     "CLOSE", "HOTKEY", "DICTATE", "CLARIFY", "SCREENSHOT",
+})
+
+# Exhaustive set of `gate_that_decided` values written to agent.db by route().
+# Each names the decisive routing factor for one logged command. Kept as a
+# single source of truth so analytics/tests can assert against it. NOTE:
+# silently discarded gestures (Gate 1, low confidence) return early WITHOUT a DB
+# row, so "discard" is deliberately absent.
+_GATE_DECISION_LABELS: frozenset[str] = frozenset({
+    "bypass",            # touch / multimodal — local, gates skipped
+    "gate0_privacy",     # sensitive text — forced local
+    "gate1_voice_conf",  # unknown low-confidence voice — escalated to cloud
+    "gate2_complexity",  # complex command — cloud
+    "gate3_vram",        # insufficient free VRAM — cloud
+    "gate4_latency",     # local latency over budget — cloud
+    "all_pass",          # all gates passed — local
 })
 
 
@@ -782,6 +806,7 @@ class HybridCoordinator:
             # Always apply vocabulary corrections before any gate evaluation
             # so app-name phonetics ("key-row" → "kiro") reach the LLM fixed
             # regardless of Whisper confidence level.
+            vocab_corrected = False
             if cmd.source in ("voice", "voice_local"):
                 corrected_text, changed = _apply_vocabulary_corrections(cmd.text)
                 if changed:
@@ -789,6 +814,7 @@ class HybridCoordinator:
                         "Pre-gate vocab correction: %r → %r", cmd.text, corrected_text
                     )
                     cmd = _dc_replace(cmd, text=corrected_text)
+                    vocab_corrected = True
 
             # Populate session_context from twin state (always accessibility namespace)
             if self._twin and self._twin.is_ready:
@@ -805,28 +831,31 @@ class HybridCoordinator:
             _original_cfg = self._cfg
             self._cfg = effective_cfg
             try:
-                # --- Gate 0 — Privacy (applies before bypass; forces local) ----
-                if not self._gate0(cmd):
-                    log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
-                    action_str = await self._run_local(cmd)
-                    route_label = "local"
-                    gate_that_decided = "gate0_privacy"
-
-                # --- Bypass path -----------------------------------------------
-                elif source in _BYPASS_SOURCES:
-                    # Touch commands (iPad CommandPad taps, tilt-tap) arrive with a
-                    # concrete action already resolved — the text is just a label
-                    # ("tilt_tap"). Honor that action directly instead of asking the
-                    # LLM to infer it from the label, which yields CLARIFY ("What is
-                    # the target of the click?") because the model can't read
-                    # "tilt_tap" as a verb. Sound/multimodal still infer via the LLM
-                    # (their action depends on which sound / phrase fired).
+                # --- Bypass path (touch / multimodal) --------------------------
+                # These sources always run local and never reach the cloud, so
+                # Gate 0 — whose sole purpose is to keep sensitive text off an
+                # external API — does not apply and is checked AFTER this branch.
+                # Touch commands (iPad CommandPad taps, tilt-tap) arrive with a
+                # concrete action already resolved — the text is just a label
+                # ("tilt_tap"). Honor that action directly instead of asking the
+                # LLM to infer it from the label, which yields CLARIFY ("What is
+                # the target of the click?") because the model can't read
+                # "tilt_tap" as a verb. Multimodal still infers via the LLM
+                # (its action depends on which phrase fired).
+                if source in _BYPASS_SOURCES:
                     if cmd.source == "touch" and cmd.action in _VALID_COMMAND_VERBS:
                         action_str = cmd.action
                     else:
                         action_str = await self._run_local(cmd)
                     route_label = "local"
                     gate_that_decided = "bypass"
+
+                # --- Gate 0 — Privacy (force local for cloud-eligible sources) --
+                elif not self._gate0(cmd):
+                    log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
+                    action_str = await self._run_local(cmd)
+                    route_label = "local"
+                    gate_that_decided = "gate0_privacy"
 
                 # --- Skip Gate 1 path ------------------------------------------
                 elif source in _SKIP_GATE1_SOURCES:
@@ -841,10 +870,30 @@ class HybridCoordinator:
                         log.debug("Gate 1 discard (low gesture conf): %r", cmd.text)
                         return {"status": "discarded", "reason": "gate1_gesture_conf"}
                     if not passed:
-                        # Voice low confidence — re-transcribe and continue to Gate 2
-                        cmd = await _retranscribe(cmd)
-
-                    action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
+                        # Voice low confidence. If the pre-gate vocabulary pass
+                        # already fixed a KNOWN misrecognition the transcript is now
+                        # high-confidence — continue local (fast, no round-trip).
+                        # Otherwise it's an UNKNOWN low-confidence utterance:
+                        # escalate to the cloud, whose system prompt is tuned to
+                        # repair voice misrecognitions the local dictionary can't.
+                        # Gate 0 has already passed here, so no sensitive data is
+                        # transmitted.
+                        if vocab_corrected:
+                            cmd = await _retranscribe(cmd)
+                            action_str, gate_that_decided, route_label = \
+                                await self._gates_2_to_4(cmd)
+                        else:
+                            log.info(
+                                "Gate 1 voice low-confidence (logprob=%.3f) — "
+                                "escalating to cloud for misrecognition repair",
+                                cmd.whisper_logprob,
+                            )
+                            action_str = await self._run_cloud(cmd)
+                            gate_that_decided = "gate1_voice_conf"
+                            route_label = "cloud"
+                    else:
+                        action_str, gate_that_decided, route_label = \
+                            await self._gates_2_to_4(cmd)
             finally:
                 self._cfg = _original_cfg
 
@@ -906,7 +955,15 @@ class HybridCoordinator:
 
         finally:
             latency_ms = (time.monotonic() - t0) * 1000
-            self._update_ema(latency_ms)
+            # Gate 4's EMA exists to detect when LOCAL inference is getting slow
+            # (e.g. GPU contention during a flare) and shed load to the cloud.
+            # Feeding cloud round-trip latency — inherently several times the
+            # local budget — back into it would inflate the EMA, trip Gate 4, and
+            # push even more commands to the cloud: a positive feedback loop that
+            # never recovers. So only local routes update the Gate 4 EMA; when a
+            # burst goes to cloud the EMA stays low and local is retried promptly.
+            if route_label == "local":
+                self._update_ema(latency_ms)
             # Record outcome in metrics singleton (non-fatal)
             if self._metrics is not None:
                 try:
