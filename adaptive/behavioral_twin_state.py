@@ -51,7 +51,7 @@ class TwinSnapshot:
     preferred_actions: list[str]           # Top-5 action verbs for current time window
     source_weights: dict[str, float]       # Per-source success ratio (last 7 days)
     session_context: list[str]             # Last N command texts (20 normal, 10 pain day)
-    command_count_today: int               # Commands executed today
+    command_count_session: int             # Commands executed this session (NOT per calendar day)
     pain_day_score: float                  # Current score in [0.0, 1.0]
     snapshot_ts: float                     # time.monotonic() at creation
     # flare_profile gating — which sensors Brad said actually degrade on a
@@ -71,7 +71,7 @@ _DEFAULT_SNAPSHOT = TwinSnapshot(
     preferred_actions=[],
     source_weights={},
     session_context=[],
-    command_count_today=0,
+    command_count_session=0,
     pain_day_score=0.0,
     snapshot_ts=0.0,
 )
@@ -679,7 +679,7 @@ class BehavioralTwinState:
             preferred_actions=self._preference_model.top_actions(current_bucket, n=5),
             source_weights=self._preference_model.source_weights(),
             session_context=list(self._session_history.get("accessibility", [])),
-            command_count_today=self._session_cmd_count,
+            command_count_session=self._session_cmd_count,
             pain_day_score=self._pain_day_score,
             snapshot_ts=time.monotonic(),
             flare_voice_degrades=self._flare_voice_degrades,

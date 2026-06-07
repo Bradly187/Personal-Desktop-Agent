@@ -320,7 +320,7 @@ def test_cross_session_context_round_trip(prior_texts):
         max_size=5,
     ),
     session_context=st.lists(st.text(min_size=0, max_size=50), min_size=0, max_size=20),
-    command_count_today=st.integers(min_value=0, max_value=1000),
+    command_count_session=st.integers(min_value=0, max_value=1000),
     pain_day_score=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
     snapshot_ts=st.floats(min_value=0.0, max_value=1e9, allow_nan=False),
 )
@@ -330,7 +330,7 @@ def test_twin_snapshot_immutable_and_complete(
     preferred_actions,
     source_weights,
     session_context,
-    command_count_today,
+    command_count_session,
     pain_day_score,
     snapshot_ts,
 ):
@@ -340,7 +340,7 @@ def test_twin_snapshot_immutable_and_complete(
         preferred_actions=preferred_actions,
         source_weights=source_weights,
         session_context=session_context,
-        command_count_today=command_count_today,
+        command_count_session=command_count_session,
         pain_day_score=pain_day_score,
         snapshot_ts=snapshot_ts,
     )
@@ -350,7 +350,7 @@ def test_twin_snapshot_immutable_and_complete(
     assert isinstance(snapshot.preferred_actions, list)
     assert isinstance(snapshot.source_weights, dict)
     assert isinstance(snapshot.session_context, list)
-    assert isinstance(snapshot.command_count_today, int)
+    assert isinstance(snapshot.command_count_session, int)
     assert isinstance(snapshot.pain_day_score, float)
     assert isinstance(snapshot.snapshot_ts, float)
 
@@ -360,7 +360,7 @@ def test_twin_snapshot_immutable_and_complete(
         "preferred_actions",
         "source_weights",
         "session_context",
-        "command_count_today",
+        "command_count_session",
         "pain_day_score",
         "snapshot_ts",
     ]
@@ -490,7 +490,7 @@ def test_default_snapshot_before_start_completes(n_commands):
     assert snapshot.preferred_actions == []
     assert snapshot.pain_day_score == 0.0
     assert snapshot.session_context == []
-    assert snapshot.command_count_today == 0
+    assert snapshot.command_count_session == 0
     assert snapshot.source_weights == {}
     assert snapshot.snapshot_ts == 0.0
 

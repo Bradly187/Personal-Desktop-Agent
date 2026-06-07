@@ -61,8 +61,15 @@ class SemanticMemory:
                 chromadb.PersistentClient, path=self._chroma_dir
             )
 
-            # Build kwargs for get_or_create_collection
-            collection_kwargs: dict = {"name": self.COLLECTION_NAME}
+            # Build kwargs for get_or_create_collection.
+            # Pin cosine space (ChromaDB defaults to L2) so query_similar's
+            # distances are genuine cosine distances — mirrors CodebaseIndexer.
+            # Applies to newly created collections only; an existing L2
+            # behavioral_memory collection keeps L2 until it is reindexed.
+            collection_kwargs: dict = {
+                "name": self.COLLECTION_NAME,
+                "configuration": {"hnsw": {"space": "cosine"}},
+            }
             if self._encoder is not None:
                 collection_kwargs["embedding_function"] = self._encoder
 
@@ -149,6 +156,9 @@ class SemanticMemory:
                             "source": meta.get("source", ""),
                             "ts": meta.get("ts", 0.0),
                             "distance": dist,
+                            # cosine similarity (collection is pinned to cosine);
+                            # kept alongside distance for caller parity
+                            "score": round(1.0 - dist, 4),
                         }
                         for doc, meta, dist in zip(documents, metadatas, distances)
                     ]
@@ -186,6 +196,7 @@ class SemanticMemory:
                     "source": row.get("source", ""),
                     "ts": row.get("ts", 0.0),
                     "distance": 1.0 - sim,
+                    "score": round(sim, 4),
                 }
                 for sim, row in scored[:n]
             ]
