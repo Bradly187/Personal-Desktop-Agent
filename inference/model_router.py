@@ -19,7 +19,7 @@ Model lineup — VERIFIED Ollama defaults (RTX 5090, 32 GB VRAM):
   math     → deepseek-r1:8b  FP16      ~4.9 GB  chain-of-thought kept (it IS the answer)
   vision   → qwen3-vl:30b    GGUF Q4   ~19 GB   multimodal screen grounding
   plan     → qwen3-coder:30b GGUF Q4   ~18 GB   thinking ON (trace stripped)
-  general  → gemma3:27b      GGUF Q4   ~16 GB   research synthesis
+  general  → gemma4:12b      GGUF Q4   ~9.1 GB  research synthesis; co-resides w/ command+Whisper (2026-06-07)
 
 These are the models the default (Ollama) backend actually runs. A heavy 30B
 specialist does not co-reside with Whisper + the command model on 32 GB, so the
@@ -63,7 +63,15 @@ Key decisions:
   - plan shares qwen3-coder:30b → zero extra wake cost after a code request
   - deepseek-r1:8b stays FP16 (4.9 GB, comfortably fits; INT4 degrades math reasoning)
   - thinking mode stripped for code/plan output; kept for math (it IS the answer)
-  - general → gemma3:27b (dense, broad knowledge) over coding-specialist qwen3
+  - general → gemma4:12b (2026-06-07): 100% on the reasoning probe (ties gemma3:27b) at
+    +9.1 GB vs +16 GB, so it co-resides with command+Whisper and the ResourceGovernor no
+    longer needs a ~16 GB swap for general queries. Pain-day fallback is gemma4:e4b-it-qat
+    (+5.1 GB, "general_light" profile); gemma3:27b is retired (kept pulled for rollback).
+    NOTE: Gemma 4 always reasons internally — max_tokens must be generous (>=4096) or the
+    response truncates to empty (done_reason=length). Ollama reads `think` ONLY as a
+    top-level request param; `options["think"]` is silently ignored (so the current
+    thinking flag is a no-op on the Ollama path — see _call_ollama). Default mode returns
+    clean answers, which is why general uses thinking=False + a large max_tokens.
 """
 
 from __future__ import annotations
@@ -312,13 +320,31 @@ _PROFILES: dict[str, ModelProfile] = {
         strip_thinking=True,
     ),
     "general": ModelProfile(
-        name="gemma3:27b",
+        name="gemma4:12b",     # 2026-06-07: 100% reasoning probe, +9.1 GB (co-resides w/ command+Whisper)
         domain="general",
         system_prompt=_GENERAL_PROMPT,
-        vram_gb=16.0,
-        max_tokens=1536,
+        vram_gb=9.1,
+        # Gemma 4 reasons internally before answering; too small a budget truncates the
+        # response to empty (done_reason=length). 4096 absorbs the reasoning + a long
+        # synthesis answer. thinking=False → default mode (clean answers; options["think"]
+        # is a no-op on Ollama anyway). strip_thinking guards any stray inline <think>.
+        max_tokens=4096,
         free_form=True,
-        thinking=False,        # general Q&A: speed > deep reasoning trace
+        thinking=False,
+        strip_thinking=True,
+    ),
+    # Pain-day / low-VRAM general fallback. 100% on the reasoning probe at just +5.1 GB
+    # (in _LIGHT_MODELS → co-resides, never evicted). Resolved by name from the general
+    # fallback chain; 8/10 on the hard coding eval (fine for a downgrade, not a primary).
+    "general_light": ModelProfile(
+        name="gemma4:e4b-it-qat",
+        domain="general",
+        system_prompt=_GENERAL_PROMPT,
+        vram_gb=5.1,
+        max_tokens=4096,
+        free_form=True,
+        thinking=False,
+        strip_thinking=True,
     ),
 }
 
@@ -327,11 +353,15 @@ _PROFILES: dict[str, ModelProfile] = {
 # entry always fits so there is a guaranteed selection. To opt into the PLANNED
 # gemma4 consolidation, prepend "gemma4:31b" here and re-point the profiles.
 _FALLBACK: dict[str, list[str]] = {
-    "code":    ["qwen3-coder:30b", "gemma3:27b",  "llama3.1:8b"],
+    # Mid-tier fallback repointed gemma3:27b → gemma4:12b (2026-06-07): the resident
+    # general model is lighter (9.1 vs 16 GB) and codes well (9-10/10 hard eval), so it's
+    # a strictly better "qwen3-coder didn't fit" fallback. gemma3:27b is retired (kept
+    # pulled for git-revert rollback only).
+    "code":    ["qwen3-coder:30b", "gemma4:12b",  "llama3.1:8b"],
     "math":    ["deepseek-r1:8b",  "llama3.1:8b"],
-    "vision":  ["qwen3-vl:30b",    "gemma3:27b",  "llama3.1:8b"],
-    "plan":    ["qwen3-coder:30b", "gemma3:27b",  "llama3.1:8b"],
-    "general": ["gemma3:27b",      "llama3.1:8b"],
+    "vision":  ["qwen3-vl:30b",    "gemma4:12b",  "llama3.1:8b"],
+    "plan":    ["qwen3-coder:30b", "gemma4:12b",  "llama3.1:8b"],
+    "general": ["gemma4:12b", "gemma4:e4b-it-qat", "llama3.1:8b"],
     "command": ["llama3.1:8b",     "llama3.2:3b"],
 }
 
@@ -340,6 +370,10 @@ _FALLBACK: dict[str, list[str]] = {
 # treated as a heavy specialist (see ModelRouter.heavy_model_names).
 _LIGHT_MODELS: frozenset[str] = frozenset({
     "llama3.1:8b", "llama3.2:3b", "gemma4:4b", "deepseek-r1:8b",
+    # gemma4:e4b-it-qat (+5.1 GB) co-resides with command+Whisper — never worth evicting.
+    # gemma4:12b (+9.1 GB) is the general default but is intentionally NOT light: it must
+    # remain evictable so a heavy 30B specialist (qwen3-coder/qwen3-vl) can load on demand.
+    "gemma4:e4b-it-qat",
 })
 
 

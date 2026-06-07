@@ -21,6 +21,10 @@ import time
 import urllib.request
 from pathlib import Path
 
+# Ensure the project root is importable when run as `python monitoring/benchmark_models.py`
+# from the repo root, so `from storage.db import AnalyticsDB` resolves (DuckDB persistence).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 # ---------------------------------------------------------------------------
 # Test suite — 12 prompts spanning all 9 verbs
 # ---------------------------------------------------------------------------
@@ -95,7 +99,12 @@ def _generate(model: str, prompt: str, timeout: float = 30.0) -> tuple[str, floa
         "model": model,
         "prompt": f"{SYSTEM_PROMPT}\n\nUser: {prompt}\nAssistant:",
         "stream": False,
-        "options": {"temperature": 0.0, "num_predict": 32},
+        # 256, not 32: reasoning models (deepseek-r1, gpt-oss, gemma4) spend a
+        # multi-token preamble before the answer. At 32 they hit the length cap
+        # mid-reasoning and return an empty `response` (done_reason="length"),
+        # which the scorer reads as a wrong answer (confirmed 2026-06-07:
+        # gemma4:12b 0/12 @32 → 9/12 @256).
+        "options": {"temperature": 0.0, "num_predict": 256},
     }).encode()
     req = urllib.request.Request(
         "http://localhost:11434/api/generate",
@@ -107,7 +116,12 @@ def _generate(model: str, prompt: str, timeout: float = 30.0) -> tuple[str, floa
         data = json.loads(resp.read())
     latency_ms = (time.monotonic() - t0) * 1000
     raw = data.get("response", "").strip()
-    # deepseek-r1 wraps reasoning in <think>...</think>; strip it
+    # Some Ollama reasoning models emit their chain-of-thought in a separate
+    # `thinking` field and leave only the answer in `response`; if `response`
+    # came back empty, fall back to stripping any inline reasoning from `thinking`.
+    if not raw:
+        raw = data.get("thinking", "").strip()
+    # deepseek-r1 (and others) wrap reasoning inline in <think>...</think>; strip it
     import re as _re
     raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
