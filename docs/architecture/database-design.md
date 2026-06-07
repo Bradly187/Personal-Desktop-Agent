@@ -101,7 +101,7 @@ The JSON fallback in `benchmark_models.py` remains for environments where DuckDB
 
 | Legacy format | Problems | Replaced by |
 |---|---|---|
-| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — those 3 tables expanded, plus the rest of today's **29-table** schema (§11) |
+| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — those 3 tables expanded, plus the rest of today's **30-table** schema (§11) |
 | `routing_log.jsonl` | Full-file read every 5 min; no session; no referential integrity | `agent.db` `commands` table |
 | `gesture_calibration.json` | Overwrote history on every write; in-memory samples lost on crash | `agent.db` `gesture_samples` (full history) + `gesture_calibration` (append-only floor log) |
 | `benchmark_results.json` | Single-run snapshot; no history; not queryable | `analytics.duckdb` `benchmark_runs / results / prompts` |
@@ -189,9 +189,9 @@ con.sql("""
 
 ## 11. Entity-Relationship Diagrams
 
-These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **29 tables**; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
+These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **30 tables**; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
 
-### 11.1 `agent.db` — relationship overview (all 29 tables)
+### 11.1 `agent.db` — relationship overview (all 30 tables)
 
 ```mermaid
 erDiagram
@@ -210,6 +210,7 @@ erDiagram
     commands ||--o{ gesture_samples : "emits"
     commands ||--o{ sensor_events : "emits"
     agent_runs ||--o{ agent_steps : "contains"
+    agent_runs ||--o| goal_queue : "executes"
     voice_calibration_sessions ||--o{ voice_pronunciations : "contains"
     word_counts { text word PK }
     hotwords { text word PK }
@@ -232,6 +233,7 @@ erDiagram
     commands ||--o{ inferences : ""
     commands ||--o{ agent_runs : ""
     agent_runs ||--o{ agent_steps : ""
+    agent_runs ||--o| goal_queue : ""
     sessions {
         int id PK
         real started_at
@@ -298,6 +300,18 @@ erDiagram
         text result
         int success
         real latency_ms
+    }
+    goal_queue {
+        int id PK
+        real ts
+        text goal
+        text domain
+        text status
+        text idempotency_key UK
+        int attempts
+        int max_attempts
+        text last_error
+        int run_id FK
     }
 ```
 
@@ -554,6 +568,7 @@ erDiagram
         int id PK
         real ts
         text component
+        text domain
         real metric_before
         real metric_after
         real cloud_rate
