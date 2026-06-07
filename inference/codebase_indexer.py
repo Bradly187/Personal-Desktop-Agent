@@ -272,10 +272,22 @@ class CodebaseIndexer:
         self,
         project_root: str = ".",
         chroma_dir: Optional[str] = None,
+        embedder=None,
     ) -> None:
         self._root = Path(project_root).resolve()
         self._chroma_dir = chroma_dir or str(self._root / "chroma_db")
         self._state_path = self._root / self.STATE_FILE
+
+        # Optional custom ChromaDB embedding function. When None, start() falls
+        # back to the built-in all-MiniLM-L6-v2 SentenceTransformer encoder.
+        # Mirrors SemanticMemory's `encoder=` injection point. Must be a
+        # ChromaDB-compatible embedding function (callable + name()); a raw
+        # VLLMEmbedder needs a thin Chroma-EF adapter before it can be passed
+        # here — see local_inference.VLLMEmbedder.
+        self._embedder = embedder
+        # The embedding function actually selected in start() (custom or the
+        # MiniLM default), exposed for diagnostics / tests.
+        self._embedding_fn = None
 
         self._client = None
         self._codebase_col = None
@@ -307,31 +319,55 @@ class CodebaseIndexer:
                 chromadb.PersistentClient, path=self._chroma_dir
             )
 
-            # GPU-accelerated embeddings (roadmap item #10):
-            # Pass device="cuda" to run all-MiniLM-L6-v2 on RTX 5090.
-            # Drops RAG retrieval latency from ~80ms (CPU) to ~8ms (GPU).
-            # Falls back to CPU if CUDA is unavailable.
-            try:
-                from chromadb.utils.embedding_functions import (
-                    SentenceTransformerEmbeddingFunction,
-                )
-                _device = "cpu"
+            # Embedding function selection:
+            #   * A caller-supplied embedder (e.g. a future VLLMEmbedder adapter)
+            #     takes priority — mirrors SemanticMemory's `encoder=` path.
+            #   * Otherwise GPU-accelerated all-MiniLM-L6-v2 (roadmap item #10):
+            #     device="cuda" runs the encoder on the RTX 5090, dropping RAG
+            #     retrieval latency from ~80ms (CPU) to ~8ms (GPU); falls back to
+            #     CPU when CUDA is unavailable.
+            if self._embedder is not None and callable(self._embedder):
+                ef = self._embedder
+                log.info("CodebaseIndexer: using caller-supplied embedder")
+            else:
+                if self._embedder is not None:
+                    # Not a usable Chroma embedding function (e.g. a raw
+                    # VLLMEmbedder, which exposes encode() not __call__). Fall
+                    # back rather than silently breaking add()/query() later.
+                    log.warning(
+                        "CodebaseIndexer: supplied embedder %r is not a callable "
+                        "ChromaDB embedding function — using all-MiniLM-L6-v2",
+                        type(self._embedder).__name__,
+                    )
                 try:
-                    import torch
-                    if torch.cuda.is_available():
-                        _device = "cuda"
-                        log.info("CodebaseIndexer: using GPU (CUDA) for embeddings")
-                except ImportError:
-                    pass
-                ef = SentenceTransformerEmbeddingFunction(
-                    model_name="all-MiniLM-L6-v2",
-                    device=_device,
-                )
-            except Exception:
-                ef = None  # fall back to ChromaDB's default
+                    from chromadb.utils.embedding_functions import (
+                        SentenceTransformerEmbeddingFunction,
+                    )
+                    _device = "cpu"
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            _device = "cuda"
+                            log.info("CodebaseIndexer: using GPU (CUDA) for embeddings")
+                    except ImportError:
+                        pass
+                    ef = SentenceTransformerEmbeddingFunction(
+                        model_name="all-MiniLM-L6-v2",
+                        device=_device,
+                    )
+                except Exception:
+                    ef = None  # fall back to ChromaDB's default
+            self._embedding_fn = ef
 
             def _get_col(name):
-                kwargs = {"name": name}
+                # Pin cosine space so query_codebase()'s `score = 1.0 - distance`
+                # is genuine cosine similarity (ChromaDB defaults to L2). Applied
+                # at creation time only — existing L2 collections keep their space
+                # and must be re-indexed to switch.
+                kwargs = {
+                    "name": name,
+                    "configuration": {"hnsw": {"space": "cosine"}},
+                }
                 if ef is not None:
                     kwargs["embedding_function"] = ef
                 return client.get_or_create_collection(**kwargs)
