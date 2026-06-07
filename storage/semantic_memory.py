@@ -34,6 +34,7 @@ class SemanticMemory:
     CHROMA_DIR = "./chroma_db"
     CAP = 10_000
     EVICT_COUNT = 1_000
+    REPROBE_INTERVAL_S = 60.0   # min seconds between ChromaDB re-probe attempts
 
     def __init__(
         self,
@@ -48,9 +49,15 @@ class SemanticMemory:
         self._collection = None
         self._available: bool = False
         self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
+        # Lazy re-probe (C4): retry start() after a failure, but only once the
+        # store has been started at least once, and at most once per interval.
+        self._started_once: bool = False
+        self._last_probe_ts: float = 0.0
 
     async def start(self) -> bool:
         """Initialize ChromaDB client. Returns True if available."""
+        self._started_once = True
+        self._last_probe_ts = time.monotonic()
         try:
             import chromadb  # noqa: PLC0415 — intentional lazy import for graceful ImportError
 
@@ -61,8 +68,15 @@ class SemanticMemory:
                 chromadb.PersistentClient, path=self._chroma_dir
             )
 
-            # Build kwargs for get_or_create_collection
-            collection_kwargs: dict = {"name": self.COLLECTION_NAME}
+            # Build kwargs for get_or_create_collection.
+            # Pin cosine space (ChromaDB defaults to L2) so query_similar's
+            # distances are genuine cosine distances — mirrors CodebaseIndexer.
+            # Applies to newly created collections only; an existing L2
+            # behavioral_memory collection keeps L2 until it is reindexed.
+            collection_kwargs: dict = {
+                "name": self.COLLECTION_NAME,
+                "configuration": {"hnsw": {"space": "cosine"}},
+            }
             if self._encoder is not None:
                 collection_kwargs["embedding_function"] = self._encoder
 
@@ -120,12 +134,31 @@ class SemanticMemory:
             log.warning("SemanticMemory.add() failed: %s — disabling ChromaDB", exc)
             self._available = False
 
+    async def _maybe_reprobe(self) -> None:
+        """Lazily retry ChromaDB init after a failure, at most once per
+        REPROBE_INTERVAL_S. No-op until the store has been started at least once
+        — so never-started instances stay in AgentDB-fallback mode (the prior
+        behaviour relied on by callers/tests)."""
+        if self._available or not self._started_once:
+            return
+        now = time.monotonic()
+        if now - self._last_probe_ts < self.REPROBE_INTERVAL_S:
+            return
+        self._last_probe_ts = now
+        try:
+            await self.start()
+            if self._available:
+                log.info("SemanticMemory: ChromaDB re-probe succeeded — vector store restored")
+        except Exception as exc:
+            log.debug("SemanticMemory: re-probe failed: %s", exc)
+
     async def query_similar(self, text: str, n: int = 5) -> list[dict]:
         """Return n most similar successful commands.
 
         ChromaDB path: cosine distance, filtered where success=True.
         Fallback path: AgentDB Jaccard scoring via get_recent_successful_commands().
         """
+        await self._maybe_reprobe()
         try:
             # ── ChromaDB path ──────────────────────────────────────────────
             if self._available and self._collection is not None:
@@ -149,6 +182,9 @@ class SemanticMemory:
                             "source": meta.get("source", ""),
                             "ts": meta.get("ts", 0.0),
                             "distance": dist,
+                            # cosine similarity (collection is pinned to cosine);
+                            # kept alongside distance for caller parity
+                            "score": round(1.0 - dist, 4),
                         }
                         for doc, meta, dist in zip(documents, metadatas, distances)
                     ]
@@ -186,6 +222,7 @@ class SemanticMemory:
                     "source": row.get("source", ""),
                     "ts": row.get("ts", 0.0),
                     "distance": 1.0 - sim,
+                    "score": round(sim, 4),
                 }
                 for sim, row in scored[:n]
             ]

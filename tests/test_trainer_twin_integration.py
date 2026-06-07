@@ -269,3 +269,36 @@ def test_gesture_floor_clamped_to_zero_on_pain_day():
         assert floor >= 0.0, f"Gesture floor went negative on pain day: {floor}"
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Tranche 1 A1: trainer.record_failure forwards to the twin ONLY (no few-shot)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _FailCmd:
+    text: str = "bad command"
+    source: str = "voice"
+    gesture_confidence: float = 0.0
+    params: dict = field(default_factory=dict)
+
+
+def test_trainer_record_failure_forwards_to_twin_only():
+    db = _make_db()
+    twin = MagicMock()
+    twin.record_failure = AsyncMock()
+    trainer = ContinuousTrainer(
+        agent_db=db, config=None, twin_state=twin, gesture_samples_min=10
+    )
+
+    asyncio.run(trainer.record_failure(_FailCmd(), "CLICK", command_id=7))
+
+    twin.record_failure.assert_called_once()
+    # Must write NOTHING to the success-biased few-shot store
+    db.upsert_few_shot_example.assert_not_called()
+
+
+def test_trainer_record_failure_no_twin_is_safe():
+    trainer = _make_trainer()  # twin_state=None
+    asyncio.run(trainer.record_failure(_FailCmd(), "CLICK"))
+    trainer._db.upsert_few_shot_example.assert_not_called()

@@ -40,9 +40,11 @@ class SessionAnalyzer:
 
     Usage:
         analyzer = SessionAnalyzer(agent_db_path="agent.db")
-        summary = await analyzer.analyze(session_id=42)   # async (uses AgentDB)
+        summary = analyzer.analyze_session(session_id=42)   # sync DuckDB queries
         report  = analyzer.format_report(summary)
         print(report)
+        # Or, to compute AND persist the rollup to AgentDB.session_summaries:
+        #   summary = await analyzer.run_and_persist(session_id=42, agent_db=db)
     """
 
     def __init__(self, agent_db_path: str = "agent.db") -> None:

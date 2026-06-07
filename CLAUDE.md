@@ -12,7 +12,18 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity + mouth-sound removal + agent-orchestration hardening (2026-06-06)
+## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity + mouth-sound removal + agent-orchestration hardening + gemma4 general slot + RAG/KB remediation (2026-06-07)
+
+**Done (RAG/KB audit + remediation — 2026-06-07):** Branch `feat/rag-kb-remediation` (off `feat/gemma4-general-slot`), 5 commits, tip `633164d`, **not yet pushed / no PR**. Full suite **761 passed**.
+- `fix(rag)` `5985e80` — `CodebaseIndexer(embedder=…)` kwarg + cosine pin. The missing kwarg had been **silently disabling code-RAG** on the `--index-codebase` path (TypeError swallowed by `main.py` → `indexer=None`).
+- `fix(twin,memory)` `3707d22` — **the pain-day fail signal was dead**: `_session_fail_count` was the highest-weighted pain-day signal (0.30) and logged `fail_ratio` but was **never incremented**. Fixed with a separate `BehavioralTwinState.record_failure()` / `ContinuousTrainer.record_failure()` / coordinator failure branch (counters only — must NEVER touch few-shot / `PreferenceModel` / `SemanticMemory`, which are success-biased). Also rewired `MemoryManager._VALID_KEYS`, `read_context` namespacing, DevAgent `_db()` seam; `gesture_conf_delta` / `cmd_rate_delta` were hard-coded 0.0 in the twin log write — now real.
+- `refactor(kb)` `3124c47` — `SemanticMemory` L2→cosine (+ `score` key); `TwinSnapshot.command_count_today` → `command_count_session` (was a per-session counter, never per-day); stale docs.
+- `feat(kb)` `633164d` — versioned migrations (`AgentDB._migrate` + `PRAGMA user_version`, narrowed except); chunk sub-splitting `_(i/N)` instead of 4000-char truncation; watcher debounce; time-gated `_available` re-probe (gated on `_started_once` so never-started instances stay in fallback). Adds `tests/test_kb_robustness.py` (19).
+- `docs(db)` `45c0283` — 9 Mermaid ER diagrams added to `docs/architecture/database-design.md` §11 + §12 two-tier note; fixed stale "embedding always NULL/Jaccard" and table-count claims (agent.db was 29 tables at that commit; **30 after the orchestration `goal_queue` merge** — the `database-design.md` ER diagrams still show 29 and need a goal_queue refresh).
+- **chroma_db rebuilt under cosine** (backup at `%TEMP%\chroma_db.bak-pre-cosine`): `codebase`=1937 chunks, `documents`=128 pages, both `hnsw.space=cosine` (verified). `behavioral_memory` recreates under cosine on next `twin.start()`.
+- **Deferred (out of scope):** Tranche 4 security — `audit.db` lacks DROP-TABLE / hash-chaining protection; `remote_indexer_service.py` is plaintext `0.0.0.0:9000` no-auth. Acceptable for single-user home LAN.
+
+**Done (Gemma 4 general slot — 2026-06-07):** `feat(inference)` `7076c24` — general slot → `gemma4:12b` (fits resident, kills eviction churn), `e4b-it-qat` flare fallback; reusable model-eval suites. Code/plan consolidation **NO-GO** (gemma4 thinking-tax = 4× latency) — kept `qwen3-coder:30b`. See `project/gemma4_general_slot_plan.md`.
 
 **Done (Agent-orchestration hardening + Opus 4.8 dev path — 2026-06-06):**
 - `fix(inference)` — `ResourceGovernor` evicts the **router-derived** heavy specialist set on a flare (was hardcoded `qwen3-vl:30b`) and sleeps the vLLM pool; new `set_model_router()` + `ModelRouter.heavy_model_names()`/`sleep_specialists()`.
@@ -185,12 +196,12 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 
 **Done (iPad structured log forwarding — 2026-05-22):**
 - `ipad_bridge.py` — `ipad_log` message handler: routes each AppLogger entry to `ipad.<subsystem>` Python logger; warning+ entries persisted to DB
-- `db.py` — +1 table: `ipad_logs`; +1 method: `log_ipad_events(session_id, entries)`; total is now **32 AgentDB tables** (previous Sprint C tables were undercounted)
+- `db.py` — +1 table: `ipad_logs`; +1 method: `log_ipad_events(session_id, entries)`; AgentDB is now **30 tables** (the 3 `benchmark_*` tables in `db.py` belong to the DuckDB `AnalyticsDB`, not `agent.db`; the most recent additions are `goal_queue` from gap D)
 - `iPadApp/DesktopAgent/AppLogger.swift` — structured log forwarding over WebSocket (subsystem + level + msg batching)
 - Multiple Swift sensor files updated to use AppLogger for structured output: `SharedAudioSession`, `AudioStreamer`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `LiDARStreamer`, `SharedFaceSession`, `TiltSensor`, `SensorManager`, `DesktopAgentApp`
 - `fusion_engine.py` — `set_gaze_calibrator()` wiring path also updated
 
-**Test suite (2026-06-06):** 673 pytest test functions across 60 `tests/test_*.py` files (+ standalone integration scripts) + 15 Swift XCTest files
+**Test suite (2026-06-07):** 714 pytest test functions across 62 `tests/test_*.py` files (761 passed when run, incl. parametrization) + 15 Swift XCTest files
 
 ## Run Commands
 
@@ -270,7 +281,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `adaptive/continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
 | `sensors/lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
 | `adaptive/behavioral_twin_state.py` | Persistent user behaviour model: `TwinSnapshot`, `PreferenceModel`, `PainDayEngine`; AgentDB + ChromaDB backing; feeds `HybridCoordinator` before every gate decision |
-| `storage/semantic_memory.py` | ChromaDB vector store (all-MiniLM-L6-v2) for semantic few-shot retrieval; Jaccard fallback when chromadb unavailable; `stop()` releases WAL file handles on Windows |
+| `storage/semantic_memory.py` | ChromaDB vector store (all-MiniLM-L6-v2, cosine space) for semantic few-shot retrieval; query results carry a `score` (=1−distance); Jaccard fallback when chromadb unavailable; time-gated `_available` re-probe (gated on `_started_once`); `stop()` releases WAL file handles on Windows |
 | `sensors/one_euro_filter.py` | Casiez 2012 adaptive low-pass filter (1€); used for tilt velocity, tilt position, gaze delta, head tracking — replaces EMA throughout sensor pipelines |
 | `calibration/gyro_bias_calibrator.py` | Gyro bias state machine (UNCALIBRATED→COLLECTING→CALIBRATED→FROZEN); stationary detection + lerp-smoothed bias subtraction for tilt velocity pipeline |
 | `sensors/gesture_processor.py` | MediaPipe Tasks API (`HandLandmarker`, `hand_landmarker.task`); peace-sign base pose; 13 gestures (swipe/grab/snap/monitor/push-pull/pinch); 500ms rolling buffer; velocity learning; 800ms debounce |
@@ -280,7 +291,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `main.py` | Unified entry point; `--measure-vram`; `--viewer`/`--viewer-only`; startup status table; Ctrl-C shutdown |
 | `sensors/sensor_viewer.py` | tkinter desktop window (daemon thread); camera + LiDAR depth side-by-side; hand landmark overlay; freeze-frame; depth-at-cursor readout; always-on-top toggle |
 | `sensors/whisper_stream.py` | GPU-accelerated speech: Silero VAD + faster-whisper large-v3; emits `Command(source="voice")` to FusionEngine |
-| `storage/db.py` | `AgentDB` (aiosqlite, 33 tables, all pipeline writes) + `AnalyticsDB` (DuckDB, benchmark history); MiniLM semantic retrieval; gesture velocity + voice + iPad log tables; **`goal_queue`** durable goal backlog (gap D — enqueue/claim/complete/requeue_stale, idempotency_key); per-domain inference stats + `adaptation_log.domain` (gap H) |
+| `storage/db.py` | `AgentDB` (aiosqlite, 30 tables, all pipeline writes; versioned via `PRAGMA user_version`) + `AnalyticsDB` (DuckDB, 3 benchmark tables); MiniLM semantic retrieval; gesture velocity + voice + iPad log tables; **`goal_queue`** durable goal backlog (gap D — enqueue/claim/complete/requeue_stale, idempotency_key); per-domain inference stats + `adaptation_log.domain` (gap H) |
 | `tests/test_bridge_client.py` | Simulated iPad client; sends 8 test messages; verifies ack for each |
 | `tts/polly_stream.py` | Python TTS client — HTTP to Node.js sidecar; `speak_sync()` for threads, `speak()` async, `speak_stream()` for token-by-token; auto-starts sidecar; `get_client(backend=)` dispatches to Chatterbox when configured |
 | `tts/chatterbox_tts.py` | Local GPU TTS backend (RTX 5090); `ChatterboxClient` with same interface as `PollyStreamClient`; emotion exaggeration, paralinguistic tags, zero-shot voice cloning |
@@ -297,7 +308,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `desktop/flick_engine.py` | Flick-to-snap gesture handler; maps GRAB_SNAP_* gestures to window snap zones; uses OneEuroFilter for smoothing |
 | `desktop/target_cache.py` | `ClickableTargetCache` — daemon thread publishing a lock-protected snapshot of clickable UI targets for magnetic snap + cursor gravity; change-gated COM walk (foreground-hwnd + 1.5 s heartbeat), failure backoff, `CoUninitialize`; started behind `DA_CURSOR_GRAVITY` |
 | `inference/kiro_client.py` | WebSocket client for Kiro/VS Code bridge extension on ws://127.0.0.1:8767; wired to DevAgent for code edits |
-| `inference/codebase_indexer.py` | ChromaDB RAG index over Python/Swift source + docs PDFs; incremental file watcher; fed to DevAgent for context |
+| `inference/codebase_indexer.py` | ChromaDB RAG index (cosine) over Python/Swift source + docs PDFs; accepts `embedder=`; oversized units sub-split into `_(i/N)` chunks (no 4000-char truncation); per-path debounced file watcher; time-gated `_available` re-probe; fed to DevAgent for context |
 | `monitoring/metrics.py` | In-process metrics singleton; VRAM poller; optional `/metrics` HTTP endpoint |
 | `storage/session_analyzer.py` | Post-session DuckDB analytics; route distribution, latency percentiles, error modes; summary persisted to AgentDB |
 | `core/scheduler.py` | `AccessibilityScheduler` — priority queue over `coordinator.route()`; 5 tiers (ACCESSIBILITY/VOICE/GESTURE concurrent, DEV_AGENT/BACKGROUND semaphore-gated); `fan_out()` runs independent sub-steps under a separate N=3 `_subagent_sem` (gap #1, deadlock-free vs `_dev_sem`; records a `fan_out` trace span, gap C); `pause_dev()`/`resume_dev()` flare admission gate (gap #3); bounded queue (256) with priority-aware load-shedding of DEV/BACKGROUND only (gap #4); parked dev tasks capped at 16 during a flare, excess shed (gap F); `is_healthy()`/`restart()` for the Supervisor (gap #2); wired in `FusionEngine._emit()` |

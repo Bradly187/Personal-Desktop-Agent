@@ -1501,7 +1501,11 @@ class DevAgent:
         if self._memory is not None:
             run_id = -1
             try:
-                run_id = await self._memory._db.insert_agent_run(
+                # The run header must be a direct call because it returns the
+                # run_id the steps reference; write_state() returns None. Use the
+                # sanctioned _db() seam rather than reaching into _memory._db
+                # (private attr). Per-step records go through write_state() below.
+                run_id = await self._db().insert_agent_run(
                     command_id=command_id,
                     goal=result.goal,
                     domain=result.domain,

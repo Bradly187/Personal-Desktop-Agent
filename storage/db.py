@@ -104,7 +104,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# agent.db schema — all 12 tables
+# agent.db schema — all 29 tables
 # ---------------------------------------------------------------------------
 
 AGENT_DB_SCHEMA = """
@@ -528,6 +528,19 @@ CREATE TABLE IF NOT EXISTS session_summaries (
 """
 
 
+# Additive column migrations (see AgentDB._migrate). Each entry adds a column to
+# a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
+# append a row when introducing a new additive column; the batch is gated by
+# PRAGMA user_version so it runs at most once per database file.
+_AGENT_DB_SCHEMA_VERSION = 2
+_AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
+    ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
+    ("commands", "trace_id", "TEXT"),
+    ("adaptation_log", "domain", "TEXT"),   # gap H: per-domain SLO adaptation
+)
+
+
 # ---------------------------------------------------------------------------
 # Scoring helpers (shared with ContinuousTrainer)
 # ---------------------------------------------------------------------------
@@ -588,23 +601,44 @@ class AgentDB:
             "PRAGMA synchronous=NORMAL;"
         )
         await self._conn.executescript(AGENT_DB_SCHEMA)
-        # Idempotent column migrations for DBs created before the column existed.
-        # CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing table.
-        for table, column, ddl in (
-            ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
-            ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
-            ("commands", "trace_id", "TEXT"),
-            ("adaptation_log", "domain", "TEXT"),   # gap H: per-domain SLO adaptation
-        ):
+        # Versioned, additive column migrations (degrade-gracefully — a failure
+        # here logs and continues as long as the core schema applied).
+        try:
+            await self._migrate()
+        except Exception as exc:
+            log.warning("AgentDB migration error (continuing): %s", exc)
+        await self._conn.commit()
+        self.available = True
+        log.info("AgentDB opened: %s", path)
+
+    async def _migrate(self) -> None:
+        """Apply additive column migrations, gated by PRAGMA user_version so the
+        batch runs at most once per DB.
+
+        CREATE TABLE IF NOT EXISTS cannot add columns to a pre-existing table, so
+        each (table, column, ddl) is ALTERed in. Unlike the previous
+        ``except Exception: pass``, the except is narrowed to the already-exists
+        case — a genuine DDL error is logged instead of being silently swallowed.
+        """
+        cur = await self._conn.execute("PRAGMA user_version")
+        row = await cur.fetchone()
+        version = row[0] if row else 0
+        if version >= _AGENT_DB_SCHEMA_VERSION:
+            return  # already migrated — skip the ALTER probing entirely
+        for table, column, ddl in _AGENT_DB_MIGRATIONS:
             try:
                 await self._conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"
                 )
-            except Exception:
-                pass  # column already exists
-        await self._conn.commit()
-        self.available = True
-        log.info("AgentDB opened: %s", path)
+            except Exception as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    log.warning(
+                        "AgentDB migration ALTER %s.%s failed: %s", table, column, exc
+                    )
+                # else: column already present (fresh/already-migrated DB) — fine
+        # PRAGMA user_version does not accept a bound parameter
+        await self._conn.execute(f"PRAGMA user_version = {_AGENT_DB_SCHEMA_VERSION}")
+        log.info("AgentDB schema migrated to version %d", _AGENT_DB_SCHEMA_VERSION)
 
     async def close(self) -> None:
         if self._conn:

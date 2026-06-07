@@ -320,7 +320,7 @@ def test_cross_session_context_round_trip(prior_texts):
         max_size=5,
     ),
     session_context=st.lists(st.text(min_size=0, max_size=50), min_size=0, max_size=20),
-    command_count_today=st.integers(min_value=0, max_value=1000),
+    command_count_session=st.integers(min_value=0, max_value=1000),
     pain_day_score=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
     snapshot_ts=st.floats(min_value=0.0, max_value=1e9, allow_nan=False),
 )
@@ -330,7 +330,7 @@ def test_twin_snapshot_immutable_and_complete(
     preferred_actions,
     source_weights,
     session_context,
-    command_count_today,
+    command_count_session,
     pain_day_score,
     snapshot_ts,
 ):
@@ -340,7 +340,7 @@ def test_twin_snapshot_immutable_and_complete(
         preferred_actions=preferred_actions,
         source_weights=source_weights,
         session_context=session_context,
-        command_count_today=command_count_today,
+        command_count_session=command_count_session,
         pain_day_score=pain_day_score,
         snapshot_ts=snapshot_ts,
     )
@@ -350,7 +350,7 @@ def test_twin_snapshot_immutable_and_complete(
     assert isinstance(snapshot.preferred_actions, list)
     assert isinstance(snapshot.source_weights, dict)
     assert isinstance(snapshot.session_context, list)
-    assert isinstance(snapshot.command_count_today, int)
+    assert isinstance(snapshot.command_count_session, int)
     assert isinstance(snapshot.pain_day_score, float)
     assert isinstance(snapshot.snapshot_ts, float)
 
@@ -360,7 +360,7 @@ def test_twin_snapshot_immutable_and_complete(
         "preferred_actions",
         "source_weights",
         "session_context",
-        "command_count_today",
+        "command_count_session",
         "pain_day_score",
         "snapshot_ts",
     ]
@@ -490,7 +490,7 @@ def test_default_snapshot_before_start_completes(n_commands):
     assert snapshot.preferred_actions == []
     assert snapshot.pain_day_score == 0.0
     assert snapshot.session_context == []
-    assert snapshot.command_count_today == 0
+    assert snapshot.command_count_session == 0
     assert snapshot.source_weights == {}
     assert snapshot.snapshot_ts == 0.0
 
@@ -886,3 +886,126 @@ def test_start_completes_within_5_seconds():
         await twin.stop()
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Tranche 1 A1: record_failure feeds the pain-day fail signal (and ONLY that)
+# ---------------------------------------------------------------------------
+
+def test_record_failure_increments_fail_and_cmd_counts():
+    """A failure bumps BOTH fail and cmd counts so signal_1 = fail/(success+fail)."""
+    twin = _make_twin()
+
+    async def run():
+        await twin.start()
+        for i in range(2):  # 2 successes
+            await twin.observe(MockCommand(text=f"ok_{i}"), "CLICK")
+        if twin._pending_tasks:
+            await asyncio.gather(*twin._pending_tasks, return_exceptions=True)
+        for i in range(3):  # 3 failures
+            await twin.record_failure(MockCommand(text=f"bad_{i}"), "CLICK")
+        await twin.stop()
+
+    asyncio.run(run())
+    assert twin._session_fail_count == 3
+    assert twin._session_cmd_count == 5  # 2 success + 3 fail
+
+
+def test_record_failure_does_not_touch_learning_stores():
+    """The dominant Tranche-1 invariant: failures move counters only — never the
+    success-biased SemanticMemory / PreferenceModel / clarify counters."""
+    twin = _make_twin()
+    calls = {"sem_add": 0, "pref_update": 0}
+
+    async def fake_add(*a, **k):
+        calls["sem_add"] += 1
+
+    def fake_update(*a, **k):
+        calls["pref_update"] += 1
+
+    async def run():
+        await twin.start()
+        twin._semantic_memory.add = fake_add
+        twin._preference_model.update = fake_update
+        await twin.record_failure(MockCommand(text="bad"), "CLICK")
+        await twin.stop()
+
+    asyncio.run(run())
+    assert calls["sem_add"] == 0
+    assert calls["pref_update"] == 0
+    assert twin._session_clarify_count == 0
+    # The accessibility few-shot session history must not gain the failed text
+    assert "bad" not in twin._session_history["accessibility"]
+
+
+def test_record_failure_dev_agent_namespace_is_ignored():
+    twin = _make_twin()
+
+    async def run():
+        await twin.start()
+        await twin.record_failure(MockCommand(text="bad"), "CLICK", namespace="dev_agent")
+        await twin.stop()
+
+    asyncio.run(run())
+    assert twin._session_fail_count == 0
+    assert twin._session_cmd_count == 0
+
+
+def test_record_failure_never_raises_on_bad_input():
+    twin = _make_twin()
+
+    async def run():
+        await twin.start()
+        await twin.record_failure(None, "")  # cmd=None must not raise
+        await twin.stop()
+
+    asyncio.run(run())
+    assert twin._session_fail_count == 1  # counter-only path is cmd-field-independent
+
+
+def test_recompute_stashes_real_deltas_for_logging():
+    """_recompute_pain_day_score stashes signals 3 & 4 so _pain_day_loop logs the
+    real values into twin_pain_day_log instead of hard-coded 0.0."""
+    from adaptive.behavioral_twin_state import ActionStats
+    twin = _make_twin()
+
+    async def run():
+        await twin.start()
+        # Deterministic gesture-confidence-drop: good-day baseline 0.9, session 0.3
+        stats = ActionStats()
+        stats.good_day_conf_sum = 0.9
+        stats.good_day_conf_count = 1
+        twin._preference_model.action_stats["CLICK"] = stats
+        twin._session_gesture_confs = [0.3]
+        twin._session_cmd_count = 4
+        twin._session_fail_count = 2
+        twin._recompute_pain_day_score()
+        await twin.stop()
+
+    asyncio.run(run())
+    assert twin._last_gesture_conf_delta > 0.0
+    assert abs(twin._last_gesture_conf_delta - (0.9 - 0.3) / 0.9) < 1e-6
+    assert isinstance(twin._last_cmd_rate_delta, float)
+
+
+def test_pain_day_score_reflects_fail_ratio_end_to_end():
+    """End-to-end: a high fraction of failed commands drives the pain-day score
+    up via signal_1 (the fail ratio) — the formerly-dead signal now lives."""
+    twin = _make_twin()
+
+    async def run():
+        await twin.start()
+        await twin.observe(MockCommand(text="ok"), "CLICK")  # 1 success
+        if twin._pending_tasks:
+            await asyncio.gather(*twin._pending_tasks, return_exceptions=True)
+        for i in range(4):                                   # 4 failures
+            await twin.record_failure(MockCommand(text=f"bad_{i}"), "CLICK")
+        score = twin._recompute_pain_day_score()
+        await twin.stop()
+        return score
+
+    score = asyncio.run(run())
+    # signal_1 = 4/5 = 0.8 at weight 0.30; other signals ~0 → score ≈ 0.24
+    assert twin._session_fail_count == 4
+    assert twin._session_cmd_count == 5
+    assert score == pytest.approx(0.30 * 0.8, abs=0.03)
