@@ -17,7 +17,7 @@
 | torch | CUDA tensor ops, Silero VAD |
 | pynvml | GPU VRAM monitoring |
 | boto3 | AWS SDK (Bedrock, Transcribe, Lex, Lambda) |
-| ollama | Local LLM inference — default backend (`OllamaInference`); llama3.1:8b warm p50 373ms |
+| ollama | Local LLM inference — default backend (`OllamaInference`); llama3.1:8b warm wall p50 ~190ms / ~29ms compute (Ollama 0.30.6, RTX 5090) |
 | vllm | Local LLM inference — production target; verified working in Ubuntu WSL2 (vLLM 0.21.0 + torch 2.11.0+cu128 on RTX 5090); activate with `--backend vllm` |
 | aiosqlite | Async SQLite for few-shot memory |
 | aiohttp | iPad touch WebSocket server |
@@ -48,7 +48,7 @@
 |-------|----------|---------|------|
 | Whisper large-v3 | RTX 5090 | < 400 ms | ~4.2 GB |
 | MediaPipe HandLandmarker | CPU | < 5 ms/frame | 0 |
-| Ollama llama3.1:8b (command) | RTX 5090 | 373 ms warm p50 | 4.6 GB |
+| Ollama llama3.1:8b (command) | RTX 5090 | ~190 ms warm wall p50 / ~29 ms compute (Ollama 0.30.6) | 4.6 GB |
 | Ollama qwen3-coder:30b (code+plan) | RTX 5090 | — (thinking ON) | 17.3 GB |
 | Ollama deepseek-r1:8b (math) | RTX 5090 | — | 4.9 GB |
 | Ollama qwen3-vl:30b (vision) | RTX 5090 | ~0.4s warm | 18.2 GB |
@@ -117,12 +117,12 @@ class LocalInference(ABC):
     @abstractmethod
     def get_status(self) -> dict: ...
 
-class OllamaInference(LocalInference): ...   # Default — llama3.1:8b command, 373 ms warm p50
+class OllamaInference(LocalInference): ...   # Default — llama3.1:8b command, ~190 ms warm wall p50 (Ollama 0.30.6)
 class LlamaCppInference(LocalInference): ... # llama-server HTTP backend (--backend llamacpp)
 class VLLMInference(LocalInference): ...     # Production target — verified in WSL2 (--backend vllm)
 ```
 
-`OllamaInference` with `llama3.1:8b` is the current production default for the command domain (100% accuracy, 373ms warm p50). Specialist domains (code/plan/math/vision/general) use `ModelRouter` which selects from qwen3-coder:30b, deepseek-r1:8b, qwen3-vl:30b, gemma3:27b based on VRAM. `NemotronInference` was removed (25% accuracy). `VLLMInference` is verified working in Ubuntu WSL2 with vLLM 0.21.0 + torch 2.11.0+cu128 — activate with `--backend vllm`; use `--gpu-memory-utilization 0.65` when Whisper is also loaded.
+`OllamaInference` with `llama3.1:8b` is the current production default for the command domain (100% accuracy, ~190ms warm wall p50 / ~29ms compute on Ollama 0.30.6). Specialist domains (code/plan/math/vision/general) use `ModelRouter` which selects from qwen3-coder:30b, deepseek-r1:8b, qwen3-vl:30b, gemma3:27b based on VRAM. `NemotronInference` was removed (25% accuracy). `VLLMInference` is verified working in Ubuntu WSL2 with vLLM 0.21.0 + torch 2.11.0+cu128 — activate with `--backend vllm`; use `--gpu-memory-utilization 0.65` when Whisper is also loaded.
 
 ## Coding Conventions
 

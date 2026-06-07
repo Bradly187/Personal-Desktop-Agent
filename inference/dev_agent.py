@@ -101,6 +101,27 @@ class AgentStep:
     result: Optional[str] = None
     success: Optional[bool] = None
     latency_ms: float = 0.0
+    # 1-based indices of steps this one depends on (gap A). Empty = no declared
+    # dependency. Parsed from an optional `(after: N, M)` / `[deps: N]` annotation.
+    deps: list[int] = field(default_factory=list)
+
+
+_DEPS_PATTERN = re.compile(
+    r"(?:after|deps|depends\s+on)\s*[:=]?\s*([\d,\s&and]+)", re.IGNORECASE
+)
+
+
+def _parse_deps(line: str) -> list[int]:
+    """Extract 1-based dependency step numbers from a plan line annotation.
+
+    Recognises e.g. '(after: 1, 3)', '[deps 2]', 'depends on 1 and 2'. Returns a
+    sorted, de-duplicated list; empty when no annotation is present.
+    """
+    m = _DEPS_PATTERN.search(line)
+    if not m:
+        return []
+    nums = {int(tok) for tok in re.findall(r"\d+", m.group(1))}
+    return sorted(nums)
 
 
 @dataclass
@@ -129,6 +150,7 @@ def _parse_plan(text: str) -> list[AgentStep]:
         if m:
             action = m.group(1).upper()
             args = (m.group(2) or "").strip()
+            deps = _parse_deps(lines[i])    # gap A: optional dependency annotation
             # Collect body lines until the next step or end
             body_lines = []
             i += 1
@@ -142,7 +164,7 @@ def _parse_plan(text: str) -> list[AgentStep]:
             # Remove markdown code fences from body
             body = re.sub(r"^```[a-z]*\n?", "", body, flags=re.MULTILINE)
             body = re.sub(r"\n?```$", "", body, flags=re.MULTILINE).strip()
-            steps.append(AgentStep(action=action, args=args, body=body))
+            steps.append(AgentStep(action=action, args=args, body=body, deps=deps))
         else:
             i += 1
     return steps
@@ -183,6 +205,25 @@ class DevAgent:
     # keep their convenient auto-approve-on-silence.
     _DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
         "WRITE_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR",
+    })
+
+    # Pure context-gathering verbs (gap #1 fan-out): read-only, no side effects,
+    # and no inter-step dependency worth serialising. A LEADING run of these in a
+    # plan can be executed concurrently via the scheduler's sub-agent pool before
+    # the sequential action loop. Subset of _RETRYABLE_VERBS (excludes SEARCH_WEB,
+    # which opens a browser, and EXPLAIN, which is ordering-sensitive narration).
+    _PARALLEL_VERBS: frozenset[str] = frozenset({
+        "READ_FILE", "GREP", "FETCH_URL", "READ_SCREEN", "GIT_STATUS", "GIT_DIFF",
+    })
+
+    # Verbs safe to run CONCURRENTLY within one DAG wave (gap A). Reads (above)
+    # plus WRITE_FILE (distinct paths — independence is guaranteed by the absence
+    # of a declared dependency) and EXPLAIN (pure narration). Everything else —
+    # RUN_TERMINAL, GIT_COMMIT/CHECKOUT, GITHUB_PR, CLICK/OPEN/HOTKEY/TYPE/SCROLL,
+    # SEARCH_WEB(browser) — is a BARRIER: it has shared-resource / ordering side
+    # effects, so it runs SOLO even when its dependencies are satisfied.
+    _FANOUT_SAFE_VERBS: frozenset[str] = _PARALLEL_VERBS | frozenset({
+        "WRITE_FILE", "EXPLAIN",
     })
 
     def __init__(
@@ -349,6 +390,17 @@ class DevAgent:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
+        # Unified agent-run trace (gap C): one trace_id spans the whole plan.
+        # Setting it as the current ContextVar means every awaited descendant —
+        # ModelRouter.infer's inference spans, scheduler.fan_out children — attach
+        # to THIS trace automatically, reconstructing the run as one tree. Zero
+        # cost when DA_TRACE is off (new_trace returns "" and spans no-op).
+        from monitoring.trace import get_tracer
+        _tracer = get_tracer()
+        trace_id = _tracer.new_trace(kind="plan", goal=goal[:80])
+        _trace_tok = _tracer.set_current(trace_id)
+        _tracer.record_span("plan", trace_id=trace_id, goal=goal[:80])
+
         # Step 1: Generate plan — inject RAG context + git/IDE context
         extra_ctx = self._format_context()
         rag = await self._rag_context(goal, n=4)
@@ -366,6 +418,8 @@ class DevAgent:
             context=extra_ctx,
         )
         if not plan_result.ok:
+            _tracer.record_span("plan_done", trace_id=trace_id, status="plan_error")
+            _tracer.reset_current(_trace_tok)
             return AgentResult(
                 goal=goal, domain="plan",
                 model_used=plan_result.model,
@@ -401,7 +455,19 @@ class DevAgent:
         cancelled = False
         halted_reason: Optional[str] = None
 
-        while remaining:
+        # Execution strategy:
+        #  - If the planner declared step dependencies AND a scheduler is wired,
+        #    run the dependency DAG in waves (gap A) — independent steps run
+        #    concurrently. On the first failure / cancellation / unmet dep it
+        #    hands the remainder back to the sequential loop below (with replan).
+        #  - Otherwise, the proven sequential path runs, after fanning out any
+        #    leading read-only context steps (gap #1).
+        if self._scheduler is not None and self._plan_has_deps(steps):
+            cancelled = await self._run_dag_waves(remaining, executed, run_id)
+        else:
+            await self._gather_readonly_prefix(remaining, executed, run_id)
+
+        while remaining and not cancelled:
             if len(executed) >= self.MAX_STEPS:
                 halted_reason = f"reached MAX_STEPS ({self.MAX_STEPS})"
                 log.warning("DevAgent: %s", halted_reason)
@@ -418,6 +484,7 @@ class DevAgent:
                      self._current_step, step.action, step.args[:60])
 
             ok = await self._run_step_with_retry(step)
+            _tracer.record_span("step", trace_id=trace_id, action=step.action, ok=ok)
             executed.append(step)
             await self._persist_step(run_id, len(executed), step)
             if ok:
@@ -466,6 +533,9 @@ class DevAgent:
         await self._speak_plan_completion(result, cancelled)
         self._reset_plan_state()
 
+        _tracer.record_span("plan_done", trace_id=trace_id,
+                            steps=len(executed), success=succeeded, status=status)
+        _tracer.reset_current(_trace_tok)
         return result
 
     async def _run_step_with_retry(self, step: AgentStep) -> bool:
@@ -491,6 +561,156 @@ class DevAgent:
                     step.action, attempt + 1, attempts, exc,
                 )
         return False
+
+    # ── Parallel context-gathering (gap #1) ─────────────────────────────────
+
+    def _leading_parallel_prefix(self, remaining: list[AgentStep]) -> list[AgentStep]:
+        """The leading contiguous run of pure read-only steps at the front of `remaining`."""
+        prefix: list[AgentStep] = []
+        for s in remaining:
+            if s.action.upper() in self._PARALLEL_VERBS:
+                prefix.append(s)
+            else:
+                break
+        return prefix
+
+    async def _gather_readonly_prefix(
+        self,
+        remaining: list[AgentStep],
+        executed: list[AgentStep],
+        run_id: int,
+    ) -> None:
+        """Fan out a leading run of independent read-only steps concurrently.
+
+        Closes gap #1 for the common 'gather context, then act' plan shape. No-op
+        unless a scheduler is wired and >= 2 such steps lead the plan.
+
+        Failure semantics are preserved EXACTLY: on any failed/timed-out child the
+        parallel results are discarded and the steps are left in `remaining` for
+        the normal sequential loop (which applies retry + replan-on-failure). Read
+        verbs are idempotent, so the rare re-run is safe and side-effect-free.
+        """
+        if self._scheduler is None or self._cancel_event.is_set():
+            return
+        prefix = self._leading_parallel_prefix(remaining)
+        if len(prefix) < 2:
+            return
+
+        results = await self._scheduler.fan_out(
+            [self._run_step_with_retry(s) for s in prefix],
+            label=f"devagent_readonly[{len(prefix)}]",
+        )
+        if not all(r is True for r in results):
+            log.info(
+                "DevAgent: parallel read-only prefix had a failure — falling back "
+                "to sequential execution (replan-on-failure preserved)"
+            )
+            return
+
+        # All succeeded — adopt the batch: advance `executed` and persist in order.
+        del remaining[: len(prefix)]
+        for s in prefix:
+            executed.append(s)
+            await self._persist_step(run_id, len(executed), s)
+        self._current_step = len(executed)
+        self._total_steps = len(executed) + len(remaining)
+        log.info("DevAgent: ran %d read-only context step(s) in parallel", len(prefix))
+
+    # ── Dependency-DAG wave execution (gap A) ────────────────────────────────
+
+    @staticmethod
+    def _plan_has_deps(steps: list[AgentStep]) -> bool:
+        """True if the planner declared any inter-step dependency (engages the DAG)."""
+        return any(s.deps for s in steps)
+
+    async def _run_dag_waves(
+        self,
+        remaining: list[AgentStep],
+        executed: list[AgentStep],
+        run_id: int,
+    ) -> bool:
+        """Execute a dependency-ordered plan in waves, fanning out independent steps.
+
+        Each wave runs every step whose declared deps are already satisfied:
+        fan-out-safe steps (reads / WRITE_FILE / EXPLAIN) run CONCURRENTLY via the
+        scheduler's sub-agent pool; barrier steps (RUN_TERMINAL, git, UI, …) run
+        SOLO. Steps are 1-based by their original plan position (what `deps`
+        reference).
+
+        Stops and hands the remainder back to the SEQUENTIAL+replan loop on the
+        first failure, on a dependency cycle / dep-on-failed-step (no ready steps),
+        or on cancellation. On clean completion `remaining` is emptied. Returns
+        whether the run was cancelled. Mutates `executed` (append, in completion
+        order) and `remaining` (left = the not-completed tail, deps cleared so the
+        dep-agnostic sequential loop can drain it).
+        """
+        # 1-based position → step, preserving the planner's numbering for deps.
+        pending: dict[int, AgentStep] = {i: s for i, s in enumerate(remaining, 1)}
+        completed: set[int] = set()
+        cancelled = False
+        failed = False
+
+        while pending and not failed and not cancelled:
+            if self._cancel_event.is_set():
+                cancelled = True
+                break
+            ready = [i for i, s in pending.items()
+                     if all(d in completed for d in s.deps)]
+            if not ready:
+                # Cycle, or a dependency landed on a step that didn't complete —
+                # let the sequential loop sort out the remainder.
+                log.warning("DevAgent[dag]: no ready steps (cycle/unmet dep) — "
+                            "%d step(s) deferred to sequential", len(pending))
+                break
+
+            safe = [i for i in ready if pending[i].action.upper() in self._FANOUT_SAFE_VERBS]
+            barriers = [i for i in ready if i not in safe]
+
+            # Fan-out-safe ready steps run concurrently (or inline if just one).
+            if len(safe) >= 2 and self._scheduler is not None:
+                results = await self._scheduler.fan_out(
+                    [self._run_step_with_retry(pending[i]) for i in safe],
+                    label=f"dag_wave[{len(safe)}]",
+                )
+            else:
+                results = [await self._run_step_with_retry(pending[i]) for i in safe]
+
+            for idx, ok in zip(safe, results):
+                step = pending.pop(idx)
+                executed.append(step)
+                await self._persist_step(run_id, len(executed), step)
+                if ok is True:
+                    completed.add(idx)
+                else:
+                    failed = True
+            if failed:
+                break
+
+            # Barriers run one at a time, in plan order.
+            for idx in sorted(barriers):
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
+                ok = await self._run_step_with_retry(pending[idx])
+                step = pending.pop(idx)
+                executed.append(step)
+                await self._persist_step(run_id, len(executed), step)
+                if ok is True:
+                    completed.add(idx)
+                else:
+                    failed = True
+                    break
+
+        # Leave the not-completed tail for the sequential loop (deps cleared so the
+        # dep-agnostic drain runs them in order; replan handles recovery).
+        tail = [pending[i] for i in sorted(pending)]
+        for s in tail:
+            s.deps = []
+        remaining[:] = tail
+        log.info("DevAgent[dag]: completed %d step(s) in waves, %d deferred%s",
+                 len(completed), len(tail), " (cancelled)" if cancelled else
+                 (" (failure → replan)" if failed else ""))
+        return cancelled
 
     async def _replan(
         self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
