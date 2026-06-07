@@ -5,7 +5,10 @@ a concrete implementation. This allows swapping backends without touching
 routing logic.
 
 Concrete implementations:
-  OllamaInference    — default backend  (373 ms warm p50, 100% accuracy on command eval)
+  OllamaInference    — default backend  (~190 ms warm wall p50 / ~29 ms compute, 100% accuracy on
+                       command eval; measured Ollama 0.30.6 + RTX 5090, 2026-06-06. Wall latency
+                       carries a ~135 ms per-request load_duration on Windows/CUDA even when the
+                       model is resident — mmap is disabled for windows_cuda.)
   VLLMInference      — production backend using vLLM offline LLM class (not AsyncLLMEngine);
                        uses LLM.chat() for native chat templates + sleep/wake VRAM offload
   LlamaCppInference  — llama-server HTTP backend (--backend llamacpp)
@@ -32,7 +35,9 @@ log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
 You are a desktop control assistant. Convert the user's natural-language \
-request into exactly ONE action from the following vocabulary:
+request into exactly ONE action from the following vocabulary. The angle \
+brackets below mark placeholders — replace each with the actual value. Never \
+output the brackets, the placeholder name, surrounding quotes, or an '=' sign.
 
 CLICK <target>       — click a named UI element or coordinates
 SCROLL <direction> [<amount>]  — scroll up/down/left/right
@@ -44,9 +49,22 @@ DICTATE <text>       — paste text verbatim via clipboard
 CLARIFY <question>   — ask the user to clarify; do not act
 SCREENSHOT           — capture the desktop screen
 
+Examples (output is the verb followed by the literal value only):
+User: click the save button
+Assistant: CLICK save button
+User: scroll down three times
+Assistant: SCROLL down 3
+User: close this window
+Assistant: CLOSE
+User: type hello world
+Assistant: TYPE hello world
+User: open Chrome browser
+Assistant: OPEN Chrome
+
 Rules:
 - Reply with ONLY the action string, nothing else.
 - Do not explain or comment.
+- Do not echo the placeholder notation: no <...>, no quotes, no '=' sign.
 - If the request is ambiguous reply with CLARIFY followed by a short question.
 - If the request matches no action reply with CLARIFY.
 """
@@ -67,6 +85,153 @@ def _build_prompt(cmd: Command, few_shot_examples: list[dict] | None = None) -> 
 
     parts.append(f"\nUser: {cmd.text}\nAssistant:")
     return "\n".join(parts)
+
+
+def _build_chat_messages(
+    cmd: Command,
+    few_shot_examples: list[dict] | None = None,
+) -> list[dict]:
+    """Build OpenAI/Ollama-style chat messages for the /api/chat tool path."""
+    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    if few_shot_examples:
+        for ex in few_shot_examples:
+            messages.append({"role": "user", "content": ex["command_text"]})
+            messages.append({"role": "assistant", "content": ex["action_text"]})
+    if cmd.session_context:
+        ctx = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
+        messages.append({"role": "user", "content": f"Recent commands:\n{ctx}"})
+        messages.append({"role": "assistant", "content": "Understood."})
+    messages.append({"role": "user", "content": cmd.text})
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# Native tool-calling schema (Ollama 0.30+ — "tool calling carries over")
+# ---------------------------------------------------------------------------
+#
+# A single constrained tool. The `verb` enum gives the Ollama path the same
+# output-format guarantee the vLLM path gets from grammar-constrained decoding
+# (VLLMInference._VERB_PATTERN): the model can only emit a valid verb, so the
+# default Ollama backend stops relying on the model obeying "reply with ONLY the
+# action string". `argument` carries the rest (target / text / keys), so the
+# reconstructed "VERB argument" string is byte-compatible with the contract
+# HybridCoordinator._parse_action already expects — no downstream changes.
+#
+# Opt-in via OllamaInference(use_tools=True); the default (generate) path is the
+# verified 100%-accuracy backend and is unchanged.
+
+# 11 accessibility verbs + CLARIFY — exactly the set OllamaInference emits
+# (dev-agent verbs are routed to DevAgent/ModelRouter before reaching here).
+_ACTION_VERBS: list[str] = [
+    "CLICK", "MOUSEDOWN", "MOUSEUP", "SCROLL", "TYPE", "OPEN",
+    "CLOSE", "HOTKEY", "DICTATE", "CLARIFY", "SCREENSHOT",
+]
+
+_DESKTOP_ACTION_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "desktop_action",
+        "description": (
+            "Emit exactly ONE desktop-control action that fulfils the user's "
+            "request. Always call this tool — never reply with prose."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "verb": {
+                    "type": "string",
+                    "enum": _ACTION_VERBS,
+                    "description": "The single action verb to perform.",
+                },
+                "argument": {
+                    "type": "string",
+                    "description": (
+                        "The action's argument: the click target, text to type, "
+                        "key combo, scroll direction[+amount], app/file to open, "
+                        "or the clarifying question for CLARIFY. Empty string for "
+                        "SCREENSHOT (and CLOSE of the active window)."
+                    ),
+                },
+            },
+            "required": ["verb"],
+        },
+    },
+}
+
+
+def _action_from_tool_call(tool_call: dict) -> str | None:
+    """Reconstruct a 'VERB argument' action string from one Ollama tool_call.
+
+    Returns None when the call isn't our tool or carries no usable verb, so the
+    caller can fall back to parsing free-text content.
+    """
+    fn = tool_call.get("function") or {}
+    if fn.get("name") != "desktop_action":
+        return None
+    args = fn.get("arguments")
+    # Ollama returns arguments as a dict; some builds/models stringify it as JSON.
+    if isinstance(args, str):
+        try:
+            import json as _json
+            args = _json.loads(args)
+        except Exception:
+            return None
+    if not isinstance(args, dict):
+        return None
+    verb = str(args.get("verb", "")).strip().upper()
+    if verb not in _ACTION_VERBS:
+        return None
+    argument = str(args.get("argument", "")).strip()
+    return f"{verb} {argument}".strip()
+
+
+def _recover_action_from_content(content: str) -> str | None:
+    """Recover a 'VERB argument' action from a model that serialised its tool
+    call into the content field instead of using tool_calls.
+
+    Observed with llama3.1 on Ollama 0.30: the model emits a function-call-shaped
+    JSON as text, e.g. {"name": "CLARIFY", "parameters": {"verb": "CLARIFY",
+    "argument": "..."}}. We tolerate several shapes (verb in the object, in
+    nested parameters/arguments, or the function `name` being the verb itself).
+    Returns None when no valid verb can be recovered, so the caller can fall
+    back to the raw first line.
+    """
+    content = (content or "").strip()
+    if not content:
+        return None
+
+    import json as _json
+    import re as _re
+
+    objs: list = []
+    try:
+        objs.append(_json.loads(content))
+    except Exception:
+        m = _re.search(r"\{.*\}", content, _re.DOTALL)
+        if m:
+            try:
+                objs.append(_json.loads(m.group(0)))
+            except Exception:
+                pass
+
+    for obj in objs:
+        if not isinstance(obj, dict):
+            continue
+        params = obj.get("parameters") or obj.get("arguments") or {}
+        if isinstance(params, str):
+            try:
+                params = _json.loads(params)
+            except Exception:
+                params = {}
+        params = params if isinstance(params, dict) else {}
+
+        verb = params.get("verb") or obj.get("verb") or obj.get("name")
+        verb = str(verb or "").strip().upper()
+        if verb not in _ACTION_VERBS:
+            continue
+        argument = str(params.get("argument", "") or obj.get("argument", "")).strip()
+        return f"{verb} {argument}".strip()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -139,21 +304,36 @@ class OllamaInference(LocalInference):
         model: str = "llama3.1:8b",
         host: str = "http://localhost:11434",
         timeout: float = 10.0,
+        use_tools: bool = False,
     ) -> None:
         self.model = model
         self.host = host
         self.timeout = timeout
+        # Opt-in native tool-calling path (/api/chat with a constrained tool).
+        # Default off → the verified generate path is unchanged. Requires a
+        # tool-capable model + Ollama 0.30+ ("ollama show <model>" → tools cap).
+        self.use_tools = use_tools
         self._available: bool | None = None  # None = not yet checked
+        # Latched breaker (gap #4): once Ollama looks down, fail fast instead of
+        # paying the full timeout on every request until it recovers.
+        from core.circuit_breaker import CircuitBreaker
+        self._breaker = CircuitBreaker(name="ollama", fail_threshold=3, cooldown_s=30.0)
 
     async def infer(
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
     ) -> str:
+        if self.use_tools:
+            return await self._infer_tools(cmd, few_shot_examples)
+
         try:
             import aiohttp
         except ImportError:
             return "CLARIFY aiohttp not installed"
+
+        if not self._breaker.allow():
+            return "CLARIFY inference backend unavailable (circuit open)"
 
         prompt = _build_prompt(cmd, few_shot_examples)
         payload = {
@@ -178,11 +358,98 @@ class OllamaInference(LocalInference):
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
+                    self._breaker.record_success()
                     return action
         except Exception as exc:
             self._available = False
+            self._breaker.record_failure()
             log.error("OllamaInference failed: %s", exc)
             return f"CLARIFY inference error: {exc}"
+
+    async def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+        """POST /api/chat and return the parsed JSON response.
+
+        Isolated so the tool path is unit-testable without mocking aiohttp —
+        tests monkeypatch this method with a canned response dict.
+        """
+        import aiohttp
+
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0.0},
+        }
+        if tools:
+            payload["tools"] = tools
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.host}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            ) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Ollama HTTP {resp.status}")
+                return await resp.json()
+
+    async def _infer_tools(
+        self,
+        cmd: Command,
+        few_shot_examples: list[dict] | None = None,
+    ) -> str:
+        """Native tool-calling path: /api/chat with the constrained desktop_action tool.
+
+        The `verb` enum constrains output to a valid action verb (the format
+        guarantee), and the result is reconstructed into the same "VERB argument"
+        string the generate path returns, so HybridCoordinator is unchanged.
+        Falls back to parsing free-text content if the model declined the tool.
+        """
+        try:
+            import aiohttp  # noqa: F401 — presence check before _chat uses it
+        except ImportError:
+            return "CLARIFY aiohttp not installed"
+
+        if not self._breaker.allow():
+            return "CLARIFY inference backend unavailable (circuit open)"
+
+        messages = _build_chat_messages(cmd, few_shot_examples)
+        t0 = time.monotonic()
+        try:
+            data = await self._chat(messages, tools=[_DESKTOP_ACTION_TOOL])
+        except Exception as exc:
+            self._available = False
+            self._breaker.record_failure()
+            log.error("OllamaInference[tools] failed: %s", exc)
+            return f"CLARIFY inference error: {exc}"
+
+        self._available = True
+        self._breaker.record_success()
+        latency_ms = (time.monotonic() - t0) * 1000
+        message = data.get("message", {}) or {}
+
+        # Preferred path: a structured tool call.
+        for call in message.get("tool_calls", []) or []:
+            action = _action_from_tool_call(call)
+            if action:
+                log.info("OllamaInference[tools]: %r → %r (%.0f ms)",
+                         cmd.text, action, latency_ms)
+                return action
+
+        # Fallback: the model answered in content despite the tool. Reuse the
+        # generate-path contract (first non-empty line) so behaviour degrades
+        # gracefully rather than dropping the command.
+        content = (message.get("content") or "").strip()
+        if content:
+            # Some models serialise the call into content as function-call JSON;
+            # recover the action from it, else take the first non-empty line.
+            action = _recover_action_from_content(content) or content.splitlines()[0].strip()
+            log.info("OllamaInference[tools]: no tool_call, parsed content %r → %r (%.0f ms)",
+                     cmd.text, action, latency_ms)
+            return action
+
+        log.warning("OllamaInference[tools]: empty response for %r", cmd.text)
+        return "CLARIFY no action produced"
 
     async def infer_stream(
         self,
@@ -253,6 +520,7 @@ class OllamaInference(LocalInference):
             "model": self.model,
             "host": self.host,
             "available": self._available,
+            "use_tools": self.use_tools,
         }
 
 

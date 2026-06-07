@@ -523,6 +523,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             "say 'resume task' to continue the most recent one.", _interrupted,
         )
 
+    # Durable goal backlog (gap D): a goal left 'running' means the process died
+    # mid-goal. Requeue it (idempotency_key prevents duplicates; poison goals that
+    # exhausted max_attempts are marked failed). The drainer is kicked after the
+    # pipeline is wired (see below) so queued goals from a previous session run.
+    _requeued = await agent_db.requeue_stale_running()
+    if _requeued:
+        log.warning("Re-queued %d goal(s) from the durable backlog after a crash.", _requeued)
+
     # --- Open audit log (separate append-only DB) ---
     audit = AuditLog()
     await audit.open(Path("audit.db"))
@@ -937,6 +945,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     governor.set_fusion_engine(fusion)
     governor.set_whisper_stream(whisper)
     governor.set_model_router(router)   # eviction targets the live model lineup
+    governor.set_scheduler(scheduler)   # gap #3: flare pauses new dev/background admission
     if indexer is not None:
         governor.set_indexer(indexer)
     await governor.start()
@@ -944,6 +953,52 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     shutdown.register(governor)
     if target_cache is not None:
         shutdown.register(target_cache)
+
+    # --- Supervisor — liveness watchdog for the critical background loops ---
+    # (gap #2) Restarts the scheduler worker / governor poll loop if either dies
+    # unexpectedly. Registered LAST so reversed-order shutdown stops it FIRST —
+    # it must not try to restart a subsystem that shutdown is tearing down.
+    from core.supervisor import Supervisor, SupervisedSpec
+    supervisor = Supervisor()
+    supervisor.supervise(SupervisedSpec(
+        name="scheduler",
+        is_alive=scheduler.is_healthy,
+        restart=scheduler.restart,
+        enabled=lambda: scheduler._running,
+    ))
+    supervisor.supervise(SupervisedSpec(
+        name="resource_governor",
+        is_alive=governor.is_healthy,
+        restart=governor.restart,
+        enabled=lambda: governor._running,
+    ))
+
+    # Escalation (gap E): when a subsystem can't be restarted, TELL the user
+    # (spoken warning — they may be unattended) and degrade rather than silently
+    # die. A FAILED scheduler → bypass it: FusionEngine._emit falls back to direct
+    # create_task dispatch when set_scheduler(None), so accessibility keeps working.
+    async def _on_subsystem_failed(name: str) -> None:
+        log.critical("Supervisor escalation: subsystem %r is FAILED (unrecoverable)", name)
+        if name == "scheduler":
+            try:
+                fusion.set_scheduler(None)   # degrade to direct dispatch
+                log.warning("Degraded mode: FusionEngine now dispatches directly "
+                            "(scheduler bypassed); accessibility unaffected, "
+                            "dev/background gating lost until restart")
+            except Exception as exc:
+                log.error("Degraded-mode handoff failed: %s", exc)
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            msg = (f"Warning. The {name.replace('_', ' ')} stopped responding and "
+                   "could not be restarted. The system is running in a reduced mode.")
+            await asyncio.to_thread(_get_tts().speak_sync, msg)
+        except Exception as exc:
+            log.debug("Supervisor escalation TTS unavailable: %s", exc)
+
+    supervisor.set_on_failed(_on_subsystem_failed)
+    supervisor.set_metrics(m)
+    await supervisor.start()
+    shutdown.register(supervisor)
 
     # --- Sync hotwords into WhisperStream once trainer is ready ---
     hotwords = await trainer.get_hotwords()
@@ -968,6 +1023,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                   f"  offload={'on' if cluster_cfg.offload_lightweight else 'off'}")
             print(f"    Whisper              : {cluster_cfg.laptop_whisper_url or '-'}  [{_mark('whisper')}]")
             print(f"    Indexer              : {cluster_cfg.laptop_indexer_url or '-'}  [{_mark('indexer')}]")
+
+    # Durable goal backlog (gap D): drain any goals queued/requeued from a previous
+    # session now that the full pipeline is wired. Fire-and-forget — each goal runs
+    # through plan_and_run with its own approval gate + crash-recoverable ledger.
+    from core.async_utils import fire_and_log
+    fire_and_log(dev_agent.drain_goal_queue(), log, label="startup_goal_drain")
 
     # --- Run bridge + fusion + watchdog concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))

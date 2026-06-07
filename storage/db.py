@@ -191,6 +191,26 @@ CREATE TABLE IF NOT EXISTS agent_steps (
 );
 CREATE INDEX IF NOT EXISTS idx_steps_run ON agent_steps(run_id);
 
+-- Durable goal backlog (gap D): goals authorized for autonomous execution are
+-- persisted here BEFORE they run, so a crash/shed never drops queued work. The
+-- agent_runs/agent_steps ledger journals an *executing* plan; this is the
+-- pre-execution *queue*. idempotency_key is UNIQUE so a re-enqueue (e.g. crash
+-- recovery) can't create a duplicate. Lifecycle: queued → running → done/failed/
+-- cancelled; a row left 'running' at startup is requeued (bounded by attempts).
+CREATE TABLE IF NOT EXISTS goal_queue (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL    NOT NULL,
+    goal            TEXT    NOT NULL,
+    domain          TEXT    NOT NULL DEFAULT 'plan',
+    status          TEXT    NOT NULL DEFAULT 'queued',
+    idempotency_key TEXT    UNIQUE,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    max_attempts    INTEGER NOT NULL DEFAULT 3,
+    last_error      TEXT,
+    run_id          INTEGER REFERENCES agent_runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_goalq_status ON goal_queue(status, ts);
+
 CREATE TABLE IF NOT EXISTS few_shot_examples (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     command_id  INTEGER REFERENCES commands(id),
@@ -512,11 +532,12 @@ CREATE TABLE IF NOT EXISTS session_summaries (
 # a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
 # append a row when introducing a new additive column; the batch is gated by
 # PRAGMA user_version so it runs at most once per database file.
-_AGENT_DB_SCHEMA_VERSION = 1
+_AGENT_DB_SCHEMA_VERSION = 2
 _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
     ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
     ("commands", "trace_id", "TEXT"),
+    ("adaptation_log", "domain", "TEXT"),   # gap H: per-domain SLO adaptation
 )
 
 
@@ -1410,6 +1431,142 @@ class AgentDB:
             return []
 
     # ---------------------------------------------------------------------- #
+    # Durable goal backlog (gap D)
+    # ---------------------------------------------------------------------- #
+
+    async def enqueue_goal(
+        self,
+        goal: str,
+        domain: str = "plan",
+        idempotency_key: Optional[str] = None,
+        max_attempts: int = 3,
+    ) -> int:
+        """Persist a goal to the durable backlog. Returns its row id, or -1.
+
+        idempotency_key is UNIQUE: re-enqueuing the same key (e.g. crash recovery)
+        is a no-op that returns the existing row id, so a goal can never be
+        double-queued.
+        """
+        if not self._conn:
+            return -1
+        try:
+            import time
+            await self._conn.execute(
+                """INSERT OR IGNORE INTO goal_queue
+                   (ts, goal, domain, status, idempotency_key, max_attempts)
+                   VALUES (?, ?, ?, 'queued', ?, ?)""",
+                (time.time(), goal, domain, idempotency_key, max_attempts),
+            )
+            await self._conn.commit()
+            if idempotency_key is not None:
+                cur = await self._conn.execute(
+                    "SELECT id FROM goal_queue WHERE idempotency_key=?",
+                    (idempotency_key,),
+                )
+                row = await cur.fetchone()
+                return int(row["id"]) if row else -1
+            cur = await self._conn.execute("SELECT last_insert_rowid() AS id")
+            row = await cur.fetchone()
+            return int(row["id"]) if row else -1
+        except Exception as exc:
+            log.warning("AgentDB.enqueue_goal failed: %s", exc)
+            return -1
+
+    async def claim_next_goal(self) -> Optional[dict]:
+        """Atomically claim the oldest queued goal → 'running'. Returns its dict
+        (with attempts incremented), or None if the queue is empty.
+
+        Single-consumer (the drainer), so SELECT-then-guarded-UPDATE is race-safe
+        without RETURNING; the UPDATE's `status='queued'` guard is belt-and-braces.
+        """
+        if not self._conn:
+            return None
+        try:
+            cur = await self._conn.execute(
+                "SELECT * FROM goal_queue WHERE status='queued' ORDER BY ts LIMIT 1"
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            gid = int(row["id"])
+            upd = await self._conn.execute(
+                "UPDATE goal_queue SET status='running', attempts=attempts+1 "
+                "WHERE id=? AND status='queued'",
+                (gid,),
+            )
+            await self._conn.commit()
+            if (upd.rowcount or 0) == 0:
+                return None   # lost a race (shouldn't happen single-consumer)
+            d = dict(row)
+            d["status"] = "running"
+            d["attempts"] = int(d.get("attempts", 0)) + 1
+            return d
+        except Exception as exc:
+            log.warning("AgentDB.claim_next_goal failed: %s", exc)
+            return None
+
+    async def complete_goal(
+        self,
+        goal_id: int,
+        status: str,
+        error: Optional[str] = None,
+        run_id: Optional[int] = None,
+    ) -> None:
+        """Mark a claimed goal terminal: 'done' / 'failed' / 'cancelled'."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE goal_queue SET status=?, last_error=?, run_id=COALESCE(?, run_id) "
+                "WHERE id=?",
+                (status, error, run_id, goal_id),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.complete_goal failed: %s", exc)
+
+    async def requeue_stale_running(self) -> int:
+        """Startup recovery: a goal left 'running' means the process died mid-goal.
+
+        Requeue it (attempts already counted the failed try) when under
+        max_attempts; otherwise mark it 'failed' so a poison goal can't loop
+        forever. Returns the number requeued.
+        """
+        if not self._conn:
+            return 0
+        try:
+            await self._conn.execute(
+                "UPDATE goal_queue SET status='failed', "
+                "last_error='exceeded max_attempts after crash' "
+                "WHERE status='running' AND attempts >= max_attempts"
+            )
+            cur = await self._conn.execute(
+                "UPDATE goal_queue SET status='queued' "
+                "WHERE status='running' AND attempts < max_attempts"
+            )
+            await self._conn.commit()
+            return cur.rowcount if cur.rowcount is not None else 0
+        except Exception as exc:
+            log.warning("AgentDB.requeue_stale_running failed: %s", exc)
+            return 0
+
+    async def get_queued_goals(self, limit: int = 50) -> list[dict]:
+        """Return queued goals (oldest first) for status queries / draining."""
+        if not self._conn:
+            return []
+        try:
+            cur = await self._conn.execute(
+                "SELECT id, goal, domain, attempts, max_attempts, ts "
+                "FROM goal_queue WHERE status='queued' ORDER BY ts LIMIT ?",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            log.warning("AgentDB.get_queued_goals failed: %s", exc)
+            return []
+
+    # ---------------------------------------------------------------------- #
     # Few-shot examples
     # ---------------------------------------------------------------------- #
 
@@ -1861,23 +2018,61 @@ class AgentDB:
         metric_after: float,
         cloud_rate: float = 0.0,
         failure_rate: float = 0.0,
+        domain: Optional[str] = None,
     ) -> int:
-        """Insert one adaptation_log row. Returns the new row id."""
+        """Insert one adaptation_log row. Returns the new row id.
+
+        `domain` tags per-domain SLO adaptations (gap H); None for global ones.
+        """
         if not self._conn:
             return -1
         try:
             cur = await self._conn.execute(
                 """INSERT INTO adaptation_log
-                   (ts, component, metric_before, metric_after, cloud_rate, failure_rate)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   (ts, component, metric_before, metric_after, cloud_rate, failure_rate, domain)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (time.time(), component, metric_before, metric_after,
-                 cloud_rate, failure_rate),
+                 cloud_rate, failure_rate, domain),
             )
             await self._conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
         except Exception as exc:
             log.warning("AgentDB.log_adaptation failed: %s", exc)
             return -1
+
+    async def get_inference_stats_by_domain(self, limit: int = 1000) -> dict:
+        """Per-domain rolling stats from the inferences table (gap H).
+
+        Returns {domain: {count, p50_latency_ms, success_rate}} over the most
+        recent `limit` inference rows. p50 + success-rate are computed in Python
+        (SQLite has no median); success = the inference recorded no error.
+        """
+        if not self._conn:
+            return {}
+        try:
+            async with self._conn.execute(
+                "SELECT domain, latency_ms, error FROM inferences ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            ) as cur:
+                rows = await cur.fetchall()
+        except Exception as exc:
+            log.warning("AgentDB.get_inference_stats_by_domain failed: %s", exc)
+            return {}
+
+        buckets: dict[str, list] = {}
+        for r in rows:
+            buckets.setdefault(r["domain"], []).append((r["latency_ms"], r["error"]))
+        out: dict[str, dict] = {}
+        for domain, items in buckets.items():
+            lats = sorted(l for l, _ in items if l is not None)
+            p50 = lats[len(lats) // 2] if lats else None
+            ok = sum(1 for _, e in items if e is None)
+            out[domain] = {
+                "count": len(items),
+                "p50_latency_ms": round(p50, 1) if p50 is not None else None,
+                "success_rate": round(ok / len(items), 3) if items else None,
+            }
+        return out
 
     async def get_recent_adaptation_log(
         self, component: str, limit: int = 5

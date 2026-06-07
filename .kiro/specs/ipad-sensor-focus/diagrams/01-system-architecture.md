@@ -17,7 +17,7 @@ C4Context
     System_Boundary(desktop, "Desktop PC — RTX 5090") {
         System(pc_service, "PC_Service", "Python asyncio\nInference + execution")
         SystemDb(storage, "Local Storage", "agent.db (SQLite 14 tables)\naudit.db (append-only)\nanalytics.duckdb\nchroma_db/ (vector store)")
-        System(ollama, "Ollama Server", "llama3.1:8b default\n4.6 GB VRAM / 373 ms p50")
+        System(ollama, "Ollama Server", "llama3.1:8b default\n4.6 GB VRAM / ~190 ms warm wall p50 (0.30.6)")
     }
 
     System_Ext(aws, "AWS Cloud", "Fallback only\nBedrock / Transcribe / Polly")
