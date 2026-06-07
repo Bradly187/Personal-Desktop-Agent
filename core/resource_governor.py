@@ -62,7 +62,7 @@ _THREAD_PRIORITY_NORMAL = 0
 # sane eviction target). The live set normally comes from
 # ModelRouter.heavy_model_names() so it can never go stale.
 _DEFAULT_HEAVY_MODELS: tuple[str, ...] = (
-    "qwen3-coder:30b", "qwen3-vl:30b", "gemma3:27b",
+    "qwen3-coder:30b", "qwen3-vl:30b",
 )
 
 
