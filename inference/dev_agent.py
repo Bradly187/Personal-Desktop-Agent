@@ -817,6 +817,41 @@ class DevAgent:
         await self.plan_and_run(goal)
         return run
 
+    async def drain_goal_queue(self, max_goals: int = 0) -> int:
+        """Drain the durable goal backlog (gap D): claim → run → mark terminal.
+
+        Claims goals one at a time (single-consumer) and runs each through
+        plan_and_run, which keeps its own crash-recoverable ledger and applies the
+        upfront voice-approval gate for destructive plans. Stops when the queue is
+        empty, on cancellation, or after `max_goals` (0 = until empty). Returns the
+        number processed. Each goal's outcome is persisted, so this is safe to call
+        again at any time (e.g. after a crash — see AgentDB.requeue_stale_running).
+        """
+        db = self._db()
+        if not db or not getattr(db, "available", False):
+            return 0
+        processed = 0
+        while not (max_goals and processed >= max_goals):
+            if self._cancel_event.is_set():
+                break
+            goal = await db.claim_next_goal()
+            if goal is None:
+                break
+            gid = int(goal["id"])
+            log.info("DevAgent.drain_goal_queue: running goal %s — %r", gid, goal["goal"][:60])
+            try:
+                result = await self.plan_and_run(goal["goal"])
+                await db.complete_goal(
+                    gid, "done" if result.success else "failed", error=result.error,
+                )
+            except Exception as exc:
+                log.error("DevAgent.drain_goal_queue: goal %s raised: %s", gid, exc)
+                await db.complete_goal(gid, "failed", error=str(exc))
+            processed += 1
+        if processed:
+            log.info("DevAgent.drain_goal_queue: processed %d goal(s)", processed)
+        return processed
+
     # ---------------------------------------------------------------------- #
     # Plan-level authorization helpers
     # ---------------------------------------------------------------------- #
@@ -1190,16 +1225,18 @@ class DevAgent:
     def _run_terminal(cmd: str) -> str:
         cmd = cmd.strip()
         log.info("DevAgent: running terminal command: %s", cmd)
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        # Sandbox (mistake-containment): cwd-jail + resource/output caps. Network
+        # is granted only for curated package/VCS/fetch ops (pip install, git
+        # push, …); everything else stays offline. Those ops are themselves
+        # approval-gated by the goal-session allowlist upstream.
+        from inference.sandbox import run_sandboxed, command_needs_network
+        net = command_needs_network(cmd)
+        result = run_sandboxed(cmd, timeout=60, allow_network=net)
         output = (result.stdout + result.stderr).strip()
         status = "ok" if result.returncode == 0 else f"exit {result.returncode}"
-        log.info("DevAgent: terminal %s → %s", status, output[:120])
+        log.info("DevAgent: terminal %s%s%s → %s",
+                 status, "" if result.sandboxed else " [unsandboxed]",
+                 " [net]" if net else "", output[:120])
         if result.returncode != 0:
             raise RuntimeError(f"Command failed ({status}): {output[:200]}")
         return output or status
