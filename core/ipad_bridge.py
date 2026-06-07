@@ -16,7 +16,6 @@ Message types:
   cursor_pause           →  FusionEngine.on_cursor_pause() (quick-pause all cursor sensors)
   cursor_resume          →  FusionEngine.on_cursor_resume() (resume cursor sensors)
   keyword                →  FusionEngine.on_keyword() (when wired)
-  sound_action           →  FusionEngine.on_sound_action() (when wired)
   depth_frame            →  LiDARReceiver.on_depth_frame() (when wired)
   camera_frame           →  GestureProcessor.on_camera_frame() (when wired)
   audio_stream           →  WhisperStream.on_audio_chunk() (VAD + Whisper transcription)
@@ -348,13 +347,6 @@ class IPadBridge:
                 self._fusion.on_keyword(word, conf)
             return
 
-        if msg_type == "sound_action":
-            if self._fusion:
-                sound = str(msg.get("sound", ""))
-                conf  = float(msg.get("confidence", 1.0))
-                self._fusion.on_sound_action(sound, conf)
-            return
-
         if msg_type == "depth_frame":
             if self._lidar:
                 self._lidar.on_depth_frame(msg)
@@ -617,6 +609,22 @@ class IPadBridge:
         import pyautogui
         action = self._active_dwell_action
         try:
+            # Magnetic snap (Phase 2b): for discrete clicks, jump to the nearest
+            # clickable target before clicking so a dwell only needs to land in
+            # the neighborhood — same area-cursor assist as the tilt-tap. Drag
+            # start/end stay at the exact cursor (drags must be precise).
+            if action in ("left_click", "right_click", "double_click"):
+                try:
+                    from core.command_executor import _magnetic_snap
+                    cx, cy = pyautogui.position()
+                    snapped = await asyncio.to_thread(_magnetic_snap, cx, cy)
+                    if snapped is not None:
+                        await asyncio.to_thread(
+                            pyautogui.moveTo, snapped[0], snapped[1], duration=0
+                        )
+                except Exception as exc:
+                    log.debug("dwell magnetic snap skipped: %s", exc)
+
             if action == "left_click":
                 pyautogui.click(button="left", _pause=False)
             elif action == "right_click":

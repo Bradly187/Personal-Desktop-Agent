@@ -283,6 +283,11 @@ class VLLMInference(LocalInference):
       with one of the 16 valid action verbs.  Eliminates format failures without
       any accuracy penalty on well-formed requests.
 
+    NOTE: VLLMInference is the opt-in `--backend vllm` path. The default Ollama
+    backend (OllamaInference, llama3.1:8b) is the VERIFIED command model; the
+    Gemma 4 checkpoint below is PLANNED/unverified — use only when explicitly
+    selecting the vLLM backend.
+
     Default checkpoint: cyankiwi/gemma-4-E4B-it-AWQ-INT4
       - 8B params, compressed-tensors INT4 (Neural Magic format)
       - Ungated, Apache 2.0, no HF login required; 204k downloads

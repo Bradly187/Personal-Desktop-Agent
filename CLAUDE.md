@@ -4,7 +4,7 @@ Multimodal accessibility desktop control for a single user with rheumatoid arthr
 
 ## What This Is
 
-The user controls a Windows desktop through voice, hand gesture, iPad tilt, mouth sounds, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). (Eye-gaze and head-pose control were removed — the standard iPad lacks the required TrueDepth sensor.) Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
+The user controls a Windows desktop through voice, hand gesture, iPad tilt, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). (Eye-gaze and head-pose control were removed — the standard iPad lacks the required TrueDepth sensor.) Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
 
 - Full requirements (17): `.kiro/specs/ipad-sensor-focus/requirements.md`
 - Architecture diagrams (13): `.kiro/specs/ipad-sensor-focus/diagrams/00-index.md`
@@ -12,7 +12,27 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute (2026-06-03)
+## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity + mouth-sound removal + agent-orchestration hardening (2026-06-06)
+
+**Done (Agent-orchestration hardening + Opus 4.8 dev path — 2026-06-06):**
+- `fix(inference)` — `ResourceGovernor` evicts the **router-derived** heavy specialist set on a flare (was hardcoded `qwen3-vl:30b`) and sleeps the vLLM pool; new `set_model_router()` + `ModelRouter.heavy_model_names()`/`sleep_specialists()`.
+- `feat(dev-agent)` — destructive plans/ops **fail-safe to DENY** on silence/ambiguity (read-only keeps auto-approve); `plan_and_run` is now closed-loop observe→act→replan (`MAX_REPLANS=2`, one read-only retry); fixed `_parse_plan` args regex that silently dropped every step argument; `agent_runs` gains a status lifecycle (+migration) with crash reconciliation (`mark_interrupted_runs`) + voice-gated `resume_pending_plan()`.
+- `feat(scheduler)` — Resource Invariants documented (single-permit `_dev_sem` is the real flare protection); `_dev_inflight` is leak-proof (decrement in `finally`); `stop()` cancels in-flight dispatched tasks; new `scheduler_queue_depth`/`scheduler_dev_inflight` gauges.
+- `feat(observability)` — opt-in cross-layer tracing (`monitoring/trace.py`, `DA_TRACE`); `trace_id` rides the `Command` dataclass + a ContextVar through coordinator→router→executor; reconstructs enqueue→dispatch→route_decision→inference→execute; `commands.trace_id` column (+migration); `GET /trace` + `/trace/{id}`. Zero-cost no-op unless `DA_TRACE` is set.
+- `chore(cloud)` — `CloudDevAgent` defaults to **`claude-opus-4-8`** (was `claude-sonnet-4-6`); command-path cloud fallback ID normalized to the `claude-haiku-4-5` alias. (Vision fallback in `vision_grounder.py` stays Sonnet 4.6 — local qwen3-vl is primary there.)
+- All on PR **#32** (`fix/tilt-tap-click`), pushed and in sync with origin. Working-tree tuning not yet committed: `_gravity_max_pull` 18→22 px, `DA_SNAP_RADIUS_PX` default 200→300 px. See `docs/daily/2026-06-06-daily-review.md`.
+
+**Done (Mouth-sound control removed — 2026-06-05):**
+- The mouth-sound pipeline (cluck/pop/hiss via AVFoundation) was removed **entirely** (PC + iPad) — the sounds fired incidentally and were not a reliable control surface. Removed iPad-side: `SoundDetector.swift`, `SoundTrainingSheet.swift`, and the `sound`/`SoundDetector` wiring across `SensorManager.swift`, `OnboardingView.swift`, `SettingsStore.swift`, `SensorActivityBar.swift`, `SensorDashboardView.swift`, `FlareProfileSheet.swift` (Swift source count 41 → 40). Removed PC-side: the `sound_action` handler and the priority-2 sound branch in `core/fusion_engine.py` (now **6-level** priority); the `sound_action` message type is no longer sent. The FusionEngine priority list shrinks 7 → 6 (see Sensor Priority below).
+
+**Done (Magnetic cursor — gravity re-enabled safely + overlay removed — 2026-06-05):**
+- Cursor gravity (magnetic-click Phase 3) re-enabled **headless**. The 2026-06-04 attempt destabilised the desktop two ways: `desktop/magnetic_overlay.py` (fullscreen `overrideredirect`/`-topmost`/layered Tk window repainting at 30 Hz) stalled the DWM compositor (soft hang), and `desktop/target_cache.py` blind-walked the whole UIA tree 3×/s rooted at `GetFocusedElement` + walk-up, spamming E_POINTER "Invalid pointer" 3×/s on stale elements.
+- `desktop/magnetic_overlay.py` — **deleted** (overlay dropped entirely; gravity needs no window).
+- `desktop/target_cache.py` — `_loop` reworked: change-gated walk (`_walk_due` — only on a foreground-window change or a 1.5 s heartbeat; foreground hwnd read via cheap `GetForegroundWindow`, no COM), consecutive-failure backoff (caps at 2 s), `CoUninitialize` in `finally`. Read API (`nearest`/`snapshot`/`is_running`) unchanged.
+- `desktop/ui_automation.py` — new `collect_snap_targets_for_window(hwnd)` roots the BFS at `ElementFromHandle(hwnd)` (fresh, foreground-scoped — no stale parent-walk); shared BFS body `_bfs_snap_targets`; bounds tightened (200 results / 0.3 s).
+- `main.py` — starts the reworked cache + `fusion.set_target_cache()` behind kill-switch `DA_CURSOR_GRAVITY` (default on; `=0` disables → gravity no-ops); registered for graceful shutdown.
+- Gravity math unchanged: `fusion_engine._apply_gravity` (radius 90 px, max pull 18 px) at end of position-mode tick; Phase 1 tilt-tap snap (`command_executor._magnetic_snap`) unchanged, now also reads the healthy cache.
+- `tests/test_target_cache.py` — **new**; 24 tests (nearest/tie-break, `_walk_due` gating, backoff grow/reset/cap, UIA-unavailable no-op, `_apply_gravity` no-op/pull/settle). Full suite: **682 passed**. Stability smoke (`main.py --safe-mode`, ~100 s): 0 E_POINTER, 0 walk failures, 0 tracebacks.
 
 **Done (Voice control + goal sessions + mic mute — 2026-06-03):**
 - `core/goal_session.py` — **new file**; goal-level authorization: the user authorizes a high-level goal once (via voice) and the constituent Claude Code tool calls / DevAgent steps run silently without per-tool prompts; atomic-replace signal file `~/.claude/approval/goal_session.json` read by `approval_hook.py` and `DevAgent._confirm_destructive_op()`; voice `cancel`/`status`/`history` control
@@ -64,7 +84,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 **Done (Phase 6 — cloud fallback):**
 - `hybrid_coordinator.py` — `_retranscribe()`: phonetic vocabulary correction (6 misrecognitions, 0ms) on low-confidence voice before Gate 2 (Amazon Transcribe Stage 2 removed in the Anthropic migration); Gate 1 route label propagated to executor
 - `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Danielle neural, 16kHz PCM) sidecar-down fallback for CLARIFY; primary path uses `polly_stream.get_client().speak_sync()`; SEARCH_WEB URL-encoded via `urllib.parse`
-- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5-20251001` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. (Migrated off AWS Bedrock; AgentCore deployment deferred and source deleted.)
+- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. The dev-domain cloud path (`CloudDevAgent`) uses `claude-opus-4-8`. (Migrated off AWS Bedrock; AgentCore deployment deferred and source deleted.)
 
 **Done (LiDAR gesture depth + Settings UI + housekeeping — 2026-05-16):**
 - `LiDARStreamer.swift` — ARWorldTrackingConfiguration + `.smoothedSceneDepth`; 5 fps depth / 10 fps camera; serialises `depth_frame` (float32 + uint8 conf) and `camera_frame` (JPEG 480px) matching PC bridge protocol; publishes UIImages for debug view
@@ -170,7 +190,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, mout
 - Multiple Swift sensor files updated to use AppLogger for structured output: `SharedAudioSession`, `AudioStreamer`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `LiDARStreamer`, `SharedFaceSession`, `TiltSensor`, `SensorManager`, `DesktopAgentApp`
 - `fusion_engine.py` — `set_gaze_calibrator()` wiring path also updated
 
-**Test suite (2026-06-03):** 552 pytest test functions across 49 `tests/test_*.py` files (+ standalone integration scripts) + 15 Swift XCTest files
+**Test suite (2026-06-06):** 673 pytest test functions across 60 `tests/test_*.py` files (+ standalone integration scripts) + 15 Swift XCTest files
 
 ## Run Commands
 
@@ -236,7 +256,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 | File | Purpose |
 |------|---------|
-| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 26 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result`, `mic_state`, `recalibration_request` replies |
+| `core/ipad_bridge.py` | aiohttp WebSocket server on :8765; routes 25 incoming message types; sends `ack`, `status`, `screenshot`, `handwriting_result`, `mic_state`, `recalibration_request` replies |
 | `core/command_executor.py` | Maps 16 action verbs to mcp_server tool calls; `_resolve_coords` falls back to screen centre; SCREENSHOT defaults to active window and copies to Windows clipboard |
 | `mcp_server/desktop_mcp_server.py` | MCP stdio server; 14 tools; `SAFE_MODE` env var |
 | `mcp_server/tools/mouse.py` | move, click, double_click, scroll, drag |
@@ -275,6 +295,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `desktop/ui_automation.py` | Win32 UIAutomation BFS tree search; fuzzy name scoring; 0.3s timeout; 1s cache; first fallback in `_resolve_coords` |
 | `desktop/action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |
 | `desktop/flick_engine.py` | Flick-to-snap gesture handler; maps GRAB_SNAP_* gestures to window snap zones; uses OneEuroFilter for smoothing |
+| `desktop/target_cache.py` | `ClickableTargetCache` — daemon thread publishing a lock-protected snapshot of clickable UI targets for magnetic snap + cursor gravity; change-gated COM walk (foreground-hwnd + 1.5 s heartbeat), failure backoff, `CoUninitialize`; started behind `DA_CURSOR_GRAVITY` |
 | `inference/kiro_client.py` | WebSocket client for Kiro/VS Code bridge extension on ws://127.0.0.1:8767; wired to DevAgent for code edits |
 | `inference/codebase_indexer.py` | ChromaDB RAG index over Python/Swift source + docs PDFs; incremental file watcher; fed to DevAgent for context |
 | `monitoring/metrics.py` | In-process metrics singleton; VRAM poller; optional `/metrics` HTTP endpoint |
@@ -335,26 +356,25 @@ used instead (4-second recording window, auto-approve on silence).
 Gaze and head-pose message types (`gaze`, `gaze_delta`, `gaze_dwell`, `gaze_ray`, `gaze_calibration_sample`, `gaze_calibration_start`, `head_pose`) were removed — the standard iPad has no TrueDepth sensor.
 
 **iPad → PC:**
-- *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `keyword`, `sound_action`, `audio_stream`, `camera_frame`, `depth_frame`
+- *Sensor streams:* `tilt`, `tilt_position`, `tilt_tap`, `tilt_ratchet`, `keyword`, `audio_stream`, `camera_frame`, `depth_frame`
 - *Direct control:* `touch_command`, `trackpad`, `handwriting_image`, `dwell_click`, `ping`
 - *Settings/UX:* `set_dwell_action`, `set_feature_toggle`, `sensor_switch`, `cursor_pause`, `cursor_resume`, `gesture_assessment`, `pain_day_override`, `flare_profile`, `calibration_start`, `calibration_cancel`, `mic_mute`
 - *Diagnostics:* `ipad_log`
 
 **PC → iPad (6 types):** `ack` (every message), `status` (window + cursor after each command), `screenshot` (base64 PNG after SCREENSHOT action), `handwriting_result` (LaTeX + unicode after handwriting_image), `recalibration_request` (voice drift/seasonal re-cal trigger → QuickRecalSheet), `mic_state` (mute/unmute echo so the iPad `MicMuteIndicator` stays in two-way sync)
 
-`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 7. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `set_feature_toggle` is still wired but currently has no valid features (all prior toggles were gaze features). `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (tilt, keyword, sound_action, etc.) are dispatched to FusionEngine.
+`touch_command` and `trackpad` bypass FusionEngine directly. `handwriting_image` is handled inline by the bridge. `audio_stream` feeds `WhisperStream` → FusionEngine priority 6. `depth_frame` and `camera_frame` are sent by `LiDARStreamer.swift` (enabled via `lidarEnabled` toggle) and routed to `LiDARReceiver` and `GestureProcessor` respectively. `set_feature_toggle` is still wired but currently has no valid features (all prior toggles were gaze features). `ipad_log` batches structured AppLogger entries; warning+ entries are persisted to `ipad_logs` AgentDB table. The remaining sensor types (tilt, keyword, etc.) are dispatched to FusionEngine.
 
 ## Sensor Priority (FusionEngine — `core/fusion_engine.py`)
 
-7-level priority (gaze and head-pose removed — the standard iPad has no TrueDepth sensor):
+6-level priority (gaze, head-pose, and mouth-sound control all removed):
 
 1. iPad touch command — bypasses LLM entirely
-2. Sound action (mouth sounds via AVFoundation)
-3. Voice "click" keyword — clicks at the current cursor position (bypass, source `multimodal`)
-4. Tilt navigation (Core Motion) — 4a absolute position, 4b legacy velocity
-5. Gesture alone
-6. On-device voice keyword (Speech Framework)
-7. PC-transcribed voice (Whisper large-v3 on GPU)
+2. Voice "click" keyword — clicks at the current cursor position (bypass, source `multimodal`)
+3. Tilt navigation (Core Motion) — 3a absolute position, 3b legacy velocity
+4. Gesture alone
+5. On-device voice keyword (Speech Framework)
+6. PC-transcribed voice (Whisper large-v3 on GPU)
 
 ## Coding Conventions
 

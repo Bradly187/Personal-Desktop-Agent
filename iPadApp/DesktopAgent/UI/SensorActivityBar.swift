@@ -74,7 +74,6 @@ private struct SensorActivityDot: View {
         switch state.id {
         case "tilt": return "ipad.landscape"
         case "keyword": return "text.bubble"
-        case "sound": return "mouth"
         case "audio": return "mic"
         default: return "circle.fill"
         }
@@ -84,7 +83,6 @@ private struct SensorActivityDot: View {
         switch state.id {
         case "tilt": return "Tilt"
         case "keyword": return "Keywords"
-        case "sound": return "Sound"
         case "audio": return "Audio"
         default: return state.id
         }

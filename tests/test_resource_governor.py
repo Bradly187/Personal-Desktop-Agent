@@ -47,6 +47,27 @@ def _make_fusion():
     return fusion
 
 
+def _patch_ollama(fn):
+    """Run fn() with urllib.request.urlopen patched; return the list of POSTed JSON bodies."""
+    import json
+    posted = []
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+    def _fake_urlopen(req, timeout=None):
+        posted.append(json.loads(req.data))
+        return _FakeResp()
+
+    with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+        fn()
+    return posted
+
+
 def _make_indexer():
     indexer = MagicMock()
     indexer._paused = False
@@ -152,31 +173,62 @@ class TestFlareActivation:
         indexer.pause.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_ollama_keepalive_set_to_zero_on_flare(self):
-        """_reduce_ollama_keepalive must POST keep_alive='0' to Ollama."""
+    async def test_evict_uses_default_heavy_set_without_router(self):
+        """Without a router, _evict_heavy_models POSTs keep_alive='0' for each default heavy model."""
+        from core.resource_governor import _DEFAULT_HEAVY_MODELS
         gov, _ = _make_governor()
-        posted_bodies = []
+        posted = _patch_ollama(lambda: gov._evict_heavy_models())
 
-        import urllib.request
-        import json
+        assert {b["keep_alive"] for b in posted} == {"0"}
+        assert {b["model"] for b in posted} == set(_DEFAULT_HEAVY_MODELS)
 
-        class _FakeResp:
-            def __enter__(self):
-                return self
+    @pytest.mark.asyncio
+    async def test_evict_targets_router_heavy_set(self):
+        """When a router is wired, eviction targets router.heavy_model_names() — never a stale hardcoded name."""
+        gov, _ = _make_governor()
+        router = MagicMock()
+        router.heavy_model_names.return_value = ["qwen3-coder:30b", "gemma3:27b"]
+        gov.set_model_router(router)
 
-            def __exit__(self, *a):
+        posted = _patch_ollama(lambda: gov._evict_heavy_models())
+
+        assert {b["model"] for b in posted} == {"qwen3-coder:30b", "gemma3:27b"}
+        assert {b["keep_alive"] for b in posted} == {"0"}
+        # The old hardcoded target must not leak in when the router doesn't list it.
+        assert "qwen3-vl:30b" not in {b["model"] for b in posted}
+
+    @pytest.mark.asyncio
+    async def test_flare_start_sleeps_vllm_specialists(self):
+        """_on_flare_start awaits router.sleep_specialists() to free the vLLM pool."""
+        gov, _ = _make_governor()
+        router = MagicMock()
+        router.heavy_model_names.return_value = ["qwen3-coder:30b"]
+        router.sleep_specialists = AsyncMock()
+        gov.set_model_router(router)
+
+        async def _noop(fn, *a, **kw):
+            try:
+                fn(*a, **kw)
+            except Exception:
                 pass
 
-        def _fake_urlopen(req, timeout=None):
-            posted_bodies.append(json.loads(req.data))
-            return _FakeResp()
+        with patch("core.resource_governor.asyncio.to_thread", side_effect=_noop):
+            await gov._on_flare_start(0.7)
 
-        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-            gov._reduce_ollama_keepalive()
+        router.sleep_specialists.assert_awaited_once()
 
-        assert len(posted_bodies) == 1
-        assert posted_bodies[0]["keep_alive"] == "0"
-        assert posted_bodies[0]["model"] == "qwen3-vl:30b"
+    @pytest.mark.asyncio
+    async def test_restore_heavy_models_posts_5m(self):
+        """_restore_heavy_models POSTs keep_alive='5m' for the router heavy set."""
+        gov, _ = _make_governor()
+        router = MagicMock()
+        router.heavy_model_names.return_value = ["qwen3-coder:30b", "gemma3:27b"]
+        gov.set_model_router(router)
+
+        posted = _patch_ollama(lambda: gov._restore_heavy_models())
+
+        assert {b["model"] for b in posted} == {"qwen3-coder:30b", "gemma3:27b"}
+        assert {b["keep_alive"] for b in posted} == {"5m"}
 
 
 # ---------------------------------------------------------------------------
@@ -226,25 +278,12 @@ class TestFlareRecovery:
         indexer.resume.assert_called_once()
 
     def test_ollama_keepalive_restored_to_5m_on_recovery(self):
+        from core.resource_governor import _DEFAULT_HEAVY_MODELS
         gov, _ = _make_governor()
-        import json
-        posted_bodies = []
+        posted_bodies = _patch_ollama(lambda: gov._restore_heavy_models())
 
-        class _FakeResp:
-            def __enter__(self):
-                return self
-            def __exit__(self, *a):
-                pass
-
-        def _fake_urlopen(req, timeout=None):
-            posted_bodies.append(json.loads(req.data))
-            return _FakeResp()
-
-        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
-            gov._restore_ollama_keepalive()
-
-        assert len(posted_bodies) == 1
-        assert posted_bodies[0]["keep_alive"] == "5m"
+        assert {b["keep_alive"] for b in posted_bodies} == {"5m"}
+        assert {b["model"] for b in posted_bodies} == set(_DEFAULT_HEAVY_MODELS)
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +313,7 @@ class TestHysteresis:
 
         with (
             patch.object(gov, "_raise_whisper_priority"),
-            patch.object(gov, "_reduce_ollama_keepalive"),
+            patch.object(gov, "_evict_heavy_models"),
         ):
             await gov.start()
             await asyncio.sleep(0.2)  # allow poll cycle
@@ -297,7 +336,7 @@ class TestHysteresis:
 
         with (
             patch.object(gov, "_restore_whisper_priority"),
-            patch.object(gov, "_restore_ollama_keepalive"),
+            patch.object(gov, "_restore_heavy_models"),
         ):
             await gov.start()
             await asyncio.sleep(0.2)
@@ -326,7 +365,7 @@ class TestStopAlwaysRestores:
 
         with (
             patch.object(gov, "_restore_whisper_priority"),
-            patch.object(gov, "_restore_ollama_keepalive"),
+            patch.object(gov, "_restore_heavy_models"),
         ):
             await gov.start()
             await gov.stop()
@@ -360,7 +399,7 @@ class TestStopAlwaysRestores:
         gov, _ = _make_governor()
         with (
             patch.object(gov, "_restore_whisper_priority"),
-            patch.object(gov, "_restore_ollama_keepalive"),
+            patch.object(gov, "_restore_heavy_models"),
         ):
             await gov.start()
             await gov.stop()  # should not raise
@@ -378,7 +417,7 @@ class TestRestoreIdempotency:
 
         with (
             patch.object(gov, "_restore_whisper_priority"),
-            patch.object(gov, "_restore_ollama_keepalive"),
+            patch.object(gov, "_restore_heavy_models"),
         ):
             gov._restore_resources_sync()
             gov._restore_resources_sync()  # called twice — idempotent
@@ -393,7 +432,7 @@ class TestRestoreIdempotency:
 
         with (
             patch.object(gov, "_restore_whisper_priority"),
-            patch.object(gov, "_restore_ollama_keepalive"),
+            patch.object(gov, "_restore_heavy_models"),
         ):
             gov._restore_resources_sync()
 
@@ -403,7 +442,7 @@ class TestRestoreIdempotency:
         gov, _ = _make_governor()
         with (
             patch.object(gov, "_restore_whisper_priority"),
-            patch.object(gov, "_restore_ollama_keepalive"),
+            patch.object(gov, "_restore_heavy_models"),
         ):
             gov._restore_resources_sync()  # no fusion, no indexer, no whisper
 
@@ -456,7 +495,7 @@ class TestSVTFastPath:
 
         with (
             patch.object(gov, "_raise_whisper_priority"),
-            patch.object(gov, "_reduce_ollama_keepalive"),
+            patch.object(gov, "_evict_heavy_models"),
         ):
             gov.notify_pain_day_change(1.0)
             await asyncio.sleep(0)   # yield so the created task runs
@@ -475,7 +514,7 @@ class TestSVTFastPath:
 
         with (
             patch.object(gov, "_restore_whisper_priority"),
-            patch.object(gov, "_restore_ollama_keepalive"),
+            patch.object(gov, "_restore_heavy_models"),
         ):
             gov.notify_pain_day_change(0.0)
             await asyncio.sleep(0)
@@ -529,7 +568,7 @@ class TestSVTFastPath:
 
         with (
             patch.object(gov, "_raise_whisper_priority"),
-            patch.object(gov, "_reduce_ollama_keepalive"),
+            patch.object(gov, "_evict_heavy_models"),
         ):
             twin.set_manual_pain_day(True)
             await asyncio.sleep(0)

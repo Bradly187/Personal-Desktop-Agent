@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS commands (
     gaze_y             REAL,
     success            INTEGER,
     error_msg          TEXT,
-    corrected_to       TEXT
+    corrected_to       TEXT,
+    trace_id           TEXT          -- cross-layer trace id (DA_TRACE); links to monitoring/trace.py spans
 );
 CREATE INDEX IF NOT EXISTS idx_commands_session ON commands(session_id);
 CREATE INDEX IF NOT EXISTS idx_commands_ts      ON commands(ts);
@@ -170,7 +171,11 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     step_count       INTEGER,
     success          INTEGER,
     total_latency_ms REAL,
-    error            TEXT
+    error            TEXT,
+    -- Lifecycle for crash recovery: 'running' while a plan executes, then a
+    -- terminal status ('completed'/'failed'/'cancelled'). On startup any row
+    -- still 'running' is reconciled to 'interrupted' (the process died mid-plan).
+    status           TEXT NOT NULL DEFAULT 'completed'
 );
 
 CREATE TABLE IF NOT EXISTS agent_steps (
@@ -567,6 +572,8 @@ class AgentDB:
         # CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing table.
         for table, column, ddl in (
             ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
+            ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
+            ("commands", "trace_id", "TEXT"),
         ):
             try:
                 await self._conn.execute(
@@ -758,6 +765,7 @@ class AgentDB:
         latency_ms: Optional[float],
         success: Optional[bool] = None,
         error_msg: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> int:
         """Insert a command routing record and return its id."""
         if not self._conn:
@@ -772,8 +780,8 @@ class AgentDB:
                    (session_id, ts, source, text, action, params,
                     route, gate_that_decided, latency_ms,
                     whisper_logprob, gesture_confidence,
-                    gaze_x, gaze_y, success, error_msg)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    gaze_x, gaze_y, success, error_msg, trace_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     session_id, time.time(), cmd.source, cmd.text,
                     action, json.dumps(
@@ -783,7 +791,7 @@ class AgentDB:
                     route, gate_that_decided,
                     round(latency_ms, 1) if latency_ms is not None else None,
                     cmd.whisper_logprob, cmd.gesture_confidence,
-                    gaze_x, gaze_y, success_int, error_msg,
+                    gaze_x, gaze_y, success_int, error_msg, trace_id,
                 ),
             )
             await self._conn.commit()
@@ -1271,6 +1279,101 @@ class AgentDB:
             await self._conn.commit()
         except Exception as exc:
             log.warning("AgentDB.insert_agent_step failed: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # Agent run lifecycle (durable, resumable plan ledger)
+    # ---------------------------------------------------------------------- #
+
+    async def start_agent_run(
+        self,
+        goal: str,
+        domain: str = "plan",
+        model_used: Optional[str] = None,
+        command_id: Optional[int] = None,
+    ) -> int:
+        """Insert a run row with status='running' and return its id.
+
+        Steps are appended via insert_agent_step as they complete; the run is
+        finalised with update_agent_run. A row left 'running' (process crash) is
+        reconciled to 'interrupted' on next startup by mark_interrupted_runs().
+        """
+        if not self._conn:
+            return -1
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO agent_runs
+                   (command_id, ts, goal, domain, model_used, step_count,
+                    success, total_latency_ms, error, status)
+                   VALUES (?,?,?,?,?,0,NULL,NULL,NULL,'running')""",
+                (
+                    command_id if (command_id and command_id > 0) else None,
+                    time.time(), goal, domain, model_used,
+                ),
+            )
+            await self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
+        except Exception as exc:
+            log.warning("AgentDB.start_agent_run failed: %s", exc)
+            return -1
+
+    async def update_agent_run(
+        self,
+        run_id: int,
+        status: str,
+        step_count: int,
+        success: bool,
+        total_latency_ms: float,
+        error: Optional[str] = None,
+    ) -> None:
+        """Finalise a run with a terminal status ('completed'/'failed'/'cancelled')."""
+        if not self._conn or run_id < 0:
+            return
+        try:
+            await self._conn.execute(
+                """UPDATE agent_runs
+                   SET status=?, step_count=?, success=?, total_latency_ms=?, error=?
+                   WHERE id=?""",
+                (status, step_count, int(success), round(total_latency_ms, 1), error, run_id),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.update_agent_run failed: %s", exc)
+
+    async def mark_interrupted_runs(self) -> int:
+        """Reconcile orphaned 'running' rows to 'interrupted'. Returns the count.
+
+        Called once at startup: any run still 'running' means the process died
+        mid-plan. Returns how many rows were reconciled so the caller can offer
+        a resume.
+        """
+        if not self._conn:
+            return 0
+        try:
+            cur = await self._conn.execute(
+                "UPDATE agent_runs SET status='interrupted' WHERE status='running'"
+            )
+            await self._conn.commit()
+            return cur.rowcount if cur.rowcount is not None else 0
+        except Exception as exc:
+            log.warning("AgentDB.mark_interrupted_runs failed: %s", exc)
+            return 0
+
+    async def get_interrupted_runs(self, limit: int = 10) -> list[dict]:
+        """Return recent interrupted runs (most recent first) for resume offers."""
+        if not self._conn:
+            return []
+        try:
+            cur = await self._conn.execute(
+                """SELECT id, goal, domain, model_used, step_count, ts
+                   FROM agent_runs WHERE status='interrupted'
+                   ORDER BY ts DESC LIMIT ?""",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            log.warning("AgentDB.get_interrupted_runs failed: %s", exc)
+            return []
 
     # ---------------------------------------------------------------------- #
     # Few-shot examples

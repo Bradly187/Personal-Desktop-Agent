@@ -8,8 +8,8 @@ import Foundation
 /// Messages sent as `audio_stream` type with base64-encoded samples.
 ///
 /// Uses SharedAudioSession for audio input — does NOT own its own AVAudioEngine.
-/// All three audio sensors (KeywordListener, SoundDetector, AudioStreamer) share
-/// the same engine via the fan-out tap pattern in SharedAudioSession.
+/// The audio sensors (KeywordListener, AudioStreamer) share the same engine via
+/// the fan-out tap pattern in SharedAudioSession.
 ///
 /// Resampling runs on a dedicated serial queue to avoid blocking the audio render
 /// thread and to prevent data races on converter state.

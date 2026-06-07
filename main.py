@@ -136,7 +136,7 @@ def _print_startup_table(
     backend: str = "ollama",
     vllm_server_url: str = "http://localhost:8000",
     cloud_dev_agent: bool = False,
-    cloud_dev_model: str = "claude-sonnet-4-6",
+    cloud_dev_model: str = "claude-opus-4-8",
 ) -> None:
     """Print a table of which PC-side services are available."""
     rows: list[tuple[str, str, str]] = []
@@ -513,6 +513,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await agent_db.prune_gesture_velocity_samples(days=90)
     await agent_db.prune_ipad_logs(days=60)
 
+    # --- Crash recovery: reconcile plans left mid-run by a previous process ---
+    # Any agent_run still 'running' means the process died during a plan. Mark
+    # them 'interrupted'; DevAgent.resume_pending_plan() can offer a gated resume.
+    _interrupted = await agent_db.mark_interrupted_runs()
+    if _interrupted:
+        log.warning(
+            "Recovered %d interrupted plan run(s) from a previous session — "
+            "say 'resume task' to continue the most recent one.", _interrupted,
+        )
+
     # --- Open audit log (separate append-only DB) ---
     audit = AuditLog()
     await audit.open(Path("audit.db"))
@@ -724,11 +734,33 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
     fusion.set_session_id(session_id)
 
+    # Magnetic cursor:
+    #   * Phase 1 (tilt-tap snap) / Phase 2b (dwell snap) — per-click UIA lookup
+    #     in command_executor; also reads the cache's cheap snapshot when running.
+    #   * Phase 3 (cursor gravity) — biases the tilt cursor toward a nearby
+    #     clickable at 60 Hz so the user can settle on buttons without precision.
+    #
+    # The background ClickableTargetCache was reworked (2026-06-05) to be
+    # change-gated (walk only on foreground change / heartbeat) with a failure
+    # backoff and a foreground-scoped UIA walk — fixing the E_POINTER thrash. The
+    # fullscreen overlay that caused the DWM soft-hang was removed entirely;
+    # gravity now runs headless. Kill-switch: DA_CURSOR_GRAVITY=0.
+    target_cache = None
+    if os.environ.get("DA_CURSOR_GRAVITY", "1") != "0":
+        from desktop.target_cache import get_target_cache
+        target_cache = get_target_cache()
+        target_cache.start()
+        fusion.set_target_cache(target_cache)
+        log.info("Cursor gravity enabled (DA_CURSOR_GRAVITY)")
+    else:
+        log.info("Cursor gravity disabled via DA_CURSOR_GRAVITY=0")
+
     # Priority-aware scheduler — gates DEV_AGENT/BACKGROUND tasks so they
     # cannot starve accessibility commands during a flare.
     from core.scheduler import AccessibilityScheduler
     scheduler = AccessibilityScheduler()
     await scheduler.start()
+    scheduler.set_metrics(m)        # queue-depth / dev-inflight visibility in /metrics
     fusion.set_scheduler(scheduler)
     dev_agent.set_scheduler(scheduler)
 
@@ -841,8 +873,21 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if args.metrics_port:
         try:
             from aiohttp import web as _aio_web
+            from monitoring.trace import get_tracer as _get_tracer
             _metrics_app = _aio_web.Application()
             _metrics_app.router.add_get("/metrics", m.aiohttp_handler)
+
+            async def _trace_recent(_req):
+                return _aio_web.json_response({"traces": _get_tracer().get_recent(50)})
+
+            async def _trace_one(req):
+                tr = _get_tracer().get_trace(req.match_info["tid"])
+                if tr is None:
+                    return _aio_web.json_response({"error": "not found"}, status=404)
+                return _aio_web.json_response(tr)
+
+            _metrics_app.router.add_get("/trace", _trace_recent)
+            _metrics_app.router.add_get("/trace/{tid}", _trace_one)
             _metrics_runner = _aio_web.AppRunner(_metrics_app)
             await _metrics_runner.setup()
             _metrics_site = _aio_web.TCPSite(_metrics_runner, "0.0.0.0", args.metrics_port)
@@ -891,11 +936,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     governor = ResourceGovernor(memory=memory)
     governor.set_fusion_engine(fusion)
     governor.set_whisper_stream(whisper)
+    governor.set_model_router(router)   # eviction targets the live model lineup
     if indexer is not None:
         governor.set_indexer(indexer)
     await governor.start()
     twin_state.set_resource_governor(governor)   # SVT fast-path: <100ms flare response
     shutdown.register(governor)
+    if target_cache is not None:
+        shutdown.register(target_cache)
 
     # --- Sync hotwords into WhisperStream once trainer is ready ---
     hotwords = await trainer.get_hotwords()
@@ -909,7 +957,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             backend=_backend,
             vllm_server_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
             cloud_dev_agent=getattr(args, "cloud_dev_agent", False),
-            cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-sonnet-4-6"),
+            cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-opus-4-8"),
         )
         if cluster_cfg.enabled:
             _h = cluster_health.status() if cluster_health is not None else {}

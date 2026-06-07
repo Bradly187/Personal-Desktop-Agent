@@ -4,15 +4,22 @@ Receives a Command from FusionEngine, decides whether to run local inference
 or fall back to the cloud, executes the resulting action, and logs the outcome.
 
 Gate logic (source-dependent):
-  touch / sound_action / multimodal → bypass all 4 gates → local
+  touch / multimodal                → bypass all 4 gates → local
   voice_local                       → skip Gate 1 → gates 2-4
   gesture / voice                   → full 4-gate evaluation
 
 Gate 0 — Privacy:     command text contains no sensitive-data patterns
   fail → force local (never send to cloud)
+  NOTE: bypass sources (touch / multimodal) are already local-only and never
+  reach the cloud, so Gate 0 does not apply to them — a resolved touch action
+  executes directly without LLM interference even when its text matches a
+  sensitive pattern.
 
 Gate 1 — Confidence:  whisper_logprob ≥ min AND gesture_conf ≥ min
-  fail-voice    → vocabulary correction → retry Gate 2
+  fail-voice, KNOWN misrecognition (vocab pass already fixed it) → local
+  fail-voice, UNKNOWN low-confidence transcript                  → cloud
+    (the cloud system prompt is tuned to repair voice misrecognitions the
+     local dictionary cannot)
   fail-gesture  → discard silently
 
 Gate 2 — Complexity:  token_count ≤ max AND no complexity keywords
@@ -25,9 +32,11 @@ Gate 4 — Latency EMA:  latency_ema_ms ≤ latency_budget_ms
   fail → Anthropic API
 
 After inference: log outcome to agent.db (AgentDB), call CommandExecutor.execute().
-Each log entry includes `gate_that_decided`: which gate was the decisive routing
-factor ("bypass", "gate0_privacy", "gate2_complexity", "gate3_vram",
-"gate4_latency", "all_pass", "discard").
+Each log entry includes `gate_that_decided`: the decisive routing factor, one of
+_GATE_DECISION_LABELS ("bypass", "gate0_privacy", "gate1_voice_conf",
+"gate2_complexity", "gate3_vram", "gate4_latency", "all_pass"). Silently
+discarded gestures (Gate 1, low confidence) return early WITHOUT a DB row, so
+"discard" is intentionally not a logged label.
 """
 
 from __future__ import annotations
@@ -43,6 +52,7 @@ from core.command_executor import Command, CommandExecutor
 from dataclasses import replace as _dc_replace
 from inference.local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
 from desktop.vision_grounder import VisionGrounder
+from monitoring.trace import get_tracer
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog
@@ -110,10 +120,11 @@ class CoordinatorConfig:
 
     # (routing_log_path removed — outcomes written to agent.db commands table)
 
-    # Anthropic API (cloud fallback). Haiku 4.5 — matches the model documented
-    # in CLAUDE.md (8/8 on voice misrecognitions) and exercised by the tests;
-    # the prior default ("claude-sonnet-4-6-20250514") was a stale/typo'd ID.
-    anthropic_model: str = "claude-haiku-4-5-20251001"
+    # Anthropic API (cloud fallback). Haiku 4.5 — fast/cheap, 8/8 on voice
+    # misrecognitions; the alias floats to the latest 4.5 snapshot. The command
+    # path needs only a one-line verb, so Haiku is the right tier here (the dev
+    # path uses Opus 4.8 via CloudDevAgent).
+    anthropic_model: str = "claude-haiku-4-5"
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +241,7 @@ async def _retranscribe(cmd: Command) -> Command:
 # HybridCoordinator
 # ---------------------------------------------------------------------------
 
-_BYPASS_SOURCES = {"touch", "sound_action", "multimodal"}
+_BYPASS_SOURCES = {"touch", "multimodal"}
 _SKIP_GATE1_SOURCES = {"voice_local"}
 
 # Output schema for the command-path LLM. The local/cloud command models are
@@ -242,6 +253,21 @@ _SKIP_GATE1_SOURCES = {"voice_local"}
 _VALID_COMMAND_VERBS: frozenset[str] = frozenset({
     "CLICK", "MOUSEDOWN", "MOUSEUP", "SCROLL", "TYPE", "OPEN",
     "CLOSE", "HOTKEY", "DICTATE", "CLARIFY", "SCREENSHOT",
+})
+
+# Exhaustive set of `gate_that_decided` values written to agent.db by route().
+# Each names the decisive routing factor for one logged command. Kept as a
+# single source of truth so analytics/tests can assert against it. NOTE:
+# silently discarded gestures (Gate 1, low confidence) return early WITHOUT a DB
+# row, so "discard" is deliberately absent.
+_GATE_DECISION_LABELS: frozenset[str] = frozenset({
+    "bypass",            # touch / multimodal — local, gates skipped
+    "gate0_privacy",     # sensitive text — forced local
+    "gate1_voice_conf",  # unknown low-confidence voice — escalated to cloud
+    "gate2_complexity",  # complex command — cloud
+    "gate3_vram",        # insufficient free VRAM — cloud
+    "gate4_latency",     # local latency over budget — cloud
+    "all_pass",          # all gates passed — local
 })
 
 
@@ -533,10 +559,29 @@ class HybridCoordinator:
         Dev-domain queries (code, math, vision, plan, general) are intercepted
         here and forwarded to DevAgent before the accessibility pipeline runs.
         """
+        # Cross-layer trace: set the current-trace ContextVar so every awaited
+        # descendant (router, executor) attaches spans without new params. Runs
+        # as its own scheduler task, so no reset is needed. No-op unless DA_TRACE.
+        _tracer = get_tracer()
+        if _tracer.enabled:
+            _tid = cmd.trace_id or _tracer.new_trace(source=cmd.source)
+            if not cmd.trace_id:
+                cmd.trace_id = _tid
+            _tracer.set_current(_tid)
+
         # --- Dev-agent pre-gate: intercept non-command domains ---
         # Skip for voice system-control keywords so they reach the keyword block
         # below instead of being misrouted to an LLM (e.g. "pain day on").
-        if self._dev_agent and not _is_system_control_voice(cmd):
+        # Skip for bypass sources (touch / multimodal): these arrive
+        # with a concrete accessibility action already resolved (e.g. a tilt-tap is
+        # source="touch" action="CLICK" text="tilt_tap"). Classifying their text
+        # would send "tilt_tap" to the DevAgent as a general-domain query and the
+        # click would never fire — they must fall through to the gate-bypass path.
+        if (
+            self._dev_agent
+            and not _is_system_control_voice(cmd)
+            and cmd.source not in _BYPASS_SOURCES
+        ):
             domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
                 # Cloud DevAgent branch — route to Claude when configured to,
@@ -762,12 +807,8 @@ class HybridCoordinator:
             # consumer relaxes only if its flare_profile degrade flag is set,
             # and apply_pain_day is idempotent so calling every command is cheap.
             if self._fusion is not None:
-                # Tilt and sound are independent flare_profile flags, so a
-                # user who tilts fine but whose mouth-sounds weaken (or vice
-                # versa) gets exactly the relaxation they configured.
                 self._fusion.apply_pain_day(
                     tilt=snapshot.pain_day_active and snapshot.flare_tilt_degrades,
-                    sound=snapshot.pain_day_active and snapshot.flare_sound_degrades,
                 )
             if self._whisper is not None:
                 self._whisper.apply_pain_day(
@@ -777,6 +818,7 @@ class HybridCoordinator:
             # Always apply vocabulary corrections before any gate evaluation
             # so app-name phonetics ("key-row" → "kiro") reach the LLM fixed
             # regardless of Whisper confidence level.
+            vocab_corrected = False
             if cmd.source in ("voice", "voice_local"):
                 corrected_text, changed = _apply_vocabulary_corrections(cmd.text)
                 if changed:
@@ -784,6 +826,7 @@ class HybridCoordinator:
                         "Pre-gate vocab correction: %r → %r", cmd.text, corrected_text
                     )
                     cmd = _dc_replace(cmd, text=corrected_text)
+                    vocab_corrected = True
 
             # Populate session_context from twin state (always accessibility namespace)
             if self._twin and self._twin.is_ready:
@@ -800,18 +843,31 @@ class HybridCoordinator:
             _original_cfg = self._cfg
             self._cfg = effective_cfg
             try:
-                # --- Gate 0 — Privacy (applies before bypass; forces local) ----
-                if not self._gate0(cmd):
+                # --- Bypass path (touch / multimodal) --------------------------
+                # These sources always run local and never reach the cloud, so
+                # Gate 0 — whose sole purpose is to keep sensitive text off an
+                # external API — does not apply and is checked AFTER this branch.
+                # Touch commands (iPad CommandPad taps, tilt-tap) arrive with a
+                # concrete action already resolved — the text is just a label
+                # ("tilt_tap"). Honor that action directly instead of asking the
+                # LLM to infer it from the label, which yields CLARIFY ("What is
+                # the target of the click?") because the model can't read
+                # "tilt_tap" as a verb. Multimodal still infers via the LLM
+                # (its action depends on which phrase fired).
+                if source in _BYPASS_SOURCES:
+                    if cmd.source == "touch" and cmd.action in _VALID_COMMAND_VERBS:
+                        action_str = cmd.action
+                    else:
+                        action_str = await self._run_local(cmd)
+                    route_label = "local"
+                    gate_that_decided = "bypass"
+
+                # --- Gate 0 — Privacy (force local for cloud-eligible sources) --
+                elif not self._gate0(cmd):
                     log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
                     action_str = await self._run_local(cmd)
                     route_label = "local"
                     gate_that_decided = "gate0_privacy"
-
-                # --- Bypass path -----------------------------------------------
-                elif source in _BYPASS_SOURCES:
-                    action_str = await self._run_local(cmd)
-                    route_label = "local"
-                    gate_that_decided = "bypass"
 
                 # --- Skip Gate 1 path ------------------------------------------
                 elif source in _SKIP_GATE1_SOURCES:
@@ -826,10 +882,30 @@ class HybridCoordinator:
                         log.debug("Gate 1 discard (low gesture conf): %r", cmd.text)
                         return {"status": "discarded", "reason": "gate1_gesture_conf"}
                     if not passed:
-                        # Voice low confidence — re-transcribe and continue to Gate 2
-                        cmd = await _retranscribe(cmd)
-
-                    action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
+                        # Voice low confidence. If the pre-gate vocabulary pass
+                        # already fixed a KNOWN misrecognition the transcript is now
+                        # high-confidence — continue local (fast, no round-trip).
+                        # Otherwise it's an UNKNOWN low-confidence utterance:
+                        # escalate to the cloud, whose system prompt is tuned to
+                        # repair voice misrecognitions the local dictionary can't.
+                        # Gate 0 has already passed here, so no sensitive data is
+                        # transmitted.
+                        if vocab_corrected:
+                            cmd = await _retranscribe(cmd)
+                            action_str, gate_that_decided, route_label = \
+                                await self._gates_2_to_4(cmd)
+                        else:
+                            log.info(
+                                "Gate 1 voice low-confidence (logprob=%.3f) — "
+                                "escalating to cloud for misrecognition repair",
+                                cmd.whisper_logprob,
+                            )
+                            action_str = await self._run_cloud(cmd)
+                            gate_that_decided = "gate1_voice_conf"
+                            route_label = "cloud"
+                    else:
+                        action_str, gate_that_decided, route_label = \
+                            await self._gates_2_to_4(cmd)
             finally:
                 self._cfg = _original_cfg
 
@@ -850,6 +926,7 @@ class HybridCoordinator:
                         latency_ms=latency_ms,
                         success=success,
                         error_msg=error_msg,
+                        trace_id=cmd.trace_id or None,
                     )
                 except Exception as db_exc:
                     log.warning("AgentDB.insert_command failed: %s", db_exc)
@@ -891,7 +968,15 @@ class HybridCoordinator:
 
         finally:
             latency_ms = (time.monotonic() - t0) * 1000
-            self._update_ema(latency_ms)
+            # Gate 4's EMA exists to detect when LOCAL inference is getting slow
+            # (e.g. GPU contention during a flare) and shed load to the cloud.
+            # Feeding cloud round-trip latency — inherently several times the
+            # local budget — back into it would inflate the EMA, trip Gate 4, and
+            # push even more commands to the cloud: a positive feedback loop that
+            # never recovers. So only local routes update the Gate 4 EMA; when a
+            # burst goes to cloud the EMA stays low and local is retried promptly.
+            if route_label == "local":
+                self._update_ema(latency_ms)
             # Record outcome in metrics singleton (non-fatal)
             if self._metrics is not None:
                 try:
@@ -907,6 +992,15 @@ class HybridCoordinator:
                     )
                 except Exception:
                     pass
+            # Cross-layer trace: the decisive routing span (no-op unless DA_TRACE)
+            try:
+                _tracer.record_span(
+                    "route_decision", route=route_label, gate=gate_that_decided,
+                    action=action_str or None, success=success,
+                    dur_ms=round(latency_ms, 1),
+                )
+            except Exception:
+                pass
 
         return result
 
@@ -1082,6 +1176,14 @@ class HybridCoordinator:
                 backend=status.get("backend", "ollama"),
                 error=error,
             )
+        try:
+            _st = self._local.get_status()
+            get_tracer().record_span(
+                "inference", route="local", backend=_st.get("backend"),
+                model=_st.get("model"), dur_ms=round(latency_ms, 1),
+            )
+        except Exception:
+            pass
         return action_str
 
     _CLOUD_TIMEOUT_S = 10.0  # circuit-breaker: cloud inference must complete within this window
@@ -1108,7 +1210,8 @@ class HybridCoordinator:
 
         try:
             async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
-                return await self._cloud.infer(cmd)
+                with get_tracer().timed("inference", route="cloud"):
+                    return await self._cloud.infer(cmd)
         except TimeoutError:
             log.error(
                 "HybridCoordinator: cloud inference timed out after %.0fs — CLARIFY fallback",
@@ -1189,7 +1292,8 @@ class HybridCoordinator:
             self._whisper.suppress(pre_suppress_s)
             log.debug("Pre-CLARIFY mic suppressed for %.1fs", pre_suppress_s)
 
-        result = await self._executor.execute(exec_cmd)
+        with get_tracer().timed("execute", verb=verb):
+            result = await self._executor.execute(exec_cmd)
 
         # Post-action suppression:
         #   CLARIFY  — long suppress covers TTS echo (already pre-suppressed too)
@@ -1276,7 +1380,14 @@ class HybridCoordinator:
             params = {"direction": direction, "amount": amount}
 
         elif verb == "CLICK":
-            if original.gaze_coords:
+            # Carry through explicit touch coords (tilt-tap pins cursor x/y +
+            # snap_nearest in FusionEngine.on_touch). Without this the coords are
+            # dropped and the click falls back to re-searching UIA for the text.
+            if "x" in original.params and "y" in original.params:
+                params = {"x": original.params["x"], "y": original.params["y"]}
+                if original.params.get("snap_nearest"):
+                    params["snap_nearest"] = True
+            elif original.gaze_coords:
                 x, y = original.gaze_coords
                 params = {"x": x, "y": y}
 

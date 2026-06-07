@@ -13,6 +13,7 @@ the same tool functions that Claude calls are called here in-process.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import io
 import logging
 import os
@@ -46,6 +47,140 @@ else:
 # Lazy singleton — UIAutomation COM init is expensive; reuse across calls.
 _ui_provider: "UIAutomationProvider | None" = None
 _action_verifier: "ActionVerifier | None" = None
+
+# Magnetic-click ("area cursor") radius in pixels: a tilt-tap clicks the nearest
+# clickable target within this distance of the cursor instead of the exact pixel,
+# so coarse tilt positioning is enough. Env-overridable for live tuning without a
+# restart-edit; 0 (or negative) disables snapping → click lands at the cursor.
+import os as _os
+try:
+    _SNAP_RADIUS_PX = int(_os.environ.get("DA_SNAP_RADIUS_PX", "300"))
+except ValueError:
+    _SNAP_RADIUS_PX = 200
+
+
+# ---------------------------------------------------------------------------
+# Dedicated single-thread COM apartment for per-click UIAutomation work.
+#
+# UIA COM objects are apartment-bound: the UIAutomationProvider singleton caches
+# a COM pointer (self._uia) that may ONLY be touched from the thread that created
+# it. The per-click UIA paths run inside `asyncio.to_thread(self._dispatch, …)`,
+# whose default ThreadPoolExecutor rotates worker threads across calls — so the
+# pointer created on one worker would later be reused from another, a textbook
+# cross-apartment access (RPC_E_WRONG_THREAD / E_POINTER). comtypes has been
+# papering over it (no CoInitialize on those threads either), but it's a latent
+# thread-identity race.
+#
+# Fix: funnel every provider COM call through this one CoInitialized(MTA) thread,
+# so the cached pointer is created and used from a single apartment for the whole
+# process lifetime. Same confinement the background ClickableTargetCache already
+# uses for its own provider (desktop/target_cache.py). The threadpool worker that
+# runs _dispatch just blocks on the future — it never touches COM itself.
+_uia_executor: "concurrent.futures.ThreadPoolExecutor | None" = None
+
+
+def _com_thread_init() -> None:
+    """ThreadPoolExecutor initializer: CoInitialize the dedicated UIA thread (MTA)."""
+    try:
+        import comtypes
+        comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
+    except Exception as exc:  # pragma: no cover - platform dependent
+        log.debug("UIA COM thread CoInitializeEx failed: %s", exc)
+
+
+def _get_uia_executor() -> "concurrent.futures.ThreadPoolExecutor":
+    global _uia_executor
+    if _uia_executor is None:
+        _uia_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="uia-com",
+            initializer=_com_thread_init,
+        )
+    return _uia_executor
+
+
+def _run_on_com_thread(fn, *args):
+    """Run a UIA COM callable on the dedicated apartment thread, blocking for the
+    result. Returns None on any executor-level failure (the callables themselves
+    are written to swallow their own COM errors and return None)."""
+    try:
+        return _get_uia_executor().submit(fn, *args).result()
+    except Exception as exc:
+        log.debug("UIA COM thread call failed: %s", exc)
+        return None
+
+
+def _uia_nearest_snap(x: int, y: int, radius: int) -> "tuple[int, int] | None":
+    """Direct per-click UIA nearest-target walk. Runs on the COM apartment thread.
+
+    Both the is_available() probe (which lazily creates the COM pointer) and the
+    tree walk happen here, so the pointer is born and used on the same thread.
+    """
+    provider = _get_ui_provider()
+    if not (provider and provider.is_available()):
+        return None
+    try:
+        elem = provider.find_nearest_clickable(x, y, max_radius=radius)
+    except Exception as exc:
+        log.debug("magnetic snap lookup failed: %s", exc)
+        return None
+    if elem is None:
+        return None
+    cx, cy = elem.center()
+    log.info(
+        "Magnetic snap: cursor (%d,%d) → %r [%s] (%d,%d)",
+        x, y, elem.name or "?", elem.role, cx, cy,
+    )
+    return cx, cy
+
+
+def _uia_find_target(target: str) -> "tuple[int, int] | None":
+    """Structured named-element lookup (Sprint 6). Runs on the COM apartment thread."""
+    provider = _get_ui_provider()
+    if not (provider and provider.is_available()):
+        return None
+    try:
+        element = provider.find(target, timeout_s=0.3)
+    except Exception as exc:
+        log.debug("UIAutomation lookup failed: %s", exc)
+        return None
+    if element and element.is_enabled:
+        cx, cy = element.center()
+        log.info("UIAutomation resolved %r → (%d, %d) [%s]", target, cx, cy, element.role)
+        return cx, cy
+    return None
+
+
+def _magnetic_snap(x: int, y: int) -> "tuple[int, int] | None":
+    """Return the center of the nearest clickable target within the snap radius
+    of (x, y), or None if snapping is disabled / unavailable / nothing is near.
+
+    Prefers the background ClickableTargetCache (cheap, no COM call on this
+    thread); falls back to a direct per-click UIA tree walk when the cache isn't
+    running yet (e.g. first click before the first refresh).
+    """
+    if _SNAP_RADIUS_PX <= 0:
+        return None
+
+    # Fast path — read the background snapshot.
+    try:
+        from desktop.target_cache import get_target_cache
+        cache = get_target_cache()
+        if cache.is_running():
+            tg = cache.nearest(x, y, _SNAP_RADIUS_PX)
+            if tg is None:
+                return None
+            cx, cy = tg.center()
+            log.info("Magnetic snap [cache]: (%d,%d) → %r [%s] (%d,%d)",
+                     x, y, tg.name or "?", tg.role, cx, cy)
+            return cx, cy
+    except Exception as exc:
+        log.debug("magnetic snap cache lookup failed: %s", exc)
+
+    # Fallback — direct UIA walk, confined to the dedicated COM apartment thread
+    # (see _run_on_com_thread). Fires rarely now that the cache serves the fast
+    # path — only before the first cache refresh / when the cache is unavailable.
+    return _run_on_com_thread(_uia_nearest_snap, x, y, _SNAP_RADIUS_PX)
 
 def _get_action_verifier():
     global _action_verifier
@@ -194,6 +329,7 @@ class Command:
     session_context: list[str] = field(default_factory=list)
     gaze_coords: tuple[int, int] | None = None  # explicit click pixel coords (vision grounder, touch)
     params: dict[str, Any] = field(default_factory=dict)
+    trace_id: str = ""                   # cross-layer trace id (set when DA_TRACE on); see monitoring/trace.py
 
 
 # ---------------------------------------------------------------------------
@@ -513,30 +649,30 @@ class CommandExecutor:
 
         Fallback chain:
           1. Explicit x/y in params  (vision grounder, touch)
+             — if params["snap_nearest"] is set (tilt-tap), magnetically snap to
+               the nearest clickable target within the snap radius first.
           2. UIAutomation structured element lookup  ← Sprint 6
           3. Explicit click coords from Command (gaze_coords)
           4. Current cursor position
         """
         p = cmd.params
         if "x" in p and "y" in p:
-            return int(p["x"]), int(p["y"])
+            x, y = int(p["x"]), int(p["y"])
+            if p.get("snap_nearest"):
+                snapped = _magnetic_snap(x, y)
+                if snapped is not None:
+                    return snapped
+            return x, y
 
-        # UIAutomation: try structured element lookup when target text is available
+        # UIAutomation: try structured element lookup when target text is available.
+        # The COM walk runs on the dedicated apartment thread (see
+        # _run_on_com_thread) so the provider's cached COM pointer is never
+        # touched from a rotating asyncio.to_thread worker.
         target = (p.get("target") or cmd.text or "").strip()
         if target and len(target.split()) <= 5:  # skip long sentences
-            provider = _get_ui_provider()
-            if provider and provider.is_available():
-                try:
-                    element = provider.find(target, timeout_s=0.3)
-                    if element and element.is_enabled:
-                        cx, cy = element.center()
-                        log.info(
-                            "UIAutomation resolved %r → (%d, %d) [%s]",
-                            target, cx, cy, element.role,
-                        )
-                        return cx, cy
-                except Exception as exc:
-                    log.debug("UIAutomation lookup failed: %s", exc)
+            coords = _run_on_com_thread(_uia_find_target, target)
+            if coords is not None:
+                return coords
 
         if cmd.gaze_coords:
             return cmd.gaze_coords

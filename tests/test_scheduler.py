@@ -31,6 +31,18 @@ async def _coro(result=None, delay: float = 0.0):
     return result
 
 
+class _FakeMetrics:
+    """Minimal metrics stub exposing set(name, value) like the real singleton."""
+    def __init__(self):
+        self.gauges: dict = {}
+        self.max_queue_depth = 0
+
+    def set(self, name, value):
+        self.gauges[name] = value
+        if name == "scheduler_queue_depth":
+            self.max_queue_depth = max(self.max_queue_depth, value)
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -288,6 +300,31 @@ class TestDevTaskTimeout:
             await sched.stop()
 
     @pytest.mark.asyncio
+    async def test_dev_inflight_released_after_timeout(self):
+        """Release-safe: scheduler_dev_inflight returns to 0 even when a dev task times out."""
+        import core.scheduler as sched_mod
+        original = sched_mod._DEV_TASK_TIMEOUT_S
+        sched_mod._DEV_TASK_TIMEOUT_S = 0.1
+
+        async def _hang():
+            await asyncio.sleep(999)
+
+        sched = AccessibilityScheduler()
+        m = _FakeMetrics()
+        sched.set_metrics(m)
+        await sched.start()
+        try:
+            fut = sched.submit(_hang(), Priority.DEV_AGENT)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(fut, timeout=2.0)
+            await asyncio.sleep(0.05)  # let the finally block run
+            assert m.gauges["scheduler_dev_inflight"] == 0
+            assert sched._dev_inflight == 0
+        finally:
+            sched_mod._DEV_TASK_TIMEOUT_S = original
+            await sched.stop()
+
+    @pytest.mark.asyncio
     async def test_semaphore_released_after_timeout(self):
         """After a dev task times out the semaphore must be released for the next task."""
         import core.scheduler as sched_mod
@@ -312,3 +349,99 @@ class TestDevTaskTimeout:
         finally:
             sched_mod._DEV_TASK_TIMEOUT_S = original
             await sched.stop()
+
+
+# ---------------------------------------------------------------------------
+# Metrics: queue depth + dev-inflight gauges
+# ---------------------------------------------------------------------------
+
+class TestSchedulerMetrics:
+    @pytest.mark.asyncio
+    async def test_queue_depth_published_and_drains(self):
+        """Submitting a burst grows scheduler_queue_depth; it returns to 0 after drain."""
+        sched = AccessibilityScheduler()
+        m = _FakeMetrics()
+        sched.set_metrics(m)
+        await sched.start()
+        try:
+            # No await between submits → the worker can't drain yet → depth builds.
+            futs = [sched.submit(_coro(i, delay=0.01), Priority.ACCESSIBILITY)
+                    for i in range(5)]
+            assert m.max_queue_depth >= 2
+            await asyncio.wait_for(asyncio.gather(*futs), timeout=3.0)
+            assert m.gauges["scheduler_queue_depth"] == 0
+        finally:
+            await sched.stop()
+
+    @pytest.mark.asyncio
+    async def test_dev_inflight_tracks_and_releases(self):
+        """scheduler_dev_inflight is 1 while a DEV task runs, 0 after it completes."""
+        sched = AccessibilityScheduler()
+        m = _FakeMetrics()
+        sched.set_metrics(m)
+        await sched.start()
+        try:
+            gate = asyncio.Event()
+
+            async def _dev():
+                await gate.wait()
+
+            fut = sched.submit(_dev(), Priority.DEV_AGENT)
+            await asyncio.sleep(0.05)            # let it acquire the permit
+            assert m.gauges["scheduler_dev_inflight"] == 1
+            assert sched._dev_inflight == 1
+            gate.set()
+            await asyncio.wait_for(fut, timeout=2.0)
+            await asyncio.sleep(0.02)            # let the finally block run
+            assert m.gauges["scheduler_dev_inflight"] == 0
+            assert sched._dev_inflight == 0
+        finally:
+            await sched.stop()
+
+
+# ---------------------------------------------------------------------------
+# Deadlock safety (single-permit re-entrancy invariant)
+# ---------------------------------------------------------------------------
+
+class TestSchedulerDeadlockSafety:
+    @pytest.mark.asyncio
+    async def test_fast_tier_can_submit_and_await_dev(self):
+        """SUPPORTED pattern: a non-permit-holder (fast tier) submits AND awaits a
+        DEV task — completes with no deadlock. (The unsupported case — a DEV task
+        awaiting another DEV task — is documented as an invariant, not exercised,
+        because by design it would hang.)"""
+        sched = AccessibilityScheduler()
+        await sched.start()
+        try:
+            async def _parent():
+                child = sched.submit(_coro("child"), Priority.DEV_AGENT)
+                return await child
+
+            fut = sched.submit(_parent(), Priority.ACCESSIBILITY)
+            result = await asyncio.wait_for(fut, timeout=3.0)
+            assert result == "child"
+        finally:
+            await sched.stop()
+
+
+# ---------------------------------------------------------------------------
+# Teardown cleanup
+# ---------------------------------------------------------------------------
+
+class TestSchedulerTeardown:
+    @pytest.mark.asyncio
+    async def test_stop_cancels_inflight_tasks(self):
+        """stop() cancels dispatched tasks still in flight (no lingering tasks/permits)."""
+        sched = AccessibilityScheduler()
+        await sched.start()
+        started = asyncio.Event()
+
+        async def _long():
+            started.set()
+            await asyncio.sleep(999)
+
+        sched.submit(_long(), Priority.ACCESSIBILITY)
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        assert len(sched._inflight_tasks) >= 1
+        await sched.stop()
+        assert len(sched._inflight_tasks) == 0

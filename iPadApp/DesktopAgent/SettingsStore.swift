@@ -82,6 +82,36 @@ final class SettingsStore: ObservableObject {
     @Published var tiltPositionMode: Bool {
         didSet { defaults.set(tiltPositionMode, forKey: "tiltPositionMode") }
     }
+    /// Tilt-joystick (rate-control) mode. When true AND Position Mode is on, the
+    /// tilt *angle* from the calibrated neutral drives cursor *velocity* (neutral
+    /// = hold still, more tilt = faster, up to the saturation angle) instead of
+    /// mapping to an absolute position — so the cursor keeps gliding while the
+    /// iPad is held tilted and stops when returned to neutral. The PC side is
+    /// unchanged: the iPad integrates velocity → position and still sends
+    /// tilt_position, so cursor gravity / multi-monitor / clamp all keep working.
+    @Published var tiltJoystickMode: Bool {
+        didSet { defaults.set(tiltJoystickMode, forKey: "tiltJoystickMode") }
+    }
+    /// Max joystick glide speed, in screen-widths/sec (fraction of the full
+    /// virtual desktop per second) reached at/after the saturation angle.
+    /// Clamped [0.2, 4.0]; default 1.2.
+    @Published var tiltDriftMaxSpeed: Double {
+        didSet {
+            let clamped = max(0.2, min(4.0, tiltDriftMaxSpeed))
+            if clamped != tiltDriftMaxSpeed { tiltDriftMaxSpeed = clamped }
+            defaults.set(clamped, forKey: "tiltDriftMaxSpeed")
+        }
+    }
+    /// Tilt angle (deg from neutral) at which the glide reaches max speed; the
+    /// velocity ramps linearly from the dead zone up to here. Clamped [10, 60];
+    /// default 30.
+    @Published var tiltDriftSaturationDeg: Double {
+        didSet {
+            let clamped = max(10.0, min(60.0, tiltDriftSaturationDeg))
+            if clamped != tiltDriftSaturationDeg { tiltDriftSaturationDeg = clamped }
+            defaults.set(clamped, forKey: "tiltDriftSaturationDeg")
+        }
+    }
     /// Tilt dwell-to-click: hold the cursor still to fire the active dwell
     /// action. Opt-in (off by default) to avoid accidental "Midas touch" clicks.
     @Published var tiltDwellClickEnabled: Bool {
@@ -94,12 +124,24 @@ final class SettingsStore: ObservableObject {
 
     /// Accelerometer tap-to-click threshold (g-force delta). LOWER = a lighter
     /// tap registers (more sensitive). The Settings "Tap Sensitivity" slider maps
-    /// to this inversely. Clamped to [0.5, 3.0]; default 1.2.
+    /// to this inversely. Clamped to [0.4, 3.0]; default 0.4 (the sensitive floor). The 0.4 floor sits
+    /// just above the ~0.3 g accel spikes that tilting-to-move-the-cursor produces,
+    /// so lighter taps register without cursor motion firing false clicks.
     @Published var tapThreshold: Double {
         didSet {
-            let clamped = max(0.5, min(3.0, tapThreshold))
+            let clamped = max(0.4, min(3.0, tapThreshold))
             if clamped != tapThreshold { tapThreshold = clamped }
             defaults.set(clamped, forKey: "tapThreshold")
+        }
+    }
+    /// Tap motion-stabilization window (ms). After a tap fires, the cursor is
+    /// held still for this long so the tap's follow-through wobble can't nudge
+    /// the click off the target. Clamped [0, 400]; 0 = off; default 180.
+    @Published var tapStabilizeMs: Double {
+        didSet {
+            let clamped = max(0.0, min(400.0, tapStabilizeMs))
+            if clamped != tapStabilizeMs { tapStabilizeMs = clamped }
+            defaults.set(clamped, forKey: "tapStabilizeMs")
         }
     }
 
@@ -286,15 +328,6 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(audioStreamEnabled, forKey: "audioStreamEnabled") }
     }
 
-    // MARK: — Sound mappings  {"cluck": "CLICK", "pop": "SCROLL down", ...}
-    @Published var soundMappings: [String: String] {
-        didSet {
-            if let data = try? JSONEncoder().encode(soundMappings) {
-                defaults.set(data, forKey: "soundMappings")
-            }
-        }
-    }
-
     // MARK: — CommandPad buttons  [{label, action, params}]
     @Published var commandButtons: [CommandButton] {
         didSet {
@@ -323,10 +356,18 @@ final class SettingsStore: ObservableObject {
         let savedRange = defaults.double(forKey: "tiltRange")
         tiltRange = savedRange > 0 ? max(5.0, min(60.0, savedRange)) : 25.0
         tiltPositionMode = defaults.object(forKey: "tiltPositionMode") as? Bool ?? true
+        tiltJoystickMode = defaults.object(forKey: "tiltJoystickMode") as? Bool ?? true
+        let savedDriftSpeed = defaults.double(forKey: "tiltDriftMaxSpeed")
+        tiltDriftMaxSpeed = savedDriftSpeed > 0 ? max(0.2, min(4.0, savedDriftSpeed)) : 1.2
+        let savedSatDeg = defaults.double(forKey: "tiltDriftSaturationDeg")
+        tiltDriftSaturationDeg = savedSatDeg > 0 ? max(10.0, min(60.0, savedSatDeg)) : 30.0
         tiltDwellClickEnabled = defaults.object(forKey: "tiltDwellClickEnabled") as? Bool ?? false
         tiltDwellDuration = defaults.double(forKey: "tiltDwellDuration").nonZero ?? 1.0
         let savedTap = defaults.double(forKey: "tapThreshold")
-        tapThreshold = savedTap > 0 ? max(0.5, min(3.0, savedTap)) : 1.2
+        tapThreshold = savedTap > 0 ? max(0.4, min(3.0, savedTap)) : 0.4
+        // 0 is a valid value (off), so key the default on presence, not >0.
+        let savedStab = defaults.double(forKey: "tapStabilizeMs")
+        tapStabilizeMs = defaults.object(forKey: "tapStabilizeMs") != nil ? max(0.0, min(400.0, savedStab)) : 180.0
         dwellTimeout = defaults.double(forKey: "dwellTimeout").nonZero ?? 1.0
 
         if let savedAction = defaults.string(forKey: "activeDwellAction"),
@@ -379,13 +420,6 @@ final class SettingsStore: ObservableObject {
 
         voiceCondition = defaults.string(forKey: "voiceCondition") ?? "good_day"
         audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false
-
-        if let data = defaults.data(forKey: "soundMappings"),
-           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
-            soundMappings = decoded
-        } else {
-            soundMappings = ["cluck": "CLICK", "pop": "SCROLL down", "hiss": "SCROLL up"]
-        }
 
         if let data = defaults.data(forKey: "commandButtons"),
            let decoded = try? JSONDecoder().decode([CommandButton].self, from: data) {

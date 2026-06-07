@@ -101,11 +101,14 @@ class UIAutomationProvider:
         if self._uia is not None:
             return self._uia
         try:
-            import comtypes.client
-            import comtypes.gen.UIAutomationClient as UIA
-            self._uia = comtypes.client.CreateObject(
-                "{ff48dba4-60ef-4201-aa87-54103eef594e}",
-                interface=UIA.IUIAutomation,
+            from comtypes.client import GetModule, CreateObject
+            # Generate comtypes.gen.UIAutomationClient from the system type
+            # library on first use — without this the gen submodule doesn't
+            # exist and the import below fails on a fresh install.
+            GetModule("UIAutomationCore.dll")
+            from comtypes.gen import UIAutomationClient as UIA
+            self._uia = CreateObject(
+                UIA.CUIAutomation, interface=UIA.IUIAutomation
             )
             self._available = True
             log.info("UIAutomationProvider: COM initialised")
@@ -171,6 +174,31 @@ class UIAutomationProvider:
         except Exception as exc:
             log.warning("UIAutomationProvider.list_clickable failed: %s", exc)
             return []
+
+    def find_nearest_clickable(
+        self,
+        x: int,
+        y: int,
+        max_radius: int = 200,
+        timeout_s: float = 0.3,
+    ) -> Optional[UIElement]:
+        """Return the clickable element nearest to (x, y), or None.
+
+        Powers the "magnetic click" / area-cursor: the tilt-tap clicks the
+        nearest real target instead of the exact cursor pixel, so coarse
+        positioning is enough. Distance is measured to the element's bounding
+        rectangle (0 if the cursor is already inside it). Only elements whose
+        edge distance is ≤ max_radius qualify; ties broken toward the smaller
+        (more specific) element. Blocking — call via asyncio.to_thread.
+        """
+        uia = self._get_uia()
+        if uia is None:
+            return None
+        try:
+            return self._nearest_clickable(uia, x, y, max_radius, timeout_s)
+        except Exception as exc:
+            log.warning("UIAutomationProvider.find_nearest_clickable failed: %s", exc)
+            return None
 
     # ── Internal search ────────────────────────────────────────────────────
 
@@ -325,6 +353,188 @@ class UIAutomationProvider:
                 pass
 
         return results
+
+    # Roles that count as click targets for magnetic snapping. Containers
+    # (Pane/Window/Document/Group/ToolBar) are excluded so the cursor snaps to
+    # the actual control, not the panel holding it.
+    _SNAP_ROLES = frozenset({
+        50000,  # Button
+        50002,  # CheckBox
+        50003,  # ComboBox
+        50004,  # Edit
+        50005,  # Hyperlink
+        50011,  # MenuItem
+        50007,  # ListItem
+        50013,  # RadioButton
+        50019,  # TabItem
+        50031,  # SplitButton
+        50024,  # TreeItem
+    })
+
+    def collect_snap_targets_for_window(
+        self, hwnd: int, max_results: int = 200, timeout_s: float = 0.3
+    ) -> list[UIElement]:
+        """Return snap-eligible clickable elements within a specific window.
+
+        Roots the BFS at ``ElementFromHandle(hwnd)`` — a fresh element scoped to
+        exactly that window — instead of walking up from the focused element.
+        That avoids the stale-pointer storm the old GetFocusedElement + walk-up
+        path caused when the tree mutates mid-walk (the E_POINTER thrash). The
+        background ClickableTargetCache uses this every refresh. Blocking.
+
+        Falls back to the legacy whole-tree collect when ``hwnd`` is 0/None.
+        """
+        uia = self._get_uia()
+        if uia is None:
+            return []
+        if not hwnd:
+            return self.collect_snap_targets(max_results, timeout_s)
+        try:
+            root = uia.ElementFromHandle(hwnd)
+            if root is None:
+                return []
+            return self._bfs_snap_targets(uia, root, max_results, timeout_s)
+        except Exception as exc:
+            # Demoted to debug: a window closing mid-walk is expected, not an error.
+            log.debug("collect_snap_targets_for_window failed: %s", exc)
+            return []
+
+    def collect_snap_targets(
+        self, max_results: int = 300, timeout_s: float = 0.5
+    ) -> list[UIElement]:
+        """Return all snap-eligible clickable elements in the top-level window.
+
+        Unlike list_clickable (which starts at the focused element), this walks
+        up to the top-level window first so the whole window is enumerated.
+        Legacy fallback for when no foreground hwnd is available; prefer
+        collect_snap_targets_for_window. Blocking.
+        """
+        uia = self._get_uia()
+        if uia is None:
+            return []
+        try:
+            root = uia.GetFocusedElement()
+            if root is None:
+                root = uia.GetRootElement()
+            walker = uia.CreateTreeWalker(uia.ControlViewCondition)
+            parent = root
+            for _ in range(10):
+                p = walker.GetParentElement(parent)
+                if p is None:
+                    break
+                parent = p
+            return self._bfs_snap_targets(uia, parent, max_results, timeout_s)
+        except Exception as exc:
+            log.debug("UIAutomationProvider.collect_snap_targets failed: %s", exc)
+            return []
+
+    def _bfs_snap_targets(
+        self, uia, root, max_results: int, timeout_s: float
+    ) -> list[UIElement]:
+        """BFS the subtree under ``root``, collecting snap-eligible controls.
+
+        Each per-element property access is individually guarded so a single
+        stale/destroyed element only skips itself rather than aborting the walk.
+        """
+        walker = uia.CreateTreeWalker(uia.ControlViewCondition)
+        deadline = time.monotonic() + timeout_s
+        out: list[UIElement] = []
+        queue = [root]
+        while queue and len(out) < max_results and time.monotonic() < deadline:
+            elem = queue.pop(0)
+            try:
+                role = elem.CurrentControlType
+                enabled = bool(elem.CurrentIsEnabled)
+                bounds = elem.CurrentBoundingRectangle
+                name = (elem.CurrentName or "").strip()
+            except Exception:
+                continue
+            if role in self._SNAP_ROLES and enabled:
+                l, t, r, b = bounds.left, bounds.top, bounds.right, bounds.bottom
+                if r > l and b > t:
+                    out.append(UIElement(
+                        name=name,
+                        role=self._role_name(role),
+                        bounds=(l, t, r, b),
+                        is_enabled=True,
+                    ))
+            try:
+                child = walker.GetFirstChildElement(elem)
+                while child is not None and time.monotonic() < deadline:
+                    queue.append(child)
+                    child = walker.GetNextSiblingElement(child)
+            except Exception:
+                pass
+        return out
+
+    @staticmethod
+    def _rect_distance(x: int, y: int, l: int, t: int, r: int, b: int) -> float:
+        """Euclidean distance from point (x, y) to rectangle (l,t,r,b).
+
+        Returns 0.0 when the point is inside the rectangle, otherwise the
+        distance to the nearest edge/corner.
+        """
+        dx = max(l - x, 0, x - r)
+        dy = max(t - y, 0, y - b)
+        return (dx * dx + dy * dy) ** 0.5
+
+    def _nearest_clickable(
+        self, uia, x: int, y: int, max_radius: int, timeout_s: float
+    ) -> Optional[UIElement]:
+        """BFS the focused window's UIA tree for the nearest snap target."""
+        root = uia.GetFocusedElement()
+        if root is None:
+            root = uia.GetRootElement()
+        # Walk up to the top-level window so the whole window is in scope, not
+        # just the subtree under the focused control.
+        walker = uia.CreateTreeWalker(uia.ControlViewCondition)
+        parent = root
+        for _ in range(10):
+            p = walker.GetParentElement(parent)
+            if p is None:
+                break
+            parent = p
+
+        deadline = time.monotonic() + timeout_s
+        best: Optional[UIElement] = None
+        best_d = float(max_radius) + 1.0
+        best_area = float("inf")
+
+        queue = [parent]
+        while queue and time.monotonic() < deadline:
+            elem = queue.pop(0)
+            try:
+                role = elem.CurrentControlType
+                enabled = bool(elem.CurrentIsEnabled)
+                bounds = elem.CurrentBoundingRectangle
+                name = (elem.CurrentName or "").strip()
+            except Exception:
+                continue
+
+            if role in self._SNAP_ROLES and enabled:
+                l, t, r, b = bounds.left, bounds.top, bounds.right, bounds.bottom
+                if r > l and b > t:  # valid bounds
+                    d = self._rect_distance(x, y, l, t, r, b)
+                    area = float((r - l) * (b - t))
+                    if d <= max_radius and (d < best_d or (d == best_d and area < best_area)):
+                        best_d = d
+                        best_area = area
+                        best = UIElement(
+                            name=name,
+                            role=self._role_name(role),
+                            bounds=(l, t, r, b),
+                            is_enabled=True,
+                        )
+
+            try:
+                child = walker.GetFirstChildElement(elem)
+                while child is not None and time.monotonic() < deadline:
+                    queue.append(child)
+                    child = walker.GetNextSiblingElement(child)
+            except Exception:
+                pass
+
+        return best
 
     @staticmethod
     def _role_name(role_id: int) -> str:

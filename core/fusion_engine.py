@@ -1,4 +1,4 @@
-"""FusionEngine — 7-level priority sensor fusion at 60 Hz.
+"""FusionEngine — 6-level priority sensor fusion at 60 Hz.
 
 Receives sensor events from IPadBridge and on each tick emits at most one
 Command to HybridCoordinator, or moves the cursor directly for tilt
@@ -6,16 +6,16 @@ events (which bypass the LLM entirely).
 
 Priority order (highest → lowest):
   1  touch       — iPad CommandPad tap, bypass all gates
-  2  sound       — AVFoundation mouth sound, bypass all gates
-  3  voice click — Speech keyword "click" → click at current cursor position
-  4  tilt        — Core Motion tilt → pyautogui.moveRel (no Command)
-  5  gesture     — MediaPipe gesture command
-  6  voice_local — Speech Framework keyword (skip Gate 1)
-  7  voice       — PC Whisper transcription (full 4-gate)
+  2  voice click — Speech keyword "click" → click at current cursor position
+  3  tilt        — Core Motion tilt → pyautogui.moveRel (no Command)
+  4  gesture     — MediaPipe gesture command
+  5  voice_local — Speech Framework keyword (skip Gate 1)
+  6  voice       — PC Whisper transcription (full 4-gate)
 
 Gaze and head-pose tracking were removed: the target iPad has no TrueDepth
 sensor, so ARFaceTrackingConfiguration is unavailable and both produced no
-data. See diagrams/06-fusion-routing.md for the full decision flowchart.
+data. Mouth-sound control (cluck/pop/hiss) was removed — the sounds fired
+incidentally. See diagrams/06-fusion-routing.md for the decision flowchart.
 """
 
 from __future__ import annotations
@@ -126,7 +126,6 @@ class FusionConfig:
     tick_hz: float = 60.0
     tilt_dead_zone: float = 0.05           # rad/s below which tilt is ignored
     tilt_sensitivity: float = 200.0        # pixels moved per rad/s
-    sound_cooldown_s: float = 0.5          # suppress duplicate sound actions
 
     # Tilt position (absolute-mapping mode)
     tilt_pos_alpha: float = 0.4              # EMA smoothing factor (0=no smoothing, 1=instant)
@@ -185,16 +184,11 @@ class FusionEngine:
         # Pain-day effective config — starts as alias of base config; replaced by
         # apply_pain_day(True) without mutating _cfg so base can always be restored.
         self._effective_cfg: FusionConfig = self._cfg
-        # Tilt and sound relax independently so the flare_profile tilt flag
-        # can't suppress the (acoustic) mouth-sound cooldown. _pain_day_active
-        # stays as the OR for telemetry.
         self._pain_day_tilt: bool = False
-        self._pain_day_sound: bool = False
         self._pain_day_active: bool = False
 
         # --- Input slots (cleared after consumption) ---
         self._touch: Optional[Command] = None
-        self._sound: Optional[Command] = None
         self._gesture: Optional[Command] = None
         self._voice_local: Optional[str] = None                  # keyword text
         self._voice: Optional[Command] = None
@@ -249,11 +243,15 @@ class FusionEngine:
         self._cursor_pos: tuple[int, int] = (screen_width // 2, screen_height // 2)
         self._cursor_cache_task: Optional[asyncio.Task] = None
 
+        # --- Cursor gravity (Phase 3) — wired via set_target_cache() ---
+        self._target_cache = None
+        # Bias the tilt cursor toward a clickable within this radius (px).
+        self._gravity_radius: int = 90
+        # Max nudge applied at the target's edge → 0 at the rim, full at center.
+        self._gravity_max_pull: int = 22
+
         # Gaze, gaze-to-cursor, edge-scroll, and drag state were removed with the
         # gaze pipeline (gaze dwell was the only drag initiator).
-
-        # --- Sound debounce ---
-        self._last_sound_ts: float = 0.0
 
         # --- Feature toggles (synced from iPad via bridge) ---
         # All previous toggles (gaze dwell variants, edge_scroll, gaze_cursor_mode)
@@ -292,7 +290,6 @@ class FusionEngine:
         from core.scheduler import Priority
         _MAP = {
             "touch":        Priority.ACCESSIBILITY,
-            "sound_action": Priority.ACCESSIBILITY,
             "multimodal":   Priority.ACCESSIBILITY,  # voice-click bypass
             "voice":        Priority.VOICE,
             "voice_local":  Priority.VOICE,
@@ -337,6 +334,16 @@ class FusionEngine:
         """Wire AcousticProfiler so rms_ambient is included in telemetry."""
         self._acoustic_profiler = profiler
 
+    def set_target_cache(self, cache) -> None:
+        """Wire the ClickableTargetCache for cursor gravity (Phase 3).
+
+        When set, tilt cursor positioning is gently biased toward a nearby
+        clickable target so the cursor 'sticks' to buttons, making it easier to
+        settle on them without fine motor control. No-op while the cache has no
+        targets (unsupported app / UIA unavailable).
+        """
+        self._target_cache = cache
+
     async def load_rom_calibration(self, db) -> None:
         """D4: Load sensor range-of-motion from onboarding assessment.
 
@@ -368,45 +375,31 @@ class FusionEngine:
     # Pain-day threshold adaptation
     # ---------------------------------------------------------------------- #
 
-    def apply_pain_day(self, tilt: bool, sound: bool | None = None) -> None:
+    def apply_pain_day(self, tilt: bool) -> None:
         """Apply or remove pain-day sensor threshold relaxations.
 
-        Called by HybridCoordinator.route() once per command. Tilt and sound
-        relax independently so the flare_profile ``tilt_degrades`` flag gates
-        only the tilt dead zone — the (acoustic) mouth-sound cooldown is a
-        separate sensor and is controlled by its own argument.
+        Called by HybridCoordinator.route() once per command. The flare_profile
+        ``tilt_degrades`` flag gates the tilt dead zone relaxation.
 
         Uses dataclasses.replace to derive an adjusted FusionConfig without
         mutating self._cfg so the base can always be restored.
 
         Pain-day adjustments (relax thresholds for tremor/fatigue):
             tilt  → dead_zone_inner  : 0.05 → 0.08 rad/s (larger tilt dead zone)
-            sound → sound_cooldown_s : 0.5 → 0.3 s       (faster mouth-sound retry)
-
-        ``sound`` defaults to ``tilt`` when omitted, preserving the original
-        single-argument "relax both" behaviour for any legacy caller.
         """
-        if sound is None:
-            sound = tilt
-
-        if tilt == self._pain_day_tilt and sound == self._pain_day_sound:
+        if tilt == self._pain_day_tilt:
             return  # idempotent — no config object created on every tick
 
         self._pain_day_tilt = tilt
-        self._pain_day_sound = sound
-        self._pain_day_active = tilt or sound  # OR for telemetry
+        self._pain_day_active = tilt
 
         from dataclasses import replace as _dc_replace
         overrides: dict[str, float] = {}
         if tilt:
             overrides["dead_zone_inner"] = 0.08
-        if sound:
-            overrides["sound_cooldown_s"] = 0.3
 
         self._effective_cfg = _dc_replace(self._cfg, **overrides) if overrides else self._cfg
-        log.info(
-            "FusionEngine: pain-day thresholds — tilt=%s sound=%s", tilt, sound
-        )
+        log.info("FusionEngine: pain-day thresholds — tilt=%s", tilt)
 
     # ---------------------------------------------------------------------- #
     # Feature toggle management
@@ -431,30 +424,49 @@ class FusionEngine:
     # ---------------------------------------------------------------------- #
 
     def on_touch(self, cmd: Command) -> None:
-        # Pin the click to the current cursor position. A tilt-tap CLICK arrives
-        # with no coordinates and text="tilt_tap"; without this, _resolve_coords
-        # would treat "tilt_tap" as a UI target name and run a UIAutomation fuzzy
-        # BFS (~0.3s, and may mis-click whatever fuzzy-matches) before finally
-        # falling back to the cursor. Writing explicit params x/y is step 1 of the
-        # resolver chain, so it short-circuits the lookup and clicks exactly where
-        # tilt/trackpad/touch last put the cursor — mirroring the voice-"click" path.
+        # Pin the click to the current cursor position and request a magnetic
+        # snap. A tilt-tap CLICK arrives with no coordinates and text="tilt_tap";
+        # without explicit x/y, _resolve_coords would treat "tilt_tap" as a UI
+        # target name and run a fuzzy UIAutomation search before falling back to
+        # the cursor. Writing x/y is step 1 of the resolver chain, and
+        # snap_nearest tells it to magnetically snap those coords to the nearest
+        # clickable target within the snap radius — the "area cursor" so coarse
+        # tilt positioning is enough and the tap threshold can stay comfortably high.
         if cmd.action == "CLICK" and "x" not in cmd.params:
             px, py = self._cursor_pos
-            cmd.params = {**cmd.params, "x": px, "y": py}
-            log.info("FusionEngine: touch CLICK pinned to cursor (%d, %d)", px, py)
+            cmd.params = {**cmd.params, "x": px, "y": py, "snap_nearest": True}
+            log.info("FusionEngine: touch CLICK pinned to cursor (%d, %d) [snap]", px, py)
         self._touch = cmd
 
-    def on_sound_action(self, sound: str, conf: float) -> None:
-        now = time.monotonic()
-        if now - self._last_sound_ts < self._effective_cfg.sound_cooldown_s:
-            return
-        self._last_sound_ts = now
-        self._sound = Command(
-            text=f"sound:{sound}",
-            action="CLICK",   # default; coordinator maps sound → action
-            source="sound_action",
-            gesture_confidence=conf,
-        )
+    def _apply_gravity(self, px_x: int, px_y: int) -> tuple[int, int]:
+        """Bias the cursor toward a nearby clickable target (cursor gravity).
+
+        Pulls (px_x, px_y) a little way toward the nearest target's center, by an
+        amount that grows as the cursor nears the target's middle (0 at the
+        gravity radius, up to _gravity_max_pull at the center). The pull is small
+        and never overshoots the center, so it assists rather than hijacks — the
+        user can always pull away. Returns the (possibly) adjusted pixel coords.
+        """
+        cache = self._target_cache
+        if cache is None or not cache.is_running():
+            return px_x, px_y
+        try:
+            tg = cache.nearest(px_x, px_y, self._gravity_radius)
+        except Exception:
+            return px_x, px_y
+        if tg is None:
+            return px_x, px_y
+
+        cx, cy = tg.center()
+        dist = math.hypot(cx - px_x, cy - px_y)
+        if dist <= 1.0:
+            return cx, cy  # already essentially on it — settle to center
+        # Strength: 1.0 at the target center → 0.0 at the gravity radius.
+        strength = max(0.0, 1.0 - dist / float(self._gravity_radius))
+        pull = min(self._gravity_max_pull, dist) * strength
+        nx = px_x + (cx - px_x) * (pull / dist)
+        ny = px_y + (cy - px_y) * (pull / dist)
+        return round(nx), round(ny)
 
     def on_tilt(self, rx: float, ry: float) -> None:
         # Reject non-finite values at ingress. JSON parses NaN/Infinity tokens by
@@ -610,13 +622,7 @@ class FusionEngine:
             await self._emit(cmd)
             return
 
-        # Rule 2 — Sound action (bypass all gates, even during pause)
-        if self._sound:
-            cmd, self._sound = self._sound, None
-            await self._emit(cmd)
-            return
-
-        # Rule 3 — Voice keyword "click": click at the CURRENT cursor position.
+        # Rule 2 — Voice keyword "click": click at the CURRENT cursor position.
         # Gaze targeting was removed, so the cursor is wherever tilt / trackpad /
         # touch last put it. Bypass the gates (source="multimodal") and consume
         # the keyword so it never falls through to DICTATE and types "click".
@@ -689,6 +695,11 @@ class FusionEngine:
                 # can reach a side monitor (left/top origin may be negative).
                 px_x = self._vleft + round(curved_x * self._vw)
                 px_y = self._vtop + round(curved_y * self._vh)
+
+                # Cursor gravity (Phase 3): nudge toward a nearby clickable so the
+                # cursor 'sticks' to buttons. Cheap — pure-Python nearest() over
+                # the cached snapshot. No-op when no target is near.
+                px_x, px_y = self._apply_gravity(px_x, px_y)
 
                 # Clamp to the virtual-desktop bounds
                 px_x = max(self._vleft, min(self._vleft + self._vw - 1, px_x))
@@ -840,6 +851,13 @@ class FusionEngine:
         if self._metrics is not None:
             self._metrics.record_command_routed(cmd.source)
         if self._coordinator:
+            # Cross-layer trace: stamp the command at its birth (no-op unless
+            # DA_TRACE is on) so the id survives the scheduler create_task hop.
+            from monitoring.trace import get_tracer
+            _tracer = get_tracer()
+            if _tracer.enabled and not cmd.trace_id:
+                cmd.trace_id = _tracer.new_trace(source=cmd.source)
+                _tracer.record_span("enqueue", trace_id=cmd.trace_id, source=cmd.source)
             if self._scheduler is not None:
                 # Priority-aware dispatch: DEV_AGENT/BACKGROUND tasks are gated
                 # so they cannot starve accessibility commands during a flare.
@@ -848,6 +866,7 @@ class FusionEngine:
                     self._coordinator.route(cmd),
                     priority=priority,
                     label=cmd.source,
+                    trace_id=cmd.trace_id,
                 )
             else:
                 # Fallback: bare fire-and-forget (scheduler not yet wired)

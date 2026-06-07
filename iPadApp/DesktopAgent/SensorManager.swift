@@ -2,11 +2,11 @@ import Combine
 import CoreMotion
 import Foundation
 
-/// Centralized lifecycle controller for all 4 sensors.
+/// Centralized lifecycle controller for all 3 sensors.
 ///
 /// Observes SettingsStore `@Published` toggles via Combine and reactively
 /// starts/stops sensors when their toggle changes. Owns the SharedAudioSession
-/// used by the three audio sensors.
+/// used by the two audio sensors (keyword, audio stream).
 ///
 /// Hardware availability is checked before starting each sensor — unavailable
 /// sensors log a warning and remain stopped (no crash).
@@ -19,7 +19,6 @@ final class SensorManager: ObservableObject {
 
     let tiltSensor: TiltSensor
     let keywordListener: KeywordListener
-    let soundDetector: SoundDetector
     let audioStreamer: AudioStreamer
 
     // MARK: - Shared Dependencies
@@ -58,7 +57,6 @@ final class SensorManager: ObservableObject {
         // Instantiate all sensors with shared dependencies
         self.tiltSensor = TiltSensor(ws: ws, settings: settings)
         self.keywordListener = KeywordListener(ws: ws, settings: settings, sharedAudioSession: audioSession)
-        self.soundDetector = SoundDetector(ws: ws, settings: settings, sharedAudioSession: audioSession)
         self.audioStreamer = AudioStreamer(ws: ws, settings: settings, sharedAudioSession: audioSession)
 
         // Initialize sensor states
@@ -79,9 +77,6 @@ final class SensorManager: ObservableObject {
         if !settings.keywordList.isEmpty {
             _startKeyword()
         }
-        if !settings.soundMappings.isEmpty {
-            _startSound()
-        }
         if settings.audioStreamEnabled {
             _startAudioStream()
         }
@@ -89,7 +84,7 @@ final class SensorManager: ObservableObject {
 
     /// G4: Stop only non-audio sensors for background mode.
     /// Core Motion (tilt) requires foreground.
-    /// Audio sensors (keyword, sound, audioStream) can continue in background
+    /// Audio sensors (keyword, audioStream) can continue in background
     /// when the app has UIBackgroundModes: ["audio"] entitlement.
     func stopNonAudioSensors() {
         tiltSensor.stop()
@@ -101,12 +96,10 @@ final class SensorManager: ObservableObject {
     func stopAll() {
         tiltSensor.stop()
         keywordListener.stop()
-        soundDetector.stop()
         audioStreamer.stop()
 
         _updateState(id: "tilt", isRunning: false)
         _updateState(id: "keyword", isRunning: false)
-        _updateState(id: "sound", isRunning: false)
         _updateState(id: "audio", isRunning: false)
     }
 
@@ -135,16 +128,6 @@ final class SensorManager: ObservableObject {
     private func _stopKeyword() {
         keywordListener.stop()
         _updateState(id: "keyword", isRunning: false)
-    }
-
-    private func _startSound() {
-        soundDetector.start()
-        _updateState(id: "sound", isRunning: true)
-    }
-
-    private func _stopSound() {
-        soundDetector.stop()
-        _updateState(id: "sound", isRunning: false)
     }
 
     private func _startAudioStream() {
@@ -189,15 +172,18 @@ final class SensorManager: ObservableObject {
         }
         .store(in: &cancellables)
 
-        // Tap sensitivity changes — debounced so dragging the slider doesn't thrash.
-        settings.$tapThreshold
-            .removeDuplicates()
-            .dropFirst()
-            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.tiltSensor.updateSettings()
-            }
-            .store(in: &cancellables)
+        // Tap sensitivity + stabilization changes — debounced so dragging the
+        // sliders doesn't thrash.
+        Publishers.CombineLatest(
+            settings.$tapThreshold.removeDuplicates(),
+            settings.$tapStabilizeMs.removeDuplicates()
+        )
+        .dropFirst()
+        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+        .sink { [weak self] _ in
+            self?.tiltSensor.updateSettings()
+        }
+        .store(in: &cancellables)
 
         settings.$tiltPositionMode
             .removeDuplicates()
@@ -206,6 +192,20 @@ final class SensorManager: ObservableObject {
                 self?.tiltSensor.updateSettings()
             }
             .store(in: &cancellables)
+
+        // Tilt-joystick settings — debounced so dragging the tuning sliders
+        // doesn't thrash the snapshot.
+        Publishers.CombineLatest3(
+            settings.$tiltJoystickMode.removeDuplicates(),
+            settings.$tiltDriftMaxSpeed.removeDuplicates(),
+            settings.$tiltDriftSaturationDeg.removeDuplicates()
+        )
+        .dropFirst()
+        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+        .sink { [weak self] _ in
+            self?.tiltSensor.updateSettings()
+        }
+        .store(in: &cancellables)
 
         // Audio stream toggle
         settings.$audioStreamEnabled
@@ -283,22 +283,6 @@ final class SensorManager: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Sound mappings — non-empty means enabled
-        settings.$soundMappings
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] mappings in
-                guard let self else { return }
-                let enabled = !mappings.isEmpty
-                self._updateState(id: "sound", isEnabled: enabled)
-                if enabled {
-                    self._startSound()
-                } else {
-                    self._stopSound()
-                }
-            }
-            .store(in: &cancellables)
-
     }
 
     // MARK: - Sensor State Management (3.6)
@@ -317,13 +301,6 @@ final class SensorManager: ObservableObject {
                 isEnabled: !settings.keywordList.isEmpty,
                 isRunning: false,
                 isAvailable: true, // Speech recognition available on all iPads
-                lastError: nil
-            ),
-            SensorState(
-                id: "sound",
-                isEnabled: !settings.soundMappings.isEmpty,
-                isRunning: false,
-                isAvailable: true, // Microphone available on all iPads
                 lastError: nil
             ),
             SensorState(
@@ -349,7 +326,7 @@ final class SensorManager: ObservableObject {
 
 /// Represents the observable state of a single sensor for UI consumption.
 struct SensorState: Identifiable {
-    let id: String          // "tilt", "keyword", "sound", "audio"
+    let id: String          // "tilt", "keyword", "audio"
     var isEnabled: Bool     // from SettingsStore toggle
     var isRunning: Bool     // actual runtime state
     var isAvailable: Bool   // hardware capability check

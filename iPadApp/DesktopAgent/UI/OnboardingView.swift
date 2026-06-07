@@ -8,7 +8,7 @@ import SwiftUI
 /// 2. Hardware       — show available sensors on this device
 /// 3. Permissions    — request microphone before any sensor starts
 /// 4. Cursor Control — pick primary cursor input method
-/// 5. Voice & Sound  — enable voice commands and mouth sounds
+/// 5. Voice Input    — enable voice commands
 /// 6. Calibration    — sensor-aware calibration hub
 /// 7. Voice Profile  — acoustic baseline (requires PC)
 /// 8. Gesture Check  — self-report gesture capability
@@ -56,7 +56,6 @@ struct OnboardingView: View {
                         .tag(3)
                     CursorControlStep(settings: settings)
                         .tag(4)
-                    // Fix P2: Voice & Sound before Calibration so sound card appears
                     VoiceStep(settings: settings)
                         .tag(5)
                     CalibrationStep(
@@ -196,7 +195,7 @@ private struct WelcomeStep: View {
 
             VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
                 featureRow(icon: "ipad.landscape", text: "Tilt your iPad to move the cursor")
-                featureRow(icon: "mic", text: "Speak commands or use mouth sounds")
+                featureRow(icon: "mic", text: "Speak commands hands-free")
                 featureRow(icon: "hand.draw", text: "Touch trackpad and handwriting input")
             }
             .padding(.horizontal, DesignTokens.Spacing.xxl)
@@ -653,13 +652,11 @@ private struct CalibrationStep: View {
 
     @Environment(\.appTheme) private var theme
 
-    @State private var showSoundTrainingSheet = false
     @State private var gyroCountdown: Int? = nil
 
     private var isConnected: Bool { wsManager.state == .connected }
     private var hasTilt: Bool { settings.tiltEnabled }
-    private var hasSounds: Bool { !settings.soundMappings.isEmpty }
-    private var hasAny: Bool { hasTilt || hasSounds }
+    private var hasAny: Bool { hasTilt }
 
     var body: some View {
         ScrollView {
@@ -724,18 +721,6 @@ private struct CalibrationStep: View {
                                 }
                             }
                         }
-
-                        // SOUND ACTIONS
-                        if hasSounds {
-                            calSection("Sound Actions", icon: "mouth") {
-                                CalibrationCard(
-                                    title: "Sound Training",
-                                    subtitle: "Confirm cluck, pop, and hiss are detected by your device.",
-                                    isDone: done.contains("sound_training"),
-                                    isBlocked: false
-                                ) { showSoundTrainingSheet = true }
-                            }
-                        }
                     }
                 }
 
@@ -745,13 +730,6 @@ private struct CalibrationStep: View {
         }
         .onAppear {
             if hasTilt { sensorManager.tiltSensor.start() }
-            // Fix P4: start SoundDetector so SoundTrainingSheet receives detections
-            if hasSounds { sensorManager.soundDetector.start() }
-        }
-        .sheet(isPresented: $showSoundTrainingSheet, onDismiss: {
-            done.insert("sound_training")
-        }) {
-            SoundTrainingSheet(wsManager: wsManager, settings: settings)
         }
     }
 
@@ -867,11 +845,11 @@ private struct VoiceStep: View {
                 .foregroundStyle(theme.accent)
                 .accessibilityHidden(true)
 
-            Text("Voice & Sound Input")
+            Text("Voice Input")
                 .font(DesignTokens.Typography.headline)
                 .foregroundStyle(theme.textPrimary)
 
-            Text("Enable voice commands and mouth sounds for hands-free actions.")
+            Text("Enable voice commands for hands-free actions.")
                 .font(DesignTokens.Typography.body)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -888,20 +866,6 @@ private struct VoiceStep: View {
                             settings.keywordList = ["click", "scroll", "open"]
                         } else {
                             settings.keywordList = []
-                        }
-                    }
-                )
-
-                voiceOption(
-                    icon: "mouth",
-                    title: "Sound Actions",
-                    subtitle: "Cluck to click, pop to scroll down, hiss to scroll up",
-                    isEnabled: !settings.soundMappings.isEmpty,
-                    toggle: {
-                        if settings.soundMappings.isEmpty {
-                            settings.soundMappings = ["cluck": "CLICK", "pop": "SCROLL down", "hiss": "SCROLL up"]
-                        } else {
-                            settings.soundMappings = [:]
                         }
                     }
                 )
@@ -1144,7 +1108,6 @@ private struct DoneStep: View {
     private var calibrationItems: [(id: String, label: String, relevant: Bool)] { [
         ("tilt_neutral",        "Tilt neutral position",   settings.tiltEnabled),
         ("tilt_gyro",           "Gyro bias",               settings.tiltEnabled && !settings.tiltPositionMode),
-        ("sound_training",      "Sound training",           !settings.soundMappings.isEmpty),
         ("voice_profiling",     "Voice profile",            settings.audioStreamEnabled),
         ("gesture_assessment",  "Gesture assessment",       true),
         ("flare_profile",       "Flare day profile",        true),
