@@ -54,7 +54,7 @@ _action_verifier: "ActionVerifier | None" = None
 # restart-edit; 0 (or negative) disables snapping → click lands at the cursor.
 import os as _os
 try:
-    _SNAP_RADIUS_PX = int(_os.environ.get("DA_SNAP_RADIUS_PX", "200"))
+    _SNAP_RADIUS_PX = int(_os.environ.get("DA_SNAP_RADIUS_PX", "300"))
 except ValueError:
     _SNAP_RADIUS_PX = 200
 

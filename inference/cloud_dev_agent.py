@@ -26,9 +26,9 @@ stateless, text-returning path.  Per the Anthropic surface decision tree:
 
 Pricing
 -------
-At ~1000 input + ~500 output tokens per dev query, Claude Sonnet 4.6
-($3 / $15 per MTok) costs ~$0.0105 per query
-(0.001 in + 0.0075 out ≈ $0.0085, rounded up for the system prompt + adaptive
+At ~1000 input + ~500 output tokens per dev query, Claude Opus 4.8
+($5 / $25 per MTok) costs ~$0.0175 per query
+(0.005 in + 0.0125 out ≈ $0.0175, plus a little for the system prompt + adaptive
 thinking on math/plan).  The Managed Agents session-hour fee ($0.08/hr) does NOT
 apply — the plain Messages API is billed by token only.
 
@@ -53,9 +53,10 @@ except ImportError:  # graceful degradation — never crash the import
 
 log = logging.getLogger(__name__)
 
-# Default model — Claude Sonnet 4.6 ($3/$15 per MTok): best speed/intelligence
-# balance for free-form dev generation.  Override via the constructor.
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+# Default model — Claude Opus 4.8 ($5/$25 per MTok): most capable model for
+# free-form dev generation and long-horizon agentic reasoning.  Override via the
+# constructor.  Adaptive thinking only (no budget_tokens); sampling params removed.
+_DEFAULT_MODEL = "claude-opus-4-8"
 
 # Domains whose answer benefits from reasoning.  Adaptive thinking is enabled
 # only here, mirroring the local ModelRouter profiles (math/plan think; code/
@@ -164,8 +165,8 @@ class CloudDevAgent:
     Used as a fallback when local specialists are unavailable/sleeping, or as the
     primary dev path with ``--cloud-dev-agent --no-local-specialists``.
 
-    Pricing: token-only on the Messages API — ~$0.0105 per dev query at
-    ~1000 in / ~500 out on Sonnet 4.6 ($3/$15 per MTok). No session-hour fee.
+    Pricing: token-only on the Messages API — ~$0.0175 per dev query at
+    ~1000 in / ~500 out on Opus 4.8 ($5/$25 per MTok). No session-hour fee.
     """
 
     def __init__(
