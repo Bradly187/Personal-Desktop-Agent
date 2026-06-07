@@ -6,6 +6,9 @@
 chroma_db/
 .codebase_index_state.json
 
+# Regenerated benchmark output (run-local, not a source artifact)
+benchmark_results.json
+
 # Apple credentials and certificates
 *.p8
 *.p12
