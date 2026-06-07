@@ -358,6 +358,11 @@ class BehavioralTwinState:
         self._session_clarify_count: int = 0    # CLARIFY responses in current session
         self._session_gesture_confs: list[float] = []  # gesture confidence values in session
         self._session_start_ts: float = time.monotonic()  # session start time
+        # Last computed pain-day signals 3 & 4, stashed by _recompute_pain_day_score
+        # so _pain_day_loop can log the real values into twin_pain_day_log
+        # (previously hard-coded to 0.0).
+        self._last_gesture_conf_delta: float = 0.0
+        self._last_cmd_rate_delta: float = 0.0
         self._acoustic_profiler = None   # set via set_acoustic_profiler()
         self._manual_pain_day: bool = False  # user override via "hey agent pain day on"
         self._resource_governor = None   # set via set_resource_governor()
@@ -454,6 +459,39 @@ class BehavioralTwinState:
             task.add_done_callback(self._pending_tasks.discard)
         except Exception as exc:
             log.warning("BehavioralTwinState.observe scheduling failed: %s", exc)
+
+    async def record_failure(
+        self,
+        cmd: "Command",
+        action_str: str,
+        namespace: str = "accessibility",
+    ) -> None:
+        """Record a *failed* command so it feeds the pain-day fail signal.
+
+        Deliberately the inverse of observe(): it moves the pain-day fail
+        counters ONLY. It must never touch PreferenceModel, SemanticMemory, or
+        the few-shot store — those are success-biased learning surfaces and a
+        failed (often garbled) command must not be offered as a future example.
+        Counters move only for the accessibility namespace, keeping the fail
+        ratio consistent with observe()'s success counting (also
+        accessibility-only); dev-agent failures are ignored here.
+
+        signal_1 = fail / (success + fail), so a failure bumps BOTH the fail
+        count and the command count to keep the denominator well-formed.
+        Non-blocking, never raises.
+        """
+        try:
+            if namespace != "accessibility":
+                return
+            self._session_cmd_count += 1
+            self._session_fail_count += 1
+            # Refresh the cached snapshot so the next route() sees the updated
+            # command_count immediately; the pain-day score itself is recomputed
+            # on the 60 s loop with hysteresis.
+            if self._is_ready:
+                self._current_snapshot = self._build_snapshot()
+        except Exception as exc:
+            log.warning("BehavioralTwinState.record_failure failed: %s", exc)
 
     async def query_similar(self, text: str, n: int = 5) -> list[dict]:
         """Return n most semantically similar past commands. Never raises."""
@@ -757,6 +795,12 @@ class BehavioralTwinState:
         else:
             signal_4 = 0.0
 
+        # Stash signals 3 & 4 so _pain_day_loop logs the real values into
+        # twin_pain_day_log (computed here regardless of the manual-override
+        # early return below).
+        self._last_gesture_conf_delta = signal_3
+        self._last_cmd_rate_delta = signal_4
+
         # Signal 5: voice clarity drop (from AcousticProfiler)
         # Captures voice softening during RA flares — the most distinctive
         # early indicator for users like Brad.
@@ -822,8 +866,8 @@ class BehavioralTwinState:
                             active=self._pain_day_active,
                             fail_ratio=self._session_fail_count / max(1, self._session_cmd_count),
                             clarify_ratio=self._session_clarify_count / max(1, self._session_cmd_count),
-                            gesture_conf_delta=0.0,
-                            cmd_rate_delta=0.0,
+                            gesture_conf_delta=self._last_gesture_conf_delta,
+                            cmd_rate_delta=self._last_cmd_rate_delta,
                         )
                 except Exception as exc:
                     log.warning("BehavioralTwinState._pain_day_loop: log_pain_day failed: %s", exc)

@@ -936,6 +936,14 @@ class HybridCoordinator:
                 await self._trainer.record_success(
                     cmd, action_str, command_id=command_id
                 )
+            # Feed failed local executions into the twin's pain-day fail signal
+            # ONLY (never the few-shot store). CLARIFY executes with status "ok"
+            # so it is a success here, not a failure. Cloud outcomes stay out of
+            # the twin, matching the local-only success gate above.
+            elif (self._trainer and route_label == "local" and not success):
+                await self._trainer.record_failure(
+                    cmd, action_str, command_id=command_id
+                )
 
             # D3: drain gesture velocity samples after every gesture command
             # that cleared Gate 1, regardless of execution outcome.

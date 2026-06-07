@@ -1,7 +1,7 @@
 """MemoryManager — thin syscall abstraction over AgentDB + SemanticMemory.
 
 Exposes three canonical operations that any agent component can call without
-knowing the 32-table AgentDB schema:
+knowing the 29-table AgentDB schema:
 
     read_context(query, namespace, n)   -> list[dict]   semantic few-shot retrieval
     write_state(key, value, namespace)  -> None         validated structured writes
@@ -51,11 +51,13 @@ _VALID_KEYS: dict[str, frozenset[str]] = {
         "inference_record",   # AgentDB insert_inference kwargs dict
     }),
     "system": frozenset({
-        "session_event",
-        "pain_day_score",     # (session_id, score, active, fail_ratio, clarify_ratio)
-        "voice_profile",
-        "sensor_telemetry",
+        "pain_day_score",     # log_pain_day kwargs dict (session_id, score, active, ...)
+        "voice_profile",      # AgentDB upsert_voice_profile(dict)
+        "sensor_telemetry",   # AgentDB insert_sensor_telemetry(**kwargs)
     }),
+    # NB: "session_event" was removed — it had no backing AgentDB method and no
+    # caller, so a write_state("session_event", ...) validated and then silently
+    # dropped. It now fails loudly via _validate_write instead.
 }
 
 
@@ -116,10 +118,23 @@ class MemoryManager:
         retrieval when ChromaDB is unavailable.
         """
         try:
-            if self._semantic is not None and self._semantic.available:
+            # The ChromaDB behavioral_memory collection holds ONLY accessibility-
+            # namespace docs (BehavioralTwinState.observe adds to SemanticMemory
+            # exclusively in the accessibility branch), so it is effectively the
+            # accessibility store: use it only for accessibility reads. Namespaced
+            # reads (dev_agent/system) route to the AgentDB few-shot table, which
+            # is domain-filtered and therefore namespace-correct.
+            if (
+                namespace == "accessibility"
+                and self._semantic is not None
+                and self._semantic.available
+            ):
                 return await self._semantic.query_similar(query, n)
             if self._db is not None and self._db.available:
-                # Build a minimal Command-like object for the DB query
+                # Minimal Command-like stub for the DB query. NB: the scorer in
+                # AgentDB.get_few_shot_examples reads only `.text`; the remaining
+                # fields are inert padding to satisfy attribute access and do not
+                # influence ranking.
                 class _FakeCmd:
                     text = query
                     source = "voice"
@@ -201,8 +216,18 @@ class MemoryManager:
             # value is a dict matching insert_agent_step kwargs
             await self._db.insert_agent_step(**value)
 
+        elif key == "sensor_telemetry":
+            # value is a dict matching insert_sensor_telemetry kwargs
+            # (session_id, ts, + optional per-sensor columns)
+            await self._db.insert_sensor_telemetry(**value)
+
+        elif key == "voice_profile":
+            # value is a single dict (NOT **kwargs) — see AgentDB.upsert_voice_profile
+            await self._db.upsert_voice_profile(value)
+
         elif key == "pain_day_score":
-            # value is a dict: {session_id, score, active, fail_ratio, clarify_ratio}
+            # value is a dict: {session_id, score, active, fail_ratio,
+            # clarify_ratio, [gesture_conf_delta], [cmd_rate_delta]}
             v = value
             await self._db.log_pain_day(
                 session_id=v["session_id"],
@@ -210,9 +235,16 @@ class MemoryManager:
                 active=v["active"],
                 fail_ratio=v.get("fail_ratio", 0.0),
                 clarify_ratio=v.get("clarify_ratio", 0.0),
-                gesture_conf_delta=0.0,
-                cmd_rate_delta=0.0,
+                gesture_conf_delta=v.get("gesture_conf_delta", 0.0),
+                cmd_rate_delta=v.get("cmd_rate_delta", 0.0),
             )
+
+        elif key == "command_outcome":
+            # Intentional no-op: commands are inserted by HybridCoordinator via
+            # AgentDB.insert_command (which needs the returned command_id).
+            # Listed in _VALID_KEYS so a stray write validates rather than
+            # erroring; it must not double-insert here.
+            pass
 
         else:
             log.debug(

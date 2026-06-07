@@ -141,6 +141,24 @@ class ContinuousTrainer:
                 command_id=command_id,
             )
 
+    async def record_failure(
+        self,
+        cmd: "Command",
+        action_str: str,
+        command_id: Optional[int] = None,
+        namespace: str = "accessibility",
+    ) -> None:
+        """Record a *failed* command for the twin's pain-day fail signal only.
+
+        The deliberately narrow counterpart to record_success: it forwards to
+        the twin's record_failure (which moves pain-day fail counters only) and
+        writes NOTHING to the few-shot store, SemanticMemory, or gesture
+        samples. Failures must never become few-shot examples — those stores are
+        success-biased. command_id is accepted for call-site symmetry.
+        """
+        if self._twin:
+            await self._twin.record_failure(cmd, action_str, namespace=namespace)
+
     async def drain_and_persist_velocity(self, pain_day: bool = False) -> None:
         """Drain velocity samples from GestureProcessor and persist to DB.
 
