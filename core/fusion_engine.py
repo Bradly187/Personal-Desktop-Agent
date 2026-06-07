@@ -248,7 +248,7 @@ class FusionEngine:
         # Bias the tilt cursor toward a clickable within this radius (px).
         self._gravity_radius: int = 90
         # Max nudge applied at the target's edge → 0 at the rim, full at center.
-        self._gravity_max_pull: int = 18
+        self._gravity_max_pull: int = 22
 
         # Gaze, gaze-to-cursor, edge-scroll, and drag state were removed with the
         # gaze pipeline (gaze dwell was the only drag initiator).

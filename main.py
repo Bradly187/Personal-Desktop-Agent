@@ -136,7 +136,7 @@ def _print_startup_table(
     backend: str = "ollama",
     vllm_server_url: str = "http://localhost:8000",
     cloud_dev_agent: bool = False,
-    cloud_dev_model: str = "claude-sonnet-4-6",
+    cloud_dev_model: str = "claude-opus-4-8",
 ) -> None:
     """Print a table of which PC-side services are available."""
     rows: list[tuple[str, str, str]] = []
@@ -1012,7 +1012,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             backend=_backend,
             vllm_server_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
             cloud_dev_agent=getattr(args, "cloud_dev_agent", False),
-            cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-sonnet-4-6"),
+            cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-opus-4-8"),
         )
         if cluster_cfg.enabled:
             _h = cluster_health.status() if cluster_health is not None else {}

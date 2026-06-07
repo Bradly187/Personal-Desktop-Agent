@@ -55,7 +55,7 @@ def _complex_cmd(text: str) -> Command:
 
 async def test_cloud_inference_real_anthropic() -> tuple[bool, str]:
     """_CloudInference sends a complex command to the Anthropic API and gets a valid action."""
-    cloud = _CloudInference(model="claude-haiku-4-5-20251001")
+    cloud = _CloudInference(model="claude-haiku-4-5")
     cmd = _cmd("close the window and then open Chrome")
     result = await cloud.infer(cmd)
 
@@ -96,7 +96,7 @@ async def test_gate2_routes_to_cloud() -> tuple[bool, str]:
 
 async def test_cloud_resolves_voice_misrecognition() -> tuple[bool, str]:
     """Cloud correctly resolves 'clothes' → CLOSE via misrecognition guidance."""
-    cloud = _CloudInference(model="claude-haiku-4-5-20251001")
+    cloud = _CloudInference(model="claude-haiku-4-5")
     cmd = _cmd("clothes the window", source="voice", logprob=-0.9)
     result = await cloud.infer(cmd)
 
@@ -111,7 +111,7 @@ async def test_cloud_resolves_voice_misrecognition() -> tuple[bool, str]:
 
 async def test_cloud_bad_credentials_returns_clarify() -> tuple[bool, str]:
     """When the Anthropic client raises an exception, cloud returns CLARIFY (no crash)."""
-    cloud = _CloudInference(model="claude-haiku-4-5-20251001")
+    cloud = _CloudInference(model="claude-haiku-4-5")
 
     with patch.object(cloud, "_get_client") as mock_client:
         mock_client.return_value.messages.create = MagicMock(

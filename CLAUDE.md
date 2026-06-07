@@ -12,7 +12,15 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - Open tasks: `.kiro/specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity + mouth-sound removal (2026-06-05)
+## Current Status — Phases 1–6 + Sprints A–C/5–7/G1–G5 + gaze removal + AIOS alignment + cluster offload + goal sessions + mic mute + magnetic cursor/gravity + mouth-sound removal + agent-orchestration hardening (2026-06-06)
+
+**Done (Agent-orchestration hardening + Opus 4.8 dev path — 2026-06-06):**
+- `fix(inference)` — `ResourceGovernor` evicts the **router-derived** heavy specialist set on a flare (was hardcoded `qwen3-vl:30b`) and sleeps the vLLM pool; new `set_model_router()` + `ModelRouter.heavy_model_names()`/`sleep_specialists()`.
+- `feat(dev-agent)` — destructive plans/ops **fail-safe to DENY** on silence/ambiguity (read-only keeps auto-approve); `plan_and_run` is now closed-loop observe→act→replan (`MAX_REPLANS=2`, one read-only retry); fixed `_parse_plan` args regex that silently dropped every step argument; `agent_runs` gains a status lifecycle (+migration) with crash reconciliation (`mark_interrupted_runs`) + voice-gated `resume_pending_plan()`.
+- `feat(scheduler)` — Resource Invariants documented (single-permit `_dev_sem` is the real flare protection); `_dev_inflight` is leak-proof (decrement in `finally`); `stop()` cancels in-flight dispatched tasks; new `scheduler_queue_depth`/`scheduler_dev_inflight` gauges.
+- `feat(observability)` — opt-in cross-layer tracing (`monitoring/trace.py`, `DA_TRACE`); `trace_id` rides the `Command` dataclass + a ContextVar through coordinator→router→executor; reconstructs enqueue→dispatch→route_decision→inference→execute; `commands.trace_id` column (+migration); `GET /trace` + `/trace/{id}`. Zero-cost no-op unless `DA_TRACE` is set.
+- `chore(cloud)` — `CloudDevAgent` defaults to **`claude-opus-4-8`** (was `claude-sonnet-4-6`); command-path cloud fallback ID normalized to the `claude-haiku-4-5` alias. (Vision fallback in `vision_grounder.py` stays Sonnet 4.6 — local qwen3-vl is primary there.)
+- All on PR **#32** (`fix/tilt-tap-click`), pushed and in sync with origin. Working-tree tuning not yet committed: `_gravity_max_pull` 18→22 px, `DA_SNAP_RADIUS_PX` default 200→300 px. See `docs/daily/2026-06-06-daily-review.md`.
 
 **Done (Mouth-sound control removed — 2026-06-05):**
 - The mouth-sound pipeline (cluck/pop/hiss via AVFoundation) was removed **entirely** (PC + iPad) — the sounds fired incidentally and were not a reliable control surface. Removed iPad-side: `SoundDetector.swift`, `SoundTrainingSheet.swift`, and the `sound`/`SoundDetector` wiring across `SensorManager.swift`, `OnboardingView.swift`, `SettingsStore.swift`, `SensorActivityBar.swift`, `SensorDashboardView.swift`, `FlareProfileSheet.swift` (Swift source count 41 → 40). Removed PC-side: the `sound_action` handler and the priority-2 sound branch in `core/fusion_engine.py` (now **6-level** priority); the `sound_action` message type is no longer sent. The FusionEngine priority list shrinks 7 → 6 (see Sensor Priority below).
@@ -76,7 +84,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 **Done (Phase 6 — cloud fallback):**
 - `hybrid_coordinator.py` — `_retranscribe()`: phonetic vocabulary correction (6 misrecognitions, 0ms) on low-confidence voice before Gate 2 (Amazon Transcribe Stage 2 removed in the Anthropic migration); Gate 1 route label propagated to executor
 - `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Danielle neural, 16kHz PCM) sidecar-down fallback for CLARIFY; primary path uses `polly_stream.get_client().speak_sync()`; SEARCH_WEB URL-encoded via `urllib.parse`
-- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5-20251001` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. (Migrated off AWS Bedrock; AgentCore deployment deferred and source deleted.)
+- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. The dev-domain cloud path (`CloudDevAgent`) uses `claude-opus-4-8`. (Migrated off AWS Bedrock; AgentCore deployment deferred and source deleted.)
 
 **Done (LiDAR gesture depth + Settings UI + housekeeping — 2026-05-16):**
 - `LiDARStreamer.swift` — ARWorldTrackingConfiguration + `.smoothedSceneDepth`; 5 fps depth / 10 fps camera; serialises `depth_frame` (float32 + uint8 conf) and `camera_frame` (JPEG 480px) matching PC bridge protocol; publishes UIImages for debug view
@@ -182,7 +190,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - Multiple Swift sensor files updated to use AppLogger for structured output: `SharedAudioSession`, `AudioStreamer`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `LiDARStreamer`, `SharedFaceSession`, `TiltSensor`, `SensorManager`, `DesktopAgentApp`
 - `fusion_engine.py` — `set_gaze_calibrator()` wiring path also updated
 
-**Test suite (2026-06-03):** 552 pytest test functions across 49 `tests/test_*.py` files (+ standalone integration scripts) + 15 Swift XCTest files
+**Test suite (2026-06-06):** 673 pytest test functions across 60 `tests/test_*.py` files (+ standalone integration scripts) + 15 Swift XCTest files
 
 ## Run Commands
 

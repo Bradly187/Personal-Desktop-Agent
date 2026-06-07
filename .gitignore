@@ -6,7 +6,7 @@
 chroma_db/
 .codebase_index_state.json
 
-# Generated benchmark artifacts (see monitoring/benchmark_models.py)
+# Regenerated benchmark output (run-local, not a source artifact; see monitoring/benchmark_models.py)
 benchmark_results.json
 
 # Apple credentials and certificates

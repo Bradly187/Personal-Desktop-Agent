@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Personal Desktop Agent — Diagrams</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent2: #7ee787;
+    --accent3: #f78166;
+    --accent4: #d2a8ff;
+    --accent5: #ffa657;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --radius: 10px;
+    --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    padding: 40px 24px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; color: var(--text); }
+  h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 24px; color: var(--muted); }
+  .section { margin-bottom: 72px; }
+  .section-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .section-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 32px;
+    color: var(--text);
+  }
+
+  /* ─── DIAGRAM 1: Architecture Pipeline ─── */
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    overflow-x: auto;
+    padding-bottom: 8px;
+  }
+  .pipeline-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    min-width: 140px;
+    flex: 1;
+  }
+  .stage-header {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-align: center;
+    height: 24px;
+  }
+  .stage-box {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    text-align: center;
+    width: 100%;
+    position: relative;
+    min-height: 72px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+  }
+  .stage-box.highlight { border-color: var(--accent); background: #1a2332; }
+  .stage-box.highlight2 { border-color: var(--accent2); background: #162320; }
+  .stage-box.highlight3 { border-color: var(--accent4); background: #1e1a2e; }
+  .stage-box.highlight4 { border-color: var(--accent5); background: #231d14; }
+  .stage-icon { font-size: 1.5rem; }
+  .stage-name { font-size: 0.85rem; font-weight: 600; }
+  .stage-sub { font-size: 0.7rem; color: var(--muted); }
+  .arrow-col {
+    display: flex;
+    align-items: center;
+    padding-top: 24px;
+    flex-shrink: 0;
+    width: 32px;
+    justify-content: center;
+  }
+  .arrow-col svg { opacity: 0.5; }
+
+  .sensor-pills {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    width: 100%;
+    margin-top: 4px;
+  }
+  .pill {
+    border-radius: 20px;
+    padding: 4px 10px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-align: center;
+    letter-spacing: 0.03em;
+  }
+  .pill-blue { background: #1a2332; border: 1px solid var(--accent); color: var(--accent); }
+  .pill-green { background: #162320; border: 1px solid var(--accent2); color: var(--accent2); }
+  .pill-purple { background: #1e1a2e; border: 1px solid var(--accent4); color: var(--accent4); }
+  .pill-orange { background: #231d14; border: 1px solid var(--accent5); color: var(--accent5); }
+  .pill-red { background: #2a1a1a; border: 1px solid var(--accent3); color: var(--accent3); }
+
+  /* ─── DIAGRAM 2: Sensor Modalities ─── */
+  .modality-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+  }
+  .modality-card {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px 20px;
+    transition: border-color 0.2s, transform 0.2s;
+    cursor: default;
+  }
+  .modality-card:hover { transform: translateY(-2px); }
+  .modality-card.tilt:hover { border-color: var(--accent); }
+  .modality-card.voice:hover { border-color: var(--accent2); }
+  .modality-card.gesture:hover { border-color: var(--accent4); }
+  .modality-card.touch:hover { border-color: var(--accent5); }
+  .modality-icon { font-size: 2.2rem; margin-bottom: 12px; }
+  .modality-name { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+  .modality-desc { font-size: 0.8rem; color: var(--muted); line-height: 1.5; margin-bottom: 12px; }
+  .modality-tech { font-size: 0.7rem; color: var(--muted); border-top: 1px solid var(--border); padding-top: 10px; }
+  .modality-tech span { color: var(--text); font-weight: 600; }
+
+  /* ─── DIAGRAM 3: Sensor Priority ─── */
+  .priority-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .priority-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    position: relative;
+    overflow: hidden;
+  }
+  .priority-row::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    border-radius: var(--radius) 0 0 var(--radius);
+    width: 4px;
+  }
+  .priority-row.p1::before { background: #ff6b6b; }
+  .priority-row.p2::before { background: var(--accent2); }
+  .priority-row.p3::before { background: var(--accent); }
+  .priority-row.p4::before { background: var(--accent4); }
+  .priority-row.p5::before { background: var(--accent5); }
+  .priority-row.p6::before { background: var(--muted); }
+  .priority-num {
+    font-size: 1.1rem;
+    font-weight: 800;
+    width: 28px;
+    text-align: center;
+    flex-shrink: 0;
+    color: var(--muted);
+  }
+  .priority-icon { font-size: 1.3rem; flex-shrink: 0; width: 30px; text-align: center; }
+  .priority-info { flex: 1; }
+  .priority-name { font-size: 0.9rem; font-weight: 600; }
+  .priority-detail { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+  .priority-bar-wrap { width: 120px; flex-shrink: 0; }
+  .priority-bar-bg { background: var(--border); border-radius: 4px; height: 6px; }
+  .priority-bar { height: 6px; border-radius: 4px; }
+  .latency-label { font-size: 0.68rem; color: var(--muted); margin-top: 4px; text-align: right; }
+
+  /* ─── DIAGRAM 4: Action Vocabulary ─── */
+  .vocab-section { margin-bottom: 20px; }
+  .vocab-section-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .vocab-section-title.access { color: var(--accent); }
+  .vocab-section-title.dev { color: var(--accent4); }
+  .verb-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .verb-chip {
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+    letter-spacing: 0.05em;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    min-width: 90px;
+    text-align: center;
+  }
+  .verb-chip.access {
+    background: #1a2332;
+    border: 1.5px solid var(--accent);
+    color: var(--accent);
+  }
+  .verb-chip.dev {
+    background: #1e1a2e;
+    border: 1.5px solid var(--accent4);
+    color: var(--accent4);
+  }
+  .verb-emoji { font-size: 1rem; }
+
+  /* ─── DIAGRAM 5: Routing Gate Flow ─── */
+  .gate-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    position: relative;
+  }
+  .gate-step {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    position: relative;
+  }
+  .gate-step::before {
+    content: '';
+    position: absolute;
+    left: 23px;
+    top: 46px;
+    bottom: -20px;
+    width: 2px;
+    background: var(--border);
+  }
+  .gate-step:last-child::before { display: none; }
+  .gate-circle {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    font-weight: 800;
+    flex-shrink: 0;
+    border: 2px solid;
+    margin-top: 0;
+  }
+  .gate-content {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    flex: 1;
+    margin-bottom: 20px;
+  }
+  .gate-title { font-size: 0.9rem; font-weight: 700; margin-bottom: 4px; }
+  .gate-desc { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
+  .gate-outcome {
+    display: inline-block;
+    margin-top: 8px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+  }
+  .gate-step:nth-child(1) .gate-circle { background: #2a1a1a; border-color: var(--accent3); color: var(--accent3); }
+  .gate-step:nth-child(2) .gate-circle { background: #1a2332; border-color: var(--accent); color: var(--accent); }
+  .gate-step:nth-child(3) .gate-circle { background: #162320; border-color: var(--accent2); color: var(--accent2); }
+  .gate-step:nth-child(4) .gate-circle { background: #231d14; border-color: var(--accent5); color: var(--accent5); }
+  .gate-step:nth-child(5) .gate-circle { background: #1e1a2e; border-color: var(--accent4); color: var(--accent4); }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 20px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    margin: 3px 3px 0 0;
+  }
+  .badge-blue { background: #1a2332; border: 1px solid var(--accent); color: var(--accent); }
+  .badge-green { background: #162320; border: 1px solid var(--accent2); color: var(--accent2); }
+
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 16px 0 32px;
+  }
+
+  /* note */
+  .note {
+    background: #161b22;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 32px;
+  }
+</style>
+</head>
+<body>
+
+<div style="margin-bottom:48px">
+  <div style="font-size:0.75rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:8px">Project</div>
+  <h1>Personal Desktop Agent</h1>
+  <h2>Multimodal accessibility control — iPad Pro + RTX 5090</h2>
+</div>
+
+<!-- ════════════════════════════════════
+     DIAGRAM 1: System Architecture
+════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label">Diagram 1</div>
+  <div class="section-title">System Architecture</div>
+
+  <div class="pipeline">
+
+    <!-- Stage: iPad Sensors -->
+    <div class="pipeline-stage">
+      <div class="stage-header">Sensor Hub</div>
+      <div class="stage-box highlight">
+        <div class="stage-icon">📱</div>
+        <div class="stage-name">iPad Pro</div>
+        <div class="sensor-pills">
+          <div class="pill pill-blue">Tilt (Core Motion)</div>
+          <div class="pill pill-green">Voice (Speech)</div>
+          <div class="pill pill-purple">Gesture (Camera)</div>
+          <div class="pill pill-orange">Touch / Trackpad</div>
+          <div class="pill pill-red">LiDAR Depth</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-col">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- Stage: WebSocket Bridge -->
+    <div class="pipeline-stage">
+      <div class="stage-header">Transport</div>
+      <div class="stage-box" style="border-color:#58a6ff44">
+        <div class="stage-icon">🔌</div>
+        <div class="stage-name">WebSocket</div>
+        <div class="stage-sub">:8765 · mDNS</div>
+        <div class="stage-sub" style="margin-top:4px">25 msg types</div>
+      </div>
+    </div>
+
+    <div class="arrow-col">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- Stage: Fusion Engine -->
+    <div class="pipeline-stage">
+      <div class="stage-header">Sensor Fusion</div>
+      <div class="stage-box highlight">
+        <div class="stage-icon">⚡</div>
+        <div class="stage-name">Fusion Engine</div>
+        <div class="stage-sub">60 Hz · 6-level priority</div>
+        <div class="stage-sub">Cursor gravity · One€ filter</div>
+      </div>
+    </div>
+
+    <div class="arrow-col">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- Stage: Coordinator -->
+    <div class="pipeline-stage">
+      <div class="stage-header">Routing</div>
+      <div class="stage-box" style="border-color:#7ee78744">
+        <div class="stage-icon">🧠</div>
+        <div class="stage-name">Coordinator</div>
+        <div class="stage-sub">4-gate routing</div>
+        <div class="sensor-pills" style="margin-top:6px">
+          <div class="pill pill-blue">llama3.1:8b</div>
+          <div class="pill pill-purple">Anthropic API</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-col">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+
+    <!-- Stage: Executor -->
+    <div class="pipeline-stage">
+      <div class="stage-header">Execution</div>
+      <div class="stage-box highlight2">
+        <div class="stage-icon">🖥️</div>
+        <div class="stage-name">Command Executor</div>
+        <div class="stage-sub">16 verbs</div>
+        <div class="sensor-pills" style="margin-top:6px">
+          <div class="pill pill-green">pyautogui</div>
+          <div class="pill pill-blue">Win32 API</div>
+          <div class="pill pill-purple">UIAutomation</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="note">
+    Whisper large-v3 (GPU) handles continuous speech transcription on the PC side.
+    The iPad streams audio over WebSocket; Silero VAD gates transcription to avoid hallucination.
+    All cross-pipeline data is typed as a <code style="color:var(--accent)">Command</code> dataclass — no raw dicts.
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIAGRAM 2: Input Modalities
+════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label">Diagram 2</div>
+  <div class="section-title">Input Modalities</div>
+
+  <div class="modality-grid">
+
+    <div class="modality-card tilt">
+      <div class="modality-icon">↕️</div>
+      <div class="modality-name">Tilt Navigation</div>
+      <div class="modality-desc">iPad tilt drives cursor position or velocity. One-Euro adaptive filter smooths tremor. Pain-day mode relaxes thresholds automatically.</div>
+      <div class="modality-tech">Stack: <span>Core Motion</span> · <span>One€ filter</span> · <span>Gyro bias calibration</span></div>
+    </div>
+
+    <div class="modality-card voice">
+      <div class="modality-icon">🎙️</div>
+      <div class="modality-name">Voice Commands</div>
+      <div class="modality-desc">Wake phrase "hey agent" arms a 15-second window. Whisper large-v3 on GPU transcribes. Acoustic profiler adapts VAD per user voice condition.</div>
+      <div class="modality-tech">Stack: <span>faster-whisper</span> · <span>Silero VAD</span> · <span>Acoustic profiler</span></div>
+    </div>
+
+    <div class="modality-card gesture">
+      <div class="modality-icon">✌️</div>
+      <div class="modality-name">Hand Gestures</div>
+      <div class="modality-desc">Peace-sign base pose detects 13 spatial gestures: swipes, grabs, snaps, monitor moves, push/pull, pinch. LiDAR validates grab depth.</div>
+      <div class="modality-tech">Stack: <span>MediaPipe Tasks</span> · <span>LiDAR depth</span> · <span>velocity calibration</span></div>
+    </div>
+
+    <div class="modality-card touch">
+      <div class="modality-icon">👆</div>
+      <div class="modality-name">Touch / Trackpad</div>
+      <div class="modality-desc">Full multi-touch trackpad pad on iPad screen. Direct touch commands bypass the LLM entirely for zero-latency control.</div>
+      <div class="modality-tech">Stack: <span>SwiftUI TrackpadView</span> · <span>WebSocket bypass</span></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIAGRAM 3: Sensor Priority
+════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label">Diagram 3</div>
+  <div class="section-title">Sensor Priority (60 Hz Fusion Loop)</div>
+
+  <div class="priority-list">
+
+    <div class="priority-row p1">
+      <div class="priority-num">1</div>
+      <div class="priority-icon">👆</div>
+      <div class="priority-info">
+        <div class="priority-name">iPad Touch Command</div>
+        <div class="priority-detail">Bypasses LLM entirely — direct pyautogui execution</div>
+      </div>
+      <div class="priority-bar-wrap">
+        <div class="priority-bar-bg"><div class="priority-bar" style="width:100%;background:#ff6b6b"></div></div>
+        <div class="latency-label">&lt;5 ms</div>
+      </div>
+    </div>
+
+    <div class="priority-row p2">
+      <div class="priority-num">2</div>
+      <div class="priority-icon">🗣️</div>
+      <div class="priority-info">
+        <div class="priority-name">Voice "click" keyword</div>
+        <div class="priority-detail">Clicks at current cursor position — bypass path, source: multimodal</div>
+      </div>
+      <div class="priority-bar-wrap">
+        <div class="priority-bar-bg"><div class="priority-bar" style="width:85%;background:var(--accent2)"></div></div>
+        <div class="latency-label">&lt;20 ms</div>
+      </div>
+    </div>
+
+    <div class="priority-row p3">
+      <div class="priority-num">3</div>
+      <div class="priority-icon">↕️</div>
+      <div class="priority-info">
+        <div class="priority-name">Tilt Navigation (Core Motion)</div>
+        <div class="priority-detail">3a absolute position mode · 3b legacy velocity mode · magnetic cursor snap</div>
+      </div>
+      <div class="priority-bar-wrap">
+        <div class="priority-bar-bg"><div class="priority-bar" style="width:70%;background:var(--accent)"></div></div>
+        <div class="latency-label">16 ms frame</div>
+      </div>
+    </div>
+
+    <div class="priority-row p4">
+      <div class="priority-num">4</div>
+      <div class="priority-icon">✌️</div>
+      <div class="priority-info">
+        <div class="priority-name">Hand Gesture (MediaPipe)</div>
+        <div class="priority-detail">13-gesture vocabulary · LiDAR depth validation · velocity calibration</div>
+      </div>
+      <div class="priority-bar-wrap">
+        <div class="priority-bar-bg"><div class="priority-bar" style="width:55%;background:var(--accent4)"></div></div>
+        <div class="latency-label">~30 ms</div>
+      </div>
+    </div>
+
+    <div class="priority-row p5">
+      <div class="priority-num">5</div>
+      <div class="priority-icon">📱</div>
+      <div class="priority-info">
+        <div class="priority-name">On-device Voice Keyword</div>
+        <div class="priority-detail">iPad Speech Framework · fast local recognition · keyword-only routing</div>
+      </div>
+      <div class="priority-bar-wrap">
+        <div class="priority-bar-bg"><div class="priority-bar" style="width:40%;background:var(--accent5)"></div></div>
+        <div class="latency-label">~50 ms</div>
+      </div>
+    </div>
+
+    <div class="priority-row p6">
+      <div class="priority-num">6</div>
+      <div class="priority-icon">🎙️</div>
+      <div class="priority-info">
+        <div class="priority-name">PC Voice (Whisper large-v3)</div>
+        <div class="priority-detail">GPU-accelerated transcription · Silero VAD · acoustic profiler adaptation</div>
+      </div>
+      <div class="priority-bar-wrap">
+        <div class="priority-bar-bg"><div class="priority-bar" style="width:25%;background:var(--muted)"></div></div>
+        <div class="latency-label">~190 ms</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIAGRAM 4: Action Vocabulary
+════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label">Diagram 4</div>
+  <div class="section-title">16-Verb Action Vocabulary</div>
+
+  <div class="vocab-section">
+    <div class="vocab-section-title access">Accessibility Verbs (11) — Sensor Pipeline &amp; Simple Commands</div>
+    <div class="verb-grid">
+      <div class="verb-chip access"><div class="verb-emoji">🖱️</div>CLICK</div>
+      <div class="verb-chip access"><div class="verb-emoji">⬇️</div>MOUSEDOWN</div>
+      <div class="verb-chip access"><div class="verb-emoji">⬆️</div>MOUSEUP</div>
+      <div class="verb-chip access"><div class="verb-emoji">📜</div>SCROLL</div>
+      <div class="verb-chip access"><div class="verb-emoji">⌨️</div>TYPE</div>
+      <div class="verb-chip access"><div class="verb-emoji">📂</div>OPEN</div>
+      <div class="verb-chip access"><div class="verb-emoji">✖️</div>CLOSE</div>
+      <div class="verb-chip access"><div class="verb-emoji">⌨️</div>HOTKEY</div>
+      <div class="verb-chip access"><div class="verb-emoji">🗣️</div>DICTATE</div>
+      <div class="verb-chip access"><div class="verb-emoji">❓</div>CLARIFY</div>
+      <div class="verb-chip access"><div class="verb-emoji">📷</div>SCREENSHOT</div>
+    </div>
+  </div>
+
+  <div class="vocab-section" style="margin-top:20px">
+    <div class="vocab-section-title dev">Dev-Agent Verbs (5) — Specialist Model Output</div>
+    <div class="verb-grid">
+      <div class="verb-chip dev"><div class="verb-emoji">📝</div>WRITE_FILE</div>
+      <div class="verb-chip dev"><div class="verb-emoji">💻</div>RUN_TERMINAL</div>
+      <div class="verb-chip dev"><div class="verb-emoji">💡</div>EXPLAIN</div>
+      <div class="verb-chip dev"><div class="verb-emoji">🔍</div>SEARCH_WEB</div>
+      <div class="verb-chip dev"><div class="verb-emoji">👁️</div>READ_SCREEN</div>
+    </div>
+  </div>
+
+  <div class="note" style="margin-top:24px">
+    All 16 verbs flow through <code style="color:var(--accent)">CommandExecutor</code>.
+    <code style="color:var(--accent2)">DomainClassifier</code> gates the pipeline — simple commands go to <code style="color:var(--accent)">llama3.1:8b</code> (verb-first);
+    dev-domain queries go to <code style="color:var(--accent4)">DevAgent</code> which selects a specialist model.
+    <code style="color:var(--accent)">MOUSEDOWN</code>/<code style="color:var(--accent)">MOUSEUP</code> execute synchronously (no asyncio.to_thread) for timing-critical drag operations.
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIAGRAM 5: Routing Gate Flow
+════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label">Diagram 5</div>
+  <div class="section-title">4-Gate Routing Pipeline</div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:32px">
+    <div class="gate-flow">
+
+      <div class="gate-step">
+        <div class="gate-circle">G0</div>
+        <div class="gate-content">
+          <div class="gate-title">Gate 0 — Privacy Screen</div>
+          <div class="gate-desc">Blocks commands containing sensitive patterns (passwords, API keys). No LLM call made — command is rejected before any model sees it.</div>
+          <span class="gate-outcome" style="background:#2a1a1a;color:var(--accent3);border:1px solid var(--accent3)44">→ REJECT or pass</span>
+        </div>
+      </div>
+
+      <div class="gate-step">
+        <div class="gate-circle">G1</div>
+        <div class="gate-content">
+          <div class="gate-title">Gate 1 — Domain Classification</div>
+          <div class="gate-desc">Keyword scoring classifies intent into COMMAND, CODE, MATH, VISION, PLAN, or GENERAL. Routes to the appropriate inference path.</div>
+          <span class="gate-outcome" style="background:#1a2332;color:var(--accent);border:1px solid var(--accent)44">→ domain label</span>
+        </div>
+      </div>
+
+      <div class="gate-step">
+        <div class="gate-circle">G2</div>
+        <div class="gate-content">
+          <div class="gate-title">Gate 2 — Local Inference</div>
+          <div class="gate-desc">Command domain: llama3.1:8b (verb-first, 190ms warm). Dev domains: specialist model via ModelRouter (qwen3-coder, deepseek-r1, etc.). 15s circuit-breaker → CLARIFY.</div>
+          <span class="gate-outcome" style="background:#162320;color:var(--accent2);border:1px solid var(--accent2)44">→ Command or fallthrough</span>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="gate-flow">
+
+      <div class="gate-step">
+        <div class="gate-circle" style="background:#231d14;border-color:var(--accent5);color:var(--accent5)">G3</div>
+        <div class="gate-content">
+          <div class="gate-title">Gate 3 — Cloud Fallback</div>
+          <div class="gate-desc">When local inference times out or scores low confidence. Command domain → claude-haiku-4-5. Dev domain → claude-opus-4-8. 10s timeout circuit-breaker.</div>
+          <span class="gate-outcome" style="background:#231d14;color:var(--accent5);border:1px solid var(--accent5)44">→ Command or CLARIFY</span>
+        </div>
+      </div>
+
+      <div class="gate-step">
+        <div class="gate-circle" style="background:#1e1a2e;border-color:var(--accent4);color:var(--accent4)">G4</div>
+        <div class="gate-content">
+          <div class="gate-title">Gate 4 — Execution &amp; Verification</div>
+          <div class="gate-desc">CommandExecutor maps verb → MCP tool call. ActionVerifier does perceptual diff (pre/post screenshot) for CLICK, OPEN, CLOSE, SCROLL. UIAutomation finds targets by fuzzy name.</div>
+          <span class="gate-outcome" style="background:#1e1a2e;color:var(--accent4);border:1px solid var(--accent4)44">→ ack + status reply to iPad</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIAGRAM 6: Tech Stack Summary
+════════════════════════════════════ -->
+<div class="section">
+  <div class="section-label">Diagram 6</div>
+  <div class="section-title">Tech Stack</div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+
+    <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:18px">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:10px">Sensor Hub</div>
+      <div style="font-size:0.8rem;color:var(--muted);line-height:1.8">
+        iPad Pro (home-button)<br>
+        SwiftUI · 41 Swift files<br>
+        Core Motion · Speech<br>
+        ARWorldTracking (LiDAR)<br>
+        MediaPipe (gesture)<br>
+        WebSocket client (mDNS)
+      </div>
+    </div>
+
+    <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:18px">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--accent2);margin-bottom:10px">Inference</div>
+      <div style="font-size:0.8rem;color:var(--muted);line-height:1.8">
+        RTX 5090 (32 GB VRAM)<br>
+        Ollama 0.30.6<br>
+        llama3.1:8b (command)<br>
+        qwen3-coder:30b (code)<br>
+        qwen3-vl:30b (vision)<br>
+        Whisper large-v3 (GPU)
+      </div>
+    </div>
+
+    <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:18px">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--accent4);margin-bottom:10px">Cloud</div>
+      <div style="font-size:0.8rem;color:var(--muted);line-height:1.8">
+        claude-haiku-4-5 (command)<br>
+        claude-opus-4-8 (dev agent)<br>
+        claude-sonnet-4-6 (vision)<br>
+        Amazon Polly (Danielle TTS)<br>
+        Anthropic SDK
+      </div>
+    </div>
+
+    <div style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:18px">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--accent5);margin-bottom:10px">Desktop Control</div>
+      <div style="font-size:0.8rem;color:var(--muted);line-height:1.8">
+        Python (asyncio)<br>
+        pyautogui · Win32 API<br>
+        UIAutomation BFS<br>
+        MCP server (stdio)<br>
+        aiosqlite · DuckDB<br>
+        ChromaDB (semantic memory)
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="note">
+  These diagrams were generated 2026-06-06. Source:
+  <code style="color:var(--accent)">E:/Personal_Desktop_Agent</code> —
+  682 passing tests · Python + Swift · Windows 11 + iPad Pro.
+</div>
+
+</body>
+</html>
