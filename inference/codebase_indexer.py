@@ -72,7 +72,62 @@ class Chunk:
 # Python chunker (AST-based)
 # ---------------------------------------------------------------------------
 
-_MAX_CHUNK_CHARS = 4000   # truncate very long chunks before embedding
+_MAX_CHUNK_CHARS = 4000   # max chars per embedded chunk; larger units are split
+
+
+def _split_oversized(text: str, max_chars: int = _MAX_CHUNK_CHARS) -> list[str]:
+    """Split `text` into <=max_chars pieces, preferring line boundaries.
+
+    Returns [text] unchanged when it already fits. Used instead of a hard
+    text[:max_chars] truncation so large functions / classes / PDF pages keep
+    their tail (retrieval recall) rather than silently losing it before
+    embedding.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    pieces: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        window = remaining[:max_chars]
+        cut = window.rfind("\n")   # prefer a line boundary within the window
+        if cut <= 0:
+            cut = max_chars        # no newline in range — hard cut
+        pieces.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        pieces.append(remaining)
+    return pieces
+
+
+def _emit_chunks(
+    chunks: list[Chunk],
+    *,
+    file: str,
+    chunk_type: str,
+    name: str,
+    text: str,
+    start_line: int = 0,
+    page: int = 0,
+) -> None:
+    """Append one Chunk for `text`, or N sub-chunks when it exceeds the char cap.
+
+    Sub-chunks share the base name with a ``_(i/N)`` suffix so the original
+    symbol stays identifiable and each sub-chunk gets a distinct id (ids derive
+    from the name). Replaces the previous hard truncation at every chunker site.
+    """
+    parts = _split_oversized(text)
+    if len(parts) == 1:
+        chunks.append(Chunk(
+            file=file, chunk_type=chunk_type, name=name,
+            text=parts[0], start_line=start_line, page=page,
+        ))
+        return
+    total = len(parts)
+    for i, part in enumerate(parts, 1):
+        chunks.append(Chunk(
+            file=file, chunk_type=chunk_type, name=f"{name}_({i}/{total})",
+            text=part, start_line=start_line, page=page,
+        ))
 
 
 def _chunk_python(path: Path, project_root: Path) -> list[Chunk]:
@@ -91,17 +146,16 @@ def _chunk_python(path: Path, project_root: Path) -> list[Chunk]:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as exc:
         log.debug("CodebaseIndexer: Python parse error %s: %s", rel, exc)
-        # Fall back to whole-file chunk
-        snippet = source[:_MAX_CHUNK_CHARS]
-        return [Chunk(file=rel, chunk_type="module", name="(file)", text=snippet)]
+        # Fall back to whole-file chunk(s)
+        out: list[Chunk] = []
+        _emit_chunks(out, file=rel, chunk_type="module", name="(file)", text=source)
+        return out
 
     # ── Module-level docstring ──
     module_doc = ast.get_docstring(tree)
     if module_doc:
-        chunks.append(Chunk(
-            file=rel, chunk_type="module", name="(docstring)",
-            text=module_doc[:_MAX_CHUNK_CHARS], start_line=1,
-        ))
+        _emit_chunks(chunks, file=rel, chunk_type="module", name="(docstring)",
+                     text=module_doc, start_line=1)
 
     # ── Walk top-level definitions ──
     for node in ast.walk(tree):
@@ -110,23 +164,18 @@ def _chunk_python(path: Path, project_root: Path) -> list[Chunk]:
         # Only top-level and one level deep (methods inside classes)
         start = node.lineno - 1
         end = getattr(node, "end_lineno", start + 1)
-        chunk_text = "\n".join(lines[start:end])[:_MAX_CHUNK_CHARS]
+        chunk_text = "\n".join(lines[start:end])
         ctype = (
             "class" if isinstance(node, ast.ClassDef)
             else "method" if _is_method(node, tree)
             else "function"
         )
-        chunks.append(Chunk(
-            file=rel, chunk_type=ctype, name=node.name,
-            text=chunk_text, start_line=node.lineno,
-        ))
+        _emit_chunks(chunks, file=rel, chunk_type=ctype, name=node.name,
+                     text=chunk_text, start_line=node.lineno)
 
     if not chunks:
-        # Fallback: whole file truncated
-        chunks.append(Chunk(
-            file=rel, chunk_type="module", name="(file)",
-            text=source[:_MAX_CHUNK_CHARS],
-        ))
+        # Fallback: whole file (split if oversized)
+        _emit_chunks(chunks, file=rel, chunk_type="module", name="(file)", text=source)
 
     return chunks
 
@@ -168,23 +217,18 @@ def _chunk_swift(path: Path, project_root: Path) -> list[Chunk]:
     for i, m in enumerate(matches):
         start_char = m.start()
         end_char = matches[i + 1].start() if i + 1 < len(matches) else len(source)
-        snippet = source[start_char:end_char][:_MAX_CHUNK_CHARS]
+        snippet = source[start_char:end_char]
 
         # Determine line number
         start_line = source[:start_char].count("\n") + 1
         ctype = m.group(1)   # class, struct, func, etc.
         name = m.group(2)
 
-        chunks.append(Chunk(
-            file=rel, chunk_type=ctype, name=name,
-            text=snippet.strip(), start_line=start_line,
-        ))
+        _emit_chunks(chunks, file=rel, chunk_type=ctype, name=name,
+                     text=snippet.strip(), start_line=start_line)
 
     if not chunks:
-        chunks.append(Chunk(
-            file=rel, chunk_type="module", name="(file)",
-            text=source[:_MAX_CHUNK_CHARS],
-        ))
+        _emit_chunks(chunks, file=rel, chunk_type="module", name="(file)", text=source)
 
     return chunks
 
@@ -205,10 +249,8 @@ def _chunk_pdf(path: Path, project_root: Path) -> list[Chunk]:
             for i, page in enumerate(pdf.pages, 1):
                 text = (page.extract_text() or "").strip()
                 if text:
-                    chunks.append(Chunk(
-                        file=rel, chunk_type="page",
-                        name=f"page_{i}", text=text[:_MAX_CHUNK_CHARS], page=i,
-                    ))
+                    _emit_chunks(chunks, file=rel, chunk_type="page",
+                                 name=f"page_{i}", text=text, page=i)
         return chunks
     except ImportError:
         pass
@@ -221,10 +263,8 @@ def _chunk_pdf(path: Path, project_root: Path) -> list[Chunk]:
         for i, page in enumerate(reader.pages, 1):
             text = (page.extract_text() or "").strip()
             if text:
-                chunks.append(Chunk(
-                    file=rel, chunk_type="page",
-                    name=f"page_{i}", text=text[:_MAX_CHUNK_CHARS], page=i,
-                ))
+                _emit_chunks(chunks, file=rel, chunk_type="page",
+                             name=f"page_{i}", text=text, page=i)
         return chunks
     except ImportError:
         log.debug("CodebaseIndexer: no PDF library (install pdfplumber or pypdf)")
@@ -267,6 +307,10 @@ class CodebaseIndexer:
     }
     # File size limit — skip huge auto-generated files
     MAX_FILE_BYTES = 500_000
+    # Watcher debounce: coalesce rapid save bursts into one re-index per path.
+    WATCH_DEBOUNCE_S = 0.8
+    # Lazy ChromaDB re-probe: min seconds between retry attempts after a failure.
+    REPROBE_INTERVAL_S = 60.0
 
     def __init__(
         self,
@@ -305,12 +349,23 @@ class CodebaseIndexer:
         # skipped. In-progress jobs run to completion.
         self._paused: bool = False
 
+        # Watcher debounce state: per-path call_later handles coalescing bursts.
+        self._debounce_timers: dict[str, asyncio.TimerHandle] = {}
+        self._reindex_tasks: set = set()   # keep debounced re-index task refs alive
+
+        # Lazy ChromaDB re-probe (C4): only retry start() after the store has
+        # been started at least once, and at most once per REPROBE_INTERVAL_S.
+        self._started_once: bool = False
+        self._last_probe_ts: float = 0.0
+
     # ---------------------------------------------------------------------- #
     # Lifecycle
     # ---------------------------------------------------------------------- #
 
     async def start(self) -> bool:
         """Initialize ChromaDB. Returns True if available."""
+        self._started_once = True
+        self._last_probe_ts = time.monotonic()
         try:
             import chromadb
 
@@ -436,16 +491,15 @@ class CodebaseIndexer:
             class _Handler(FileSystemEventHandler):
                 def on_modified(self, event):
                     if not event.is_directory:
-                        asyncio.run_coroutine_threadsafe(
-                            indexer._on_file_changed(Path(event.src_path)),
-                            loop,
+                        # Debounce on the loop thread — coalesce save bursts.
+                        loop.call_soon_threadsafe(
+                            indexer._debounced_reindex, Path(event.src_path)
                         )
 
                 def on_created(self, event):
                     if not event.is_directory:
-                        asyncio.run_coroutine_threadsafe(
-                            indexer._on_file_changed(Path(event.src_path)),
-                            loop,
+                        loop.call_soon_threadsafe(
+                            indexer._debounced_reindex, Path(event.src_path)
                         )
 
                 def on_deleted(self, event):
@@ -470,7 +524,13 @@ class CodebaseIndexer:
             return False
 
     def stop_watching(self) -> None:
-        """Stop the background file watcher."""
+        """Stop the background file watcher and cancel pending debounce timers."""
+        for t in self._debounce_timers.values():
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        self._debounce_timers.clear()
         if self._observer is not None:
             try:
                 self._observer.stop()
@@ -479,6 +539,26 @@ class CodebaseIndexer:
                 pass
             self._observer = None
             log.info("CodebaseIndexer: file watcher stopped")
+
+    def _debounced_reindex(self, path: Path) -> None:
+        """Coalesce rapid save bursts: (re)start a per-path timer so only the
+        last change within WATCH_DEBOUNCE_S triggers a single re-index. Runs on
+        the event loop thread (scheduled via call_soon_threadsafe)."""
+        if path.suffix.lower() not in (".py", ".swift"):
+            return  # avoid timer churn from state-file / non-source writes
+        key = str(path)
+        existing = self._debounce_timers.get(key)
+        if existing is not None:
+            existing.cancel()
+        loop = self._watch_loop or asyncio.get_event_loop()
+
+        def _fire() -> None:
+            self._debounce_timers.pop(key, None)
+            t = asyncio.create_task(self._on_file_changed(path))
+            self._reindex_tasks.add(t)
+            t.add_done_callback(self._reindex_tasks.discard)
+
+        self._debounce_timers[key] = loop.call_later(self.WATCH_DEBOUNCE_S, _fire)
 
     async def _on_file_changed(self, path: Path) -> None:
         """Handle file creation/modification event from watchdog thread."""
@@ -746,6 +826,24 @@ class CodebaseIndexer:
     # Query API
     # ---------------------------------------------------------------------- #
 
+    async def _maybe_reprobe(self) -> None:
+        """Lazily retry ChromaDB init after a failure, at most once per
+        REPROBE_INTERVAL_S, so a transient outage doesn't disable RAG for the
+        rest of the session. No-op until the store has been started at least
+        once (keeps never-started instances in their current state)."""
+        if self._available or not self._started_once:
+            return
+        now = time.monotonic()
+        if now - self._last_probe_ts < self.REPROBE_INTERVAL_S:
+            return
+        self._last_probe_ts = now
+        try:
+            await self.start()
+            if self._available:
+                log.info("CodebaseIndexer: ChromaDB re-probe succeeded — RAG restored")
+        except Exception as exc:
+            log.debug("CodebaseIndexer: re-probe failed: %s", exc)
+
     async def query_codebase(self, query: str, n: int = 5) -> list[dict]:
         """Semantic search over Python/Swift source chunks.
 
@@ -753,6 +851,7 @@ class CodebaseIndexer:
           {file, chunk_type, name, start_line, text, score}
         where score is 1.0 - cosine_distance (higher = more similar).
         """
+        await self._maybe_reprobe()
         if not self._available or self._codebase_col is None:
             return []
         try:
@@ -772,6 +871,7 @@ class CodebaseIndexer:
         Returns list of:
           {file, page, text, score}
         """
+        await self._maybe_reprobe()
         if not self._available or self._documents_col is None:
             return []
         try:

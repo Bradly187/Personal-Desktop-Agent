@@ -986,3 +986,26 @@ def test_recompute_stashes_real_deltas_for_logging():
     assert twin._last_gesture_conf_delta > 0.0
     assert abs(twin._last_gesture_conf_delta - (0.9 - 0.3) / 0.9) < 1e-6
     assert isinstance(twin._last_cmd_rate_delta, float)
+
+
+def test_pain_day_score_reflects_fail_ratio_end_to_end():
+    """End-to-end: a high fraction of failed commands drives the pain-day score
+    up via signal_1 (the fail ratio) — the formerly-dead signal now lives."""
+    twin = _make_twin()
+
+    async def run():
+        await twin.start()
+        await twin.observe(MockCommand(text="ok"), "CLICK")  # 1 success
+        if twin._pending_tasks:
+            await asyncio.gather(*twin._pending_tasks, return_exceptions=True)
+        for i in range(4):                                   # 4 failures
+            await twin.record_failure(MockCommand(text=f"bad_{i}"), "CLICK")
+        score = twin._recompute_pain_day_score()
+        await twin.stop()
+        return score
+
+    score = asyncio.run(run())
+    # signal_1 = 4/5 = 0.8 at weight 0.30; other signals ~0 → score ≈ 0.24
+    assert twin._session_fail_count == 4
+    assert twin._session_cmd_count == 5
+    assert score == pytest.approx(0.30 * 0.8, abs=0.03)
