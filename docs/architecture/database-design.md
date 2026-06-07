@@ -61,13 +61,13 @@ Both tables grow at low rate (at most a few dozen rows per day) and are cheap to
 
 ## 5. The Embedding Column
 
-`few_shot_examples.embedding` is a nullable `BLOB` column that is always `NULL` in the current implementation. It exists for forward compatibility with semantic retrieval.
+`few_shot_examples.embedding` is a nullable `BLOB` holding a 384-dimensional float32 vector from `all-MiniLM-L6-v2`. It is populated **incrementally**: each UPSERT backfills the embedding only where it is still `NULL` (the encoder loads lazily on first use; if `sentence-transformers` is unavailable the column stays `NULL` and that row falls back to Jaccard).
 
-**Current retrieval:** Jaccard word overlap × recency decay × log(usage_count). Fast, zero dependencies, works well for the current ~100-row dataset. The scoring function lives in `db.py:_fse_score()`.
-
-**Future upgrade path (no schema migration required):** When `few_shot_examples` grows to thousands of rows and Jaccard overlap misses semantically similar commands ("close the browser" vs "exit Chrome"), populate the `embedding` column with a 384-dimensional float32 vector from a sentence transformer (`all-MiniLM-L6-v2`, ~80MB). Switch `get_few_shot_examples()` to use cosine similarity over the stored embeddings instead of Jaccard. The column is already there — the upgrade is purely in `db.py`.
+**Retrieval** (`get_few_shot_examples`): `similarity × recency_decay × log(usage_count)`, where `similarity` is **cosine** over the stored embeddings when both the query and the row have one, and **Jaccard** word-overlap otherwise — a per-row decision, so a partially-embedded table is handled gracefully. Recency uses a 30-day half-life; results are filtered to `score > 0`.
 
 The BLOB stores raw float32 bytes (`numpy.ndarray.tobytes()` / `numpy.frombuffer()`). 384 floats × 4 bytes = 1536 bytes per row — negligible.
+
+> This is the **SQLite-resident** few-shot store on the per-command prompt hot path. It is distinct from the ChromaDB `behavioral_memory` collection used by the behavioral twin and the `codebase`/`documents` collections used by the RAG indexer — see §11 and the two-tier note in §12.
 
 ---
 
@@ -101,7 +101,7 @@ The JSON fallback in `benchmark_models.py` remains for environments where DuckDB
 
 | Legacy format | Problems | Replaced by |
 |---|---|---|
-| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — same 3 tables expanded + 8 new tables |
+| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — those 3 tables expanded, plus the rest of today's **29-table** schema (§11) |
 | `routing_log.jsonl` | Full-file read every 5 min; no session; no referential integrity | `agent.db` `commands` table |
 | `gesture_calibration.json` | Overwrote history on every write; in-memory samples lost on crash | `agent.db` `gesture_samples` (full history) + `gesture_calibration` (append-only floor log) |
 | `benchmark_results.json` | Single-run snapshot; no history; not queryable | `analytics.duckdb` `benchmark_runs / results / prompts` |
@@ -184,3 +184,478 @@ con.sql("""
     ORDER BY ts
 """).df()  # returns pandas DataFrame
 ```
+
+---
+
+## 11. Entity-Relationship Diagrams
+
+These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **29 tables**; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
+
+### 11.1 `agent.db` — relationship overview (all 29 tables)
+
+```mermaid
+erDiagram
+    sessions ||--o{ commands : "has"
+    sessions ||--o{ twin_session_history : "logs"
+    sessions ||--o{ twin_pain_day_log : "scores"
+    sessions ||--o{ voice_calibration : "captures"
+    sessions ||--o{ sensor_rom : "measures"
+    sessions ||--o{ ambient_transcripts : "records"
+    sessions ||--o{ ipad_logs : "forwards"
+    sessions ||--o{ sensor_telemetry : "samples"
+    sessions ||--o| session_summaries : "rolls-up (UNIQUE)"
+    commands ||--o{ inferences : "triggers"
+    commands ||--o{ agent_runs : "spawns"
+    commands ||--o{ few_shot_examples : "seeds"
+    commands ||--o{ gesture_samples : "emits"
+    commands ||--o{ sensor_events : "emits"
+    agent_runs ||--o{ agent_steps : "contains"
+    voice_calibration_sessions ||--o{ voice_pronunciations : "contains"
+    word_counts { text word PK }
+    hotwords { text word PK }
+    gesture_calibration { int id PK }
+    gesture_velocity_samples { int id PK }
+    gesture_velocity_calibration { int id PK }
+    settings_versions { int id PK }
+    voice_profile { int id PK }
+    voice_phrases { int id PK }
+    flare_profile { int id PK }
+    voice_profiles { int id PK }
+    adaptation_log { int id PK }
+```
+
+### 11.2 Group A — core pipeline & dev-agent runs
+
+```mermaid
+erDiagram
+    sessions ||--o{ commands : ""
+    commands ||--o{ inferences : ""
+    commands ||--o{ agent_runs : ""
+    agent_runs ||--o{ agent_steps : ""
+    sessions {
+        int id PK
+        real started_at
+        real ended_at
+        text mode
+        text git_hash
+        text agent_version
+        text notes
+    }
+    commands {
+        int id PK
+        int session_id FK
+        real ts
+        text source
+        text text
+        text action
+        text params
+        text route
+        text gate_that_decided
+        real latency_ms
+        real whisper_logprob
+        real gesture_confidence
+        real gaze_x
+        real gaze_y
+        int success
+        text error_msg
+        text corrected_to
+        text trace_id
+    }
+    inferences {
+        int id PK
+        int command_id FK
+        real ts
+        text model
+        text domain
+        text prompt_hash
+        text response
+        int tokens_in
+        int tokens_out
+        real latency_ms
+        text backend
+        text error
+    }
+    agent_runs {
+        int id PK
+        int command_id FK
+        real ts
+        text goal
+        text domain
+        text model_used
+        int step_count
+        int success
+        real total_latency_ms
+        text error
+        text status
+    }
+    agent_steps {
+        int id PK
+        int run_id FK
+        int step_num
+        text action
+        text args
+        text body
+        text result
+        int success
+        real latency_ms
+    }
+```
+
+### 11.3 Group B — knowledge base / few-shot & vocabulary
+
+```mermaid
+erDiagram
+    commands ||--o{ few_shot_examples : "seeds"
+    commands { int id PK }
+    few_shot_examples {
+        int id PK
+        int command_id FK
+        text text
+        text action
+        text source
+        text domain
+        real ts
+        int usage_count
+        blob embedding
+    }
+    word_counts {
+        text word PK
+        int count
+    }
+    hotwords {
+        text word PK
+        real added
+    }
+```
+
+### 11.4 Group C — gesture & sensor telemetry
+
+```mermaid
+erDiagram
+    commands ||--o{ gesture_samples : ""
+    commands ||--o{ sensor_events : ""
+    sessions ||--o{ sensor_telemetry : ""
+    commands { int id PK }
+    sessions { int id PK }
+    gesture_samples {
+        int id PK
+        int command_id FK
+        real ts
+        text gesture
+        real confidence
+        real lidar_depth_m
+    }
+    gesture_calibration {
+        int id PK
+        real ts
+        text gesture
+        real confidence_floor
+        int sample_count
+        real p10
+    }
+    gesture_velocity_samples {
+        int id PK
+        real ts
+        text gesture
+        real velocity
+        int pain_day
+    }
+    gesture_velocity_calibration {
+        int id PK
+        real ts
+        text gesture
+        real velocity_floor
+        int sample_count
+        real p10
+    }
+    sensor_events {
+        int id PK
+        int command_id FK
+        real ts
+        text event_type
+        real x
+        real y
+        real confidence
+        text value
+        text params
+    }
+    sensor_telemetry {
+        int id PK
+        int session_id FK
+        real ts
+        real tilt_rx
+        real tilt_ry
+        real gaze_dx
+        real gaze_dy
+        real gaze_conf
+        real head_pitch
+        real head_yaw
+        int cursor_x
+        int cursor_y
+        int pain_day_active
+        text active_source
+        real gesture_conf
+        real rms_ambient
+    }
+```
+
+### 11.5 Group D — behavioral twin & settings
+
+```mermaid
+erDiagram
+    sessions ||--o{ twin_session_history : ""
+    sessions ||--o{ twin_pain_day_log : ""
+    sessions { int id PK }
+    twin_session_history {
+        int id PK
+        int session_id FK
+        real ts
+        text cmd_text
+        text action
+        text source
+        int seq
+    }
+    twin_pain_day_log {
+        int id PK
+        int session_id FK
+        real ts
+        real pain_day_score
+        int pain_day_active
+        real fail_ratio
+        real clarify_ratio
+        real gesture_conf_delta
+        real cmd_rate_delta
+    }
+    settings_versions {
+        int id PK
+        real ts
+        text component
+        text key
+        text old_value
+        text new_value
+        text changed_by
+    }
+```
+
+### 11.6 Group E — voice / acoustic calibration
+
+```mermaid
+erDiagram
+    sessions ||--o{ voice_calibration : ""
+    sessions ||--o{ ambient_transcripts : ""
+    voice_calibration_sessions ||--o{ voice_pronunciations : ""
+    sessions { int id PK }
+    voice_calibration {
+        int id PK
+        int session_id FK
+        real ts
+        text phrase
+        text actual_text
+        real rms_amplitude
+        real freq_centroid
+        real avg_logprob
+        real duration_s
+        int is_flare_day
+    }
+    voice_profile {
+        int id PK
+        real updated_at
+        real baseline_rms
+        real baseline_logprob
+        real baseline_freq
+        real flare_rms_scale
+        real vad_threshold
+        real logprob_floor
+        int sample_count
+    }
+    voice_phrases {
+        int id PK
+        text phrase
+        text category
+        text phonetic
+        int active
+    }
+    voice_calibration_sessions {
+        int id PK
+        real ts
+        text condition
+        text notes
+    }
+    voice_pronunciations {
+        int id PK
+        int session_id FK
+        real ts
+        text expected
+        text heard
+        real logprob
+        real duration_s
+        int accepted
+    }
+    voice_profiles {
+        int id PK
+        text condition UK
+        text corrections_json
+        real vad_threshold
+        real logprob_floor
+        text initial_prompt
+        real updated_at
+    }
+    ambient_transcripts {
+        int id PK
+        int session_id FK
+        real ts
+        text text
+        real logprob
+        real duration_s
+    }
+```
+
+> `voice_profile` (singular — one derived acoustic baseline, written by `AcousticProfiler`) and `voice_profiles` (plural — per-condition compiled profiles keyed by `condition`, written by `VoiceCalibrator`) are **distinct tables**; the names are easy to conflate.
+
+### 11.7 Group F — onboarding, flare & ops rollups
+
+```mermaid
+erDiagram
+    sessions ||--o{ sensor_rom : ""
+    sessions ||--o{ ipad_logs : ""
+    sessions ||--o| session_summaries : ""
+    sessions { int id PK }
+    sensor_rom {
+        int id PK
+        real ts
+        int session_id FK
+        text sensor
+        text direction
+        real max_value
+        real comfortable_value
+        text unit
+    }
+    flare_profile {
+        int id PK
+        real updated_at
+        int voice_degrades
+        int gesture_degrades
+        int gaze_degrades
+        int tilt_degrades
+        int sound_degrades
+        real flare_vad_scale
+        int manual_pain_day
+        text notes
+    }
+    ipad_logs {
+        int id PK
+        int session_id FK
+        real ts
+        text level
+        text subsystem
+        text msg
+    }
+    adaptation_log {
+        int id PK
+        real ts
+        text component
+        real metric_before
+        real metric_after
+        real cloud_rate
+        real failure_rate
+        int rolled_back
+    }
+    session_summaries {
+        int id PK
+        int session_id FK,UK
+        real ts
+        real duration_s
+        int total_commands
+        real success_rate
+        real cloud_escalation_rate
+        int gate0_blocks
+        int gate1_blocks
+        int gate2_blocks
+        int gate3_blocks
+        int gate4_blocks
+        real latency_p50_ms
+        real latency_p95_ms
+        real pain_day_pct
+        int corrections_count
+        real avg_whisper_logprob
+        real avg_gesture_conf
+        text source_breakdown
+        text domain_breakdown
+        text top_actions
+    }
+```
+
+### 11.8 `analytics.duckdb` — OLAP benchmark store
+
+Dashed edges denote **by-convention** foreign keys (no SQL `FOREIGN KEY` is declared); IDs come from `CREATE SEQUENCE` + `nextval()`. Note `correct` is an `INTEGER` count in `benchmark_results` but a `BOOLEAN` in `benchmark_prompts`.
+
+```mermaid
+erDiagram
+    benchmark_runs ||..o{ benchmark_results : "run_id (by convention)"
+    benchmark_results ||..o{ benchmark_prompts : "result_id (by convention)"
+    benchmark_runs {
+        bigint id PK
+        double ts
+        varchar git_hash
+        varchar mode
+        varchar notes
+    }
+    benchmark_results {
+        bigint id PK
+        bigint run_id
+        varchar model
+        double accuracy_pct
+        int correct
+        int total
+        double p50_ms
+        double p95_ms
+        double vram_before_gb
+        double vram_after_gb
+        double vram_delta_gb
+        varchar error
+    }
+    benchmark_prompts {
+        bigint id PK
+        bigint result_id
+        varchar prompt
+        varchar expected
+        varchar got
+        boolean correct
+        double p50_ms
+        double p95_ms
+    }
+```
+
+### 11.9 `audit.db` — append-only security trail
+
+Single table; immutability is enforced at the DB layer by `BEFORE UPDATE` / `BEFORE DELETE` triggers that `RAISE(ABORT)`. No foreign key by design — the trail must survive even if `sessions`/`commands` are gone.
+
+```mermaid
+erDiagram
+    audit_events {
+        int id PK
+        real ts
+        text event_type
+        text severity
+        text actor
+        text tool
+        text detail
+        text params
+        text outcome
+        int session_id
+        int command_id
+        text source_ip
+        int redacted
+    }
+```
+
+---
+
+## 12. Two-Tier Knowledge Store (vector + structured)
+
+The persistence layer is deliberately two-tier, unified for callers by the `MemoryManager` syscall facade (`storage/memory_manager.py`):
+
+- **Vector / semantic tier (ChromaDB + `all-MiniLM-L6-v2`, 384-dim, cosine).** Three logical stores under `./chroma_db`: the RAG **`codebase`/`documents`** collections (`inference/codebase_indexer.py`), the **`behavioral_memory`** few-shot collection (`storage/semantic_memory.py`), and the behavioral-twin backing (which reuses `behavioral_memory`). All degrade to a Jaccard word-overlap fallback over SQLite rows when ChromaDB is unavailable, with a time-gated re-probe that restores the vector path after a transient outage.
+- **Structured tier.** `agent.db` (SQLite/`aiosqlite`, OLTP — §11.1–11.7), `analytics.duckdb` (DuckDB, OLAP — §11.8), and `audit.db` (append-only, trigger-immutable — §11.9). `agent.db` migrations are versioned via `PRAGMA user_version` (`AgentDB._migrate`).
+
+The SQLite `few_shot_examples` table (§5) is the embedding store on the **per-command prompt hot path**; the ChromaDB `behavioral_memory` collection feeds the **behavioral-twin context layer**. Same embedding model, two independent storage paths — see §5.
