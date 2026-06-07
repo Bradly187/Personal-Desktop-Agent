@@ -93,8 +93,16 @@ def _list_models() -> list[dict]:
         sys.exit(1)
 
 
-def _generate(model: str, prompt: str, timeout: float = 30.0) -> tuple[str, float]:
-    """Return (response_text, latency_ms). Raises on HTTP error."""
+def _generate(model: str, prompt: str, timeout: float = 30.0) -> tuple[str, float, dict]:
+    """Return (response_text, wall_latency_ms, timing).
+
+    `timing` is Ollama's server-side duration breakdown (ms), which separates the
+    one-off model **load** from the actual **compute**. Wall-clock latency alone
+    is misleading: on Ollama 0.30 + Windows/CUDA a (re)load adds ~2.2 s, and even a
+    resident model reports ~135 ms `load_ms` per request (mmap is disabled for
+    windows_cuda). The number that reflects steady-state user latency is
+    `compute_ms` = prompt_eval + eval, which excludes load. Raises on HTTP error.
+    """
     body = json.dumps({
         "model": model,
         "prompt": f"{SYSTEM_PROMPT}\n\nUser: {prompt}\nAssistant:",
@@ -126,7 +134,20 @@ def _generate(model: str, prompt: str, timeout: float = 30.0) -> tuple[str, floa
     raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
     text = lines[0] if lines else ""
-    return text, latency_ms
+
+    # Server-side breakdown (nanoseconds → ms). load is one-off / per-request
+    # overhead; compute is what the user actually waits on once the model is warm.
+    _ms = lambda k: round(data.get(k, 0) / 1e6, 1)
+    eval_count = data.get("eval_count", 0) or 0
+    eval_dur_ns = data.get("eval_duration", 0) or 0
+    timing = {
+        "load_ms": _ms("load_duration"),
+        "prompt_eval_ms": _ms("prompt_eval_duration"),
+        "eval_ms": _ms("eval_duration"),
+        "compute_ms": round((data.get("prompt_eval_duration", 0) + eval_dur_ns) / 1e6, 1),
+        "tok_per_s": round(eval_count / (eval_dur_ns / 1e9), 1) if eval_dur_ns else None,
+    }
+    return text, latency_ms, timing
 
 
 def _unload_model(model: str) -> None:
@@ -178,14 +199,18 @@ def _benchmark_model(model_name: str, runs: int) -> dict:
     results = []
     correct = 0
     all_latencies = []
+    all_compute = []   # load-excluded server-side compute (the warm-latency signal)
 
     for expected_verb, prompt in TEST_PROMPTS:
         latencies = []
+        computes = []
         last_response = ""
         for _ in range(runs):
             try:
-                response, ms = _generate(model_name, prompt, timeout=30.0)
+                response, ms, timing = _generate(model_name, prompt, timeout=30.0)
                 latencies.append(ms)
+                if timing.get("compute_ms"):
+                    computes.append(timing["compute_ms"])
                 last_response = response
             except Exception as exc:
                 print(f"    ERROR on {prompt!r}: {exc}")
@@ -195,6 +220,8 @@ def _benchmark_model(model_name: str, runs: int) -> dict:
         p50 = s[len(s) // 2]
         p95 = s[min(len(s) - 1, int(len(s) * 0.95))]
         all_latencies.extend(latencies)
+        all_compute.extend(computes)
+        compute_p50 = round(sorted(computes)[len(computes) // 2], 1) if computes else None
 
         got_verb = last_response.split()[0].upper() if last_response else "?"
         hit = got_verb == expected_verb
@@ -202,7 +229,8 @@ def _benchmark_model(model_name: str, runs: int) -> dict:
             correct += 1
         mark = "+" if hit else "X"
 
-        print(f"  {mark} [{expected_verb:<10}] {prompt:<36}  =>  {last_response[:30]:<30}  p50={p50:.0f}ms")
+        print(f"  {mark} [{expected_verb:<10}] {prompt:<36}  =>  {last_response[:30]:<30}  "
+              f"p50={p50:.0f}ms  compute={compute_p50}ms")
         results.append({
             "prompt": prompt,
             "expected": expected_verb,
@@ -210,16 +238,21 @@ def _benchmark_model(model_name: str, runs: int) -> dict:
             "correct": hit,
             "p50_ms": round(p50, 1),
             "p95_ms": round(p95, 1),
+            "compute_p50_ms": compute_p50,
         })
 
     finite = [l for l in all_latencies if l != float("inf")]
     sf = sorted(finite)
     overall_p50 = round(sf[len(sf) // 2], 1) if sf else None
     overall_p95 = round(sf[min(len(sf) - 1, int(len(sf) * 0.95))], 1) if sf else None
+    sc = sorted(all_compute)
+    compute_p50 = round(sc[len(sc) // 2], 1) if sc else None
+    compute_p95 = round(sc[min(len(sc) - 1, int(len(sc) * 0.95))], 1) if sc else None
     accuracy = round(correct / len(TEST_PROMPTS) * 100, 1)
 
     print(f"\n  Accuracy: {correct}/{len(TEST_PROMPTS)} ({accuracy}%)")
-    print(f"  Latency:  p50={overall_p50}ms  p95={overall_p95}ms")
+    print(f"  Wall latency:  p50={overall_p50}ms  p95={overall_p95}ms  (includes model load)")
+    print(f"  Compute only:  p50={compute_p50}ms  p95={compute_p95}ms  (load-excluded — warm-latency signal)")
     print(f"  VRAM:     before={vram_before} GB  after={vram_after_load} GB  delta=+{vram_delta} GB")
 
     _unload_model(model_name)
@@ -231,6 +264,8 @@ def _benchmark_model(model_name: str, runs: int) -> dict:
         "total": len(TEST_PROMPTS),
         "p50_ms": overall_p50,
         "p95_ms": overall_p95,
+        "compute_p50_ms": compute_p50,
+        "compute_p95_ms": compute_p95,
         "vram_before_gb": vram_before,
         "vram_after_load_gb": vram_after_load,
         "vram_delta_gb": vram_delta,
@@ -263,8 +298,8 @@ def _print_summary(results: list[dict], baseline_gb: float | None) -> None:
     print(f"  BENCHMARK SUMMARY -- {gpu_name} ({total_gb} GB total)")
     print(f"  Baseline: {baseline_gb} GB  |  +Whisper: {whisper_gb} GB  |  Free alongside Whisper: ~{free_after_whisper:.1f} GB")
     print(f"  {'=' * 70}")
-    print(f"  {'Model':<28}  {'Accuracy':>8}  {'p50':>7}  {'p95':>7}  {'VRAM':>8}  {'Fits w/Whisper':>14}")
-    print(f"  {'-' * 28}  {'-' * 8}  {'-' * 7}  {'-' * 7}  {'-' * 8}  {'-' * 14}")
+    print(f"  {'Model':<28}  {'Accuracy':>8}  {'wall p50':>9}  {'compute p50':>11}  {'VRAM':>8}  {'Fits w/Whisper':>14}")
+    print(f"  {'-' * 28}  {'-' * 8}  {'-' * 9}  {'-' * 11}  {'-' * 8}  {'-' * 14}")
 
     valid = [r for r in results if "error" not in r]
     valid.sort(key=lambda r: (-r["accuracy_pct"], r["p50_ms"] or 9999))
@@ -272,9 +307,10 @@ def _print_summary(results: list[dict], baseline_gb: float | None) -> None:
     for r in valid:
         delta = r["vram_delta_gb"]
         fits = "yes" if (delta is not None and isinstance(free_after_whisper, float) and delta < free_after_whisper) else "check"
+        compute = r.get("compute_p50_ms")
         print(
             f"  {r['model']:<28}  {r['accuracy_pct']:>7}%  "
-            f"{str(r['p50_ms'])+'ms':>7}  {str(r['p95_ms'])+'ms':>7}  "
+            f"{str(r['p50_ms'])+'ms':>9}  {(str(compute)+'ms') if compute is not None else 'n/a':>11}  "
             f"{'+'+str(delta)+' GB':>8}  {fits:>14}"
         )
 

@@ -98,7 +98,7 @@ flowchart TD
     G4 -->|pass| LOCAL
     G4 -->|fail| CLOUD
 
-    LOCAL["LocalInference\nllama3.1:8b default\n373 ms warm p50"]
+    LOCAL["LocalInference\nllama3.1:8b default\n~190 ms warm wall p50 (0.30.6)"]
     CLOUD["CloudInference\nAWS Bedrock Claude Haiku\n(AgentCore deferred)"]
 
     LOCAL --> ACTION["action string"]
