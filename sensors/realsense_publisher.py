@@ -207,39 +207,41 @@ async def run(args: argparse.Namespace) -> int:
 
     uri = f"ws://{args.host}:{args.port}{args.path}"
 
+    want_depth = not args.no_depth
     pipeline = rs.pipeline()
-    align = rs.align(rs.stream.color)
+    align = rs.align(rs.stream.color) if want_depth else None
 
     # Detect the USB link up front. On USB2 the L515 cannot carry depth + color
     # at 30fps simultaneously — the device resets mid-stream ("No device
-    # connected"). Clamp to 15fps on USB2 so it streams reliably without the user
-    # having to know the flag. (USB3 gets the full requested fps.)
+    # connected"). Clamp to 15fps on USB2 ONLY when depth is enabled; color-only
+    # streams fine at 30fps on USB2 (and the Relaxed-Pointer model is depth-free,
+    # so --no-depth gives the smoother 30fps cursor without a USB3 cable).
     eff_fps = args.fps
-    try:
-        _devs = rs.context().query_devices()
-        if len(_devs) and _devs[0].get_info(rs.camera_info.usb_type_descriptor).startswith("2"):
-            if eff_fps > 15:
-                log.warning("USB2 link detected — clamping capture to 15fps (was %d) to avoid "
-                            "device resets. Use a USB3 port for 30fps.", eff_fps)
-                eff_fps = 15
-    except Exception:  # noqa: BLE001
-        pass
+    if want_depth:
+        try:
+            _devs = rs.context().query_devices()
+            if len(_devs) and _devs[0].get_info(rs.camera_info.usb_type_descriptor).startswith("2"):
+                if eff_fps > 15:
+                    log.warning("USB2 link + depth — clamping to 15fps (was %d) to avoid resets. "
+                                "Use --no-depth for 30fps color, or a USB3 port.", eff_fps)
+                    eff_fps = 15
+        except Exception:  # noqa: BLE001
+            pass
 
     # The L515 supports DIFFERENT resolutions for depth vs color, and the set of
     # available profiles depends on the USB link (USB2 caps depth to 320x240).
-    # So we resolve profiles defensively: enable color explicitly (640x480 bgr8
-    # is universally available), and let librealsense pick the native depth
-    # profile for the current link (320x240 on USB2, 640x480 on USB3). If the
-    # explicit request fails we retry with fully auto-selected defaults.
+    # Enable color explicitly (640x480 bgr8 is universal); let librealsense pick
+    # the native depth profile for the link. Retry fully-auto if the request fails.
     def _make_config(depth_explicit: bool) -> "rs.config":
         cfg = rs.config()
         cfg.enable_stream(rs.stream.color, args.color_width, args.color_height,
                           rs.format.bgr8, eff_fps)
-        if depth_explicit and args.depth_capture_width > 0:
-            cfg.enable_stream(rs.stream.depth, args.depth_capture_width,
-                              args.depth_capture_height, rs.format.z16, eff_fps)
-        else:
-            cfg.enable_stream(rs.stream.depth)  # native default for this link
+        if want_depth:
+            if depth_explicit and args.depth_capture_width > 0:
+                cfg.enable_stream(rs.stream.depth, args.depth_capture_width,
+                                  args.depth_capture_height, rs.format.z16, eff_fps)
+            else:
+                cfg.enable_stream(rs.stream.depth)
         return cfg
 
     try:
@@ -248,25 +250,21 @@ async def run(args: argparse.Namespace) -> int:
         log.warning("requested stream config rejected (%s) — retrying with auto profiles", exc)
         profile = pipeline.start(_make_config(depth_explicit=False))
 
-    depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
     usb = "?"
     try:
         usb = profile.get_device().get_info(rs.camera_info.usb_type_descriptor)
     except Exception:  # noqa: BLE001
         pass
-    dvp = profile.get_stream(rs.stream.depth).as_video_stream_profile()
     cvp = profile.get_stream(rs.stream.color).as_video_stream_profile()
-    if usb.startswith("2"):
-        log.warning(
-            "L515 is on a USB2 link (usb=%s) — depth limited to %dx%d. Move to a USB3 "
-            "port + cable for 640x480/1024x768 depth.", usb, dvp.width(), dvp.height(),
-        )
-    log.info(
-        "L515 streaming  depth=%dx%d color=%dx%d @%dfps  usb=%s  depth_scale=%.6f  -> %s "
-        "(color every frame, depth every %d frame(s), transported @ %dx%d)",
-        dvp.width(), dvp.height(), cvp.width(), cvp.height(), eff_fps, usb, depth_scale, uri,
-        args.depth_every, args.depth_width, args.depth_height,
-    )
+    depth_scale = 0.0
+    if want_depth:
+        depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+        dvp = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+        log.info("L515 streaming  depth=%dx%d color=%dx%d @%dfps  usb=%s  depth_scale=%.6f -> %s",
+                 dvp.width(), dvp.height(), cvp.width(), cvp.height(), eff_fps, usb, depth_scale, uri)
+    else:
+        log.info("L515 streaming  COLOR-ONLY %dx%d @%dfps  usb=%s -> %s  (depth disabled; "
+                 "depth-free pointer mode)", cvp.width(), cvp.height(), eff_fps, usb, uri)
 
     frame_idx = 0
     try:
@@ -276,24 +274,28 @@ async def run(args: argparse.Namespace) -> int:
                     log.info("connected to bridge at %s", uri)
                     while True:
                         frames = await asyncio.to_thread(pipeline.wait_for_frames)
-                        aligned = align.process(frames)
-                        color = aligned.get_color_frame()
-                        depth = aligned.get_depth_frame()
-                        if not color or not depth:
+                        if want_depth:
+                            frames = align.process(frames)
+                        color = frames.get_color_frame()
+                        if not color:
                             continue
-
                         bgr = rotate_frame(np.asanyarray(color.get_data()), args.rotate)
+                        if args.scale != 1.0 and _CV2_AVAILABLE:
+                            bgr = cv2.resize(bgr, None, fx=args.scale, fy=args.scale,
+                                             interpolation=cv2.INTER_AREA)
                         await ws.send(json.dumps(encode_camera_frame(bgr, args.jpeg_quality)))
 
-                        if frame_idx % args.depth_every == 0:
-                            z16 = np.asanyarray(depth.get_data())
-                            depth_m = depth_units_to_metres(z16, depth_scale)
-                            depth_m = rotate_frame(depth_m, args.depth_rotate)
-                            depth_m = downscale_depth(depth_m, args.depth_width, args.depth_height)
-                            conf = synth_confidence(depth_m)
-                            await ws.send(
-                                json.dumps(encode_depth_frame(depth_m, conf, time.time() * 1000.0))
-                            )
+                        if want_depth:
+                            depth = frames.get_depth_frame()
+                            if depth and frame_idx % args.depth_every == 0:
+                                z16 = np.asanyarray(depth.get_data())
+                                depth_m = depth_units_to_metres(z16, depth_scale)
+                                depth_m = rotate_frame(depth_m, args.depth_rotate)
+                                depth_m = downscale_depth(depth_m, args.depth_width, args.depth_height)
+                                conf = synth_confidence(depth_m)
+                                await ws.send(
+                                    json.dumps(encode_depth_frame(depth_m, conf, time.time() * 1000.0))
+                                )
                         frame_idx += 1
             except asyncio.CancelledError:
                 raise
@@ -317,11 +319,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--depth-capture-height", type=int, default=0,
                    help="depth capture height (0 = auto/native for the USB link)")
     p.add_argument("--fps", type=int, default=30, help="capture fps (default 30)")
+    p.add_argument("--no-depth", action="store_true",
+                   help="color-only mode (no depth stream) — enables 30fps on USB2 for the "
+                        "depth-free Relaxed-Pointer cursor model")
     p.add_argument("--depth-every", type=int, default=2,
                    help="send depth every Nth frame (default 2 -> ~15fps depth)")
     p.add_argument("--depth-width", type=int, default=320, help="transported depth width (default 320)")
     p.add_argument("--depth-height", type=int, default=240, help="transported depth height (default 240)")
     p.add_argument("--jpeg-quality", type=int, default=80, help="color JPEG quality (default 80)")
+    p.add_argument("--scale", type=float, default=1.0,
+                   help="downscale color before sending (e.g. 0.5 -> 320x240) so MediaPipe runs "
+                        "faster and the cursor keeps up at 30fps. Landmarks are normalized so "
+                        "accuracy is preserved.")
     p.add_argument("--rotate", type=int, default=180, choices=[0, 90, 180, 270],
                    help="rotate COLOR N degrees (default 180 — camera mounted upside down)")
     p.add_argument("--depth-rotate", type=int, default=0, choices=[0, 90, 180, 270],

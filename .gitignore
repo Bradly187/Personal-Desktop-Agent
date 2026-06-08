@@ -30,6 +30,7 @@ benchmark_results.json
 
 # Calibration data files
 gaze_calibration.json
+hand_pointer_calibration.json
 
 # Python
 __pycache__/
