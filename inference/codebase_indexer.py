@@ -302,7 +302,7 @@ class CodebaseIndexer:
     # (14k+ files) and never settle.
     EXCLUDE_DIRS = {
         ".git", ".claude", "__pycache__", "node_modules",
-        "venv", ".venv", ".venv-laptop", ".venv-wsl", "env",
+        "venv", ".venv", ".venv-laptop", ".venv-wsl", ".venv-realsense", "env",
         "Pods", "build", "DerivedData", ".build", "chroma_db",
     }
     # File size limit — skip huge auto-generated files

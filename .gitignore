@@ -21,6 +21,8 @@ benchmark_results.json
 
 # Secrets and API keys
 *.txt
+!requirements.txt
+!requirements-realsense.txt
 *.key
 *.pem
 *.env
@@ -37,6 +39,7 @@ __pycache__/
 venv/
 .venv-wsl/
 .venv-laptop/
+.venv-realsense/
 .pip-tmp/
 *.egg-info/
 dist/

@@ -1,0 +1,17 @@
+# RealSense L515 sidecar dependencies — Python 3.10 ONLY (.venv-realsense)
+#
+# DO NOT install these into the main app env (Python 3.14). The L515 was EOL'd
+# and REMOVED from the RealSense SDK at v2.55.1, so it is only usable with
+# pyrealsense2 <= 2.54.x, whose wheels ship only for CPython 3.7-3.11.
+#
+# Setup:
+#   & "C:\Users\bradt\AppData\Local\Programs\Python\Python310\python.exe" -m venv .venv-realsense
+#   .venv-realsense\Scripts\python.exe -m pip install -r requirements-realsense.txt
+#
+# Verify the camera is seen:
+#   .venv-realsense\Scripts\python.exe sensors\realsense_publisher.py --list-devices
+
+pyrealsense2==2.54.1.5217   # last L515-supporting line (2.55.1+ dropped it); 2.54.2.5684 also works
+websockets>=12.0
+numpy>=1.23,<2.0       # 2.54.1 wheels were built against the numpy 1.x ABI
+opencv-python>=4.8
