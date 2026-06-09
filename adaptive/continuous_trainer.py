@@ -157,6 +157,10 @@ class ContinuousTrainer:
         samples. Failures must never become few-shot examples — those stores are
         success-biased. command_id is accepted for call-site symmetry.
         """
+        if self._db and self._db.available:
+            await self._db.upsert_few_shot_counterexample(
+                cmd, action_str, "command", "pipeline_failure", command_id
+            )
         if self._twin:
             await self._twin.record_failure(cmd, action_str, namespace=namespace)
 
@@ -200,6 +204,15 @@ class ContinuousTrainer:
         """Return the n best few-shot examples for this command."""
         return await self._db.get_few_shot_examples(cmd, n=n, domain=domain)
 
+    async def get_few_shot_counterexamples(
+        self,
+        cmd: "Command",
+        n: int = 3,
+        domain: str = "command",
+    ) -> list[dict]:
+        """Return up to n counterexamples (wrong actions) for this command."""
+        return await self._db.get_few_shot_counterexamples(cmd, n=n, domain=domain)
+
     async def get_hotwords(self) -> list[str]:
         return await self._db.get_hotwords()
 
@@ -213,6 +226,25 @@ class ContinuousTrainer:
     async def get_gesture_floor(self, gesture: str) -> float:
         return await self._db.get_gesture_floor(gesture)
 
+    async def load_velocity_calibration(self) -> None:
+        """Load persisted velocity floors from DB into GestureProcessor at startup (Gap 3)."""
+        if self._gesture_proc is None or not self._db.available:
+            return
+        motion_gestures = [
+            "PEACE_SWIPE_LEFT", "PEACE_SWIPE_RIGHT", "PEACE_SWIPE_UP", "PEACE_SWIPE_DOWN",
+            "OPEN_PUSH", "OPEN_PULL",
+            "GRAB_SNAP_LEFT", "GRAB_SNAP_RIGHT", "GRAB_NEXT_MONITOR", "GRAB_PREV_MONITOR",
+        ]
+        calibrated: dict[str, float] = {}
+        for gesture in motion_gestures:
+            floor = await self._db.get_gesture_velocity_floor(gesture)
+            key = "SWIPE" if "SWIPE" in gesture else "PUSH"
+            if key not in calibrated or floor < calibrated[key]:
+                calibrated[key] = floor
+        if calibrated:
+            self._gesture_proc.set_velocity_thresholds(calibrated)
+            log.info("GestureProcessor: loaded velocity floors from DB — %s", calibrated)
+
     # ---------------------------------------------------------------------- #
     # Correction feedback
     # ---------------------------------------------------------------------- #
@@ -225,6 +257,9 @@ class ContinuousTrainer:
         command_id: Optional[int] = None,
     ) -> None:
         """Record a user correction as a few-shot example."""
+        await self._db.upsert_few_shot_counterexample(
+            cmd, wrong_action, "command", "user_correction", command_id
+        )
         await self._db.upsert_few_shot_example(cmd, correct_action, "command", command_id)
         if command_id and command_id > 0:
             await self._db.mark_command_corrected(command_id, correct_action)
@@ -367,6 +402,13 @@ class ContinuousTrainer:
                         metric_after=self._config.whisper_logprob_min,
                         cloud_rate=cloud_rate,
                         failure_rate=failure_rate,
+                    )
+                    await self._db.log_settings_change(
+                        component="coordinator",
+                        key="whisper_logprob_min",
+                        old_value=old,
+                        new_value=self._config.whisper_logprob_min,
+                        changed_by="continuous_trainer",
                     )
             except Exception as exc:
                 log.debug("Gate 1 adaptation log skipped: %s", exc)

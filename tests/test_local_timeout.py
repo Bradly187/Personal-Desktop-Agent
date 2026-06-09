@@ -41,7 +41,7 @@ async def test_local_timeout_returns_clarify():
     """A local infer that hangs past local_timeout_s yields the CLARIFY fallback."""
     coord = _coord(timeout_s=0.05)
 
-    async def _hang(cmd, few_shot_examples=None):
+    async def _hang(cmd, few_shot_examples=None, counterexamples=None):
         await asyncio.sleep(5.0)
         return "SCROLL down"
 
@@ -73,7 +73,7 @@ async def test_route_survives_local_hang():
     """A hung local backend degrades route() to a CLARIFY execution, not a crash."""
     coord = _coord(timeout_s=0.05)
 
-    async def _hang(cmd, few_shot_examples=None):
+    async def _hang(cmd, few_shot_examples=None, counterexamples=None):
         await asyncio.sleep(5.0)
         return "SCROLL down"
 

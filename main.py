@@ -568,6 +568,20 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Build components ---
     cfg = CoordinatorConfig()
+    # Gap 1: restore learned Gate 1 threshold that was adapted in a prior session
+    if agent_db.available:
+        try:
+            async with agent_db._conn.execute(
+                "SELECT new_value FROM settings_versions "
+                "WHERE component='coordinator' AND key='whisper_logprob_min' "
+                "ORDER BY ts DESC LIMIT 1"
+            ) as _cur:
+                _row = await _cur.fetchone()
+                if _row and _row[0]:
+                    cfg.whisper_logprob_min = float(_row[0])
+                    log.info("Gate 1: restored learned threshold %.2f from DB", cfg.whisper_logprob_min)
+        except Exception as _exc:
+            log.debug("Gate 1: could not restore threshold (using default): %s", _exc)
 
     # Backend selection (--backend flag)
     _backend = args.backend.lower() if hasattr(args, "backend") else "ollama"
@@ -970,6 +984,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # --- Start trainer and WhisperStream ---
     await trainer.start()
+    await trainer.load_velocity_calibration()  # Gap 3: reload persisted gesture floors
     await whisper.start()
 
     # --- ResourceGovernor — pain-aware hardware resource control ---
