@@ -186,22 +186,56 @@ Output / explain:
 Rules:
 - Think step by step before producing the plan
 - Be specific: exact file paths, exact commands, exact content
-- One action per numbered step; content (file body, PR description) follows the step line
+- One action per step; multi-line content (file body, PR description) goes in `body`
 - Cover the full task end to end, including tests and git commit when appropriate
 - Python environment: Windows, .venv, pytest, pyproject.toml or requirements.txt
 - For ML tasks: default to PyTorch unless JAX/Qiskit/PennyLane is explicitly needed
 - For git tasks: run GIT_STATUS first, commit at the end
 - PARALLELISM: by default steps run in order. If a step depends ONLY on specific
-  earlier steps, annotate it with `(after: N, M)` — independent steps with no
-  such annotation may then run concurrently. Reads and writes to DISTINCT files
+  earlier steps, list their 1-based positions in `after` — independent steps with
+  an empty `after` may then run concurrently. Reads and writes to DISTINCT files
   are independent; anything sharing the shell, git, or one file must declare the
-  dependency. When unsure, omit the annotation (it runs sequentially — safe).
+  dependency. When unsure, leave `after` empty (it runs sequentially — safe).
 
-Format:
-Step 1: [ACTION args]
-<optional content / detail for this step>
-Step 2: [ACTION args] (after: 1)
-..."""
+Output ONLY a JSON object of this exact shape (no prose, no code fences):
+{
+  "steps": [
+    {"action": "<one verb above>", "args": "<arguments, may be empty>",
+     "body": "<multi-line content e.g. file contents, may be empty>",
+     "after": [<1-based positions of steps this depends on>]}
+  ]
+}
+Steps are 1-based by their order in the array; `after` references those positions."""
+
+# Verb vocabulary the planner may emit (mirrors DevAgent._PLAN_ACTIONS).
+_PLAN_VERBS: list[str] = [
+    "WRITE_FILE", "RUN_TERMINAL", "READ_FILE", "GREP",
+    "GIT_STATUS", "GIT_DIFF", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR",
+    "FETCH_URL", "SEARCH_WEB", "CLICK", "OPEN", "HOTKEY", "SCROLL", "TYPE",
+    "EXPLAIN", "READ_SCREEN",
+]
+
+# Ollama `format` JSON Schema constraining the plan response (gap: free-text
+# parsing). An object with a `steps` array; each step is action/args/body/after.
+_PLAN_JSON_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": _PLAN_VERBS},
+                    "args": {"type": "string"},
+                    "body": {"type": "string"},
+                    "after": {"type": "array", "items": {"type": "integer"}},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    "required": ["steps"],
+}
 
 _GENERAL_PROMPT = """\
 You are a knowledgeable research assistant for a graduate student in machine learning, \
@@ -244,6 +278,11 @@ class ModelProfile:
     # Cluster offload: when set, _call_ollama targets this base URL instead of
     # the router's local self._host (e.g. the laptop node's Ollama). None = local.
     inference_host: Optional[str] = None
+    # Structured output (Ollama `format`): when set, _call_ollama passes this
+    # JSON Schema so the model's response is constrained to valid JSON. Used by
+    # the plan profile so the planner emits a parseable step array instead of
+    # free text (eliminates the regex body-collision / arg-truncation bug class).
+    json_schema: Optional[dict] = None
 
     def __str__(self) -> str:
         think_flag = " [thinking]" if self.thinking else ""
@@ -323,6 +362,7 @@ _PROFILES: dict[str, ModelProfile] = {
         free_form=True,
         thinking=True,         # planning benefits from reasoning
         strip_thinking=True,
+        json_schema=_PLAN_JSON_SCHEMA,   # constrain output to a parseable step array
     ),
     "general": ModelProfile(
         name="gemma4:12b",     # 2026-06-07: 100% reasoning probe, +9.1 GB (co-resides w/ command+Whisper)
@@ -1078,6 +1118,11 @@ class ModelRouter:
             "stream": False,
             "options": options,
         }
+        # Structured output: constrain the response to a JSON Schema (Ollama
+        # 0.5+). Only the plan profile sets this; the constraint applies after
+        # any thinking block, so strip_thinking still cleans the response.
+        if profile.json_schema:
+            payload["format"] = profile.json_schema
         if screenshot_b64 and profile.supports_images:
             payload["images"] = [screenshot_b64]
 

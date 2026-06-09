@@ -150,8 +150,37 @@ class AgentResult:
 # Plan parser
 # ---------------------------------------------------------------------------
 
+def _parse_plan_json(text: str) -> list[AgentStep]:
+    """Parse a structured-output (Ollama `format`) plan response into steps.
+
+    Expects `{"steps": [{action, args, body, after}, ...]}` (the plan profile's
+    json_schema). Raises (json.JSONDecodeError / ValueError) on anything that
+    isn't a valid step array so the caller can fall back to the regex parser —
+    this is the structured replacement for the body-collision-prone free-text
+    parse. Unknown verbs are skipped (the schema enum should prevent them).
+    """
+    data = json.loads(text)
+    raw_steps = data.get("steps") if isinstance(data, dict) else data
+    if not isinstance(raw_steps, list):
+        raise ValueError("plan JSON has no 'steps' array")
+    steps: list[AgentStep] = []
+    for item in raw_steps:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip().upper()
+        if action not in _PLAN_ACTIONS:
+            continue
+        args = str(item.get("args", "") or "").strip()
+        body = str(item.get("body", "") or "")
+        after = item.get("after") or []
+        deps = sorted({int(d) for d in after if isinstance(d, (int, float, str))
+                       and str(d).strip().lstrip("-").isdigit()})
+        steps.append(AgentStep(action=action, args=args, body=body, deps=deps))
+    return steps
+
+
 def _parse_plan(text: str) -> list[AgentStep]:
-    """Extract AgentStep objects from a planner model response."""
+    """Extract AgentStep objects from a free-text planner response (fallback)."""
     steps: list[AgentStep] = []
     lines = text.splitlines()
     i = 0
@@ -463,9 +492,20 @@ class DevAgent:
                 total_latency_ms=(time.monotonic() - t0) * 1000,
             )
 
-        steps = _parse_plan(plan_result.text)
+        # Prefer structured JSON (Ollama `format` on the plan profile) — it
+        # eliminates the free-text body-collision / arg-truncation bugs. Fall
+        # back to the regex parser when JSON parsing fails (older Ollama /
+        # vLLM / remote backends that don't honor `format`).
+        try:
+            steps = _parse_plan_json(plan_result.text)
+        except Exception as _json_exc:
+            log.debug("DevAgent: plan JSON parse failed (%s) — regex fallback", _json_exc)
+            steps = []
         if not steps:
-            # Planner returned free-form — treat as single EXPLAIN step
+            steps = _parse_plan(plan_result.text)
+        if not steps:
+            # Planner returned neither valid JSON nor a parseable plan — treat
+            # the whole response as a single EXPLAIN step.
             steps = [AgentStep(action="EXPLAIN", body=plan_result.text)]
 
         log.info("DevAgent: plan has %d steps", len(steps))
