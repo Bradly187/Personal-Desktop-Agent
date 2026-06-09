@@ -16,8 +16,10 @@ Topic namespace (dotted paths):
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, AsyncIterator, Optional
 
@@ -51,6 +53,12 @@ class EventBus:
         self._db = db
         # topic_pattern → list of Queue instances for that subscription
         self._queues: dict[str, list[asyncio.Queue]] = {}
+        # Events dropped because a subscriber's queue was full (observability).
+        self._dropped_events: int = 0
+
+    @property
+    def dropped_events(self) -> int:
+        return self._dropped_events
 
     # ---------------------------------------------------------------------- #
     # Publish
@@ -96,15 +104,23 @@ class EventBus:
         }
         for pattern, queues in list(self._queues.items()):
             if _topic_matches(topic, pattern):
-                dead: list[asyncio.Queue] = []
                 for q in queues:
                     try:
                         q.put_nowait(envelope)
                     except asyncio.QueueFull:
-                        dead.append(q)
-                        log.debug("EventBus: dropped event for slow consumer (pattern=%s)", pattern)
-                for q in dead:
-                    queues.remove(q)
+                        # Drop THIS EVENT for the slow consumer — never the
+                        # subscription. The old code removed the queue, which
+                        # turned a transient burst into a permanently hung
+                        # consumer (it drained its buffer, then blocked on
+                        # q.get() forever with no signal). The durable log
+                        # still has the event; a consumer that must not miss
+                        # any can replay via AgentDB.poll_events + its cursor.
+                        self._dropped_events += 1
+                        log.warning(
+                            "EventBus: dropped event %s for slow consumer "
+                            "(pattern=%s, total dropped=%d)",
+                            topic, pattern, self._dropped_events,
+                        )
         return row_id
 
     # ---------------------------------------------------------------------- #
@@ -132,22 +148,34 @@ class EventBus:
                 event = await q.get()
                 yield event
                 q.task_done()
-        except asyncio.CancelledError:
-            pass
         finally:
+            # NOTE: CancelledError is deliberately NOT swallowed here —
+            # catching it converted task.cancel() into a normal `async for`
+            # exit, letting code after the loop run in a cancelled task and
+            # breaking structured shutdown of subscribers.
             try:
                 self._queues[topic_pattern].remove(q)
             except (KeyError, ValueError):
                 pass
 
 
-def _topic_matches(topic: str, pattern: str) -> bool:
-    """Match a topic against a LIKE-style pattern where % is a wildcard segment.
+@functools.lru_cache(maxsize=128)
+def _pattern_regex(pattern: str) -> "re.Pattern[str]":
+    """Compile a SQL-LIKE pattern ('%' = zero or more chars) to a regex."""
+    return re.compile(
+        "^" + ".*".join(re.escape(part) for part in pattern.split("%")) + "$"
+    )
 
-    'command.%' matches 'command.executed' and 'command.foo.bar' but NOT 'command.'.
-    '%' alone matches anything. Exact patterns (no %) must equal the topic.
+
+def _topic_matches(topic: str, pattern: str) -> bool:
+    """Match a topic against a SQL-LIKE pattern where % matches zero or more chars.
+
+    Semantics are identical to the SQL LIKE used by AgentDB.poll_events, so
+    real-time subscribers and replay consumers of the same pattern see the
+    same event set ('%' anywhere in the pattern works, not just at the tail;
+    SQL's '_' single-char wildcard is NOT supported — treated literally).
+    Exact patterns (no %) must equal the topic.
     """
     if "%" not in pattern:
         return topic == pattern
-    prefix = pattern.rstrip("%")  # e.g. "command." or "" for bare "%"
-    return topic.startswith(prefix)
+    return _pattern_regex(pattern).match(topic) is not None

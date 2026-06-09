@@ -218,3 +218,61 @@ async def test_upsert_and_update_consumer_cursor(tmp_path):
     await db.upsert_event_consumer("test_consumer", "command.%")
 
     await db.close()  # no assertion needed — confirms no DB errors
+
+
+# ---------------------------------------------------------------------------
+# Slow-consumer overflow: drop the EVENT, never the subscription
+# (audit fix 2026-06-09 — removing the queue permanently hung the consumer)
+# ---------------------------------------------------------------------------
+
+async def test_queue_overflow_drops_event_not_subscription(tmp_path):
+    bus, db = await _make_bus(tmp_path)
+    received = []
+    resume = asyncio.Event()
+
+    async def slow_consume():
+        async for event in bus.subscribe("slow", "command.%", maxsize=2):
+            received.append(event["payload"]["n"])
+            await resume.wait()        # consumer stalls after the first event
+
+    task = asyncio.create_task(slow_consume())
+    await asyncio.sleep(0)
+
+    # Fill: consumer takes n=1 then stalls; n=2, n=3 fill the maxsize-2 queue;
+    # n=4 and n=5 overflow and must be DROPPED (not the subscription).
+    for n in range(1, 6):
+        await bus.publish(TOPIC_COMMAND_EXECUTED, {"n": n}, source="test")
+        await asyncio.sleep(0.01)
+
+    assert bus.dropped_events == 2
+    assert bus._queues.get("command.%")           # subscription still registered
+
+    # Consumer resumes: it must receive the buffered events AND later ones —
+    # the old behavior left it blocked on q.get() forever.
+    resume.set()
+    await asyncio.sleep(0.05)
+    await bus.publish(TOPIC_COMMAND_EXECUTED, {"n": 6}, source="test")
+    await asyncio.sleep(0.05)
+
+    assert received == [1, 2, 3, 6]               # dropped 4,5; still alive for 6
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    await db.close()
+
+
+# ---------------------------------------------------------------------------
+# _topic_matches — SQL LIKE parity (mid-pattern % must work like poll_events)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("topic,pattern,expected", [
+    ("command.exec.failed", "command.%.failed", True),   # mid-pattern %
+    ("command.exec.ok",     "command.%.failed", False),
+    ("command.",            "command.%",        True),   # SQL: % matches empty
+    ("gate.decided",        "%.decided",        True),
+    ("gate.decided",        "%.executed",       False),
+])
+def test_topic_matches_sql_like_parity(topic, pattern, expected):
+    assert _topic_matches(topic, pattern) is expected
