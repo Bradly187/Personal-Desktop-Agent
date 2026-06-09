@@ -2731,7 +2731,9 @@ class AgentDB:
     async def get_recent_adaptation_log(
         self, component: str, limit: int = 5
     ) -> list[dict]:
-        """Return the most recent adaptation_log rows for a component."""
+        """Return the most recent NON-rolled-back adaptation_log rows for a
+        component. Rolled-back rows are excluded so the D5 rollback check never
+        re-evaluates (and re-triggers on) an adaptation it already undid."""
         if not self._conn:
             return []
         try:
@@ -2739,7 +2741,7 @@ class AgentDB:
                 """SELECT id, ts, metric_before, metric_after,
                           cloud_rate, failure_rate, rolled_back
                    FROM adaptation_log
-                   WHERE component = ?
+                   WHERE component = ? AND rolled_back = 0
                    ORDER BY ts DESC LIMIT ?""",
                 (component, limit),
             ) as cur:
