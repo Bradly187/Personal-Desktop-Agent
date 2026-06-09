@@ -638,17 +638,42 @@ class HybridCoordinator:
         ):
             domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
+                # Privacy: the dev pre-gate runs BEFORE the command-path Gate 0,
+                # so enforce Gate 0 here too — sensitive text (credentials/PII)
+                # must never reach the cloud. A Gate-0 failure forces the LOCAL
+                # DevAgent regardless of the cloud-routing preference.
+                route_cloud = self._should_route_cloud_dev()
+                if route_cloud and not self._gate0(cmd):
+                    log.info("HybridCoordinator: dev-domain=%s contains sensitive "
+                             "data — forcing LOCAL DevAgent (Gate 0)", domain)
+                    route_cloud = False
+
                 # Cloud DevAgent branch — route to Claude when configured to,
                 # avoiding a 30B specialist wake (and the GPU teardown it forces).
-                if self._should_route_cloud_dev():
+                if route_cloud:
+                    # Scrub secrets/PII from the query AND the recent-command
+                    # context before any cloud egress (the command-path cloud
+                    # route scrubs in _run_cloud; this path bypasses it).
+                    clean_text = cmd.text
+                    recent = list(self._recent_dev_commands)
+                    if self._content_filter:
+                        clean_text, findings = await self._content_filter.scrub(cmd.text)
+                        if findings:
+                            log.info("ContentFilter: redacted %d secret(s) before "
+                                     "cloud dev call", len(findings))
+                        recent = [
+                            (await self._content_filter.scrub(rc))[0] for rc in recent
+                        ]
                     log.info("HybridCoordinator: dev-domain=%s → CloudDevAgent (%s)",
                              domain, getattr(self._cloud_dev_agent, "model", "?"))
                     ctx = {
                         "session_id": self._session_id,
-                        "recent_commands": list(self._recent_dev_commands),
+                        "recent_commands": recent,
                         "source": cmd.source,
                     }
-                    response_text = await self._cloud_dev_agent.run(cmd.text, domain, ctx)
+                    response_text = await self._cloud_dev_agent.run(clean_text, domain, ctx)
+                    # Record the ORIGINAL locally (kept on-device; re-scrubbed at
+                    # the next cloud egress).
                     self._record_dev_command(cmd.text)
                     if self._twin:
                         self._twin.clear_dev_namespace()
@@ -1336,15 +1361,28 @@ class HybridCoordinator:
         (network drop, service hiccup) the coroutine is cancelled and the
         pipeline degrades to a CLARIFY response rather than stalling indefinitely.
         """
-        # Scrub secrets before sending to external API
+        # Scrub secrets before sending to external API — from BOTH the command
+        # text AND the session_context the cloud prompt embeds. A sensitive
+        # prior command that Gate 0 correctly forced local must not leak later
+        # inside an innocuous command's context window.
         if self._content_filter:
             clean_text, findings = await self._content_filter.scrub(cmd.text)
-            if findings:
-                log.info("ContentFilter: redacted %d secret(s) before cloud call", len(findings))
-                # replace() preserves every field (action, source, params, …) and
-                # only overrides text — the manual rebuild dropped the required
-                # `action` and used a nonexistent `_gaze_coords` kwarg (TypeError).
-                cmd = _dc_replace(cmd, text=clean_text)
+            total = len(findings)
+            ctx_overrides: dict = {}
+            if cmd.session_context:
+                clean_ctx = []
+                for line in cmd.session_context:
+                    cl, f = await self._content_filter.scrub(line)
+                    clean_ctx.append(cl)
+                    total += len(f)
+                ctx_overrides["session_context"] = clean_ctx
+            if total:
+                log.info("ContentFilter: redacted %d secret(s) before cloud call", total)
+            # replace() preserves every field (action, source, params, …) and
+            # only overrides text/context — the manual rebuild dropped the
+            # required `action` and used a nonexistent `_gaze_coords` kwarg.
+            if findings or ctx_overrides:
+                cmd = _dc_replace(cmd, text=clean_text, **ctx_overrides)
 
         t0 = time.monotonic()
         try:
