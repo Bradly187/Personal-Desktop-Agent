@@ -73,12 +73,16 @@ class EventBus:
         """
         payload_str = json.dumps(payload, separators=(",", ":"))
         # Durable write first — if it fails, log it but still deliver in-process.
-        row_id = await self._db.insert_event(
-            topic, payload_str, source,
-            session_id=session_id,
-            command_id=command_id,
-            trace_id=trace_id,
-        )
+        row_id: Optional[int] = None
+        try:
+            row_id = await self._db.insert_event(
+                topic, payload_str, source,
+                session_id=session_id,
+                command_id=command_id,
+                trace_id=trace_id,
+            )
+        except Exception as exc:
+            log.warning("EventBus: DB write failed (in-process fan-out continues): %s", exc)
         # In-process fan-out to all subscribers whose pattern matches this topic.
         envelope = {
             "id": row_id,
@@ -118,10 +122,12 @@ class EventBus:
         Registers consumer_name in AgentDB for cursor tracking. The generator
         runs until the caller breaks or cancels.
         """
-        await self._db.upsert_event_consumer(consumer_name, topic_pattern)
         q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+        # Register the queue BEFORE the first await so publish() can fan-out
+        # even if the DB call suspends and publish() runs concurrently.
         self._queues.setdefault(topic_pattern, []).append(q)
         try:
+            await self._db.upsert_event_consumer(consumer_name, topic_pattern)
             while True:
                 event = await q.get()
                 yield event
@@ -136,8 +142,12 @@ class EventBus:
 
 
 def _topic_matches(topic: str, pattern: str) -> bool:
-    """Match a topic against a LIKE-style pattern where % is a wildcard segment."""
+    """Match a topic against a LIKE-style pattern where % is a wildcard segment.
+
+    'command.%' matches 'command.executed' and 'command.foo.bar' but NOT 'command.'.
+    '%' alone matches anything. Exact patterns (no %) must equal the topic.
+    """
     if "%" not in pattern:
         return topic == pattern
-    prefix = pattern.rstrip("%")
-    return topic == prefix.rstrip(".") or topic.startswith(prefix)
+    prefix = pattern.rstrip("%")  # e.g. "command." or "" for bare "%"
+    return topic.startswith(prefix)
