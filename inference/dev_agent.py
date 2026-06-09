@@ -26,8 +26,10 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import subprocess
 import time
+import uuid
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -107,6 +109,11 @@ class AgentStep:
     # 1-based indices of steps this one depends on (gap A). Empty = no declared
     # dependency. Parsed from an optional `(after: N, M)` / `[deps: N]` annotation.
     deps: list[int] = field(default_factory=list)
+    # Saga compensation args captured at EXECUTE time (e.g. a WRITE_FILE
+    # pre-write snapshot: JSON {path, existed, backup}). When set, it overrides
+    # the static _compensation_for default so rollback can RESTORE an overwritten
+    # file instead of blindly deleting it.
+    comp_args: Optional[str] = None
 
 
 _DEPS_PATTERN = re.compile(
@@ -508,6 +515,7 @@ class DevAgent:
         replans = 0
         cancelled = False
         halted_reason: Optional[str] = None
+        compensated = False   # ensure rollback runs exactly once per terminal path
 
         # Execution strategy:
         #  - If the planner declared step dependencies AND a scheduler is wired,
@@ -525,6 +533,10 @@ class DevAgent:
             if len(executed) >= self.MAX_STEPS:
                 halted_reason = f"reached MAX_STEPS ({self.MAX_STEPS})"
                 log.warning("DevAgent: %s", halted_reason)
+                # Roll back completed side effects — a partial plan halted by the
+                # step cap should not leave half-done destructive work.
+                await self._run_compensations(run_id, triggered_by="max_steps")
+                compensated = True
                 break
             if self._cancel_event.is_set():
                 log.info("DevAgent: plan cancelled at step %d", len(executed) + 1)
@@ -586,8 +598,17 @@ class DevAgent:
                 except Exception as _pub_exc:
                     log.debug("DevAgent: event publish failed: %s", _pub_exc)
             # Run saga compensations to undo successfully completed steps.
-            await self._run_compensations(run_id)
+            await self._run_compensations(run_id, triggered_by="max_replans")
+            compensated = True
             break
+
+        # Cancellation (from the sequential loop above OR from _run_dag_waves)
+        # rolls back completed side effects — a cancelled plan must not leave
+        # half-done destructive work. Runs once, only if a terminal path above
+        # didn't already compensate.
+        if cancelled and not compensated:
+            await self._run_compensations(run_id, triggered_by="user_cancel")
+            compensated = True
 
         # Step 3: Reflect — summarise outcomes for the user.
         reflect_text = await self._reflect(goal, executed, plan_result.model)
@@ -849,12 +870,52 @@ class DevAgent:
             log.debug("DevAgent._start_run failed: %s", exc)
             return -1
 
+    # Max file size we snapshot for a WRITE_FILE rollback. Above this, we record
+    # that the file existed (so rollback won't delete it) but keep no backup.
+    _SAGA_SNAPSHOT_MAX_BYTES = 256 * 1024
+
+    @staticmethod
+    def _saga_dir() -> Path:
+        return Path.home() / ".claude" / "saga"
+
+    @classmethod
+    def _snapshot_for_write(cls, path_str: Optional[str]) -> dict:
+        """Capture a WRITE_FILE pre-write snapshot for saga rollback.
+
+        Returns {path, existed, backup}: `existed` is whether the target file
+        was present before the write; `backup` is a copy of its prior bytes (or
+        None when it didn't exist, or was too large to snapshot). On rollback:
+        existed+backup → restore; existed+no-backup → leave the overwritten file
+        (deleting would lose data we couldn't back up); not-existed → delete.
+        """
+        info: dict = {"path": "", "existed": False, "backup": None}
+        if not path_str:
+            return info
+        try:
+            p = Path(path_str.strip().strip("'\""))
+            info["path"] = str(p)
+            if p.exists() and p.is_file():
+                info["existed"] = True
+                if p.stat().st_size <= cls._SAGA_SNAPSHOT_MAX_BYTES:
+                    saga = cls._saga_dir()
+                    saga.mkdir(parents=True, exist_ok=True)
+                    backup = saga / f"{p.name}.{uuid.uuid4().hex}.bak"
+                    shutil.copy2(p, backup)
+                    info["backup"] = str(backup)
+        except Exception as exc:
+            log.debug("DevAgent._snapshot_for_write(%r) failed: %s", path_str, exc)
+        return info
+
     @staticmethod
     def _compensation_for(step: "AgentStep") -> tuple[Optional[str], Optional[str]]:
         """Return (compensation_action, compensation_args) for a completed step, or (None, None)."""
         action = step.action.upper()
         if action == "WRITE_FILE":
-            # Undo: delete the file that was written.
+            # Prefer the execute-time snapshot (RESTORE_FILE: restore an
+            # overwritten file or delete a freshly-created one). Fall back to the
+            # legacy blind DELETE_FILE only if no snapshot was captured.
+            if step.comp_args:
+                return "RESTORE_FILE", step.comp_args
             return "DELETE_FILE", step.args.strip() if step.args else None
         if action == "RUN_TERMINAL":
             # Terminal side-effects can't be automatically reversed, but we
@@ -886,13 +947,16 @@ class DevAgent:
         except Exception as exc:
             log.debug("DevAgent._persist_step failed: %s", exc)
 
-    async def _run_compensations(self, run_id: int) -> None:
+    async def _run_compensations(
+        self, run_id: int, triggered_by: str = "step_failure"
+    ) -> None:
         """Execute pending saga compensations for run_id in reverse step order.
 
-        Only called after MAX_REPLANS is exhausted. Each compensation is
-        marked running → done (or failed) in the DB so the audit trail is
-        complete. Compensation failures are logged but never raise — we
-        always attempt all pending compensations.
+        Called on EVERY non-success terminal path — replan exhaustion
+        (triggered_by="max_replans"), MAX_STEPS halt ("max_steps"), user/cancel
+        ("user_cancel"). Each compensation is marked running → done (or failed)
+        so the audit trail is complete; failures are logged but never raise — we
+        always attempt every pending compensation.
         """
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
@@ -900,14 +964,18 @@ class DevAgent:
         compensations = await db.get_pending_compensations(run_id)
         if not compensations:
             return
-        log.info("DevAgent: running %d saga compensation(s) for run %d", len(compensations), run_id)
+        log.info("DevAgent: running %d saga compensation(s) for run %d (%s)",
+                 len(compensations), run_id, triggered_by)
         for comp in compensations:
             cid = comp["id"]
             caction = comp.get("compensation_action", "")
             cargs = comp.get("compensation_args")
-            await db.update_saga_compensation(cid, "running", triggered_by="max_replans")
+            await db.update_saga_compensation(cid, "running", triggered_by=triggered_by)
             try:
-                if caction == "DELETE_FILE" and cargs:
+                if caction == "RESTORE_FILE" and cargs:
+                    await asyncio.to_thread(self._restore_file, cargs)
+                elif caction == "DELETE_FILE" and cargs:
+                    # Legacy/back-compat (no pre-write snapshot was captured).
                     path = Path(cargs.strip())
                     if path.exists():
                         path.unlink()
@@ -921,6 +989,31 @@ class DevAgent:
                 log.error("DevAgent: saga compensation %s failed: %s", caction, exc)
                 await db.update_saga_compensation(cid, "failed", error=str(exc), finished=True)
 
+    @staticmethod
+    def _restore_file(comp_args: str) -> None:
+        """Roll back a WRITE_FILE step from its pre-write snapshot.
+
+        existed + backup → restore the original bytes; existed + no backup →
+        leave the overwritten file in place (deleting would lose data we
+        couldn't snapshot); not-existed → delete the file the plan created.
+        """
+        info = json.loads(comp_args)
+        path = Path(info["path"])
+        if info.get("existed"):
+            backup = info.get("backup")
+            if backup and Path(backup).exists():
+                shutil.copy2(backup, path)
+                log.info("DevAgent: saga RESTORE_FILE restored %s from backup", path)
+            else:
+                log.warning(
+                    "DevAgent: saga RESTORE_FILE %s existed but no backup — "
+                    "leaving the overwritten file in place", path,
+                )
+        else:
+            if path.exists():
+                path.unlink()
+                log.info("DevAgent: saga RESTORE_FILE deleted %s (created by plan)", path)
+
     async def _finalize_run(self, run_id: int, result: AgentResult, status: str) -> None:
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
@@ -931,6 +1024,10 @@ class DevAgent:
                 success=result.success, total_latency_ms=result.total_latency_ms,
                 error=result.error,
             )
+            # Any compensation still 'pending' here was never triggered (the run
+            # succeeded, or a path that didn't roll back) — mark it skipped so it
+            # never lingers as an un-actioned pending row.
+            await db.skip_pending_compensations(run_id)
         except Exception as exc:
             log.debug("DevAgent._finalize_run failed: %s", exc)
 
@@ -953,6 +1050,12 @@ class DevAgent:
         goal = run.get("goal", "")
         if not await self._confirm_destructive_op(f"Resume the interrupted task: {goal[:60]}?"):
             log.info("DevAgent.resume_pending_plan: user declined resume of run %s", run.get("id"))
+            # Declining a resume rolls back the crashed run's completed side
+            # effects — the user chose not to finish it, so partial destructive
+            # work shouldn't be left behind.
+            run_id = run.get("id")
+            if run_id is not None:
+                await self._run_compensations(int(run_id), triggered_by="user_cancel")
             return None
         log.info("DevAgent.resume_pending_plan: resuming run %s — %r", run.get("id"), goal[:60])
         await self.plan_and_run(goal)
@@ -1238,6 +1341,12 @@ class DevAgent:
                 f"Approve writing file {target[:60]}?"
             ):
                 return "WRITE_FILE cancelled by user"
+            # Snapshot BEFORE writing so a saga rollback restores an overwritten
+            # file instead of deleting it. Captured even though we're about to
+            # write — if the write fails, no compensation is registered anyway.
+            step.comp_args = json.dumps(await asyncio.to_thread(
+                self._snapshot_for_write, step.args
+            ))
             return await asyncio.to_thread(self._write_file, step.args, step.body)
 
         if action == "RUN_TERMINAL":

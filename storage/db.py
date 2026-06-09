@@ -581,10 +581,10 @@ CREATE TABLE IF NOT EXISTS saga_compensations (
     ts                  REAL    NOT NULL,
     run_id              INTEGER NOT NULL REFERENCES agent_runs(id),
     step_id             INTEGER NOT NULL REFERENCES agent_steps(id),
-    compensation_action TEXT    NOT NULL,  -- verb: 'DELETE_FILE', 'REVERT_TERMINAL'
+    compensation_action TEXT    NOT NULL,  -- verb: 'RESTORE_FILE', 'DELETE_FILE', 'REVERT_TERMINAL'
     compensation_args   TEXT,             -- JSON; must be fully self-contained
     status              TEXT    NOT NULL DEFAULT 'pending',  -- pending/running/done/failed/skipped
-    triggered_by        TEXT,             -- 'step_failure' | 'user_cancel' | 'max_replans'
+    triggered_by        TEXT,             -- 'step_failure'|'user_cancel'|'max_replans'|'max_steps'
     started_at          REAL,
     finished_at         REAL,
     error               TEXT
@@ -2447,6 +2447,29 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.get_pending_compensations failed: %s", exc)
             return []
+
+    async def skip_pending_compensations(self, run_id: int) -> int:
+        """Mark all still-pending compensations for run_id as 'skipped'.
+
+        Called at run finalization so a successful run (or any terminal path
+        that didn't roll back) doesn't leave compensation rows 'pending'
+        forever. Returns the number of rows updated.
+        """
+        if not self._conn:
+            return 0
+        try:
+            cur = await self._conn.execute(
+                "UPDATE saga_compensations"
+                " SET status = 'skipped',"
+                "     finished_at = COALESCE(finished_at, ?)"
+                " WHERE run_id = ? AND status = 'pending'",
+                (time.time(), run_id),
+            )
+            await self._conn.commit()
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        except Exception as exc:
+            log.warning("AgentDB.skip_pending_compensations failed: %s", exc)
+            return 0
 
     # ---------------------------------------------------------------------- #
     # Per-call tool execution (idempotency + timeout)
