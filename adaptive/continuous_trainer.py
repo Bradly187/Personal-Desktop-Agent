@@ -318,9 +318,15 @@ class ContinuousTrainer:
         Conservative by design: it LOGS breaches to adaptation_log (domain-tagged)
         and exposes them via `self.slo_status` for the operator/UI — it does not
         aggressively re-tune dev model selection (risky) or train a route
-        classifier (data-blocked). The one concrete knob it sets is a per-domain
-        Gate-4 latency override on the config for domains chronically breaching
-        their latency SLO, so the gated path can escalate sooner for them.
+        classifier (data-blocked).
+
+        NOTE (audit 2026-06-09): the former per-domain Gate-4 override was a
+        no-op and was removed. It assigned the UNCHANGED slo.latency_budget_ms
+        back into per_domain_latency_budget, which `latency_budget_for` already
+        returns for non-command domains; Gate 4 also evaluates only the
+        "command" domain. The override never changed behaviour and was never
+        cleared. `per_domain_latency_budget`/`latency_budget_for` remain on the
+        config (harmless, override-ready) but the trainer no longer writes them.
         """
         if not self._config:
             return
@@ -348,10 +354,6 @@ class ContinuousTrainer:
                     metric_after=s.get("p50_latency_ms") or slo.latency_budget_ms,
                     domain=domain,
                 )
-                if verdict == BREACH_LATENCY and domain != "command":
-                    # Tighten this domain's Gate-4 budget toward observed p50 so the
-                    # gated path (if it ever routes this domain) escalates sooner.
-                    self._config.per_domain_latency_budget[domain] = slo.latency_budget_ms
         self.slo_status = status
 
     async def _adapt_gate1_threshold(self, entries: list[dict], pain_day_active: bool = False) -> None:
