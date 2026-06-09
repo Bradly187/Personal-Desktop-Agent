@@ -1,12 +1,20 @@
-"""Tests for DevAgent approval gates (Fix #2 — fail-safe to DENY).
+"""Tests for DevAgent approval gates (Fix #2 — fail-safe to DENY, hardened
+2026-06-09: DENY now aborts the whole plan, WRITE_FILE/RUN_TERMINAL are
+per-op gated, and a replan that injects unapproved destructive verbs revokes
+the blanket authorization).
 
 Destructive plans / ops must NOT auto-approve on silence, ambiguity, or
 TTS/mic hardware failure — only an explicit spoken "yes" (or a prior whole-plan
-authorization) proceeds. Read-only plans keep their convenient auto-approve.
+authorization) proceeds. Read-only plans keep their convenient auto-run, but
+auto-run does NOT grant blanket authorization.
 
 Covered:
-- _approve_plan_upfront: destructive plan + TTS-unavailable → DENY (no GoalSession)
-- _approve_plan_upfront: read-only plan + TTS-unavailable → APPROVE (GoalSession written)
+- _approve_plan_upfront: destructive plan + TTS-unavailable → "denied" (no GoalSession)
+- _approve_plan_upfront: read-only plan + TTS-unavailable → "auto" (GoalSession written)
+- plan_and_run: "denied" verdict aborts — zero steps execute
+- plan_and_run: "auto" verdict runs WITHOUT _plan_authorized
+- plan_and_run: replan injecting an unapproved destructive verb revokes authorization
+- _execute_step: WRITE_FILE / RUN_TERMINAL are per-op gated when not authorized
 - _confirm_destructive_op: _plan_authorized short-circuit → APPROVE
 - _confirm_destructive_op: TTS/mic hardware failure → DENY
 - _confirm_destructive_op: silence → DENY
@@ -113,18 +121,18 @@ class TestApprovePlanUpfront:
         steps = [AgentStep(action="WRITE_FILE", args="x.py"),
                  AgentStep(action="RUN_TERMINAL", args="pytest")]
         with _fake_tts(raises=True):
-            approved = await agent._approve_plan_upfront("ship the feature", steps)
-        assert approved is False
+            verdict = await agent._approve_plan_upfront("ship the feature", steps)
+        assert verdict == "denied"
         assert GoalSessionStore.get_active() is None   # no grant written
 
     @pytest.mark.asyncio
-    async def test_readonly_plan_tts_unavailable_auto_approves(self):
+    async def test_readonly_plan_tts_unavailable_auto_runs(self):
         agent = _agent()
         steps = [AgentStep(action="READ_FILE", args="x.py"),
                  AgentStep(action="EXPLAIN", body="here's what it does")]
         with _fake_tts(raises=True):
-            approved = await agent._approve_plan_upfront("explain the module", steps)
-        assert approved is True
+            verdict = await agent._approve_plan_upfront("explain the module", steps)
+        assert verdict == "auto"
         assert GoalSessionStore.get_active() is not None   # convenience grant
 
 
@@ -172,3 +180,160 @@ class TestConfirmDestructiveOp:
         _seed_whisper(agent, "banana bread recipe")
         with _fake_tts(), _fake_mic(loud=True):
             assert await agent._confirm_destructive_op("git commit?") is False
+
+
+# ---------------------------------------------------------------------------
+# plan_and_run — DENY aborts; auto runs unauthorized; replan revokes
+# ---------------------------------------------------------------------------
+
+class _RR:
+    """Minimal RouterResult stand-in (ok/text/model/error)."""
+    def __init__(self, text: str, ok: bool = True, model: str = "test-model"):
+        self.text = text
+        self.ok = ok
+        self.model = model
+        self.error = None if ok else "err"
+
+
+def _plan_agent(*router_responses, verdict: str) -> DevAgent:
+    """DevAgent with a canned plan + approval verdict, side-channels stubbed."""
+    from unittest.mock import AsyncMock
+    router = MagicMock()
+    router.infer = AsyncMock(side_effect=list(router_responses))
+    agent = DevAgent(router=router)
+    agent._approve_plan_upfront = AsyncMock(return_value=verdict)
+    agent._rag_context = AsyncMock(return_value="")
+    agent._git_context = AsyncMock(return_value="")
+    agent._format_context = lambda: ""
+    agent._reflect = AsyncMock(return_value="summary")
+    agent._persist_run = AsyncMock()
+    agent._speak_plan_completion = AsyncMock()
+    return agent
+
+
+class TestPlanDenyAborts:
+    @pytest.mark.asyncio
+    async def test_denied_verdict_executes_zero_steps(self):
+        agent = _plan_agent(
+            _RR("Step 1: [WRITE_FILE x.py]\nStep 2: [RUN_TERMINAL pytest]"),
+            verdict="denied",
+        )
+        ran: list[str] = []
+
+        async def exec_step(step):
+            ran.append(step.action)
+            return "ok"
+
+        agent._execute_step = exec_step
+        result = await agent.plan_and_run("destructive goal")
+
+        assert ran == []                       # nothing executed
+        assert result.success is False
+        assert result.error == "Plan rejected by user"
+        assert result.steps == []
+
+    @pytest.mark.asyncio
+    async def test_legacy_false_still_aborts(self):
+        # Backward compat: a stubbed bool False must behave like "denied".
+        agent = _plan_agent(
+            _RR("Step 1: [WRITE_FILE x.py]"), verdict=False,
+        )
+        ran: list[str] = []
+
+        async def exec_step(step):
+            ran.append(step.action)
+            return "ok"
+
+        agent._execute_step = exec_step
+        result = await agent.plan_and_run("goal")
+        assert ran == []
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_auto_verdict_runs_without_blanket_authorization(self):
+        agent = _plan_agent(
+            _RR("Step 1: [READ_FILE x.py]"), verdict="auto",
+        )
+        seen_auth: list[bool] = []
+
+        async def exec_step(step):
+            seen_auth.append(agent._plan_authorized)
+            return "ok"
+
+        agent._execute_step = exec_step
+        result = await agent.plan_and_run("read-only goal")
+        assert result.success is True
+        assert seen_auth == [False]            # ran, but not blanket-authorized
+
+    @pytest.mark.asyncio
+    async def test_approved_verdict_sets_blanket_authorization(self):
+        agent = _plan_agent(
+            _RR("Step 1: [WRITE_FILE x.py]"), verdict="approved",
+        )
+        seen_auth: list[bool] = []
+
+        async def exec_step(step):
+            seen_auth.append(agent._plan_authorized)
+            return "ok"
+
+        agent._execute_step = exec_step
+        result = await agent.plan_and_run("write goal")
+        assert result.success is True
+        assert seen_auth == [True]
+
+    @pytest.mark.asyncio
+    async def test_replan_injecting_destructive_verb_revokes_authorization(self):
+        # Approved plan contains only WRITE_FILE; the recovery replan injects
+        # RUN_TERMINAL — blanket authorization must be revoked for the remainder.
+        agent = _plan_agent(
+            _RR("Step 1: [WRITE_FILE a FAIL]"),        # original (approved) plan
+            _RR("Step 1: [RUN_TERMINAL rm -rf x]"),    # replan injects new verb
+            verdict="approved",
+        )
+        observed: list[tuple[str, bool]] = []
+
+        async def exec_step(step):
+            observed.append((step.action, agent._plan_authorized))
+            if "FAIL" in (step.args or ""):
+                raise RuntimeError("boom")
+            return "ok"
+
+        agent._execute_step = exec_step
+        await agent.plan_and_run("goal")
+
+        assert observed[0] == ("WRITE_FILE", True)     # approved plan verb
+        assert observed[1] == ("RUN_TERMINAL", False)  # injected verb → revoked
+
+
+class TestPerOpGates:
+    @pytest.mark.asyncio
+    async def test_write_file_denied_does_not_write(self, tmp_path):
+        from unittest.mock import AsyncMock
+        agent = _agent()
+        agent._plan_authorized = False
+        agent._confirm_destructive_op = AsyncMock(return_value=False)
+        target = tmp_path / "out.txt"
+        step = AgentStep(action="WRITE_FILE", args=str(target), body="data")
+        result = await agent._execute_step(step)
+        assert result == "WRITE_FILE cancelled by user"
+        assert not target.exists()
+
+    @pytest.mark.asyncio
+    async def test_write_file_approved_writes(self, tmp_path):
+        from unittest.mock import AsyncMock
+        agent = _agent()
+        agent._confirm_destructive_op = AsyncMock(return_value=True)
+        target = tmp_path / "out.txt"
+        step = AgentStep(action="WRITE_FILE", args=str(target), body="data")
+        await agent._execute_step(step)
+        assert target.read_text(encoding="utf-8") == "data"
+
+    @pytest.mark.asyncio
+    async def test_run_terminal_denied_does_not_run(self):
+        from unittest.mock import AsyncMock
+        agent = _agent()
+        agent._plan_authorized = False
+        agent._confirm_destructive_op = AsyncMock(return_value=False)
+        step = AgentStep(action="RUN_TERMINAL", args="echo pwned")
+        result = await agent._execute_step(step)
+        assert result == "RUN_TERMINAL cancelled by user"
