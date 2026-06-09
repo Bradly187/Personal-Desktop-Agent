@@ -150,3 +150,98 @@ async def test_drain_stops_on_cancel(db, monkeypatch):
     n = await agent.drain_goal_queue()
     assert n == 0
     assert len(await db.get_queued_goals()) == 1   # untouched
+
+
+# ---------------------------------------------------------------------------
+# Single-flight drainer + flare gate (audit fix 2026-06-09)
+# ---------------------------------------------------------------------------
+
+async def test_concurrent_drain_is_single_flight_and_no_goal_abandoned(db, monkeypatch):
+    """A second drain call while one is active returns 0 immediately, and the
+    active drainer picks up a goal enqueued mid-run (re-check signal)."""
+    import asyncio
+
+    await db.enqueue_goal("g1", idempotency_key="k1")
+    agent = _agent(db)
+    ran: list[str] = []
+    release = asyncio.Event()
+
+    async def _slow_plan(goal):
+        ran.append(goal)
+        await release.wait()                # hold the drainer mid-goal
+        return AgentResult(goal=goal, domain="plan", model_used="m", success=True)
+
+    monkeypatch.setattr(agent, "plan_and_run", _slow_plan)
+
+    drain1 = asyncio.create_task(agent.drain_goal_queue())
+    await asyncio.sleep(0.05)               # let drainer claim g1 and block
+
+    # New goal arrives + second drain call (the coordinator "authorize" path)
+    await db.enqueue_goal("g2", idempotency_key="k2")
+    n2 = await agent.drain_goal_queue()
+    assert n2 == 0                          # single-flight: did not run anything
+
+    release.set()
+    n1 = await drain1
+    assert n1 == 2                          # active drainer processed BOTH
+    assert ran == ["g1", "g2"]              # g2 was not abandoned
+    assert await db.get_queued_goals() == []
+
+
+async def test_drain_waits_for_flare_gate(db, monkeypatch):
+    """With dev admission paused, the drainer must not claim until resume."""
+    import asyncio
+
+    await db.enqueue_goal("g", idempotency_key="k")
+    agent = _agent(db)
+    resume = asyncio.Event()
+
+    class _FakeScheduler:
+        @property
+        def dev_paused(self):
+            return not resume.is_set()
+
+        async def wait_dev_admission(self):
+            await resume.wait()
+
+    agent._scheduler = _FakeScheduler()
+    ran: list[str] = []
+
+    async def _plan(goal):
+        ran.append(goal)
+        return AgentResult(goal=goal, domain="plan", model_used="m", success=True)
+
+    monkeypatch.setattr(agent, "plan_and_run", _plan)
+
+    drain = asyncio.create_task(agent.drain_goal_queue())
+    await asyncio.sleep(0.05)
+    assert ran == []                                    # parked at the gate
+    assert (await db.get_queued_goals())[0]["goal"] == "g"  # not yet claimed
+
+    resume.set()                                        # flare ends
+    n = await drain
+    assert n == 1
+    assert ran == ["g"]
+
+
+async def test_plan_and_run_is_serialized():
+    """Two concurrent plan_and_run calls must not interleave (shared plan state)."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    agent = DevAgent(router=MagicMock())
+    order: list[str] = []
+
+    async def _locked_body(goal):
+        order.append(f"start:{goal}")
+        await asyncio.sleep(0.05)
+        order.append(f"end:{goal}")
+        return AgentResult(goal=goal, domain="plan", model_used="m", success=True)
+
+    agent._plan_and_run_locked = _locked_body
+    await asyncio.gather(agent.plan_and_run("a"), agent.plan_and_run("b"))
+    # Strict serialization: no interleaving of start/end pairs.
+    assert order in (
+        ["start:a", "end:a", "start:b", "end:b"],
+        ["start:b", "end:b", "start:a", "end:a"],
+    )

@@ -479,6 +479,17 @@ class AccessibilityScheduler:
     def dev_paused(self) -> bool:
         return self._dev_paused
 
+    async def wait_dev_admission(self) -> None:
+        """Block until dev/background admission is open (flare gate).
+
+        For out-of-band dev producers (DevAgent.drain_goal_queue) that run
+        plans as their own tasks rather than through submit(): awaiting this
+        before claiming a goal ensures no NEW heavy plan starts mid-flare.
+        Returns immediately when admission is open. Does not hold a permit
+        and does not count against the parked-dev cap.
+        """
+        await self._dev_resume_event.wait()
+
     # ── Supervision (gap #2) ────────────────────────────────────────────────
 
     def is_healthy(self) -> bool:

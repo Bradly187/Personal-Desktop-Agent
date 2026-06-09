@@ -259,6 +259,13 @@ class DevAgent:
         self._plan_authorized: bool = False
         self._approved_verbs: frozenset[str] = frozenset()
         self._confirm_lock: asyncio.Lock = asyncio.Lock()
+        # Concurrency guards: plan state (_plan_authorized/_cancel_event/
+        # _current_goal/…) is per-plan instance state, so plans must never
+        # interleave; the drainer must be single-flight (claim_next_goal's
+        # SELECT-then-UPDATE assumes a single consumer).
+        self._plan_lock: asyncio.Lock = asyncio.Lock()
+        self._drain_lock: asyncio.Lock = asyncio.Lock()
+        self._drain_signal: bool = False   # set when drain is requested while one is active
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._current_goal: Optional[str] = None
         self._current_step: int = 0
@@ -398,7 +405,16 @@ class DevAgent:
     # ---------------------------------------------------------------------- #
 
     async def plan_and_run(self, goal: str) -> AgentResult:
-        """Decompose a complex goal into steps and execute them sequentially."""
+        """Decompose a complex goal into steps and execute them sequentially.
+
+        Serialized: plan state (_plan_authorized, _cancel_event, _current_goal,
+        step counters, GoalSession) is instance-level, so two interleaved plans
+        would answer each other's confirmations and un-cancel each other.
+        """
+        async with self._plan_lock:
+            return await self._plan_and_run_locked(goal)
+
+    async def _plan_and_run_locked(self, goal: str) -> AgentResult:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
@@ -945,37 +961,69 @@ class DevAgent:
     async def drain_goal_queue(self, max_goals: int = 0) -> int:
         """Drain the durable goal backlog (gap D): claim → run → mark terminal.
 
-        Claims goals one at a time (single-consumer) and runs each through
-        plan_and_run, which keeps its own crash-recoverable ledger and applies the
-        upfront voice-approval gate for destructive plans. Stops when the queue is
-        empty, on cancellation, or after `max_goals` (0 = until empty). Returns the
-        number processed. Each goal's outcome is persisted, so this is safe to call
-        again at any time (e.g. after a crash — see AgentDB.requeue_stale_running).
+        Single-flight: claim_next_goal's SELECT-then-guarded-UPDATE is only
+        race-safe with one consumer, and concurrent drainers would interleave
+        plan state. If a drain is already active (startup drain still running
+        when a voice "authorize" enqueues a new goal), this call signals the
+        active drainer to re-check the queue after it thinks it's empty, and
+        returns 0 — the goal is never abandoned.
+
+        Flare gate: before each claim, waits on the scheduler's dev-admission
+        event so no NEW heavy plan starts mid-flare (the real production
+        enforcement of pause_dev for this path).
+
+        Stops when the queue is empty, on cancellation, or after `max_goals`
+        (0 = until empty). Returns the number processed. Each goal's outcome is
+        persisted, so this is safe to call again at any time (e.g. after a
+        crash — see AgentDB.requeue_stale_running).
         """
         db = self._db()
         if not db or not getattr(db, "available", False):
             return 0
-        processed = 0
-        while not (max_goals and processed >= max_goals):
-            if self._cancel_event.is_set():
-                break
-            goal = await db.claim_next_goal()
-            if goal is None:
-                break
-            gid = int(goal["id"])
-            log.info("DevAgent.drain_goal_queue: running goal %s — %r", gid, goal["goal"][:60])
-            try:
-                result = await self.plan_and_run(goal["goal"])
-                await db.complete_goal(
-                    gid, "done" if result.success else "failed", error=result.error,
-                )
-            except Exception as exc:
-                log.error("DevAgent.drain_goal_queue: goal %s raised: %s", gid, exc)
-                await db.complete_goal(gid, "failed", error=str(exc))
-            processed += 1
-        if processed:
-            log.info("DevAgent.drain_goal_queue: processed %d goal(s)", processed)
-        return processed
+        if self._drain_lock.locked():
+            # An active drainer exists — tell it to re-check after its final
+            # empty claim so a goal enqueued in that window isn't stranded.
+            self._drain_signal = True
+            log.info("DevAgent.drain_goal_queue: drain already active — signalled re-check")
+            return 0
+        async with self._drain_lock:
+            processed = 0
+            while True:
+                self._drain_signal = False
+                while not (max_goals and processed >= max_goals):
+                    if self._cancel_event.is_set():
+                        break
+                    # Flare admission gate: never START a heavy plan mid-flare.
+                    sched = self._scheduler
+                    if sched is not None and getattr(sched, "dev_paused", False):
+                        log.info(
+                            "DevAgent.drain_goal_queue: dev admission paused "
+                            "(flare) — waiting before next claim"
+                        )
+                        await sched.wait_dev_admission()
+                    goal = await db.claim_next_goal()
+                    if goal is None:
+                        break
+                    gid = int(goal["id"])
+                    log.info("DevAgent.drain_goal_queue: running goal %s — %r",
+                             gid, goal["goal"][:60])
+                    try:
+                        result = await self.plan_and_run(goal["goal"])
+                        await db.complete_goal(
+                            gid, "done" if result.success else "failed",
+                            error=result.error,
+                        )
+                    except Exception as exc:
+                        log.error("DevAgent.drain_goal_queue: goal %s raised: %s", gid, exc)
+                        await db.complete_goal(gid, "failed", error=str(exc))
+                    processed += 1
+                # Re-check once if another caller requested a drain while we ran
+                # (until-empty mode only; bounded calls return at their cap).
+                if not self._drain_signal or max_goals:
+                    break
+            if processed:
+                log.info("DevAgent.drain_goal_queue: processed %d goal(s)", processed)
+            return processed
 
     # ---------------------------------------------------------------------- #
     # Plan-level authorization helpers
