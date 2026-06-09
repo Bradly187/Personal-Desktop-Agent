@@ -1452,6 +1452,33 @@ class AgentDB:
             log.warning("AgentDB.insert_inference failed: %s", exc)
             return -1
 
+    async def link_inferences_to_command(
+        self, inference_ids: list[int], command_id: int
+    ) -> None:
+        """Backfill inferences.command_id once the command row exists.
+
+        insert_command necessarily runs AFTER inference returns, so inference
+        rows are first written with command_id=NULL and linked here (audit
+        2026-06-09: without this backfill every command-pipeline inference row
+        was unlinkable and the fine-tuning extraction JOIN matched nothing).
+        Only NULL rows are updated — never relinks an already-linked row.
+        """
+        if not self._conn or not command_id or command_id <= 0:
+            return
+        ids = [int(i) for i in inference_ids if i and i > 0]
+        if not ids:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE inferences SET command_id = ?"
+                f" WHERE id IN ({','.join('?' * len(ids))})"
+                " AND command_id IS NULL",
+                (command_id, *ids),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.link_inferences_to_command failed: %s", exc)
+
     # ---------------------------------------------------------------------- #
     # Agent runs / steps
     # ---------------------------------------------------------------------- #

@@ -36,6 +36,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from adaptive.content_filter import ContentFilter  # noqa: E402
+
 _DEFAULT_DB = Path(__file__).parent.parent / "agent.db"
 _DEFAULT_OUT = Path(__file__).parent.parent / "finetuning_dataset.jsonl"
 
@@ -52,7 +56,14 @@ _SYSTEM_PROMPT = (
 
 # Quality filters
 _MIN_WHISPER_LOGPROB = -0.9   # drop very low-confidence voice transcripts
-_CLARIFY_ERROR_PREFIX = "CLARIFY inference error"   # drop backend-offline noise
+# Backend/infra noise — never legitimate training targets. Covers
+# "CLARIFY inference error …", "CLARIFY inference backend unavailable …",
+# "CLARIFY local inference timed out", "CLARIFY cloud unavailable/error/timed out".
+_CLARIFY_NOISE_PREFIXES = (
+    "CLARIFY inference",
+    "CLARIFY local inference",
+    "CLARIFY cloud",
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -62,8 +73,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--stats", action="store_true",        help="Print DB stats and exit")
     p.add_argument("--include-synthetic", action="store_true",
                    help="Also merge finetuning_synthetic.jsonl if it exists")
-    p.add_argument("--min-success-rate", type=float, default=0.0,
-                   help="Skip examples with success=0 unless corrected_to is set (0=keep all)")
     return p.parse_args()
 
 
@@ -100,7 +109,7 @@ def _filter(rows: list[dict]) -> list[dict]:
     kept = []
     for r in rows:
         # Drop backend-offline errors — these are dev noise, not real interactions
-        if r["response"] and r["response"].startswith(_CLARIFY_ERROR_PREFIX):
+        if r["response"] and r["response"].startswith(_CLARIFY_NOISE_PREFIXES):
             continue
         # Drop low-confidence voice transcripts unless there's a correction
         logprob = r.get("whisper_logprob")
@@ -112,6 +121,44 @@ def _filter(rows: list[dict]) -> list[dict]:
             continue
         kept.append(r)
     return kept
+
+
+def _scrub_rows(rows: list[dict]) -> tuple[list[dict], int, int]:
+    """Redact secrets/PII before anything lands in the export file.
+
+    Gate 0 deliberately routes secret-bearing commands to the LOCAL path, and
+    local prompts are stored verbatim in inferences.prompt — so without this
+    pass the dataset (the artifact most likely to be uploaded to a training
+    service) would contain raw passwords/API keys. Policy:
+      - secret in the training TARGET (response/corrected_to) → DROP the row
+        (a redacted action string is garbage as a label);
+      - secret in the input side (cmd_text / prompt / session_context) →
+        REDACT in place ([REDACTED:pattern]).
+    Returns (kept_rows, n_dropped, n_redacted).
+    """
+    flt = ContentFilter()
+    kept: list[dict] = []
+    dropped = 0
+    redacted = 0
+    for r in rows:
+        target = r.get("corrected_to") or r.get("response") or ""
+        _, target_findings = flt.scrub_sync(target)
+        if target_findings:
+            dropped += 1
+            continue
+        any_redaction = False
+        for field in ("cmd_text", "prompt", "session_context"):
+            val = r.get(field)
+            if not val:
+                continue
+            clean, findings = flt.scrub_sync(val)
+            if findings:
+                r[field] = clean
+                any_redaction = True
+        if any_redaction:
+            redacted += 1
+        kept.append(r)
+    return kept, dropped, redacted
 
 
 def _deduplicate(rows: list[dict]) -> list[dict]:
@@ -231,6 +278,9 @@ def main() -> None:
     print(f"Loaded {len(rows)} linked inference+command rows")
     rows = _filter(rows)
     print(f"After quality filter: {len(rows)}")
+    rows, n_dropped, n_redacted = _scrub_rows(rows)
+    print(f"After secret scrub:   {len(rows)}"
+          f"  ({n_dropped} dropped: secret in action; {n_redacted} inputs redacted)")
     rows = _deduplicate(rows)
     print(f"After deduplication:  {len(rows)}")
 

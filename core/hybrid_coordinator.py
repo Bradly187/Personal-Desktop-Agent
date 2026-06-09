@@ -55,6 +55,14 @@ from inference.local_inference import LocalInference, OllamaInference, _build_pr
 from desktop.vision_grounder import VisionGrounder
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
+from contextvars import ContextVar
+
+# Task-local accumulator linking inference rows to their command row (the
+# inference insert happens before insert_command, so command_id is unknown at
+# write time and backfilled by route() — see AgentDB.link_inferences_to_command).
+_PENDING_INFERENCE_IDS: ContextVar[Optional[list]] = ContextVar(
+    "da_pending_inference_ids", default=None
+)
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog
@@ -841,6 +849,11 @@ class HybridCoordinator:
         success: Optional[bool] = None
         error_msg: Optional[str] = None
         command_id: int = -1
+        # Per-command accumulator for inference row ids written by
+        # _run_local/_run_cloud BEFORE the command row exists. Task-local
+        # (ContextVar) so concurrent route() tasks never share a list. The ids
+        # are backfilled onto inferences.command_id right after insert_command.
+        _inf_ids_token = _PENDING_INFERENCE_IDS.set([])
 
         try:
             source = cmd.source
@@ -987,6 +1000,18 @@ class HybridCoordinator:
                     )
                 except Exception as db_exc:
                     log.warning("AgentDB.insert_command failed: %s", db_exc)
+                else:
+                    # Backfill inferences.command_id now that the command row
+                    # exists — without this the fine-tuning extraction JOIN
+                    # (inferences ⨝ commands) matches nothing.
+                    _inf_ids = _PENDING_INFERENCE_IDS.get()
+                    if _inf_ids and command_id and command_id > 0:
+                        try:
+                            await self._agent_db.link_inferences_to_command(
+                                _inf_ids, command_id
+                            )
+                        except Exception as link_exc:
+                            log.debug("link_inferences_to_command failed: %s", link_exc)
 
             # Publish gate decision and command outcome events (fail-safe).
             if self._event_bus is not None:
@@ -1065,6 +1090,7 @@ class HybridCoordinator:
             return {"status": "error", "error": str(exc)}
 
         finally:
+            _PENDING_INFERENCE_IDS.reset(_inf_ids_token)
             latency_ms = (time.monotonic() - t0) * 1000
             # Gate 4's EMA exists to detect when LOCAL inference is getting slow
             # (e.g. GPU contention during a flare) and shed load to the cloud.
@@ -1273,8 +1299,8 @@ class HybridCoordinator:
         if self._agent_db and self._agent_db.available:
             status = self._local.get_status()
             error = action_str if action_str.startswith("CLARIFY inference") else None
-            await self._agent_db.insert_inference(
-                command_id=None,
+            _inf_id = await self._agent_db.insert_inference(
+                command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=status.get("model", "unknown"),
                 domain="command",
                 prompt=getattr(self._local, "last_prompt", None),
@@ -1285,6 +1311,9 @@ class HybridCoordinator:
                 backend=status.get("backend", "ollama"),
                 error=error,
             )
+            _ids = _PENDING_INFERENCE_IDS.get()
+            if _ids is not None and _inf_id and _inf_id > 0:
+                _ids.append(_inf_id)
         try:
             _st = self._local.get_status()
             get_tracer().record_span(
@@ -1331,8 +1360,8 @@ class HybridCoordinator:
         latency_ms = (time.monotonic() - t0) * 1000
         if self._agent_db and self._agent_db.available:
             error = action_str if action_str.startswith("CLARIFY") else None
-            await self._agent_db.insert_inference(
-                command_id=None,
+            _inf_id = await self._agent_db.insert_inference(
+                command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=self._cfg.anthropic_model,
                 domain="command",
                 prompt=getattr(self._cloud, "last_prompt", None),
@@ -1343,6 +1372,9 @@ class HybridCoordinator:
                 backend="anthropic",
                 error=error,
             )
+            _ids = _PENDING_INFERENCE_IDS.get()
+            if _ids is not None and _inf_id and _inf_id > 0:
+                _ids.append(_inf_id)
         return action_str
 
     # ---------------------------------------------------------------------- #
