@@ -244,6 +244,7 @@ erDiagram
     commands ||--o{ inferences : ""
     commands ||--o{ agent_runs : ""
     agent_runs ||--o{ agent_steps : ""
+    agent_runs ||--o| goal_queue : ""
     sessions {
         int id PK
         real started_at
@@ -312,6 +313,18 @@ erDiagram
         real latency_ms
         text compensation_action
         text compensation_args
+    }
+    goal_queue {
+        int id PK
+        real ts
+        text goal
+        text domain
+        text status
+        text idempotency_key UK
+        int attempts
+        int max_attempts
+        text last_error
+        int run_id FK
     }
 ```
 
@@ -569,6 +582,7 @@ erDiagram
         int id PK
         real ts
         text component
+        text domain
         real metric_before
         real metric_after
         real cloud_rate
