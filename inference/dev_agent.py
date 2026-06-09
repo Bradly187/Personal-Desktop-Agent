@@ -525,7 +525,36 @@ class DevAgent:
         #  - Otherwise, the proven sequential path runs, after fanning out any
         #    leading read-only context steps (gap #1).
         if self._scheduler is not None and self._plan_has_deps(steps):
-            cancelled = await self._run_dag_waves(remaining, executed, run_id)
+            cancelled, dag_failed_step = await self._run_dag_waves(
+                remaining, executed, run_id
+            )
+            # A DAG-wave failure is handled exactly like a sequential step
+            # failure: replan from the failure observation. The tail handed back
+            # has the failed step's dependents already pruned, so we never run a
+            # step whose precondition failed.
+            if dag_failed_step is not None and not cancelled:
+                recovered = False
+                if replans < self.MAX_REPLANS and not self._cancel_event.is_set():
+                    replans += 1
+                    new_remaining = await self._try_replan(goal, executed, remaining)
+                    if new_remaining is not None:
+                        remaining = new_remaining
+                        self._total_steps = len(executed) + len(remaining)
+                        recovered = True
+                        log.info("DevAgent: replanned after DAG failure %s — "
+                                 "%d new step(s) (replan %d/%d)",
+                                 dag_failed_step.action, len(remaining),
+                                 replans, self.MAX_REPLANS)
+                if not recovered:
+                    halted_reason = (
+                        f"halted after failed {dag_failed_step.action} (no recovery plan)"
+                    )
+                    log.warning("DevAgent: %s", halted_reason)
+                    await self._halt_and_compensate(
+                        run_id, goal, replans, dag_failed_step.action
+                    )
+                    compensated = True
+                    remaining = []
         else:
             await self._gather_readonly_prefix(remaining, executed, run_id)
 
@@ -559,25 +588,9 @@ class DevAgent:
             # Step failed — try a bounded recovery replan; otherwise halt.
             if replans < self.MAX_REPLANS and not self._cancel_event.is_set():
                 replans += 1
-                new_steps = await self._replan(goal, executed, remaining)
-                if new_steps:
-                    # Recompute destructiveness: the upfront approval covered
-                    # the ORIGINAL plan's verbs. If the replan injects a
-                    # destructive verb the user never heard described, revoke
-                    # the blanket authorization so that step (and every later
-                    # destructive step) goes through per-op confirmation.
-                    injected = {
-                        s.action.upper() for s in new_steps
-                    } & self._DESTRUCTIVE_VERBS - self._approved_verbs
-                    if injected and self._plan_authorized:
-                        log.warning(
-                            "DevAgent: replan injected unapproved destructive "
-                            "verb(s) %s — revoking blanket plan authorization",
-                            sorted(injected),
-                        )
-                        self._plan_authorized = False
-                    budget = max(0, self.MAX_STEPS - len(executed))
-                    remaining = new_steps[:budget]
+                new_steps = await self._try_replan(goal, executed, remaining)
+                if new_steps is not None:
+                    remaining = new_steps
                     self._total_steps = len(executed) + len(remaining)
                     log.info(
                         "DevAgent: replanned after failed %s — %d new step(s) (replan %d/%d)",
@@ -586,19 +599,7 @@ class DevAgent:
                     continue
             halted_reason = f"halted after failed {step.action} (no recovery plan)"
             log.warning("DevAgent: %s", halted_reason)
-            # Publish replan-exhausted event so watchers (alerting, metrics) can react.
-            if self._event_bus is not None:
-                try:
-                    await self._event_bus.publish(
-                        TOPIC_REPLAN_EXHAUSTED,
-                        {"run_id": run_id, "goal": goal[:120], "replans": replans,
-                         "failed_action": step.action},
-                        source="dev_agent",
-                    )
-                except Exception as _pub_exc:
-                    log.debug("DevAgent: event publish failed: %s", _pub_exc)
-            # Run saga compensations to undo successfully completed steps.
-            await self._run_compensations(run_id, triggered_by="max_replans")
+            await self._halt_and_compensate(run_id, goal, replans, step.action)
             compensated = True
             break
 
@@ -726,12 +727,34 @@ class DevAgent:
         """True if the planner declared any inter-step dependency (engages the DAG)."""
         return any(s.deps for s in steps)
 
+    @staticmethod
+    def _dependents_closure(pending: dict[int, AgentStep], failed_idx: int) -> set[int]:
+        """Indices in `pending` that (transitively) declare `after:` the failed step.
+
+        Those steps' precondition can never be satisfied now, so they must NOT
+        run — they're dropped from the deferred tail rather than handed to the
+        dep-agnostic sequential drain.
+        """
+        closure: set[int] = set()
+        bad = {failed_idx}
+        changed = True
+        while changed:
+            changed = False
+            for i, s in pending.items():
+                if i in closure:
+                    continue
+                if any(d in bad for d in s.deps):
+                    closure.add(i)
+                    bad.add(i)
+                    changed = True
+        return closure
+
     async def _run_dag_waves(
         self,
         remaining: list[AgentStep],
         executed: list[AgentStep],
         run_id: int,
-    ) -> bool:
+    ) -> tuple[bool, Optional[AgentStep]]:
         """Execute a dependency-ordered plan in waves, fanning out independent steps.
 
         Each wave runs every step whose declared deps are already satisfied:
@@ -740,20 +763,22 @@ class DevAgent:
         SOLO. Steps are 1-based by their original plan position (what `deps`
         reference).
 
-        Stops and hands the remainder back to the SEQUENTIAL+replan loop on the
-        first failure, on a dependency cycle / dep-on-failed-step (no ready steps),
-        or on cancellation. On clean completion `remaining` is emptied. Returns
-        whether the run was cancelled. Mutates `executed` (append, in completion
-        order) and `remaining` (left = the not-completed tail, deps cleared so the
-        dep-agnostic sequential loop can drain it).
+        Stops on the first failure, on a dependency cycle / dep-on-failed-step
+        (no ready steps), or on cancellation. On a failure it DROPS the failed
+        step's transitive dependents from the tail (their precondition is gone)
+        and returns the failed step so the caller routes into the replan path —
+        a failed step's dependents must never blindly run. Returns
+        (cancelled, failed_step|None). Mutates `executed` (append, in completion
+        order) and `remaining` (the not-completed, still-runnable tail).
         """
         # 1-based position → step, preserving the planner's numbering for deps.
         pending: dict[int, AgentStep] = {i: s for i, s in enumerate(remaining, 1)}
         completed: set[int] = set()
         cancelled = False
-        failed = False
+        failed_step: Optional[AgentStep] = None
+        failed_idx: Optional[int] = None
 
-        while pending and not failed and not cancelled:
+        while pending and failed_step is None and not cancelled:
             if self._cancel_event.is_set():
                 cancelled = True
                 break
@@ -784,9 +809,9 @@ class DevAgent:
                 await self._persist_step(run_id, len(executed), step)
                 if ok is True:
                     completed.add(idx)
-                else:
-                    failed = True
-            if failed:
+                elif failed_step is None:
+                    failed_step, failed_idx = step, idx
+            if failed_step is not None:
                 break
 
             # Barriers run one at a time, in plan order.
@@ -801,19 +826,23 @@ class DevAgent:
                 if ok is True:
                     completed.add(idx)
                 else:
-                    failed = True
+                    failed_step, failed_idx = step, idx
                     break
 
-        # Leave the not-completed tail for the sequential loop (deps cleared so the
-        # dep-agnostic drain runs them in order; replan handles recovery).
-        tail = [pending[i] for i in sorted(pending)]
-        for s in tail:
-            s.deps = []
+        # On failure, drop the failed step's transitive dependents — they can
+        # never legally run. Survivors stay in the tail as replan context.
+        dropped: set[int] = set()
+        if failed_idx is not None:
+            dropped = self._dependents_closure(pending, failed_idx)
+            if dropped:
+                log.info("DevAgent[dag]: dropping %d dependent(s) of failed step %d",
+                         len(dropped), failed_idx)
+        tail = [pending[i] for i in sorted(pending) if i not in dropped]
         remaining[:] = tail
         log.info("DevAgent[dag]: completed %d step(s) in waves, %d deferred%s",
                  len(completed), len(tail), " (cancelled)" if cancelled else
-                 (" (failure → replan)" if failed else ""))
-        return cancelled
+                 (" (failure → replan)" if failed_step is not None else ""))
+        return cancelled, failed_step
 
     async def _replan(
         self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
@@ -946,6 +975,50 @@ class DevAgent:
                 )
         except Exception as exc:
             log.debug("DevAgent._persist_step failed: %s", exc)
+
+    async def _try_replan(
+        self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
+    ) -> Optional[list[AgentStep]]:
+        """One bounded recovery replan. Returns the new (budget-capped) remaining
+        steps, or None if the planner declined/errored (caller should halt).
+
+        Recomputes destructiveness: the upfront approval covered the ORIGINAL
+        plan's verbs, so a replan that injects a destructive verb the user never
+        heard described revokes the blanket authorization — that step (and every
+        later destructive step) then goes through per-op confirmation.
+        """
+        new_steps = await self._replan(goal, executed, remaining)
+        if not new_steps:
+            return None
+        injected = {
+            s.action.upper() for s in new_steps
+        } & self._DESTRUCTIVE_VERBS - self._approved_verbs
+        if injected and self._plan_authorized:
+            log.warning(
+                "DevAgent: replan injected unapproved destructive verb(s) %s — "
+                "revoking blanket plan authorization", sorted(injected),
+            )
+            self._plan_authorized = False
+        budget = max(0, self.MAX_STEPS - len(executed))
+        return new_steps[:budget]
+
+    async def _halt_and_compensate(
+        self, run_id: int, goal: str, replans: int, failed_action: str
+    ) -> None:
+        """Publish the replan-exhausted event (best-effort) and roll back
+        completed side effects. Used on every replan-exhausted terminal path
+        (sequential and DAG)."""
+        if self._event_bus is not None:
+            try:
+                await self._event_bus.publish(
+                    TOPIC_REPLAN_EXHAUSTED,
+                    {"run_id": run_id, "goal": goal[:120], "replans": replans,
+                     "failed_action": failed_action},
+                    source="dev_agent",
+                )
+            except Exception as _pub_exc:
+                log.debug("DevAgent: event publish failed: %s", _pub_exc)
+        await self._run_compensations(run_id, triggered_by="max_replans")
 
     async def _run_compensations(
         self, run_id: int, triggered_by: str = "step_failure"

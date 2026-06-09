@@ -86,9 +86,10 @@ async def test_independent_safe_steps_run_concurrently():
     agent._execute_step = _exec
     remaining = [AgentStep("WRITE_FILE", args="a"), AgentStep("WRITE_FILE", args="b")]
     executed: list[AgentStep] = []
-    cancelled = await agent._run_dag_waves(remaining, executed, run_id=1)
+    cancelled, failed = await agent._run_dag_waves(remaining, executed, run_id=1)
 
     assert cancelled is False
+    assert failed is None
     assert peak["max"] == 2            # both ran at once
     assert {s.args for s in executed} == {"a", "b"}
     assert remaining == []             # all completed, nothing deferred
@@ -131,7 +132,9 @@ async def test_barrier_runs_solo():
     assert peak["max"] == 1            # never concurrent
 
 
-async def test_failure_defers_remainder_to_sequential():
+async def test_failure_drops_dependents_of_failed_step():
+    """A step depending on the failed step must NOT survive into the tail —
+    its precondition can never be satisfied (audit fix 2026-06-09)."""
     agent = _agent()
 
     async def _exec(step):
@@ -140,18 +143,42 @@ async def test_failure_defers_remainder_to_sequential():
         return "ok"
 
     agent._execute_step = _exec
-    # Step 1 ok, step 2 (barrier) fails, step 3 depends on 2.
+    # Step 1 ok, step 2 (barrier) fails, step 3 depends on 2 (the failed step).
     remaining = [
         AgentStep("WRITE_FILE", args="ok1"),
         AgentStep("RUN_TERMINAL", args="boom"),
         AgentStep("WRITE_FILE", args="downstream", deps=[2]),
     ]
     executed: list[AgentStep] = []
-    await agent._run_dag_waves(remaining, executed, run_id=1)
-    # ok1 + the failed barrier are executed; the downstream step is deferred.
+    cancelled, failed = await agent._run_dag_waves(remaining, executed, run_id=1)
+    assert cancelled is False
+    assert failed is not None and failed.args == "boom"   # failed step returned
     assert [s.args for s in executed] == ["ok1", "boom"]
-    assert [s.args for s in remaining] == ["downstream"]
-    assert remaining[0].deps == []     # deps cleared for the sequential drain
+    assert remaining == []             # dependent dropped, NOT deferred
+
+
+async def test_failure_keeps_independent_survivor():
+    """A deferred step independent of the failed step survives into the tail."""
+    agent = _agent()
+
+    async def _exec(step):
+        if step.args == "boom":
+            raise RuntimeError("fail")
+        return "ok"
+
+    agent._execute_step = _exec
+    # Step1 ok (safe), step2 boom (barrier) fails; step3 depends on 1 (completed)
+    # — independent of the failed step 2, so it must be kept for replan.
+    remaining = [
+        AgentStep("WRITE_FILE", args="a"),
+        AgentStep("RUN_TERMINAL", args="boom"),
+        AgentStep("WRITE_FILE", args="survivor", deps=[1]),
+    ]
+    executed: list[AgentStep] = []
+    cancelled, failed = await agent._run_dag_waves(remaining, executed, run_id=1)
+    assert failed.args == "boom"
+    assert [s.args for s in executed] == ["a", "boom"]
+    assert [s.args for s in remaining] == ["survivor"]   # kept (independent)
 
 
 async def test_cancellation_stops_waves():
@@ -160,8 +187,9 @@ async def test_cancellation_stops_waves():
     agent._execute_step = AsyncMock(return_value="ok")
     remaining = [AgentStep("WRITE_FILE", args="a")]
     executed: list[AgentStep] = []
-    cancelled = await agent._run_dag_waves(remaining, executed, run_id=1)
+    cancelled, failed = await agent._run_dag_waves(remaining, executed, run_id=1)
     assert cancelled is True
+    assert failed is None
     assert executed == []              # nothing ran
 
 
@@ -215,3 +243,39 @@ async def test_plain_plan_stays_sequential():
     result = await agent.plan_and_run("do it")
     assert result.success is True
     assert len(result.steps) == 2
+
+
+async def test_dag_failure_triggers_replan_not_blind_continue():
+    """A DAG-wave failure routes into the replan path (like a sequential
+    failure), instead of blindly draining the deferred tail."""
+    router = MagicMock()
+    router.infer = AsyncMock(side_effect=[
+        # initial plan: step2 (after:1) is a barrier that fails
+        _RR("Step 1: [WRITE_FILE a]\nStep 2: [RUN_TERMINAL boom] (after: 1)"),
+        # recovery replan
+        _RR("Step 1: [WRITE_FILE recovered]"),
+    ])
+    agent = DevAgent(router=router)
+    agent.set_scheduler(AccessibilityScheduler())
+    agent._approve_plan_upfront = AsyncMock(return_value=True)
+    agent._rag_context = AsyncMock(return_value="")
+    agent._git_context = AsyncMock(return_value="")
+    agent._format_context = lambda: ""
+    agent._reflect = AsyncMock(return_value="done")
+    agent._speak_plan_completion = AsyncMock()
+    agent._persist_step = AsyncMock()
+
+    ran = []
+
+    async def _exec(step):
+        ran.append(step.args)
+        if step.args == "boom":
+            raise RuntimeError("fail")
+        return "ok"
+
+    agent._execute_step = _exec
+    result = await agent.plan_and_run("build")
+
+    assert "recovered" in ran                       # replan executed
+    assert agent._router.infer.await_count == 2     # initial plan + exactly 1 replan
+    assert result.success is True
