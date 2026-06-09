@@ -101,7 +101,7 @@ The JSON fallback in `benchmark_models.py` remains for environments where DuckDB
 
 | Legacy format | Problems | Replaced by |
 |---|---|---|
-| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — those 3 tables expanded, plus the rest of today's **29-table** schema (§11) |
+| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — those 3 tables expanded, plus the rest of today's **38-table** schema (§11) |
 | `routing_log.jsonl` | Full-file read every 5 min; no session; no referential integrity | `agent.db` `commands` table |
 | `gesture_calibration.json` | Overwrote history on every write; in-memory samples lost on crash | `agent.db` `gesture_samples` (full history) + `gesture_calibration` (append-only floor log) |
 | `benchmark_results.json` | Single-run snapshot; no history; not queryable | `analytics.duckdb` `benchmark_runs / results / prompts` |
@@ -189,9 +189,9 @@ con.sql("""
 
 ## 11. Entity-Relationship Diagrams
 
-These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **29 tables**; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
+These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **38 tables** across schema versions v1–v3; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
 
-### 11.1 `agent.db` — relationship overview (all 29 tables)
+### 11.1 `agent.db` — relationship overview (all 38 tables)
 
 ```mermaid
 erDiagram
@@ -209,7 +209,15 @@ erDiagram
     commands ||--o{ few_shot_examples : "seeds"
     commands ||--o{ gesture_samples : "emits"
     commands ||--o{ sensor_events : "emits"
+    commands ||--o{ event_log : "referenced-by"
+    commands ||--o{ tool_calls : "dispatched-via"
+    commands ||--o{ rate_limit_events : "throttled-by"
     agent_runs ||--o{ agent_steps : "contains"
+    agent_runs ||--o{ saga_compensations : "unwinds-via"
+    agent_runs ||--o{ tool_calls : "owns"
+    agent_runs ||--o{ goal_queue : "fulfils"
+    agent_steps ||--o{ saga_compensations : "reverses"
+    agent_steps ||--o{ tool_calls : "invokes"
     voice_calibration_sessions ||--o{ voice_pronunciations : "contains"
     word_counts { text word PK }
     hotwords { text word PK }
@@ -222,6 +230,10 @@ erDiagram
     flare_profile { int id PK }
     voice_profiles { int id PK }
     adaptation_log { int id PK }
+    event_consumers { int id PK }
+    tool_timeout_config { text tool_name PK }
+    tool_cache_config { text tool_name PK }
+    rate_limit_config { text resource PK }
 ```
 
 ### 11.2 Group A — core pipeline & dev-agent runs
@@ -298,6 +310,8 @@ erDiagram
         text result
         int success
         real latency_ms
+        text compensation_action
+        text compensation_args
     }
 ```
 
@@ -549,6 +563,7 @@ erDiagram
         text level
         text subsystem
         text msg
+        text trace_id
     }
     adaptation_log {
         int id PK
@@ -559,6 +574,7 @@ erDiagram
         real cloud_rate
         real failure_rate
         int rolled_back
+        text domain
     }
     session_summaries {
         int id PK
@@ -649,6 +665,160 @@ erDiagram
     }
 ```
 
+### 11.10 Group G — Goal queue (v2+)
+
+`goal_queue` is the durable pre-execution backlog for DevAgent goals. A goal is persisted here **before** it runs, so a crash or scheduler shed never silently drops it. `idempotency_key` (UNIQUE) prevents duplicate enqueues on crash recovery. The lifecycle is `queued → running → done / failed / cancelled`; rows left `running` at startup are requeued by `mark_interrupted_runs()`, bounded by `max_attempts`.
+
+```mermaid
+erDiagram
+    agent_runs ||--o{ goal_queue : "fulfilled-by (run_id)"
+    goal_queue {
+        int id PK
+        real ts
+        text goal
+        text domain
+        text status
+        text idempotency_key UK
+        int attempts
+        int max_attempts
+        text last_error
+        int run_id FK
+    }
+    agent_runs {
+        int id PK
+        int command_id FK
+        real ts
+        text goal
+        text domain
+        text model_used
+        int step_count
+        int success
+        real total_latency_ms
+        text error
+        text status
+    }
+```
+
+### 11.11 Group H — Orchestration v3 (event bus, saga, tool tracking, rate limiting)
+
+Eight tables added in schema v3 (`PRAGMA user_version = 3`, PR #38). Together they implement the five orchestration gaps: event bus, saga/compensation, per-call idempotency + timeout, cache-policy config, and rate-limit config.
+
+**Event bus** (`event_log` + `event_consumers`): `event_log` is an append-only structured log; in-process delivery uses `asyncio.Queue` fan-out keyed on `topic_pattern`. Consumers persist their cursor in `event_consumers.last_event_id` for durable replay. Pruned at 7 days.
+
+```mermaid
+erDiagram
+    sessions ||--o{ event_log : "session_id"
+    commands ||--o{ event_log : "command_id"
+    event_log {
+        int id PK
+        real ts
+        text topic
+        int session_id FK
+        int command_id FK
+        text trace_id
+        text source
+        text payload
+    }
+    event_consumers {
+        int id PK
+        text consumer_name UK
+        text topic_pattern
+        int last_event_id
+        real updated_at
+    }
+```
+
+**Saga compensations** (`saga_compensations`): one row per successfully executed reversible step. Populated as each step completes; triggered in reverse step order when `MAX_REPLANS` is exhausted. Never pruned (forensic value; volume ≤ 200 rows/day).
+
+```mermaid
+erDiagram
+    agent_runs ||--o{ saga_compensations : "run_id"
+    agent_steps ||--o{ saga_compensations : "step_id"
+    saga_compensations {
+        int id PK
+        real ts
+        int run_id FK
+        int step_id FK
+        text compensation_action
+        text compensation_args
+        text status
+        text triggered_by
+        real started_at
+        real finished_at
+        text error
+    }
+    agent_steps {
+        int id PK
+        int run_id FK
+        int step_num
+        text action
+        text args
+        text body
+        text result
+        int success
+        real latency_ms
+        text compensation_action
+        text compensation_args
+    }
+```
+
+**Tool call log + timeout config** (`tool_calls`, `tool_timeout_config`): every MCP/desktop tool invocation is recorded with its actual timeout, idempotency key, and result. The `UNIQUE INDEX` on `(idempotency_key) WHERE status='completed'` prevents re-running a successful idempotent call on plan restart. `tool_timeout_config` and `tool_cache_config` are config tables seeded once via `INSERT OR IGNORE` on `AgentDB.open()`.
+
+```mermaid
+erDiagram
+    commands ||--o{ tool_calls : "command_id"
+    agent_runs ||--o{ tool_calls : "run_id"
+    agent_steps ||--o{ tool_calls : "step_id"
+    tool_calls {
+        int id PK
+        real ts
+        int command_id FK
+        int run_id FK
+        int step_id FK
+        text tool_name
+        text idempotency_key UK
+        text args_json
+        text result_json
+        int success
+        real latency_ms
+        int timeout_ms
+        text status
+    }
+    tool_timeout_config {
+        text tool_name PK
+        int timeout_ms
+        int max_retries
+        real updated_at
+    }
+    tool_cache_config {
+        text tool_name PK
+        real ttl_s
+        int max_entries
+        real updated_at
+    }
+```
+
+**Rate limit config + breach log** (`rate_limit_config`, `rate_limit_events`): token-bucket parameters per resource; breach log for observability. Pruned at 7 days.
+
+```mermaid
+erDiagram
+    commands ||--o{ rate_limit_events : "command_id"
+    rate_limit_events {
+        int id PK
+        real ts
+        text resource
+        int command_id FK
+        real wait_ms
+        int was_dropped
+    }
+    rate_limit_config {
+        text resource PK
+        real max_rps
+        int burst_capacity
+        real updated_at
+    }
+```
+
 ---
 
 ## 12. Two-Tier Knowledge Store (vector + structured)
@@ -656,6 +826,6 @@ erDiagram
 The persistence layer is deliberately two-tier, unified for callers by the `MemoryManager` syscall facade (`storage/memory_manager.py`):
 
 - **Vector / semantic tier (ChromaDB + `all-MiniLM-L6-v2`, 384-dim, cosine).** Three logical stores under `./chroma_db`: the RAG **`codebase`/`documents`** collections (`inference/codebase_indexer.py`), the **`behavioral_memory`** few-shot collection (`storage/semantic_memory.py`), and the behavioral-twin backing (which reuses `behavioral_memory`). All degrade to a Jaccard word-overlap fallback over SQLite rows when ChromaDB is unavailable, with a time-gated re-probe that restores the vector path after a transient outage.
-- **Structured tier.** `agent.db` (SQLite/`aiosqlite`, OLTP — §11.1–11.7), `analytics.duckdb` (DuckDB, OLAP — §11.8), and `audit.db` (append-only, trigger-immutable — §11.9). `agent.db` migrations are versioned via `PRAGMA user_version` (`AgentDB._migrate`).
+- **Structured tier.** `agent.db` (SQLite/`aiosqlite`, OLTP — §11.1–11.11), `analytics.duckdb` (DuckDB, OLAP — §11.8), and `audit.db` (append-only, trigger-immutable — §11.9). `agent.db` migrations are versioned via `PRAGMA user_version` (`AgentDB._migrate`); current version is **3** (38 tables).
 
 The SQLite `few_shot_examples` table (§5) is the embedding store on the **per-command prompt hot path**; the ChromaDB `behavioral_memory` collection feeds the **behavioral-twin context layer**. Same embedding model, two independent storage paths — see §5.

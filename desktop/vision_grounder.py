@@ -63,6 +63,11 @@ class VisionGrounder:
                  "anthropic" (claude-sonnet-4-6, ~$0.003–0.015/call).
     """
 
+    def set_cache_config(self, ttl_s: float, max_entries: int) -> None:
+        """Override cache TTL and capacity (loaded from tool_cache_config by main.py)."""
+        self._cache_ttl_s = max(ttl_s, 0.1)
+        self._cache_max = max(max_entries, 1)
+
     def __init__(
         self,
         model: str = _MODEL,
@@ -72,6 +77,8 @@ class VisionGrounder:
         self._backend = backend
         self._client = None  # Anthropic client, lazy-init
         self._cache: dict[str, tuple[int, int, float]] = {}
+        self._cache_ttl_s: float = _CACHE_TTL_S
+        self._cache_max: int = 200
 
     def _get_client(self):
         if self._client is None:
@@ -107,7 +114,7 @@ class VisionGrounder:
         cache_key = target.lower().strip()
         now = time.monotonic()
         # Evict stale entries on each lookup to prevent unbounded growth.
-        if len(self._cache) > 200:
+        if len(self._cache) > self._cache_max:
             self._cache = {k: v for k, v in self._cache.items() if v[2] > now}
         if cache_key in self._cache:
             cx, cy, expiry = self._cache[cache_key]
@@ -155,7 +162,7 @@ class VisionGrounder:
             )
             return None
 
-        self._cache[cache_key] = (x, y, now + _CACHE_TTL_S)
+        self._cache[cache_key] = (x, y, now + self._cache_ttl_s)
         log.info("VisionGrounder: %r → (%d, %d) conf=%.2f", target, x, y, confidence)
         return GroundingResult(x=x, y=y, confidence=confidence)
 

@@ -512,6 +512,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await agent_db.prune_sensor_telemetry(days=7)
     await agent_db.prune_gesture_velocity_samples(days=90)
     await agent_db.prune_ipad_logs(days=60)
+    # Orchestration tables (added in schema v3)
+    await agent_db.prune_event_log(days=7)
+    await agent_db.prune_tool_calls(days=30)
+    await agent_db.prune_rate_limit_events(days=7)
 
     # --- Crash recovery: reconcile plans left mid-run by a previous process ---
     # Any agent_run still 'running' means the process died during a plan. Mark
@@ -820,6 +824,34 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         # Immediate pain-day velocity-floor flips (no 60s ContinuousTrainer lag)
         twin_state.set_gesture_processor(gesture)
 
+    # ── EventBus + RateLimiter (orchestration gap remediation — schema v3) ────
+    from core.events import EventBus
+    from core.rate_limiter import RateLimiter
+    event_bus = EventBus(agent_db)
+    rate_limiter = RateLimiter(agent_db)
+    coordinator.set_event_bus(event_bus)
+    dev_agent.set_event_bus(event_bus)
+
+    # Wire CommandExecutor DB access for per-call timeout + idempotency.
+    coordinator._executor.set_agent_db(agent_db)
+
+    # Read cache configs from DB and push to the cache-using components.
+    try:
+        vg_ttl, vg_max = await agent_db.get_cache_config("vision_grounder")
+        if hasattr(coordinator, "_vision_grounder") and coordinator._vision_grounder:
+            coordinator._vision_grounder.set_cache_config(vg_ttl, vg_max)
+    except Exception as _cfg_exc:
+        log.debug("Could not read vision_grounder cache config: %s", _cfg_exc)
+    try:
+        ua_ttl, ua_max = await agent_db.get_cache_config("ui_automation")
+        from desktop.ui_automation import UIAutomationProvider as _UAP
+        # UIAutomationProvider is a lazy singleton; update it when first accessed.
+        from core import command_executor as _cex
+        if _cex._ui_provider is not None:
+            _cex._ui_provider.set_cache_config(ua_ttl, ua_max)
+    except Exception as _cfg_exc:
+        log.debug("Could not read ui_automation cache config: %s", _cfg_exc)
+
     bridge = IPadBridge(port=args.port, host=args.host)
     bridge.set_fusion_engine(fusion)
     bridge.set_lidar(lidar)
@@ -827,6 +859,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_whisper_stream(whisper)
     bridge.set_coordinator(coordinator)  # needed for pain_day_override message
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
+    coordinator.set_bridge(bridge)  # trace_id correlation: coordinator → bridge on command executed
     fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
     await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
     await profiler.load_rom_bounds(agent_db)       # D4: ROM → initial VAD bounds

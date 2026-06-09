@@ -97,6 +97,11 @@ class IPadBridge:
     # are currently toggleable) while the message path stays wired.
     VALID_FEATURES: set[str] = set()
 
+    # Window in seconds within which an iPad log entry is correlated to the
+    # most recent PC-side trace_id. iPad log batches are sent asynchronously
+    # so a 2 s window covers most sensor round-trips without false attribution.
+    _TRACE_WINDOW_S: float = 2.0
+
     def __init__(self, port: int = 8765, host: str = "0.0.0.0"):
         self.port = port
         self.host = host
@@ -126,6 +131,13 @@ class IPadBridge:
         # until completion (otherwise Python may GC them) and surfaces exceptions
         # via _on_ipad_log_task_done. Mirrors the FusionEngine._route_tasks pattern.
         self._ipad_log_tasks: set[asyncio.Task] = set()
+
+        # iPad↔PC trace correlation: the most recent PC-side trace_id and the wall
+        # time it was set. ipad_log entries arriving within _TRACE_WINDOW_S of a
+        # command execution are tagged with this trace_id so they can be joined to
+        # commands.trace_id in AgentDB.
+        self._active_trace_id: Optional[str] = None
+        self._active_trace_ts: float = 0.0
 
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
@@ -158,6 +170,16 @@ class IPadBridge:
     def set_agent_db(self, agent_db, session_id: int) -> None:
         self._agent_db = agent_db
         self._session_id = session_id
+
+    def set_active_trace_id(self, trace_id: Optional[str]) -> None:
+        """Record the most recent PC-side trace_id for iPad log correlation.
+
+        Called by HybridCoordinator after each command execution so ipad_log
+        entries that arrive within _TRACE_WINDOW_S can be joined to the command
+        span via commands.trace_id in AgentDB.
+        """
+        self._active_trace_id = trace_id
+        self._active_trace_ts = time.time()
 
     # ---------------------------------------------------------------------- #
     # Startup
@@ -826,8 +848,16 @@ class IPadBridge:
                 db_entries.append(entry)
 
         if db_entries and self._agent_db and self._session_id >= 0:
+            trace_id: Optional[str] = None
+            if (
+                self._active_trace_id
+                and time.time() - self._active_trace_ts < self._TRACE_WINDOW_S
+            ):
+                trace_id = self._active_trace_id
             task = asyncio.create_task(
-                self._agent_db.log_ipad_events(self._session_id, db_entries)
+                self._agent_db.log_ipad_events(
+                    self._session_id, db_entries, trace_id=trace_id
+                )
             )
             self._ipad_log_tasks.add(task)
             task.add_done_callback(self._on_ipad_log_task_done)

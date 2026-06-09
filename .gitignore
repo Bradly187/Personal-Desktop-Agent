@@ -21,6 +21,8 @@ benchmark_results.json
 
 # Secrets and API keys
 *.txt
+!requirements.txt
+!requirements-realsense.txt
 *.key
 *.pem
 *.env
@@ -28,6 +30,7 @@ benchmark_results.json
 
 # Calibration data files
 gaze_calibration.json
+hand_pointer_calibration.json
 
 # Python
 __pycache__/
@@ -37,6 +40,7 @@ __pycache__/
 venv/
 .venv-wsl/
 .venv-laptop/
+.venv-realsense/
 .pip-tmp/
 *.egg-info/
 dist/

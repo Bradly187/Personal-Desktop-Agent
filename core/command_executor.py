@@ -336,8 +336,43 @@ class Command:
 # Executor
 # ---------------------------------------------------------------------------
 
+import hashlib
+import json as _json
+
+# Verbs for which we compute a SHA-256 idempotency key and skip re-execution
+# when the exact same call already succeeded in this session (safe to deduplicate).
+_IDEMPOTENT_VERBS: frozenset[str] = frozenset({"WRITE_FILE"})
+
+
 class CommandExecutor:
     """Translates a Command into one or more desktop tool calls."""
+
+    def __init__(self) -> None:
+        self._agent_db = None  # AgentDB — set via set_agent_db(); optional
+
+    def set_agent_db(self, db) -> None:
+        """Wire AgentDB for per-call idempotency tracking and timeout config."""
+        self._agent_db = db
+
+    async def _tool_timeout_ms(self, action: str) -> int:
+        """Return the configured timeout for action (ms). Falls back to 30 000."""
+        if self._agent_db and getattr(self._agent_db, "available", False):
+            try:
+                timeout_ms, _ = await self._agent_db.get_tool_timeout(action.lower())
+                return timeout_ms
+            except Exception:
+                pass
+        _defaults = {
+            "WRITE_FILE": 15_000, "RUN_TERMINAL": 30_000, "SCREENSHOT": 5_000,
+            "READ_SCREEN": 5_000, "CLICK": 5_000, "TYPE": 10_000,
+        }
+        return _defaults.get(action.upper(), 30_000)
+
+    @staticmethod
+    def _make_idempotency_key(action: str, params: dict) -> str:
+        canon = _json.dumps({"action": action.upper(), "params": params},
+                            sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canon.encode()).hexdigest()
 
     async def _proxy_execute(self, cmd: Command) -> dict:
         """Forward the command to the Windows action proxy (WSL mode).
@@ -396,6 +431,23 @@ class CommandExecutor:
                 log.error("Failed to execute %s: %s", action, exc)
                 return {"status": "error", "action": action, "error": str(exc)}
 
+        # Per-call idempotency: skip re-executing a verb if we already have a
+        # successful result for the exact same (action, params) in this session.
+        idem_key: str | None = None
+        if action in _IDEMPOTENT_VERBS:
+            idem_key = self._make_idempotency_key(action, cmd.params)
+            if self._agent_db and getattr(self._agent_db, "available", False):
+                try:
+                    cached = await self._agent_db.get_tool_call_by_idempotency(idem_key)
+                    if cached:
+                        log.info("CommandExecutor: idempotency hit for %s — skipping", action)
+                        import json as _j
+                        return {"status": "ok", "action": action,
+                                "result": _j.loads(cached.get("result_json") or "{}"),
+                                "idempotent": True}
+                except Exception as _ie:
+                    log.debug("CommandExecutor: idempotency check failed: %s", _ie)
+
         # Take a pre-action snapshot for verifiable verbs
         from desktop.action_verifier import VERIFIABLE_VERBS
         verifier = _get_action_verifier()
@@ -403,12 +455,23 @@ class CommandExecutor:
         if verifier and action in VERIFIABLE_VERBS:
             pre_b64 = await asyncio.to_thread(verifier.snapshot)
 
+        timeout_ms = await self._tool_timeout_ms(action)
+        t_start = time.monotonic()
         try:
-            result = await asyncio.to_thread(self._dispatch, action, cmd)
+            async with asyncio.timeout(timeout_ms / 1000):
+                result = await asyncio.to_thread(self._dispatch, action, cmd)
             log.info("Executed %s [source=%s]: %s", action, cmd.source, result)
+        except TimeoutError:
+            elapsed_ms = (time.monotonic() - t_start) * 1000
+            log.error("CommandExecutor: %s timed out after %d ms (limit=%d ms)",
+                      action, round(elapsed_ms), timeout_ms)
+            return {"status": "error", "action": action,
+                    "error": f"timeout after {timeout_ms} ms"}
         except Exception as exc:
             log.error("Failed to execute %s: %s", action, exc)
             return {"status": "error", "action": action, "error": str(exc)}
+        finally:
+            latency_ms = (time.monotonic() - t_start) * 1000
 
         # Post-action verification — perceptual diff confirms screen changed
         verify_result = None
@@ -421,6 +484,23 @@ class CommandExecutor:
                     "ActionVerifier: %s — no visible change (diff=%.1f%%, %dms)",
                     action, vr.diff_pct, vr.elapsed_ms,
                 )
+
+        # Record call in tool_calls for idempotency and observability.
+        if self._agent_db and getattr(self._agent_db, "available", False):
+            try:
+                import json as _j
+                await self._agent_db.insert_tool_call(
+                    action.lower(),
+                    idempotency_key=idem_key,
+                    args_json=_j.dumps(cmd.params, separators=(",", ":")) if cmd.params else None,
+                    result_json=_j.dumps(result, separators=(",", ":")),
+                    success=True,
+                    latency_ms=round(latency_ms, 1),
+                    timeout_ms=timeout_ms,
+                    status="completed",
+                )
+            except Exception as _db_exc:
+                log.debug("CommandExecutor: insert_tool_call failed: %s", _db_exc)
 
         resp = {"status": "ok", "action": action, "result": result}
         if verify_result:
