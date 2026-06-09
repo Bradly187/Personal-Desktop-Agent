@@ -35,6 +35,9 @@ from typing import TYPE_CHECKING, Optional
 
 from core.approval_keywords import classify_confirmation
 from core.domain_classifier import DomainClassifier
+from core.events import (
+    TOPIC_REPLAN_EXHAUSTED, TOPIC_STEP_FAILED,
+)
 from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
@@ -249,12 +252,19 @@ class DevAgent:
         self._cluster_health = None        # ClusterHealthMonitor | None
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
 
+        # EventBus — set via set_event_bus(); optional (no-op if None)
+        self._event_bus = None
+
         # Goal-level authorization state (reset after each plan)
         self._plan_authorized: bool = False
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._current_goal: Optional[str] = None
         self._current_step: int = 0
         self._total_steps: int = 0
+
+    def set_event_bus(self, bus) -> None:
+        """Wire the EventBus for publishing replan-exhausted and step-failed events."""
+        self._event_bus = bus
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
@@ -505,6 +515,19 @@ class DevAgent:
                     continue
             halted_reason = f"halted after failed {step.action} (no recovery plan)"
             log.warning("DevAgent: %s", halted_reason)
+            # Publish replan-exhausted event so watchers (alerting, metrics) can react.
+            if self._event_bus is not None:
+                try:
+                    await self._event_bus.publish(
+                        TOPIC_REPLAN_EXHAUSTED,
+                        {"run_id": run_id, "goal": goal[:120], "replans": replans,
+                         "failed_action": step.action},
+                        source="dev_agent",
+                    )
+                except Exception as _pub_exc:
+                    log.debug("DevAgent: event publish failed: %s", _pub_exc)
+            # Run saga compensations to undo successfully completed steps.
+            await self._run_compensations(run_id)
             break
 
         # Step 3: Reflect — summarise outcomes for the user.
@@ -767,18 +790,77 @@ class DevAgent:
             log.debug("DevAgent._start_run failed: %s", exc)
             return -1
 
-    async def _persist_step(self, run_id: int, step_num: int, step: AgentStep) -> None:
+    @staticmethod
+    def _compensation_for(step: "AgentStep") -> tuple[Optional[str], Optional[str]]:
+        """Return (compensation_action, compensation_args) for a completed step, or (None, None)."""
+        action = step.action.upper()
+        if action == "WRITE_FILE":
+            # Undo: delete the file that was written.
+            return "DELETE_FILE", step.args.strip() if step.args else None
+        if action == "RUN_TERMINAL":
+            # Terminal side-effects can't be automatically reversed, but we
+            # record the command so a human reviewer can manually undo.
+            return "REVERT_TERMINAL", step.args or step.body or None
+        return None, None
+
+    async def _persist_step(self, run_id: int, step_num: int, step: "AgentStep") -> None:
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
             return
+        comp_action, comp_args = self._compensation_for(step)
         try:
-            await db.insert_agent_step(
+            step_id = await db.insert_agent_step(
                 run_id=run_id, step_num=step_num, action=step.action,
                 args=step.args or None, body=step.body or None,
                 result=step.result, success=step.success, latency_ms=step.latency_ms,
+                compensation_action=comp_action,
+                compensation_args=comp_args,
             )
+            # Register a saga compensation row for every successful step that
+            # has a defined reverse action, so they can be unwound on failure.
+            if step.success and comp_action and step_id is not None:
+                await db.insert_saga_compensation(
+                    run_id=run_id, step_id=step_id,
+                    compensation_action=comp_action,
+                    compensation_args=comp_args,
+                )
         except Exception as exc:
             log.debug("DevAgent._persist_step failed: %s", exc)
+
+    async def _run_compensations(self, run_id: int) -> None:
+        """Execute pending saga compensations for run_id in reverse step order.
+
+        Only called after MAX_REPLANS is exhausted. Each compensation is
+        marked running → done (or failed) in the DB so the audit trail is
+        complete. Compensation failures are logged but never raise — we
+        always attempt all pending compensations.
+        """
+        db = self._db()
+        if run_id < 0 or not db or not getattr(db, "available", False):
+            return
+        compensations = await db.get_pending_compensations(run_id)
+        if not compensations:
+            return
+        log.info("DevAgent: running %d saga compensation(s) for run %d", len(compensations), run_id)
+        for comp in compensations:
+            cid = comp["id"]
+            caction = comp.get("compensation_action", "")
+            cargs = comp.get("compensation_args")
+            await db.update_saga_compensation(cid, "running", triggered_by="max_replans")
+            try:
+                if caction == "DELETE_FILE" and cargs:
+                    path = Path(cargs.strip())
+                    if path.exists():
+                        path.unlink()
+                        log.info("DevAgent: saga compensation DELETE_FILE %s", path)
+                elif caction == "REVERT_TERMINAL":
+                    log.warning(
+                        "DevAgent: saga compensation REVERT_TERMINAL requires manual review: %r", cargs
+                    )
+                await db.update_saga_compensation(cid, "done", finished=True)
+            except Exception as exc:
+                log.error("DevAgent: saga compensation %s failed: %s", caction, exc)
+                await db.update_saga_compensation(cid, "failed", error=str(exc), finished=True)
 
     async def _finalize_run(self, run_id: int, result: AgentResult, status: str) -> None:
         db = self._db()
