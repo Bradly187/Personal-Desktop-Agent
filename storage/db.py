@@ -525,6 +525,114 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     domain_breakdown      TEXT,           -- JSON {command:N, code:N, math:N, ...}
     top_actions           TEXT            -- JSON [[action, count], ...]
 );
+
+-- ── Event bus — append-only structured log for topic fan-out ─────────────────
+-- Provides durable replay + in-process asyncio.Queue real-time delivery.
+-- Consumers track their cursor via event_consumers.last_event_id.
+-- Prune: 7 days (similar cadence to sensor_telemetry).
+CREATE TABLE IF NOT EXISTS event_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    topic       TEXT    NOT NULL,     -- dotted: 'command.executed', 'gate.decided', 'step.failed'
+    session_id  INTEGER REFERENCES sessions(id),
+    command_id  INTEGER REFERENCES commands(id),
+    trace_id    TEXT,                 -- correlates to commands.trace_id
+    source      TEXT    NOT NULL,     -- emitting component name
+    payload     TEXT    NOT NULL      -- JSON blob; schema per-topic documented in core/events.py
+);
+CREATE INDEX IF NOT EXISTS idx_event_log_topic_id ON event_log(topic, id);
+CREATE INDEX IF NOT EXISTS idx_event_log_ts       ON event_log(ts);
+CREATE INDEX IF NOT EXISTS idx_event_log_trace    ON event_log(trace_id) WHERE trace_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS event_consumers (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumer_name   TEXT    NOT NULL UNIQUE,
+    topic_pattern   TEXT    NOT NULL,           -- SQL LIKE pattern: 'command.%', 'gate.%'
+    last_event_id   INTEGER NOT NULL DEFAULT 0, -- cursor; poll WHERE id > last_event_id
+    updated_at      REAL    NOT NULL
+);
+
+-- ── Saga compensations — reverse actions for DevAgent plan steps ──────────────
+-- One row per executed step that declares a compensation. Populated as steps run;
+-- triggered in reverse order when MAX_REPLANS is exhausted or plan is cancelled.
+-- Never pruned — forensic value is high; volume is very low (≤200 rows/day).
+CREATE TABLE IF NOT EXISTS saga_compensations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                  REAL    NOT NULL,
+    run_id              INTEGER NOT NULL REFERENCES agent_runs(id),
+    step_id             INTEGER NOT NULL REFERENCES agent_steps(id),
+    compensation_action TEXT    NOT NULL,  -- verb: 'DELETE_FILE', 'REVERT_TERMINAL'
+    compensation_args   TEXT,             -- JSON; must be fully self-contained
+    status              TEXT    NOT NULL DEFAULT 'pending',  -- pending/running/done/failed/skipped
+    triggered_by        TEXT,             -- 'step_failure' | 'user_cancel' | 'max_replans'
+    started_at          REAL,
+    finished_at         REAL,
+    error               TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_saga_run  ON saga_compensations(run_id);
+CREATE INDEX IF NOT EXISTS idx_saga_step ON saga_compensations(step_id);
+
+-- ── Per-call tool execution log — idempotency + timeout tracking ─────────────
+-- Records every MCP/desktop tool invocation. idempotency_key is
+-- SHA-256(tool_name + canonical_args_json) for idempotent verbs; NULL otherwise.
+-- The UNIQUE index on (idempotency_key) WHERE completed prevents re-running a
+-- successful idempotent call (e.g. WRITE_FILE) if the coordinator retries.
+-- Prune: 30 days (~6 000 rows; negligible).
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL    NOT NULL,
+    command_id      INTEGER REFERENCES commands(id),
+    run_id          INTEGER REFERENCES agent_runs(id),
+    step_id         INTEGER REFERENCES agent_steps(id),
+    tool_name       TEXT    NOT NULL,
+    idempotency_key TEXT,
+    args_json       TEXT,
+    result_json     TEXT,
+    success         INTEGER,
+    latency_ms      REAL,
+    timeout_ms      INTEGER,
+    status          TEXT    NOT NULL DEFAULT 'completed'  -- running/completed/failed/timeout
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_calls_idem
+    ON tool_calls(idempotency_key) WHERE idempotency_key IS NOT NULL AND status = 'completed';
+CREATE INDEX IF NOT EXISTS idx_tool_calls_cmd  ON tool_calls(command_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_step ON tool_calls(step_id);
+
+-- ── Config tables (rarely written; read at init) ─────────────────────────────
+-- Populated via INSERT OR IGNORE in AgentDB.open(); never pruned.
+
+CREATE TABLE IF NOT EXISTS tool_timeout_config (
+    tool_name   TEXT    PRIMARY KEY,
+    timeout_ms  INTEGER NOT NULL,
+    max_retries INTEGER NOT NULL DEFAULT 0,
+    updated_at  REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tool_cache_config (
+    tool_name   TEXT    PRIMARY KEY,
+    ttl_s       REAL    NOT NULL,
+    max_entries INTEGER NOT NULL DEFAULT 200,
+    updated_at  REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rate_limit_config (
+    resource        TEXT    PRIMARY KEY,
+    max_rps         REAL    NOT NULL,
+    burst_capacity  INTEGER NOT NULL DEFAULT 1,
+    updated_at      REAL    NOT NULL
+);
+
+-- ── Rate limit breach log — observability only ───────────────────────────────
+-- Prune: 7 days.
+CREATE TABLE IF NOT EXISTS rate_limit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL    NOT NULL,
+    resource    TEXT    NOT NULL,
+    command_id  INTEGER REFERENCES commands(id),
+    wait_ms     REAL    NOT NULL DEFAULT 0,
+    was_dropped INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_rle_resource_ts ON rate_limit_events(resource, ts);
 """
 
 
@@ -532,12 +640,17 @@ CREATE TABLE IF NOT EXISTS session_summaries (
 # a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
 # append a row when introducing a new additive column; the batch is gated by
 # PRAGMA user_version so it runs at most once per database file.
-_AGENT_DB_SCHEMA_VERSION = 2
+_AGENT_DB_SCHEMA_VERSION = 3
 _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # v1→2
     ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
     ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
     ("commands", "trace_id", "TEXT"),
-    ("adaptation_log", "domain", "TEXT"),   # gap H: per-domain SLO adaptation
+    ("adaptation_log", "domain", "TEXT"),       # gap H: per-domain SLO adaptation
+    # v2→3
+    ("ipad_logs",   "trace_id",           "TEXT"),          # iPad↔PC trace correlation
+    ("agent_steps", "compensation_action", "TEXT"),          # saga: reverse verb
+    ("agent_steps", "compensation_args",   "TEXT"),          # saga: reverse args JSON
 )
 
 
@@ -607,6 +720,10 @@ class AgentDB:
             await self._migrate()
         except Exception as exc:
             log.warning("AgentDB migration error (continuing): %s", exc)
+        try:
+            await self._seed_config_tables()
+        except Exception as exc:
+            log.warning("AgentDB config seed error (continuing): %s", exc)
         await self._conn.commit()
         self.available = True
         log.info("AgentDB opened: %s", path)
@@ -639,6 +756,45 @@ class AgentDB:
         # PRAGMA user_version does not accept a bound parameter
         await self._conn.execute(f"PRAGMA user_version = {_AGENT_DB_SCHEMA_VERSION}")
         log.info("AgentDB schema migrated to version %d", _AGENT_DB_SCHEMA_VERSION)
+
+    async def _seed_config_tables(self) -> None:
+        """INSERT OR IGNORE default rows into the three config tables.
+
+        Using the current wall-clock time as updated_at; callers may override
+        individual rows via direct UPDATE without re-running this method.
+        """
+        now = time.time()
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO tool_timeout_config (tool_name, timeout_ms, max_retries, updated_at)"
+            " VALUES (?, ?, ?, ?)",
+            [
+                ("mouse_click",     5_000,  1, now),
+                ("keyboard_type",  10_000,  0, now),
+                ("run_terminal",   30_000,  0, now),
+                ("write_file",     15_000,  1, now),
+                ("vision_grounder", 8_000,  1, now),
+                ("screenshot",      5_000,  1, now),
+                ("ui_automation",   3_000,  1, now),
+            ],
+        )
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO tool_cache_config (tool_name, ttl_s, max_entries, updated_at)"
+            " VALUES (?, ?, ?, ?)",
+            [
+                ("vision_grounder", 2.0, 200, now),
+                ("ui_automation",   1.0, 200, now),
+                ("target_cache",    1.5, 500, now),
+            ],
+        )
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO rate_limit_config (resource, max_rps, burst_capacity, updated_at)"
+            " VALUES (?, ?, ?, ?)",
+            [
+                ("cloud_api",        2.0, 5, now),
+                ("ollama",           4.0, 8, now),
+                ("vision_grounder",  1.0, 3, now),
+            ],
+        )
 
     async def close(self) -> None:
         if self._conn:
@@ -685,11 +841,13 @@ class AgentDB:
         self,
         session_id: int,
         entries: list,
+        trace_id: Optional[str] = None,
     ) -> None:
         """Persist a batch of structured log entries forwarded from the iPad app.
 
         Each entry is a dict with keys: ts (float), level (str), subsystem (str), msg (str).
-        Silently no-ops if DB is unavailable or the entry list is empty.
+        trace_id correlates entries to the PC-side command that triggered them (iPad↔PC
+        trace correlation gap). Silently no-ops if DB is unavailable or entries is empty.
         """
         if not self._conn or not entries:
             return
@@ -700,6 +858,7 @@ class AgentDB:
                 str(e.get("level", "info"))[:16],
                 str(e.get("subsystem", "unknown"))[:64],
                 str(e.get("msg", ""))[:2048],
+                trace_id,
             )
             for e in entries
             if isinstance(e, dict)
@@ -707,8 +866,8 @@ class AgentDB:
         if not rows:
             return
         await self._conn.executemany(
-            "INSERT INTO ipad_logs (session_id, ts, level, subsystem, msg)"
-            " VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO ipad_logs (session_id, ts, level, subsystem, msg, trace_id)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             rows,
         )
         await self._conn.commit()
@@ -1316,24 +1475,33 @@ class AgentDB:
         result: Optional[str],
         success: Optional[bool],
         latency_ms: float,
-    ) -> None:
+        compensation_action: Optional[str] = None,
+        compensation_args: Optional[str] = None,
+    ) -> Optional[int]:
+        """Insert a step record. Returns the new row id (for saga compensation wiring), or None."""
         if not self._conn or run_id < 0:
-            return
+            return None
         try:
-            await self._conn.execute(
+            async with self._conn.execute(
                 """INSERT INTO agent_steps
-                   (run_id, step_num, action, args, body, result, success, latency_ms)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                   (run_id, step_num, action, args, body, result, success, latency_ms,
+                    compensation_action, compensation_args)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     run_id, step_num, action, args or None, body or None,
                     result or None,
                     None if success is None else int(success),
                     round(latency_ms, 1),
+                    compensation_action,
+                    compensation_args,
                 ),
-            )
+            ) as cur:
+                row_id = cur.lastrowid
             await self._conn.commit()
+            return row_id
         except Exception as exc:
             log.warning("AgentDB.insert_agent_step failed: %s", exc)
+            return None
 
     # ---------------------------------------------------------------------- #
     # Agent run lifecycle (durable, resumable plan ledger)
@@ -1921,6 +2089,348 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.prune_ipad_logs failed: %s", exc)
             return 0
+
+    async def prune_event_log(self, days: int = 7) -> int:
+        """Delete event_log rows older than `days`. Returns rows deleted."""
+        if not self._conn:
+            return 0
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                "DELETE FROM event_log WHERE ts < ?", (cutoff,)
+            ) as cur:
+                deleted = cur.rowcount or 0
+            await self._conn.commit()
+            if deleted:
+                log.info("AgentDB: pruned %d event_log rows (> %d days)", deleted, days)
+            return deleted
+        except Exception as exc:
+            log.warning("AgentDB.prune_event_log failed: %s", exc)
+            return 0
+
+    async def prune_tool_calls(self, days: int = 30) -> int:
+        """Delete tool_calls rows older than `days`. Returns rows deleted."""
+        if not self._conn:
+            return 0
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                "DELETE FROM tool_calls WHERE ts < ?", (cutoff,)
+            ) as cur:
+                deleted = cur.rowcount or 0
+            await self._conn.commit()
+            if deleted:
+                log.info("AgentDB: pruned %d tool_calls rows (> %d days)", deleted, days)
+            return deleted
+        except Exception as exc:
+            log.warning("AgentDB.prune_tool_calls failed: %s", exc)
+            return 0
+
+    async def prune_rate_limit_events(self, days: int = 7) -> int:
+        """Delete rate_limit_events rows older than `days`. Returns rows deleted."""
+        if not self._conn:
+            return 0
+        cutoff = time.time() - days * 86400
+        try:
+            async with self._conn.execute(
+                "DELETE FROM rate_limit_events WHERE ts < ?", (cutoff,)
+            ) as cur:
+                deleted = cur.rowcount or 0
+            await self._conn.commit()
+            if deleted:
+                log.info("AgentDB: pruned %d rate_limit_events rows (> %d days)", deleted, days)
+            return deleted
+        except Exception as exc:
+            log.warning("AgentDB.prune_rate_limit_events failed: %s", exc)
+            return 0
+
+    # ---------------------------------------------------------------------- #
+    # Event bus
+    # ---------------------------------------------------------------------- #
+
+    async def insert_event(
+        self,
+        topic: str,
+        payload: str,
+        source: str,
+        *,
+        session_id: Optional[int] = None,
+        command_id: Optional[int] = None,
+        trace_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Append one event to event_log. Returns the new row id, or None on error."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                "INSERT INTO event_log (ts, topic, session_id, command_id, trace_id, source, payload)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (time.time(), topic, session_id, command_id, trace_id, source, payload),
+            ) as cur:
+                row_id = cur.lastrowid
+            await self._conn.commit()
+            return row_id
+        except Exception as exc:
+            log.warning("AgentDB.insert_event failed: %s", exc)
+            return None
+
+    async def poll_events(
+        self,
+        topic_pattern: str,
+        last_event_id: int,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return up to `limit` events matching `topic_pattern` (SQL LIKE) with id > last_event_id."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT id, ts, topic, session_id, command_id, trace_id, source, payload"
+                " FROM event_log WHERE topic LIKE ? AND id > ? ORDER BY id LIMIT ?",
+                (topic_pattern, last_event_id, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.poll_events failed: %s", exc)
+            return []
+
+    async def upsert_event_consumer(self, consumer_name: str, topic_pattern: str) -> None:
+        """Register a consumer; no-op if already registered."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "INSERT OR IGNORE INTO event_consumers"
+                " (consumer_name, topic_pattern, last_event_id, updated_at)"
+                " VALUES (?, ?, 0, ?)",
+                (consumer_name, topic_pattern, time.time()),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.upsert_event_consumer failed: %s", exc)
+
+    async def update_consumer_cursor(self, consumer_name: str, last_event_id: int) -> None:
+        """Advance a consumer's cursor after processing events."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE event_consumers SET last_event_id = ?, updated_at = ?"
+                " WHERE consumer_name = ?",
+                (last_event_id, time.time(), consumer_name),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.update_consumer_cursor failed: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # Saga compensations
+    # ---------------------------------------------------------------------- #
+
+    async def insert_saga_compensation(
+        self,
+        run_id: int,
+        step_id: int,
+        compensation_action: str,
+        compensation_args: Optional[str] = None,
+    ) -> Optional[int]:
+        """Register a compensation for a completed step. Returns new row id."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                "INSERT INTO saga_compensations"
+                " (ts, run_id, step_id, compensation_action, compensation_args)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (time.time(), run_id, step_id, compensation_action, compensation_args),
+            ) as cur:
+                row_id = cur.lastrowid
+            await self._conn.commit()
+            return row_id
+        except Exception as exc:
+            log.warning("AgentDB.insert_saga_compensation failed: %s", exc)
+            return None
+
+    async def update_saga_compensation(
+        self,
+        compensation_id: int,
+        status: str,
+        *,
+        triggered_by: Optional[str] = None,
+        error: Optional[str] = None,
+        finished: bool = False,
+    ) -> None:
+        """Update the status of a saga compensation row."""
+        if not self._conn:
+            return
+        now = time.time()
+        try:
+            await self._conn.execute(
+                "UPDATE saga_compensations"
+                " SET status = ?, triggered_by = COALESCE(?, triggered_by),"
+                "     started_at = CASE WHEN started_at IS NULL THEN ? ELSE started_at END,"
+                "     finished_at = CASE WHEN ? THEN ? ELSE finished_at END,"
+                "     error = COALESCE(?, error)"
+                " WHERE id = ?",
+                (
+                    status,
+                    triggered_by,
+                    now,
+                    finished, now if finished else None,
+                    error,
+                    compensation_id,
+                ),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.update_saga_compensation failed: %s", exc)
+
+    async def get_pending_compensations(self, run_id: int) -> list[dict]:
+        """Return pending compensations for run_id in reverse step order (highest step_num first)."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT sc.id, sc.step_id, sc.compensation_action, sc.compensation_args,"
+                "       as2.step_num"
+                " FROM saga_compensations sc"
+                " JOIN agent_steps as2 ON as2.id = sc.step_id"
+                " WHERE sc.run_id = ? AND sc.status = 'pending'"
+                " ORDER BY as2.step_num DESC",
+                (run_id,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_pending_compensations failed: %s", exc)
+            return []
+
+    # ---------------------------------------------------------------------- #
+    # Per-call tool execution (idempotency + timeout)
+    # ---------------------------------------------------------------------- #
+
+    async def insert_tool_call(
+        self,
+        tool_name: str,
+        *,
+        command_id: Optional[int] = None,
+        run_id: Optional[int] = None,
+        step_id: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+        args_json: Optional[str] = None,
+        result_json: Optional[str] = None,
+        success: Optional[bool] = None,
+        latency_ms: Optional[float] = None,
+        timeout_ms: Optional[int] = None,
+        status: str = "completed",
+    ) -> Optional[int]:
+        """Record a tool call. Returns row id, or None if duplicate idempotency_key."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                "INSERT OR IGNORE INTO tool_calls"
+                " (ts, command_id, run_id, step_id, tool_name, idempotency_key,"
+                "  args_json, result_json, success, latency_ms, timeout_ms, status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    time.time(), command_id, run_id, step_id, tool_name,
+                    idempotency_key, args_json, result_json,
+                    int(success) if success is not None else None,
+                    latency_ms, timeout_ms, status,
+                ),
+            ) as cur:
+                row_id = cur.lastrowid if cur.rowcount else None
+            await self._conn.commit()
+            return row_id
+        except Exception as exc:
+            log.warning("AgentDB.insert_tool_call failed: %s", exc)
+            return None
+
+    async def get_tool_call_by_idempotency(self, idempotency_key: str) -> Optional[dict]:
+        """Return a completed tool_call row for the given key, or None if not found."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                "SELECT * FROM tool_calls WHERE idempotency_key = ? AND status = 'completed' LIMIT 1",
+                (idempotency_key,),
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+        except Exception as exc:
+            log.warning("AgentDB.get_tool_call_by_idempotency failed: %s", exc)
+            return None
+
+    # ---------------------------------------------------------------------- #
+    # Config reads (tool timeout, cache TTL, rate limits)
+    # ---------------------------------------------------------------------- #
+
+    async def get_tool_timeout(self, tool_name: str) -> tuple[int, int]:
+        """Return (timeout_ms, max_retries) for tool_name, or (15000, 0) if not configured."""
+        if not self._conn:
+            return (15_000, 0)
+        try:
+            async with self._conn.execute(
+                "SELECT timeout_ms, max_retries FROM tool_timeout_config WHERE tool_name = ?",
+                (tool_name,),
+            ) as cur:
+                row = await cur.fetchone()
+                return (row["timeout_ms"], row["max_retries"]) if row else (15_000, 0)
+        except Exception as exc:
+            log.warning("AgentDB.get_tool_timeout failed: %s", exc)
+            return (15_000, 0)
+
+    async def get_cache_config(self, tool_name: str) -> tuple[float, int]:
+        """Return (ttl_s, max_entries) for tool_name, or hardcoded fallback if not configured."""
+        _FALLBACKS = {"vision_grounder": (2.0, 200), "ui_automation": (1.0, 200), "target_cache": (1.5, 500)}
+        if not self._conn:
+            return _FALLBACKS.get(tool_name, (2.0, 200))
+        try:
+            async with self._conn.execute(
+                "SELECT ttl_s, max_entries FROM tool_cache_config WHERE tool_name = ?",
+                (tool_name,),
+            ) as cur:
+                row = await cur.fetchone()
+                return (row["ttl_s"], row["max_entries"]) if row else _FALLBACKS.get(tool_name, (2.0, 200))
+        except Exception as exc:
+            log.warning("AgentDB.get_cache_config failed: %s", exc)
+            return _FALLBACKS.get(tool_name, (2.0, 200))
+
+    async def get_rate_limit_config(self, resource: str) -> tuple[float, int]:
+        """Return (max_rps, burst_capacity) for resource, or (2.0, 1) if not configured."""
+        if not self._conn:
+            return (2.0, 1)
+        try:
+            async with self._conn.execute(
+                "SELECT max_rps, burst_capacity FROM rate_limit_config WHERE resource = ?",
+                (resource,),
+            ) as cur:
+                row = await cur.fetchone()
+                return (row["max_rps"], row["burst_capacity"]) if row else (2.0, 1)
+        except Exception as exc:
+            log.warning("AgentDB.get_rate_limit_config failed: %s", exc)
+            return (2.0, 1)
+
+    async def insert_rate_limit_event(
+        self,
+        resource: str,
+        *,
+        command_id: Optional[int] = None,
+        wait_ms: float = 0.0,
+        was_dropped: bool = False,
+    ) -> None:
+        """Record a rate-limit breach for observability. Non-fatal on error."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "INSERT INTO rate_limit_events (ts, resource, command_id, wait_ms, was_dropped)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (time.time(), resource, command_id, wait_ms, int(was_dropped)),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.debug("AgentDB.insert_rate_limit_event failed (non-fatal): %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Adaptation queries (used by ContinuousTrainer)

@@ -406,6 +406,8 @@ class HybridCoordinator:
         self._metrics = None   # set via set_metrics()
 
         self._memory = None   # MemoryManager — wired via set_memory()
+        self._event_bus = None  # EventBus — wired via set_event_bus()
+        self._bridge = None    # IPadBridge — wired via set_bridge() for trace correlation
 
         # Cloud DevAgent (--cloud-dev-agent) — optional Anthropic-API fallback for
         # dev-domain queries so a 30B specialist (and a GPU wake) is not needed.
@@ -526,6 +528,14 @@ class HybridCoordinator:
     def set_memory(self, memory) -> None:
         """Wire MemoryManager for standardised storage access."""
         self._memory = memory
+
+    def set_event_bus(self, bus) -> None:
+        """Wire EventBus so gate decisions and command outcomes are published as events."""
+        self._event_bus = bus
+
+    def set_bridge(self, bridge) -> None:
+        """Wire IPadBridge for trace_id correlation on iPad log entries."""
+        self._bridge = bridge
 
     def _approval_config(self) -> dict:
         """Load approval_config.json; returns {} on failure (safe defaults used by callers)."""
@@ -963,6 +973,39 @@ class HybridCoordinator:
                     )
                 except Exception as db_exc:
                     log.warning("AgentDB.insert_command failed: %s", db_exc)
+
+            # Publish gate decision and command outcome events (fail-safe).
+            if self._event_bus is not None:
+                try:
+                    from core.events import TOPIC_COMMAND_EXECUTED, TOPIC_GATE_DECIDED
+                    _ev_payload_gate = {
+                        "gate": gate_that_decided, "route": route_label,
+                        "domain": getattr(cmd, "domain", None),
+                        "latency_ms": round(latency_ms, 1),
+                    }
+                    _ev_payload_cmd = {
+                        "action": action_str, "route": route_label,
+                        "gate": gate_that_decided,
+                        "latency_ms": round(latency_ms, 1),
+                        "success": success,
+                    }
+                    from core.async_utils import fire_and_log
+                    fire_and_log(self._event_bus.publish(
+                        TOPIC_GATE_DECIDED, _ev_payload_gate, source="coordinator",
+                        session_id=self._session_id, command_id=command_id,
+                        trace_id=cmd.trace_id or None,
+                    ))
+                    fire_and_log(self._event_bus.publish(
+                        TOPIC_COMMAND_EXECUTED, _ev_payload_cmd, source="coordinator",
+                        session_id=self._session_id, command_id=command_id,
+                        trace_id=cmd.trace_id or None,
+                    ))
+                    # Update bridge's active trace_id so ipad_log entries
+                    # arriving within the 2 s window are correlated to this command.
+                    if self._bridge is not None and cmd.trace_id:
+                        self._bridge.set_active_trace_id(cmd.trace_id)
+                except Exception as _ev_exc:
+                    log.debug("HybridCoordinator: event publish failed: %s", _ev_exc)
 
             # Record successful local executions for few-shot learning
             if (self._trainer and route_label == "local" and success):

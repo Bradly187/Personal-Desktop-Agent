@@ -86,13 +86,17 @@ class UIAutomationProvider:
     Windows SDK; degrades gracefully (returns None) when unavailable.
     """
 
-    # Cache: (element_name_lower, exe_name) → (UIElement, expiry_mono)
-    _CACHE_TTL_S = 1.0
+    def set_cache_config(self, ttl_s: float, max_entries: int) -> None:
+        """Override cache TTL and capacity (loaded from tool_cache_config by main.py)."""
+        self._cache_ttl_s = max(ttl_s, 0.1)
+        self._cache_max = max(max_entries, 1)
 
     def __init__(self) -> None:
         self._cache: dict[tuple[str, str], tuple[UIElement, float]] = {}
         self._uia = None   # lazy-initialised COM object
         self._available: Optional[bool] = None
+        self._cache_ttl_s: float = 1.0
+        self._cache_max: int = 200
 
     def _get_uia(self):
         """Lazy-init the UIAutomation COM object. Returns None if unavailable."""
@@ -160,7 +164,7 @@ class UIAutomationProvider:
             return None
 
         if result is not None:
-            self._cache[cache_key] = (result, now + self._CACHE_TTL_S)
+            self._cache[cache_key] = (result, now + self._cache_ttl_s)
 
         return result
 
