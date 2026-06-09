@@ -2115,8 +2115,15 @@ class AgentDB:
             log.warning("AgentDB.update_gesture_velocity_calibration failed: %s", exc)
 
     async def get_gesture_velocity_floor(
-        self, gesture: str, default: float = 1.2
-    ) -> float:
+        self, gesture: str, default: Optional[float] = None
+    ) -> Optional[float]:
+        """Latest calibrated velocity floor for `gesture`, or `default` when no
+        calibration row exists. The default is None — NOT a numeric guess:
+        swipe floors are ~1.2 normalized coords/s but push/pull floors are
+        ~0.30 m/s (different units), so a shared numeric default poisons the
+        other gesture class (audit 2026-06-09: the old 1.2 default made
+        push/pull/snap gestures 4x harder on every uncalibrated startup,
+        permanently, because below-threshold motions are never sampled)."""
         if not self._conn:
             return default
         try:

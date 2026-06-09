@@ -465,7 +465,7 @@ class TestGap3VelocityCalibrationLoad:
         _db = MagicMock()
         _db.available = True
 
-        async def _fake_floor(gesture, default=1.2):
+        async def _fake_floor(gesture, default=None):
             return (db_floors or {}).get(gesture, default)
 
         _db.get_gesture_velocity_floor = _fake_floor
@@ -525,13 +525,27 @@ class TestGap3VelocityCalibrationLoad:
         gesture_proc.set_velocity_thresholds.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_uses_default_when_no_db_data(self):
-        """When DB has no calibration rows (returns default 1.2 for all), still calls set."""
+    async def test_fresh_db_is_a_noop(self):
+        """No calibration rows → do NOT push anything: GestureProcessor's own
+        per-class defaults (SWIPE 1.2 coords/s, PUSH 0.30 m/s) must stay in
+        effect. (Audit 2026-06-09: pushing a shared 1.2 default put the SWIPE
+        number into the PUSH class — 4x harder — and locked out calibration.)"""
         trainer, gesture_proc = self._make_trainer(db_floors={})
         await trainer.load_velocity_calibration()
-        gesture_proc.set_velocity_thresholds.assert_called_once()
+        gesture_proc.set_velocity_thresholds.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_swipe_only_calibration_does_not_clobber_push(self):
+        """A calibrated SWIPE floor must not introduce a PUSH key: the pushed
+        dict omits PUSH so _push_threshold() falls back to its 0.30 m/s class
+        default rather than inheriting the swipe-unit value."""
+        trainer, gesture_proc = self._make_trainer(
+            db_floors={"PEACE_SWIPE_LEFT": 1.1}
+        )
+        await trainer.load_velocity_calibration()
         call_arg = gesture_proc.set_velocity_thresholds.call_args[0][0]
-        assert call_arg["SWIPE"] == pytest.approx(1.2)
+        assert call_arg == {"SWIPE": pytest.approx(1.1)}
+        assert "PUSH" not in call_arg
 
     @pytest.mark.asyncio
     async def test_swipe_gestures_map_to_swipe_key(self):

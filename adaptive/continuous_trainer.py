@@ -227,7 +227,15 @@ class ContinuousTrainer:
         return await self._db.get_gesture_floor(gesture)
 
     async def load_velocity_calibration(self) -> None:
-        """Load persisted velocity floors from DB into GestureProcessor at startup (Gap 3)."""
+        """Load persisted velocity floors from DB into GestureProcessor at startup (Gap 3).
+
+        Only gestures with an actual calibration row contribute: SWIPE floors
+        (normalized coords/s) and PUSH floors (m/s) are different units, so an
+        uncalibrated gesture must fall back to GestureProcessor's own per-class
+        default rather than inheriting a number from the other class. On a
+        fresh DB this is a no-op (built-in defaults stay in effect). Preserves
+        the current pain-day relaxation instead of clobbering it to False.
+        """
         if self._gesture_proc is None or not self._db.available:
             return
         motion_gestures = [
@@ -238,11 +246,21 @@ class ContinuousTrainer:
         calibrated: dict[str, float] = {}
         for gesture in motion_gestures:
             floor = await self._db.get_gesture_velocity_floor(gesture)
+            if floor is None:               # no calibration row — keep class default
+                continue
             key = "SWIPE" if "SWIPE" in gesture else "PUSH"
             if key not in calibrated or floor < calibrated[key]:
                 calibrated[key] = floor
         if calibrated:
-            self._gesture_proc.set_velocity_thresholds(calibrated)
+            pain_active = False
+            if self._twin is not None:
+                try:
+                    pain_active = bool((await self._twin.get_snapshot()).pain_day_active)
+                except Exception:
+                    pain_active = False
+            self._gesture_proc.set_velocity_thresholds(
+                calibrated, pain_day_active=pain_active
+            )
             log.info("GestureProcessor: loaded velocity floors from DB — %s", calibrated)
 
     # ---------------------------------------------------------------------- #
@@ -470,6 +488,8 @@ class ContinuousTrainer:
             p10 = samples_sorted[p10_idx]
             floor = max(0.1, p10)              # always at least 0.1 coords/s
             old_floor = await self._db.get_gesture_velocity_floor(gesture)
+            if old_floor is None:              # first calibration for this gesture
+                old_floor = floor
             await self._db.update_gesture_velocity_calibration(
                 gesture, floor, len(samples), p10
             )
