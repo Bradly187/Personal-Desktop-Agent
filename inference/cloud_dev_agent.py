@@ -184,6 +184,12 @@ class CloudDevAgent:
         # its own, but we want the status check to be honest up front.
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._client = None  # lazily constructed AsyncAnthropic
+        self._rate_limiter = None  # shared 'anthropic' bucket; wired by coordinator
+
+    def set_rate_limiter(self, limiter) -> None:
+        """Share the coordinator's RateLimiter so dev + command cloud calls
+        count against one 'anthropic' bucket. Fail-open if never wired."""
+        self._rate_limiter = limiter
 
     # ---------------------------------------------------------------------- #
     # Client lifecycle
@@ -227,6 +233,13 @@ class CloudDevAgent:
         except Exception as exc:
             log.warning("CloudDevAgent unavailable: %s", exc)
             return "CLARIFY cloud dev agent temporarily unavailable"
+
+        # Throttle cloud egress (shares the 'anthropic' bucket with _run_cloud).
+        if self._rate_limiter is not None:
+            try:
+                await self._rate_limiter.check("anthropic")
+            except Exception as exc:
+                log.debug("CloudDevAgent rate-limit check skipped: %s", exc)
 
         user_content = self._build_user_content(query, domain, context)
 

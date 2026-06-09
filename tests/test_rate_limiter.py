@@ -167,3 +167,90 @@ async def test_drop_logged_to_rate_limit_events(tmp_path):
     assert row is not None
     assert row[0] == 1  # was_dropped = True
     await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Wait-path token consumption (audit fix 2026-06-09)
+# ---------------------------------------------------------------------------
+
+async def test_wait_path_reconsumes_token_after_sleep(tmp_path, monkeypatch):
+    """The throttled path must actually take a token after waiting. Previously
+    check() returned True without re-consuming, so every throttled request was
+    admitted token-free and the effective rate exceeded max_rps."""
+    limiter, db = await _make_limiter(tmp_path)
+    bucket = await limiter._get_bucket("ollama")
+    bucket._tokens = 0.0
+    bucket.max_rps = 50.0       # wait ≈ 0.02 s; one token refills during the sleep
+
+    calls = {"n": 0}
+    real_consume = bucket.consume
+
+    def _counting():
+        calls["n"] += 1
+        return real_consume()
+
+    monkeypatch.setattr(bucket, "consume", _counting)
+
+    result = await limiter.check("ollama")
+    assert result is True
+    # initial consume (empty → wait) + at least one re-consume after the sleep
+    assert calls["n"] >= 2
+    await db.close()
+
+
+async def test_throttled_calls_consume_their_tokens(tmp_path):
+    """Throttled checks each take a token — the bucket never free-accumulates,
+    so the effective admission rate is bounded by max_rps."""
+    limiter, db = await _make_limiter(tmp_path)
+    bucket = await limiter._get_bucket("ollama")
+    bucket._tokens = 0.0
+    bucket.max_rps = 50.0       # fast but real waits
+
+    for _ in range(3):
+        assert await limiter.check("ollama") is True
+    # After three throttled admissions the bucket holds well under a full token —
+    # each admission consumed what refilled, no token-free passes.
+    assert bucket._tokens < 1.0
+    await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Wiring: coordinator throttles cloud egress; limiter shared with CloudDevAgent
+# ---------------------------------------------------------------------------
+
+def test_run_cloud_calls_rate_limiter():
+    from core.hybrid_coordinator import HybridCoordinator
+    from core.command_executor import Command
+
+    coord = HybridCoordinator()
+    coord._content_filter = None
+
+    class _Cloud:
+        async def infer(self, cmd):
+            return "CLICK ok"
+
+    coord._cloud = _Cloud()
+    checked = []
+
+    class _RL:
+        async def check(self, resource, **kw):
+            checked.append(resource)
+            return True
+
+    coord._rate_limiter = _RL()
+    cmd = Command(text="open browser", action="OPEN", source="voice")
+    out = asyncio.run(coord._run_cloud(cmd))
+    assert out == "CLICK ok"
+    assert checked == ["anthropic"]
+
+
+def test_set_rate_limiter_propagates_to_cloud_dev_agent():
+    from core.hybrid_coordinator import HybridCoordinator
+
+    coord = HybridCoordinator()
+    cda = MagicMock()
+    coord._cloud_dev_agent = cda
+    rl = object()
+    coord.set_rate_limiter(rl)
+    cda.set_rate_limiter.assert_called_once_with(rl)
+    assert coord._rate_limiter is rl

@@ -429,6 +429,7 @@ class HybridCoordinator:
 
         self._memory = None   # MemoryManager — wired via set_memory()
         self._event_bus = None  # EventBus — wired via set_event_bus()
+        self._rate_limiter = None  # RateLimiter — wired via set_rate_limiter()
         self._bridge = None    # IPadBridge — wired via set_bridge() for trace correlation
 
         # Cloud DevAgent (--cloud-dev-agent) — optional Anthropic-API fallback for
@@ -554,6 +555,16 @@ class HybridCoordinator:
     def set_event_bus(self, bus) -> None:
         """Wire EventBus so gate decisions and command outcomes are published as events."""
         self._event_bus = bus
+
+    def set_rate_limiter(self, limiter) -> None:
+        """Wire the RateLimiter so cloud (Anthropic) calls are throttled. The
+        CloudDevAgent shares the same limiter via set_cloud_dev_agent so both
+        cloud egress paths count against one 'anthropic' bucket."""
+        self._rate_limiter = limiter
+        if self._cloud_dev_agent is not None and hasattr(
+            self._cloud_dev_agent, "set_rate_limiter"
+        ):
+            self._cloud_dev_agent.set_rate_limiter(limiter)
 
     def set_bridge(self, bridge) -> None:
         """Wire IPadBridge for trace_id correlation on iPad log entries."""
@@ -1361,6 +1372,12 @@ class HybridCoordinator:
         (network drop, service hiccup) the coroutine is cancelled and the
         pipeline degrades to a CLARIFY response rather than stalling indefinitely.
         """
+        # Throttle cloud egress (cost/abuse protection). Fail-open if no limiter
+        # is wired or the bucket is unconfigured; shares the 'anthropic' bucket
+        # with CloudDevAgent.
+        if self._rate_limiter is not None:
+            await self._rate_limiter.check("anthropic")
+
         # Scrub secrets before sending to external API — from BOTH the command
         # text AND the session_context the cloud prompt embeds. A sensitive
         # prior command that Gate 0 correctly forced local must not leak later
