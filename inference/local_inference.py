@@ -24,11 +24,41 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Any
+from contextvars import ContextVar
+from typing import Any, Optional
 
 from core.command_executor import Command
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Fine-tuning data capture (task-local)
+# ---------------------------------------------------------------------------
+# (prompt, tokens_in, tokens_out) of the current task's most recent inference,
+# read by HybridCoordinator._run_local()/_run_cloud() for the inferences row.
+# A ContextVar, NOT backend instance attributes: one backend instance serves
+# concurrent route() tasks (the scheduler runs ACCESSIBILITY/VOICE/GESTURE
+# tiers concurrently), so instance attributes let task B's infer() overwrite
+# task A's prompt between A's infer() returning and A's insert_inference()
+# read — misattributing prompts and token counts across commands. infer()
+# runs in the same task as the coordinator's read, so a ContextVar set inside
+# infer() and read after `await infer()` cannot race.
+_INFERENCE_CAPTURE: ContextVar[tuple[Optional[str], Optional[int], Optional[int]]] = \
+    ContextVar("da_inference_capture", default=(None, None, None))
+
+
+def set_inference_capture(
+    prompt: Optional[str],
+    tokens_in: Optional[int] = None,
+    tokens_out: Optional[int] = None,
+) -> None:
+    """Record the current task's inference prompt and token counts."""
+    _INFERENCE_CAPTURE.set((prompt, tokens_in, tokens_out))
+
+
+def get_inference_capture() -> tuple[Optional[str], Optional[int], Optional[int]]:
+    """Return (prompt, tokens_in, tokens_out) set by the current task's last infer()."""
+    return _INFERENCE_CAPTURE.get()
 
 # ---------------------------------------------------------------------------
 # Action vocabulary prompt fragment (shared by all backends)
@@ -339,11 +369,6 @@ class OllamaInference(LocalInference):
         # paying the full timeout on every request until it recovers.
         from core.circuit_breaker import CircuitBreaker
         self._breaker = CircuitBreaker(name="ollama", fail_threshold=3, cooldown_s=30.0)
-        # Fine-tuning data capture: last inference's prompt and token counts.
-        # Set on every successful infer() call; read by HybridCoordinator._run_local().
-        self.last_prompt: str | None = None
-        self.last_tokens_in: int | None = None
-        self.last_tokens_out: int | None = None
 
     async def infer(
         self,
@@ -363,9 +388,7 @@ class OllamaInference(LocalInference):
             return "CLARIFY inference backend unavailable (circuit open)"
 
         prompt = _build_prompt(cmd, few_shot_examples, counterexamples)
-        self.last_prompt = prompt
-        self.last_tokens_in = None
-        self.last_tokens_out = None
+        set_inference_capture(prompt)
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -390,8 +413,9 @@ class OllamaInference(LocalInference):
                         raise RuntimeError(f"Ollama HTTP {resp.status}")
                     data = await resp.json()
                     action = data.get("response", "").strip().splitlines()[0].strip()
-                    self.last_tokens_in = data.get("prompt_eval_count")
-                    self.last_tokens_out = data.get("eval_count")
+                    set_inference_capture(
+                        prompt, data.get("prompt_eval_count"), data.get("eval_count")
+                    )
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
@@ -458,9 +482,8 @@ class OllamaInference(LocalInference):
             return "CLARIFY inference backend unavailable (circuit open)"
 
         messages = _build_chat_messages(cmd, few_shot_examples, counterexamples)
-        self.last_prompt = json.dumps(messages)
-        self.last_tokens_in = None
-        self.last_tokens_out = None
+        prompt_json = json.dumps(messages)
+        set_inference_capture(prompt_json)
         t0 = time.monotonic()
         # Report the outcome in `finally` so a CancelledError (BaseException, not
         # caught by `except Exception`) still clears the breaker's half-open
@@ -480,8 +503,9 @@ class OllamaInference(LocalInference):
                 self._breaker.record_failure()
 
         self._available = True
-        self.last_tokens_in = data.get("prompt_eval_count")
-        self.last_tokens_out = data.get("eval_count")
+        set_inference_capture(
+            prompt_json, data.get("prompt_eval_count"), data.get("eval_count")
+        )
         latency_ms = (time.monotonic() - t0) * 1000
         message = data.get("message", {}) or {}
 
@@ -844,6 +868,7 @@ class VLLMInference(LocalInference):
         sampling_kwargs.update(_constraint_kwargs)
         sampling = SamplingParams(**sampling_kwargs)
 
+        set_inference_capture(json.dumps(messages))
         t0 = time.monotonic()
         try:
             outputs = await asyncio.to_thread(
@@ -986,6 +1011,8 @@ class VLLMServerInference(LocalInference):
             "guided_regex": self._VERB_PATTERN,
         }
 
+        prompt_json = json.dumps(payload["messages"])
+        set_inference_capture(prompt_json)
         t0 = time.monotonic()
         try:
             async with aiohttp.ClientSession() as session:
@@ -1002,6 +1029,11 @@ class VLLMServerInference(LocalInference):
                     data = __import__("json").loads(body)
                     content = data["choices"][0]["message"]["content"].strip()
                     action = content.splitlines()[0].strip() if content else "CLARIFY empty response"
+                    usage = data.get("usage") or {}
+                    set_inference_capture(
+                        prompt_json,
+                        usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                    )
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("VLLMServerInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
@@ -1290,6 +1322,8 @@ class LlamaCppInference(LocalInference):
             "max_tokens": 64,
         }
 
+        prompt_json = json.dumps(payload["messages"])
+        set_inference_capture(prompt_json)
         t0 = time.monotonic()
         try:
             async with aiohttp.ClientSession() as session:
@@ -1306,6 +1340,11 @@ class LlamaCppInference(LocalInference):
                         .strip()
                         .splitlines()[0]
                         .strip()
+                    )
+                    usage = data.get("usage") or {}
+                    set_inference_capture(
+                        prompt_json,
+                        usage.get("prompt_tokens"), usage.get("completion_tokens"),
                     )
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("LlamaCppInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)

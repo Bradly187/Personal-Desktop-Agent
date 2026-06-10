@@ -128,6 +128,14 @@ class ContinuousTrainer:
         else:
             await self._db.upsert_few_shot_example(cmd, action_str, domain, command_id)
 
+        # Success supersedes failure evidence: if this exact (text, action) pair
+        # was previously recorded as a counterexample (e.g. a transient execution
+        # failure — slow app, missing window), the mapping is now demonstrably
+        # right, so retire the counterexample instead of letting it contradict
+        # the positive store in future prompts.
+        if self._db and self._db.available:
+            await self._db.delete_few_shot_counterexample(cmd.text, action_str)
+
         # Feed observation into twin state (non-blocking)
         if self._twin:
             await self._twin.observe(cmd, action_str, namespace=namespace)
@@ -149,13 +157,19 @@ class ContinuousTrainer:
         command_id: Optional[int] = None,
         namespace: str = "accessibility",
     ) -> None:
-        """Record a *failed* command for the twin's pain-day fail signal only.
+        """Record a *failed* command: pain-day fail signal + counterexample store.
 
-        The deliberately narrow counterpart to record_success: it forwards to
-        the twin's record_failure (which moves pain-day fail counters only) and
-        writes NOTHING to the few-shot store, SemanticMemory, or gesture
-        samples. Failures must never become few-shot examples — those stores are
-        success-biased. command_id is accepted for call-site symmetry.
+        The narrow counterpart to record_success: it moves the twin's pain-day
+        fail counters and records the (text, action) pair in the
+        few_shot_counterexamples store — NEVER the positive few-shot store,
+        SemanticMemory, or gesture samples, which are success-biased.
+
+        An execution failure is weak evidence (the mapping may be right and the
+        app merely slow), so the counterexample only reaches prompts under the
+        guards in AgentDB.get_few_shot_counterexamples (usage_count >= 2 for
+        pipeline failures, excluded while the same pair exists as a positive
+        example) and is deleted outright if the pair later succeeds
+        (record_success). command_id is accepted for call-site symmetry.
         """
         if self._db and self._db.available:
             await self._db.upsert_few_shot_counterexample(
@@ -274,7 +288,14 @@ class ContinuousTrainer:
         correct_action: str,
         command_id: Optional[int] = None,
     ) -> None:
-        """Record a user correction as a few-shot example."""
+        """Record a user correction as a few-shot example.
+
+        Also retires any stale POSITIVE example for (text, wrong_action): the
+        user just said that mapping is wrong, so it must neither keep
+        reinforcing the model nor suppress this counterexample through the
+        contradiction guard in AgentDB.get_few_shot_counterexamples.
+        """
+        await self._db.delete_few_shot_example(cmd.text, wrong_action)
         await self._db.upsert_few_shot_counterexample(
             cmd, wrong_action, "command", "user_correction", command_id
         )
