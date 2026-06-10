@@ -121,7 +121,7 @@ async def test_inference_stats_by_domain(db):
 # Trainer per-domain SLO adaptation
 # ---------------------------------------------------------------------------
 
-async def test_trainer_logs_breach_and_sets_override(db, monkeypatch):
+async def test_trainer_logs_breach_without_dead_override(db, monkeypatch):
     from adaptive.continuous_trainer import ContinuousTrainer
     from core.hybrid_coordinator import CoordinatorConfig
 
@@ -140,15 +140,16 @@ async def test_trainer_logs_breach_and_sets_override(db, monkeypatch):
 
     await trainer._adapt_per_domain_slo()
 
+    # Breach detection + status + domain-tagged logging still work...
     assert trainer.slo_status.get("plan") == BREACH_LATENCY
-    # Per-domain Gate-4 override was set for the breaching dev domain.
-    assert "plan" in cfg.per_domain_latency_budget
-    # And an adaptation_log row was written with the domain tag.
     async with db._conn.execute(
         "SELECT component, domain FROM adaptation_log WHERE domain='plan'"
     ) as cur:
         rows = await cur.fetchall()
     assert rows and rows[0]["component"] == "slo:plan"
+    # ...but the dead Gate-4 override is no longer written (audit fix 2026-06-09:
+    # it assigned the unchanged budget and Gate 4 only reads "command").
+    assert "plan" not in cfg.per_domain_latency_budget
 
 
 async def test_trainer_skips_low_sample_domains(db):

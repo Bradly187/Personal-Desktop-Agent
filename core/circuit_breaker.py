@@ -53,6 +53,7 @@ class CircuitBreaker:
         self._consecutive_failures = 0
         self._opened_at: float = 0.0
         self._half_open_probe_inflight = False
+        self._probe_started_at: float = 0.0
 
     # ── Query ────────────────────────────────────────────────────────────────
 
@@ -65,13 +66,25 @@ class CircuitBreaker:
             if self._now() - self._opened_at >= self._cooldown_s:
                 self._state = "half_open"
                 self._half_open_probe_inflight = True
+                self._probe_started_at = self._now()
                 log.info("CircuitBreaker[%s]: half-open — admitting one probe", self._name)
                 return True
             return False
         # half_open: admit exactly one probe; reject concurrent callers meanwhile.
+        # Self-heal: if a probe was admitted but never reported its outcome (the
+        # caller was cancelled before record_success/record_failure), the flag
+        # would wedge the breaker shut forever. After cooldown_s with no outcome,
+        # treat the probe as lost and admit a fresh one.
         if self._half_open_probe_inflight:
+            if self._now() - self._probe_started_at >= self._cooldown_s:
+                log.warning("CircuitBreaker[%s]: half-open probe lost (no outcome "
+                            "in %.0fs) — admitting a fresh probe", self._name,
+                            self._cooldown_s)
+                self._probe_started_at = self._now()
+                return True
             return False
         self._half_open_probe_inflight = True
+        self._probe_started_at = self._now()
         return True
 
     @property

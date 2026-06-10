@@ -218,8 +218,10 @@ class TestFlareActivation:
         router.sleep_specialists.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_restore_heavy_models_posts_5m(self):
-        """_restore_heavy_models POSTs keep_alive='5m' for the router heavy set."""
+    async def test_restore_heavy_models_does_not_preload(self):
+        """_restore_heavy_models is a no-op — it must NOT POST anything (an
+        empty-prompt keep_alive='5m' is Ollama's LOAD idiom and would thrash
+        VRAM by eagerly loading two 30B models; audit fix 2026-06-09)."""
         gov, _ = _make_governor()
         router = MagicMock()
         router.heavy_model_names.return_value = ["qwen3-coder:30b", "gemma3:27b"]
@@ -227,8 +229,7 @@ class TestFlareActivation:
 
         posted = _patch_ollama(lambda: gov._restore_heavy_models())
 
-        assert {b["model"] for b in posted} == {"qwen3-coder:30b", "gemma3:27b"}
-        assert {b["keep_alive"] for b in posted} == {"5m"}
+        assert posted == []   # no load POSTs
 
 
 # ---------------------------------------------------------------------------
@@ -277,13 +278,12 @@ class TestFlareRecovery:
         assert indexer._paused is False
         indexer.resume.assert_called_once()
 
-    def test_ollama_keepalive_restored_to_5m_on_recovery(self):
-        from core.resource_governor import _DEFAULT_HEAVY_MODELS
+    def test_no_model_preload_on_recovery(self):
+        """Flare recovery must NOT preload heavy models (the next real inference
+        loads them on demand). Asserts _restore_heavy_models issues no POSTs."""
         gov, _ = _make_governor()
         posted_bodies = _patch_ollama(lambda: gov._restore_heavy_models())
-
-        assert {b["keep_alive"] for b in posted_bodies} == {"5m"}
-        assert {b["model"] for b in posted_bodies} == set(_DEFAULT_HEAVY_MODELS)
+        assert posted_bodies == []
 
 
 # ---------------------------------------------------------------------------

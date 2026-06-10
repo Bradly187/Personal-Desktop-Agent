@@ -26,8 +26,10 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import subprocess
 import time
+import uuid
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -107,6 +109,11 @@ class AgentStep:
     # 1-based indices of steps this one depends on (gap A). Empty = no declared
     # dependency. Parsed from an optional `(after: N, M)` / `[deps: N]` annotation.
     deps: list[int] = field(default_factory=list)
+    # Saga compensation args captured at EXECUTE time (e.g. a WRITE_FILE
+    # pre-write snapshot: JSON {path, existed, backup}). When set, it overrides
+    # the static _compensation_for default so rollback can RESTORE an overwritten
+    # file instead of blindly deleting it.
+    comp_args: Optional[str] = None
 
 
 _DEPS_PATTERN = re.compile(
@@ -143,8 +150,37 @@ class AgentResult:
 # Plan parser
 # ---------------------------------------------------------------------------
 
+def _parse_plan_json(text: str) -> list[AgentStep]:
+    """Parse a structured-output (Ollama `format`) plan response into steps.
+
+    Expects `{"steps": [{action, args, body, after}, ...]}` (the plan profile's
+    json_schema). Raises (json.JSONDecodeError / ValueError) on anything that
+    isn't a valid step array so the caller can fall back to the regex parser —
+    this is the structured replacement for the body-collision-prone free-text
+    parse. Unknown verbs are skipped (the schema enum should prevent them).
+    """
+    data = json.loads(text)
+    raw_steps = data.get("steps") if isinstance(data, dict) else data
+    if not isinstance(raw_steps, list):
+        raise ValueError("plan JSON has no 'steps' array")
+    steps: list[AgentStep] = []
+    for item in raw_steps:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip().upper()
+        if action not in _PLAN_ACTIONS:
+            continue
+        args = str(item.get("args", "") or "").strip()
+        body = str(item.get("body", "") or "")
+        after = item.get("after") or []
+        deps = sorted({int(d) for d in after if isinstance(d, (int, float, str))
+                       and str(d).strip().lstrip("-").isdigit()})
+        steps.append(AgentStep(action=action, args=args, body=body, deps=deps))
+    return steps
+
+
 def _parse_plan(text: str) -> list[AgentStep]:
-    """Extract AgentStep objects from a planner model response."""
+    """Extract AgentStep objects from a free-text planner response (fallback)."""
     steps: list[AgentStep] = []
     lines = text.splitlines()
     i = 0
@@ -456,9 +492,20 @@ class DevAgent:
                 total_latency_ms=(time.monotonic() - t0) * 1000,
             )
 
-        steps = _parse_plan(plan_result.text)
+        # Prefer structured JSON (Ollama `format` on the plan profile) — it
+        # eliminates the free-text body-collision / arg-truncation bugs. Fall
+        # back to the regex parser when JSON parsing fails (older Ollama /
+        # vLLM / remote backends that don't honor `format`).
+        try:
+            steps = _parse_plan_json(plan_result.text)
+        except Exception as _json_exc:
+            log.debug("DevAgent: plan JSON parse failed (%s) — regex fallback", _json_exc)
+            steps = []
         if not steps:
-            # Planner returned free-form — treat as single EXPLAIN step
+            steps = _parse_plan(plan_result.text)
+        if not steps:
+            # Planner returned neither valid JSON nor a parseable plan — treat
+            # the whole response as a single EXPLAIN step.
             steps = [AgentStep(action="EXPLAIN", body=plan_result.text)]
 
         log.info("DevAgent: plan has %d steps", len(steps))
@@ -508,6 +555,7 @@ class DevAgent:
         replans = 0
         cancelled = False
         halted_reason: Optional[str] = None
+        compensated = False   # ensure rollback runs exactly once per terminal path
 
         # Execution strategy:
         #  - If the planner declared step dependencies AND a scheduler is wired,
@@ -517,7 +565,36 @@ class DevAgent:
         #  - Otherwise, the proven sequential path runs, after fanning out any
         #    leading read-only context steps (gap #1).
         if self._scheduler is not None and self._plan_has_deps(steps):
-            cancelled = await self._run_dag_waves(remaining, executed, run_id)
+            cancelled, dag_failed_step = await self._run_dag_waves(
+                remaining, executed, run_id
+            )
+            # A DAG-wave failure is handled exactly like a sequential step
+            # failure: replan from the failure observation. The tail handed back
+            # has the failed step's dependents already pruned, so we never run a
+            # step whose precondition failed.
+            if dag_failed_step is not None and not cancelled:
+                recovered = False
+                if replans < self.MAX_REPLANS and not self._cancel_event.is_set():
+                    replans += 1
+                    new_remaining = await self._try_replan(goal, executed, remaining)
+                    if new_remaining is not None:
+                        remaining = new_remaining
+                        self._total_steps = len(executed) + len(remaining)
+                        recovered = True
+                        log.info("DevAgent: replanned after DAG failure %s — "
+                                 "%d new step(s) (replan %d/%d)",
+                                 dag_failed_step.action, len(remaining),
+                                 replans, self.MAX_REPLANS)
+                if not recovered:
+                    halted_reason = (
+                        f"halted after failed {dag_failed_step.action} (no recovery plan)"
+                    )
+                    log.warning("DevAgent: %s", halted_reason)
+                    await self._halt_and_compensate(
+                        run_id, goal, replans, dag_failed_step.action
+                    )
+                    compensated = True
+                    remaining = []
         else:
             await self._gather_readonly_prefix(remaining, executed, run_id)
 
@@ -525,6 +602,10 @@ class DevAgent:
             if len(executed) >= self.MAX_STEPS:
                 halted_reason = f"reached MAX_STEPS ({self.MAX_STEPS})"
                 log.warning("DevAgent: %s", halted_reason)
+                # Roll back completed side effects — a partial plan halted by the
+                # step cap should not leave half-done destructive work.
+                await self._run_compensations(run_id, triggered_by="max_steps")
+                compensated = True
                 break
             if self._cancel_event.is_set():
                 log.info("DevAgent: plan cancelled at step %d", len(executed) + 1)
@@ -547,25 +628,9 @@ class DevAgent:
             # Step failed — try a bounded recovery replan; otherwise halt.
             if replans < self.MAX_REPLANS and not self._cancel_event.is_set():
                 replans += 1
-                new_steps = await self._replan(goal, executed, remaining)
-                if new_steps:
-                    # Recompute destructiveness: the upfront approval covered
-                    # the ORIGINAL plan's verbs. If the replan injects a
-                    # destructive verb the user never heard described, revoke
-                    # the blanket authorization so that step (and every later
-                    # destructive step) goes through per-op confirmation.
-                    injected = {
-                        s.action.upper() for s in new_steps
-                    } & self._DESTRUCTIVE_VERBS - self._approved_verbs
-                    if injected and self._plan_authorized:
-                        log.warning(
-                            "DevAgent: replan injected unapproved destructive "
-                            "verb(s) %s — revoking blanket plan authorization",
-                            sorted(injected),
-                        )
-                        self._plan_authorized = False
-                    budget = max(0, self.MAX_STEPS - len(executed))
-                    remaining = new_steps[:budget]
+                new_steps = await self._try_replan(goal, executed, remaining)
+                if new_steps is not None:
+                    remaining = new_steps
                     self._total_steps = len(executed) + len(remaining)
                     log.info(
                         "DevAgent: replanned after failed %s — %d new step(s) (replan %d/%d)",
@@ -574,20 +639,17 @@ class DevAgent:
                     continue
             halted_reason = f"halted after failed {step.action} (no recovery plan)"
             log.warning("DevAgent: %s", halted_reason)
-            # Publish replan-exhausted event so watchers (alerting, metrics) can react.
-            if self._event_bus is not None:
-                try:
-                    await self._event_bus.publish(
-                        TOPIC_REPLAN_EXHAUSTED,
-                        {"run_id": run_id, "goal": goal[:120], "replans": replans,
-                         "failed_action": step.action},
-                        source="dev_agent",
-                    )
-                except Exception as _pub_exc:
-                    log.debug("DevAgent: event publish failed: %s", _pub_exc)
-            # Run saga compensations to undo successfully completed steps.
-            await self._run_compensations(run_id)
+            await self._halt_and_compensate(run_id, goal, replans, step.action)
+            compensated = True
             break
+
+        # Cancellation (from the sequential loop above OR from _run_dag_waves)
+        # rolls back completed side effects — a cancelled plan must not leave
+        # half-done destructive work. Runs once, only if a terminal path above
+        # didn't already compensate.
+        if cancelled and not compensated:
+            await self._run_compensations(run_id, triggered_by="user_cancel")
+            compensated = True
 
         # Step 3: Reflect — summarise outcomes for the user.
         reflect_text = await self._reflect(goal, executed, plan_result.model)
@@ -705,12 +767,34 @@ class DevAgent:
         """True if the planner declared any inter-step dependency (engages the DAG)."""
         return any(s.deps for s in steps)
 
+    @staticmethod
+    def _dependents_closure(pending: dict[int, AgentStep], failed_idx: int) -> set[int]:
+        """Indices in `pending` that (transitively) declare `after:` the failed step.
+
+        Those steps' precondition can never be satisfied now, so they must NOT
+        run — they're dropped from the deferred tail rather than handed to the
+        dep-agnostic sequential drain.
+        """
+        closure: set[int] = set()
+        bad = {failed_idx}
+        changed = True
+        while changed:
+            changed = False
+            for i, s in pending.items():
+                if i in closure:
+                    continue
+                if any(d in bad for d in s.deps):
+                    closure.add(i)
+                    bad.add(i)
+                    changed = True
+        return closure
+
     async def _run_dag_waves(
         self,
         remaining: list[AgentStep],
         executed: list[AgentStep],
         run_id: int,
-    ) -> bool:
+    ) -> tuple[bool, Optional[AgentStep]]:
         """Execute a dependency-ordered plan in waves, fanning out independent steps.
 
         Each wave runs every step whose declared deps are already satisfied:
@@ -719,20 +803,22 @@ class DevAgent:
         SOLO. Steps are 1-based by their original plan position (what `deps`
         reference).
 
-        Stops and hands the remainder back to the SEQUENTIAL+replan loop on the
-        first failure, on a dependency cycle / dep-on-failed-step (no ready steps),
-        or on cancellation. On clean completion `remaining` is emptied. Returns
-        whether the run was cancelled. Mutates `executed` (append, in completion
-        order) and `remaining` (left = the not-completed tail, deps cleared so the
-        dep-agnostic sequential loop can drain it).
+        Stops on the first failure, on a dependency cycle / dep-on-failed-step
+        (no ready steps), or on cancellation. On a failure it DROPS the failed
+        step's transitive dependents from the tail (their precondition is gone)
+        and returns the failed step so the caller routes into the replan path —
+        a failed step's dependents must never blindly run. Returns
+        (cancelled, failed_step|None). Mutates `executed` (append, in completion
+        order) and `remaining` (the not-completed, still-runnable tail).
         """
         # 1-based position → step, preserving the planner's numbering for deps.
         pending: dict[int, AgentStep] = {i: s for i, s in enumerate(remaining, 1)}
         completed: set[int] = set()
         cancelled = False
-        failed = False
+        failed_step: Optional[AgentStep] = None
+        failed_idx: Optional[int] = None
 
-        while pending and not failed and not cancelled:
+        while pending and failed_step is None and not cancelled:
             if self._cancel_event.is_set():
                 cancelled = True
                 break
@@ -763,9 +849,9 @@ class DevAgent:
                 await self._persist_step(run_id, len(executed), step)
                 if ok is True:
                     completed.add(idx)
-                else:
-                    failed = True
-            if failed:
+                elif failed_step is None:
+                    failed_step, failed_idx = step, idx
+            if failed_step is not None:
                 break
 
             # Barriers run one at a time, in plan order.
@@ -780,19 +866,23 @@ class DevAgent:
                 if ok is True:
                     completed.add(idx)
                 else:
-                    failed = True
+                    failed_step, failed_idx = step, idx
                     break
 
-        # Leave the not-completed tail for the sequential loop (deps cleared so the
-        # dep-agnostic drain runs them in order; replan handles recovery).
-        tail = [pending[i] for i in sorted(pending)]
-        for s in tail:
-            s.deps = []
+        # On failure, drop the failed step's transitive dependents — they can
+        # never legally run. Survivors stay in the tail as replan context.
+        dropped: set[int] = set()
+        if failed_idx is not None:
+            dropped = self._dependents_closure(pending, failed_idx)
+            if dropped:
+                log.info("DevAgent[dag]: dropping %d dependent(s) of failed step %d",
+                         len(dropped), failed_idx)
+        tail = [pending[i] for i in sorted(pending) if i not in dropped]
         remaining[:] = tail
         log.info("DevAgent[dag]: completed %d step(s) in waves, %d deferred%s",
                  len(completed), len(tail), " (cancelled)" if cancelled else
-                 (" (failure → replan)" if failed else ""))
-        return cancelled
+                 (" (failure → replan)" if failed_step is not None else ""))
+        return cancelled, failed_step
 
     async def _replan(
         self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
@@ -849,12 +939,52 @@ class DevAgent:
             log.debug("DevAgent._start_run failed: %s", exc)
             return -1
 
+    # Max file size we snapshot for a WRITE_FILE rollback. Above this, we record
+    # that the file existed (so rollback won't delete it) but keep no backup.
+    _SAGA_SNAPSHOT_MAX_BYTES = 256 * 1024
+
+    @staticmethod
+    def _saga_dir() -> Path:
+        return Path.home() / ".claude" / "saga"
+
+    @classmethod
+    def _snapshot_for_write(cls, path_str: Optional[str]) -> dict:
+        """Capture a WRITE_FILE pre-write snapshot for saga rollback.
+
+        Returns {path, existed, backup}: `existed` is whether the target file
+        was present before the write; `backup` is a copy of its prior bytes (or
+        None when it didn't exist, or was too large to snapshot). On rollback:
+        existed+backup → restore; existed+no-backup → leave the overwritten file
+        (deleting would lose data we couldn't back up); not-existed → delete.
+        """
+        info: dict = {"path": "", "existed": False, "backup": None}
+        if not path_str:
+            return info
+        try:
+            p = Path(path_str.strip().strip("'\""))
+            info["path"] = str(p)
+            if p.exists() and p.is_file():
+                info["existed"] = True
+                if p.stat().st_size <= cls._SAGA_SNAPSHOT_MAX_BYTES:
+                    saga = cls._saga_dir()
+                    saga.mkdir(parents=True, exist_ok=True)
+                    backup = saga / f"{p.name}.{uuid.uuid4().hex}.bak"
+                    shutil.copy2(p, backup)
+                    info["backup"] = str(backup)
+        except Exception as exc:
+            log.debug("DevAgent._snapshot_for_write(%r) failed: %s", path_str, exc)
+        return info
+
     @staticmethod
     def _compensation_for(step: "AgentStep") -> tuple[Optional[str], Optional[str]]:
         """Return (compensation_action, compensation_args) for a completed step, or (None, None)."""
         action = step.action.upper()
         if action == "WRITE_FILE":
-            # Undo: delete the file that was written.
+            # Prefer the execute-time snapshot (RESTORE_FILE: restore an
+            # overwritten file or delete a freshly-created one). Fall back to the
+            # legacy blind DELETE_FILE only if no snapshot was captured.
+            if step.comp_args:
+                return "RESTORE_FILE", step.comp_args
             return "DELETE_FILE", step.args.strip() if step.args else None
         if action == "RUN_TERMINAL":
             # Terminal side-effects can't be automatically reversed, but we
@@ -886,13 +1016,60 @@ class DevAgent:
         except Exception as exc:
             log.debug("DevAgent._persist_step failed: %s", exc)
 
-    async def _run_compensations(self, run_id: int) -> None:
+    async def _try_replan(
+        self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
+    ) -> Optional[list[AgentStep]]:
+        """One bounded recovery replan. Returns the new (budget-capped) remaining
+        steps, or None if the planner declined/errored (caller should halt).
+
+        Recomputes destructiveness: the upfront approval covered the ORIGINAL
+        plan's verbs, so a replan that injects a destructive verb the user never
+        heard described revokes the blanket authorization — that step (and every
+        later destructive step) then goes through per-op confirmation.
+        """
+        new_steps = await self._replan(goal, executed, remaining)
+        if not new_steps:
+            return None
+        injected = {
+            s.action.upper() for s in new_steps
+        } & self._DESTRUCTIVE_VERBS - self._approved_verbs
+        if injected and self._plan_authorized:
+            log.warning(
+                "DevAgent: replan injected unapproved destructive verb(s) %s — "
+                "revoking blanket plan authorization", sorted(injected),
+            )
+            self._plan_authorized = False
+        budget = max(0, self.MAX_STEPS - len(executed))
+        return new_steps[:budget]
+
+    async def _halt_and_compensate(
+        self, run_id: int, goal: str, replans: int, failed_action: str
+    ) -> None:
+        """Publish the replan-exhausted event (best-effort) and roll back
+        completed side effects. Used on every replan-exhausted terminal path
+        (sequential and DAG)."""
+        if self._event_bus is not None:
+            try:
+                await self._event_bus.publish(
+                    TOPIC_REPLAN_EXHAUSTED,
+                    {"run_id": run_id, "goal": goal[:120], "replans": replans,
+                     "failed_action": failed_action},
+                    source="dev_agent",
+                )
+            except Exception as _pub_exc:
+                log.debug("DevAgent: event publish failed: %s", _pub_exc)
+        await self._run_compensations(run_id, triggered_by="max_replans")
+
+    async def _run_compensations(
+        self, run_id: int, triggered_by: str = "step_failure"
+    ) -> None:
         """Execute pending saga compensations for run_id in reverse step order.
 
-        Only called after MAX_REPLANS is exhausted. Each compensation is
-        marked running → done (or failed) in the DB so the audit trail is
-        complete. Compensation failures are logged but never raise — we
-        always attempt all pending compensations.
+        Called on EVERY non-success terminal path — replan exhaustion
+        (triggered_by="max_replans"), MAX_STEPS halt ("max_steps"), user/cancel
+        ("user_cancel"). Each compensation is marked running → done (or failed)
+        so the audit trail is complete; failures are logged but never raise — we
+        always attempt every pending compensation.
         """
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
@@ -900,14 +1077,18 @@ class DevAgent:
         compensations = await db.get_pending_compensations(run_id)
         if not compensations:
             return
-        log.info("DevAgent: running %d saga compensation(s) for run %d", len(compensations), run_id)
+        log.info("DevAgent: running %d saga compensation(s) for run %d (%s)",
+                 len(compensations), run_id, triggered_by)
         for comp in compensations:
             cid = comp["id"]
             caction = comp.get("compensation_action", "")
             cargs = comp.get("compensation_args")
-            await db.update_saga_compensation(cid, "running", triggered_by="max_replans")
+            await db.update_saga_compensation(cid, "running", triggered_by=triggered_by)
             try:
-                if caction == "DELETE_FILE" and cargs:
+                if caction == "RESTORE_FILE" and cargs:
+                    await asyncio.to_thread(self._restore_file, cargs)
+                elif caction == "DELETE_FILE" and cargs:
+                    # Legacy/back-compat (no pre-write snapshot was captured).
                     path = Path(cargs.strip())
                     if path.exists():
                         path.unlink()
@@ -921,6 +1102,31 @@ class DevAgent:
                 log.error("DevAgent: saga compensation %s failed: %s", caction, exc)
                 await db.update_saga_compensation(cid, "failed", error=str(exc), finished=True)
 
+    @staticmethod
+    def _restore_file(comp_args: str) -> None:
+        """Roll back a WRITE_FILE step from its pre-write snapshot.
+
+        existed + backup → restore the original bytes; existed + no backup →
+        leave the overwritten file in place (deleting would lose data we
+        couldn't snapshot); not-existed → delete the file the plan created.
+        """
+        info = json.loads(comp_args)
+        path = Path(info["path"])
+        if info.get("existed"):
+            backup = info.get("backup")
+            if backup and Path(backup).exists():
+                shutil.copy2(backup, path)
+                log.info("DevAgent: saga RESTORE_FILE restored %s from backup", path)
+            else:
+                log.warning(
+                    "DevAgent: saga RESTORE_FILE %s existed but no backup — "
+                    "leaving the overwritten file in place", path,
+                )
+        else:
+            if path.exists():
+                path.unlink()
+                log.info("DevAgent: saga RESTORE_FILE deleted %s (created by plan)", path)
+
     async def _finalize_run(self, run_id: int, result: AgentResult, status: str) -> None:
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
@@ -931,6 +1137,10 @@ class DevAgent:
                 success=result.success, total_latency_ms=result.total_latency_ms,
                 error=result.error,
             )
+            # Any compensation still 'pending' here was never triggered (the run
+            # succeeded, or a path that didn't roll back) — mark it skipped so it
+            # never lingers as an un-actioned pending row.
+            await db.skip_pending_compensations(run_id)
         except Exception as exc:
             log.debug("DevAgent._finalize_run failed: %s", exc)
 
@@ -953,6 +1163,12 @@ class DevAgent:
         goal = run.get("goal", "")
         if not await self._confirm_destructive_op(f"Resume the interrupted task: {goal[:60]}?"):
             log.info("DevAgent.resume_pending_plan: user declined resume of run %s", run.get("id"))
+            # Declining a resume rolls back the crashed run's completed side
+            # effects — the user chose not to finish it, so partial destructive
+            # work shouldn't be left behind.
+            run_id = run.get("id")
+            if run_id is not None:
+                await self._run_compensations(int(run_id), triggered_by="user_cancel")
             return None
         log.info("DevAgent.resume_pending_plan: resuming run %s — %r", run.get("id"), goal[:60])
         await self.plan_and_run(goal)
@@ -1238,6 +1454,12 @@ class DevAgent:
                 f"Approve writing file {target[:60]}?"
             ):
                 return "WRITE_FILE cancelled by user"
+            # Snapshot BEFORE writing so a saga rollback restores an overwritten
+            # file instead of deleting it. Captured even though we're about to
+            # write — if the write fails, no compensation is registered anyway.
+            step.comp_args = json.dumps(await asyncio.to_thread(
+                self._snapshot_for_write, step.args
+            ))
             return await asyncio.to_thread(self._write_file, step.args, step.body)
 
         if action == "RUN_TERMINAL":

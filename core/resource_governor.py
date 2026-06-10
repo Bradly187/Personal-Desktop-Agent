@@ -352,13 +352,19 @@ class ResourceGovernor:
         log.info("ResourceGovernor: heavy-model VRAM eviction requested (flare): %s", models)
 
     def _restore_heavy_models(self) -> None:
-        """Restore keep_alive=5m for every heavy specialist (Ollama default)."""
-        models = self._heavy_models()
-        for model in models:
-            try:
-                self._post_keepalive(model, "5m")
-            except Exception as exc:
-                log.debug("ResourceGovernor: restore %s failed: %s", model, exc)
+        """Intentionally a NO-OP (audit fix 2026-06-09).
+
+        The old implementation POSTed an empty-prompt /api/generate with
+        keep_alive='5m' for every heavy specialist — which is Ollama's model
+        LOAD idiom (eviction uses the same call with keep_alive='0'). So
+        "restoring" eagerly loaded qwen3-coder:30b + qwen3-vl:30b (~36 GB on a
+        32 GB card → guaranteed eviction churn) at flare-end AND on every clean
+        shutdown. There is no way to set a keep-alive policy without loading, so
+        we don't try: the NEXT real inference loads the specialist on demand
+        with the router's normal keep-alive. Eviction (keep_alive=0) on flare
+        start is unchanged.
+        """
+        return
 
     # ── Supervision (gap #2) ────────────────────────────────────────────────
 

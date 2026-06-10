@@ -88,8 +88,18 @@ class RateLimiter:
             await self._db.insert_rate_limit_event(
                 resource, command_id=command_id, wait_ms=wait_s * 1000, was_dropped=False
             )
-            await asyncio.sleep(wait_s)
-            return True
+            # Wait, then ACTUALLY consume the token. The first consume() above
+            # returned a wait time WITHOUT taking a token; without re-consuming
+            # here every throttled request would be admitted token-free, so the
+            # effective rate would exceed max_rps under sustained load. Loop
+            # because N throttled callers can wake together and race for the
+            # one refilled token (bounded by burst_capacity tries).
+            for _ in range(self._buckets[resource].burst_capacity + 1):
+                await asyncio.sleep(wait_s)
+                wait_s = bucket.consume()
+                if wait_s <= 0.0:
+                    return True
+            return True   # fail-open after bounded retries (never starve a call)
         except Exception as exc:
             log.warning("RateLimiter.check failed (fail-open): %s", exc)
             return True  # fail-open

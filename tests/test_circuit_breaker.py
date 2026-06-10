@@ -95,6 +95,23 @@ def test_success_resets_failure_count():
     assert cb.state == "closed"         # 2 < 3 after reset
 
 
+def test_half_open_lost_probe_self_heals():
+    """A half-open probe whose outcome is never reported (caller cancelled)
+    must not wedge the breaker shut forever — after cooldown a fresh probe is
+    admitted (audit fix 2026-06-09)."""
+    clock = _Clock()
+    cb = _cb(clock, fail_threshold=1, cooldown_s=10.0)
+    cb.record_failure()                 # open
+    clock.advance(11.0)
+    assert cb.allow() is True           # probe admitted, inflight=True
+    assert cb.allow() is False          # concurrent caller rejected
+    # No record_success/record_failure ever called (probe was lost).
+    clock.advance(5.0)
+    assert cb.allow() is False          # still within the probe deadline
+    clock.advance(6.0)                  # now > cooldown_s since the probe started
+    assert cb.allow() is True           # self-healed — fresh probe admitted
+
+
 # ---------------------------------------------------------------------------
 # OllamaInference wiring
 # ---------------------------------------------------------------------------
@@ -135,3 +152,21 @@ async def test_ollama_success_keeps_breaker_closed():
     out = await b.infer(Command(text="click x", action="", source="voice"))
     assert out == "CLICK x"
     assert b._breaker.state == "closed"
+
+
+async def test_ollama_tools_cancellation_records_failure_via_finally():
+    """A CancelledError from the call (BaseException — NOT caught by
+    `except Exception`) must still report a breaker failure via finally, so a
+    cancelled probe can't strand the half-open flag."""
+    import asyncio
+
+    b = OllamaInference(use_tools=True)
+
+    async def _chat_cancel(messages, tools=None):
+        raise asyncio.CancelledError()
+
+    b._chat = _chat_cancel
+    before = b._breaker._consecutive_failures
+    with pytest.raises(asyncio.CancelledError):
+        await b.infer(Command(text="click x", action="", source="voice"))
+    assert b._breaker._consecutive_failures == before + 1

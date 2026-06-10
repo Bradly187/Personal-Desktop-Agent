@@ -844,6 +844,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     event_bus = EventBus(agent_db)
     rate_limiter = RateLimiter(agent_db)
     coordinator.set_event_bus(event_bus)
+    coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
     dev_agent.set_event_bus(event_bus)
 
     # Wire CommandExecutor DB access for per-call timeout + idempotency.

@@ -374,6 +374,11 @@ class OllamaInference(LocalInference):
         }
 
         t0 = time.monotonic()
+        # Report the outcome in `finally` so a CancelledError (which is a
+        # BaseException, NOT caught by `except Exception`) still clears the
+        # breaker's half-open probe flag — otherwise a cancelled probe wedges
+        # the breaker shut forever.
+        succeeded = False
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -390,13 +395,19 @@ class OllamaInference(LocalInference):
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
-                    self._breaker.record_success()
+                    succeeded = True
                     return action
         except Exception as exc:
             self._available = False
-            self._breaker.record_failure()
             log.error("OllamaInference failed: %s", exc)
             return f"CLARIFY inference error: {exc}"
+        finally:
+            if succeeded:
+                self._breaker.record_success()
+            else:
+                # Covers both `except Exception` returns and BaseException
+                # (CancelledError/timeout) propagation.
+                self._breaker.record_failure()
 
     async def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """POST /api/chat and return the parsed JSON response.
@@ -451,16 +462,24 @@ class OllamaInference(LocalInference):
         self.last_tokens_in = None
         self.last_tokens_out = None
         t0 = time.monotonic()
+        # Report the outcome in `finally` so a CancelledError (BaseException, not
+        # caught by `except Exception`) still clears the breaker's half-open
+        # probe flag — otherwise a cancelled probe wedges the breaker shut.
+        succeeded = False
         try:
             data = await self._chat(messages, tools=[_DESKTOP_ACTION_TOOL])
+            succeeded = True
         except Exception as exc:
             self._available = False
-            self._breaker.record_failure()
             log.error("OllamaInference[tools] failed: %s", exc)
             return f"CLARIFY inference error: {exc}"
+        finally:
+            if succeeded:
+                self._breaker.record_success()
+            else:
+                self._breaker.record_failure()
 
         self._available = True
-        self._breaker.record_success()
         self.last_tokens_in = data.get("prompt_eval_count")
         self.last_tokens_out = data.get("eval_count")
         latency_ms = (time.monotonic() - t0) * 1000

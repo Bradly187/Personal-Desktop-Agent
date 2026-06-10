@@ -280,3 +280,172 @@ async def test_persist_step_no_saga_for_non_reversible_verb(tmp_path):
     compensations = await db.get_pending_compensations(run_id)
     assert len(compensations) == 0
     await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Pre-write snapshot + RESTORE_FILE (audit fix 2026-06-09)
+# ---------------------------------------------------------------------------
+
+def test_snapshot_for_write_overwrite_captures_backup(tmp_path):
+    target = tmp_path / "exists.py"
+    target.write_text("ORIGINAL", encoding="utf-8")
+    info = DevAgent._snapshot_for_write(str(target))
+    assert info["existed"] is True
+    assert info["backup"] and Path(info["backup"]).exists()
+    assert Path(info["backup"]).read_text(encoding="utf-8") == "ORIGINAL"
+
+
+def test_snapshot_for_write_new_file_marks_not_existed(tmp_path):
+    target = tmp_path / "brand_new.py"
+    info = DevAgent._snapshot_for_write(str(target))
+    assert info["existed"] is False
+    assert info["backup"] is None
+
+
+def test_compensation_for_prefers_snapshot_restore():
+    step = _make_step("WRITE_FILE", args="/tmp/x.py")
+    step.comp_args = '{"path": "/tmp/x.py", "existed": true, "backup": "/tmp/x.bak"}'
+    action, args = DevAgent._compensation_for(step)
+    assert action == "RESTORE_FILE"
+    assert args == step.comp_args
+
+
+async def test_restore_file_overwrite_restores_original_bytes(tmp_path):
+    db = await _open_db(tmp_path)
+    agent = await _make_agent(db)
+    run_id = await _seed_run(db)
+
+    target = tmp_path / "doc.py"
+    target.write_text("ORIGINAL", encoding="utf-8")
+    snap = DevAgent._snapshot_for_write(str(target))    # capture before "write"
+    target.write_text("OVERWRITTEN BY PLAN", encoding="utf-8")
+
+    import json as _json
+    step_id = await db.insert_agent_step(
+        run_id, 1, "WRITE_FILE", str(target), None, "ok", True, 1.0,
+        compensation_action="RESTORE_FILE", compensation_args=_json.dumps(snap),
+    )
+    await db.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", _json.dumps(snap))
+
+    await agent._run_compensations(run_id, triggered_by="user_cancel")
+
+    # Original content restored — NOT deleted.
+    assert target.exists()
+    assert target.read_text(encoding="utf-8") == "ORIGINAL"
+    await db.close()
+
+
+async def test_restore_file_new_file_is_deleted(tmp_path):
+    db = await _open_db(tmp_path)
+    agent = await _make_agent(db)
+    run_id = await _seed_run(db)
+
+    target = tmp_path / "created.py"
+    snap = DevAgent._snapshot_for_write(str(target))    # did not exist
+    target.write_text("CREATED BY PLAN", encoding="utf-8")
+
+    import json as _json
+    step_id = await db.insert_agent_step(
+        run_id, 1, "WRITE_FILE", str(target), None, "ok", True, 1.0,
+        compensation_action="RESTORE_FILE", compensation_args=_json.dumps(snap),
+    )
+    await db.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", _json.dumps(snap))
+
+    await agent._run_compensations(run_id, triggered_by="max_steps")
+
+    assert not target.exists()                           # plan-created file removed
+    await db.close()
+
+
+async def test_restore_file_existed_but_no_backup_leaves_file(tmp_path):
+    db = await _open_db(tmp_path)
+    agent = await _make_agent(db)
+    run_id = await _seed_run(db)
+
+    target = tmp_path / "huge.py"
+    target.write_text("OVERWRITTEN", encoding="utf-8")
+    # existed=True but no backup (simulates a file too large to snapshot).
+    import json as _json
+    snap = _json.dumps({"path": str(target), "existed": True, "backup": None})
+    step_id = await db.insert_agent_step(
+        run_id, 1, "WRITE_FILE", str(target), None, "ok", True, 1.0,
+        compensation_action="RESTORE_FILE", compensation_args=snap,
+    )
+    cid = await db.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
+
+    await agent._run_compensations(run_id, triggered_by="user_cancel")
+
+    # Can't restore, but must NOT delete (deleting would lose data).
+    assert target.exists()
+    async with db._conn.execute(
+        "SELECT status FROM saga_compensations WHERE id = ?", (cid,)
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["status"] == "done"
+    await db.close()
+
+
+# ---------------------------------------------------------------------------
+# triggered_by is recorded; skip_pending_compensations
+# ---------------------------------------------------------------------------
+
+async def test_run_compensations_records_triggered_by(tmp_path):
+    db = await _open_db(tmp_path)
+    agent = await _make_agent(db)
+    run_id = await _seed_run(db)
+    target = tmp_path / "f.py"
+    target.write_text("x")
+    step_id = await db.insert_agent_step(
+        run_id, 1, "WRITE_FILE", str(target), None, "ok", True, 1.0,
+        compensation_action="DELETE_FILE", compensation_args=str(target),
+    )
+    cid = await db.insert_saga_compensation(run_id, step_id, "DELETE_FILE", str(target))
+
+    await agent._run_compensations(run_id, triggered_by="user_cancel")
+
+    async with db._conn.execute(
+        "SELECT triggered_by FROM saga_compensations WHERE id = ?", (cid,)
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["triggered_by"] == "user_cancel"
+    await db.close()
+
+
+async def test_finalize_run_skips_leftover_pending_compensations(tmp_path):
+    from inference.dev_agent import AgentResult
+    db = await _open_db(tmp_path)
+    agent = await _make_agent(db)
+    run_id = await _seed_run(db)
+
+    # A successful WRITE_FILE registers a pending compensation we must NOT run.
+    step = _make_step("WRITE_FILE", args=str(tmp_path / "out.py"), success=True)
+    await agent._persist_step(run_id, 1, step)
+    assert len(await db.get_pending_compensations(run_id)) == 1
+
+    result = AgentResult(goal="g", domain="plan", model_used="m",
+                         steps=[step], success=True)
+    await agent._finalize_run(run_id, result, "completed")
+
+    # No pending rows linger; the row is 'skipped', not 'done'.
+    assert await db.get_pending_compensations(run_id) == []
+    async with db._conn.execute(
+        "SELECT status FROM saga_compensations WHERE run_id = ?", (run_id,)
+    ) as cur:
+        rows = await cur.fetchall()
+    assert all(r["status"] == "skipped" for r in rows)
+    await db.close()
+
+
+async def test_skip_pending_compensations_returns_count(tmp_path):
+    db = await _open_db(tmp_path)
+    run_id = await _seed_run(db)
+    for i in range(3):
+        sid = await db.insert_agent_step(
+            run_id, i + 1, "WRITE_FILE", f"/tmp/{i}.py", None, "ok", True, 1.0,
+            compensation_action="DELETE_FILE", compensation_args=f"/tmp/{i}.py",
+        )
+        await db.insert_saga_compensation(run_id, sid, "DELETE_FILE", f"/tmp/{i}.py")
+    n = await db.skip_pending_compensations(run_id)
+    assert n == 3
+    assert await db.skip_pending_compensations(run_id) == 0   # idempotent
+    await db.close()
