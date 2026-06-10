@@ -51,7 +51,14 @@ from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
 from dataclasses import replace as _dc_replace
-from inference.local_inference import LocalInference, OllamaInference, _build_prompt, _SYSTEM_PROMPT
+from inference.local_inference import (
+    LocalInference,
+    OllamaInference,
+    _build_prompt,
+    _SYSTEM_PROMPT,
+    get_inference_capture,
+    set_inference_capture,
+)
 from desktop.vision_grounder import VisionGrounder
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
@@ -168,10 +175,6 @@ class _CloudInference:
     def __init__(self, model: str) -> None:
         self._model = model
         self._client = None
-        # Fine-tuning data capture: last inference's prompt and token counts.
-        self.last_prompt: str | None = None
-        self.last_tokens_in: int | None = None
-        self.last_tokens_out: int | None = None
 
     def _get_client(self):
         if self._client is None:
@@ -195,12 +198,13 @@ class _CloudInference:
             context_lines = f"\n\nRecent commands:\n{joined}"
 
         user_content = f"Command: {cmd.text}{context_lines}"
-        self.last_prompt = json.dumps([
+        # Task-local fine-tuning capture (see inference.local_inference) — a
+        # ContextVar so concurrent route() tasks can't misattribute prompts.
+        prompt_json = json.dumps([
             {"role": "system", "content": _CLOUD_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ])
-        self.last_tokens_in = None
-        self.last_tokens_out = None
+        set_inference_capture(prompt_json)
 
         t0 = time.monotonic()
         try:
@@ -214,8 +218,10 @@ class _CloudInference:
             )
             action = response.content[0].text.strip().splitlines()[0].strip()
             if hasattr(response, "usage") and response.usage:
-                self.last_tokens_in = response.usage.input_tokens
-                self.last_tokens_out = response.usage.output_tokens
+                set_inference_capture(
+                    prompt_json,
+                    response.usage.input_tokens, response.usage.output_tokens,
+                )
             latency_ms = (time.monotonic() - t0) * 1000
             log.info("CloudInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
             return action
@@ -1088,9 +1094,10 @@ class HybridCoordinator:
                     cmd, action_str, command_id=command_id
                 )
             # Feed failed local executions into the twin's pain-day fail signal
-            # ONLY (never the few-shot store). CLARIFY executes with status "ok"
-            # so it is a success here, not a failure. Cloud outcomes stay out of
-            # the twin, matching the local-only success gate above.
+            # and the counterexample store (guarded — see trainer.record_failure;
+            # never the positive few-shot store). CLARIFY executes with status
+            # "ok" so it is a success here, not a failure. Cloud outcomes stay
+            # out of the twin, matching the local-only success gate above.
             elif (self._trainer and route_label == "local" and not success):
                 await self._trainer.record_failure(
                     cmd, action_str, command_id=command_id
@@ -1312,6 +1319,9 @@ class HybridCoordinator:
             await self._trainer.get_few_shot_counterexamples(cmd)
             if self._trainer else None
         )
+        # Clear the task-local capture so a backend that doesn't set it (or a
+        # mocked infer in tests) can't surface a previous command's prompt.
+        set_inference_capture(None)
         t0 = time.monotonic()
         # Circuit-breaker: a wedged local backend (Ollama hung, GPU stuck during
         # a flare, stalled model reload) must not stall the pipeline forever.
@@ -1335,14 +1345,15 @@ class HybridCoordinator:
         if self._agent_db and self._agent_db.available:
             status = self._local.get_status()
             error = action_str if action_str.startswith("CLARIFY inference") else None
+            _prompt, _tokens_in, _tokens_out = get_inference_capture()
             _inf_id = await self._agent_db.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=status.get("model", "unknown"),
                 domain="command",
-                prompt=getattr(self._local, "last_prompt", None),
+                prompt=_prompt,
                 response=action_str,
-                tokens_in=getattr(self._local, "last_tokens_in", None),
-                tokens_out=getattr(self._local, "last_tokens_out", None),
+                tokens_in=_tokens_in,
+                tokens_out=_tokens_out,
                 latency_ms=latency_ms,
                 backend=status.get("backend", "ollama"),
                 error=error,
@@ -1401,6 +1412,9 @@ class HybridCoordinator:
             if findings or ctx_overrides:
                 cmd = _dc_replace(cmd, text=clean_text, **ctx_overrides)
 
+        # Clear the task-local capture so a stale prompt from a previous
+        # inference in this task can't be attributed to this cloud call.
+        set_inference_capture(None)
         t0 = time.monotonic()
         try:
             async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
@@ -1415,14 +1429,15 @@ class HybridCoordinator:
         latency_ms = (time.monotonic() - t0) * 1000
         if self._agent_db and self._agent_db.available:
             error = action_str if action_str.startswith("CLARIFY") else None
+            _prompt, _tokens_in, _tokens_out = get_inference_capture()
             _inf_id = await self._agent_db.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=self._cfg.anthropic_model,
                 domain="command",
-                prompt=getattr(self._cloud, "last_prompt", None),
+                prompt=_prompt,
                 response=action_str,
-                tokens_in=getattr(self._cloud, "last_tokens_in", None),
-                tokens_out=getattr(self._cloud, "last_tokens_out", None),
+                tokens_in=_tokens_in,
+                tokens_out=_tokens_out,
                 latency_ms=latency_ms,
                 backend="anthropic",
                 error=error,

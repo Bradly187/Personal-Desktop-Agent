@@ -1904,12 +1904,17 @@ class AgentDB:
             return
         now = time.time()
         try:
+            # reason upgrades to user_correction (direct evidence the mapping is
+            # wrong) but never downgrades back to pipeline_failure — the gate in
+            # get_few_shot_counterexamples() trusts user_correction immediately.
             await self._conn.execute(
                 """INSERT INTO few_shot_counterexamples
                    (command_id, text, wrong_action, reason, source, domain, ts, usage_count)
                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                    ON CONFLICT(text, wrong_action) DO UPDATE
-                     SET usage_count = usage_count + 1, ts = excluded.ts""",
+                     SET usage_count = usage_count + 1, ts = excluded.ts,
+                         reason = CASE WHEN excluded.reason = 'user_correction'
+                                       THEN 'user_correction' ELSE reason END""",
                 (
                     command_id if (command_id and command_id > 0) else None,
                     cmd.text, wrong_action, reason, cmd.source, domain, now,
@@ -1933,13 +1938,29 @@ class AgentDB:
         except Exception as exc:
             log.debug("Counterexample embedding update failed (non-fatal): %s", exc)
 
+    # Similarity floor for counterexample injection. A "do NOT" line about an
+    # unrelated command only burns prompt tokens and confuses a small model, so
+    # require real similarity to the current text before injecting.
+    _COUNTEREXAMPLE_MIN_SIM = 0.30
+
     async def get_few_shot_counterexamples(
         self,
         cmd: "Command",
         n: int = 3,
         domain: str = "command",
     ) -> list[dict]:
-        """Return up to n counterexamples ranked by (cosine | Jaccard) × recency × usage."""
+        """Return up to n counterexamples ranked by (cosine | Jaccard) × recency × usage.
+
+        Poisoning guards — an execution failure is NOT proof the LLM mapping
+        was wrong (the app may have been slow, the window missing), so:
+        - pipeline_failure rows need usage_count >= 2 before they inject; a
+          single transient failure stays recorded but never reaches a prompt.
+          user_correction rows inject immediately — the user said it was wrong.
+        - pairs that also exist as a positive few-shot example are excluded:
+          success evidence supersedes failure evidence, and a prompt must never
+          contain the same pair as both example and counterexample.
+        - a similarity floor keeps unrelated counterexamples out of prompts.
+        """
         if not self._conn:
             return []
         try:
@@ -1953,32 +1974,82 @@ class AgentDB:
                 except Exception:
                     pass
             async with self._conn.execute(
-                """SELECT text, wrong_action, ts, usage_count, embedding
-                   FROM few_shot_counterexamples
-                   WHERE domain = ?
-                   ORDER BY ts DESC LIMIT 500""",
+                """SELECT ce.text, ce.wrong_action, ce.ts, ce.usage_count, ce.embedding
+                   FROM few_shot_counterexamples ce
+                   WHERE ce.domain = ?
+                     AND (ce.reason = 'user_correction' OR ce.usage_count >= 2)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM few_shot_examples fe
+                         WHERE fe.text = ce.text AND fe.action = ce.wrong_action
+                     )
+                   ORDER BY ce.ts DESC LIMIT 500""",
                 (domain,),
             ) as cur:
                 rows = [dict(r) for r in await cur.fetchall()]
 
-            def _cscore(row: dict) -> float:
-                recency = _recency_weight(row["ts"], now)
-                usage   = math.log1p(row["usage_count"])
+            scored: list[tuple[float, dict]] = []
+            for row in rows:
                 if query_emb is not None and row.get("embedding"):
                     sim = _cosine(query_emb, row["embedding"])
                 else:
                     sim = _jaccard(query_tokens, _tokens(row["text"]))
-                return sim * recency * usage
+                if sim < self._COUNTEREXAMPLE_MIN_SIM:
+                    continue
+                recency = _recency_weight(row["ts"], now)
+                usage   = math.log1p(row["usage_count"])
+                scored.append((sim * recency * usage, row))
 
-            scored = sorted(rows, key=_cscore, reverse=True)
+            scored.sort(key=lambda pair: pair[0], reverse=True)
             return [
                 {"command_text": r["text"], "wrong_action": r["wrong_action"]}
-                for r in scored[:n]
-                if _cscore(r) > 0.0
+                for score, r in scored[:n]
+                if score > 0.0
             ]
         except Exception as exc:
             log.warning("AgentDB.get_few_shot_counterexamples failed: %s", exc)
             return []
+
+    async def delete_few_shot_example(self, text: str, action: str) -> None:
+        """Remove a (text, action) positive example the user has rejected.
+
+        Called by record_correction: a user correction is direct evidence the
+        old mapping is wrong, so a stale positive example for the same pair
+        must not keep reinforcing it — and must not suppress the correction's
+        counterexample via the contradiction guard in
+        get_few_shot_counterexamples. No-op when the pair was never recorded.
+        """
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "DELETE FROM few_shot_examples WHERE text = ? AND action = ?",
+                (text, action),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.delete_few_shot_example failed: %s", exc)
+
+    async def delete_few_shot_counterexample(
+        self, text: str, action: str
+    ) -> None:
+        """Remove a (text, action) counterexample after the same pair succeeds.
+
+        A later success supersedes earlier failure evidence: the mapping is
+        demonstrably right, so keeping it as a counterexample would re-poison
+        prompts the next time the pair fails transiently. Exact-match on the
+        UNIQUE(text, wrong_action) key; no-op when the pair was never recorded.
+        """
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "DELETE FROM few_shot_counterexamples"
+                " WHERE text = ? AND wrong_action = ?",
+                (text, action),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.delete_few_shot_counterexample failed: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Hotwords

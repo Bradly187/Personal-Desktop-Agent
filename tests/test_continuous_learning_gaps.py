@@ -355,6 +355,8 @@ class TestGap2TrainerWiring:
         _db.available = True
         _db.upsert_few_shot_counterexample = AsyncMock()
         _db.upsert_few_shot_example = AsyncMock()
+        _db.delete_few_shot_example = AsyncMock()
+        _db.delete_few_shot_counterexample = AsyncMock()
         _db.mark_command_corrected = AsyncMock()
         _db.get_few_shot_counterexamples = AsyncMock(return_value=[])
         _twin = MagicMock()
