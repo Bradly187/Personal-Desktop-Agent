@@ -226,6 +226,26 @@ CREATE TABLE IF NOT EXISTS few_shot_examples (
 CREATE INDEX IF NOT EXISTS idx_fse_ts     ON few_shot_examples(ts);
 CREATE INDEX IF NOT EXISTS idx_fse_domain ON few_shot_examples(domain);
 
+-- Counterexamples: (text, wrong_action) pairs captured from failures and user
+-- corrections. Injected as "Do NOT produce" guidance in prompts so the local LLM
+-- stops mapping a phrasing to an action the user has already rejected.
+-- Source reason: "pipeline_failure" | "user_correction"
+CREATE TABLE IF NOT EXISTS few_shot_counterexamples (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id   INTEGER REFERENCES commands(id),
+    text         TEXT    NOT NULL,
+    wrong_action TEXT    NOT NULL,
+    reason       TEXT,
+    source       TEXT    NOT NULL,
+    domain       TEXT    NOT NULL DEFAULT 'command',
+    ts           REAL    NOT NULL,
+    embedding    BLOB,
+    usage_count  INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(text, wrong_action)
+);
+CREATE INDEX IF NOT EXISTS idx_fsce_ts     ON few_shot_counterexamples(ts);
+CREATE INDEX IF NOT EXISTS idx_fsce_domain ON few_shot_counterexamples(domain);
+
 CREATE TABLE IF NOT EXISTS word_counts (
     word  TEXT    PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 1
@@ -640,7 +660,7 @@ CREATE INDEX IF NOT EXISTS idx_rle_resource_ts ON rate_limit_events(resource, ts
 # a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
 # append a row when introducing a new additive column; the batch is gated by
 # PRAGMA user_version so it runs at most once per database file.
-_AGENT_DB_SCHEMA_VERSION = 3
+_AGENT_DB_SCHEMA_VERSION = 5
 _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # v1→2
     ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
@@ -651,6 +671,8 @@ _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("ipad_logs",   "trace_id",           "TEXT"),          # iPad↔PC trace correlation
     ("agent_steps", "compensation_action", "TEXT"),          # saga: reverse verb
     ("agent_steps", "compensation_args",   "TEXT"),          # saga: reverse args JSON
+    # v3→4
+    ("inferences", "prompt", "TEXT"),           # fine-tuning: full prompt text
 )
 
 
@@ -1415,12 +1437,12 @@ class AgentDB:
         try:
             cur = await self._conn.execute(
                 """INSERT INTO inferences
-                   (command_id, ts, model, domain, prompt_hash, response,
+                   (command_id, ts, model, domain, prompt_hash, prompt, response,
                     tokens_in, tokens_out, latency_ms, backend, error)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     command_id if (command_id and command_id > 0) else None,
-                    time.time(), model, domain, prompt_hash, response,
+                    time.time(), model, domain, prompt_hash, prompt, response,
                     tokens_in, tokens_out, round(latency_ms, 1), backend, error,
                 ),
             )
@@ -1841,6 +1863,94 @@ class AgentDB:
             ]
         except Exception as exc:
             log.warning("AgentDB.get_few_shot_examples failed: %s", exc)
+            return []
+
+    async def upsert_few_shot_counterexample(
+        self,
+        cmd: "Command",
+        wrong_action: str,
+        domain: str = "command",
+        reason: str = "pipeline_failure",
+        command_id: Optional[int] = None,
+    ) -> None:
+        if not self._conn:
+            return
+        now = time.time()
+        try:
+            await self._conn.execute(
+                """INSERT INTO few_shot_counterexamples
+                   (command_id, text, wrong_action, reason, source, domain, ts, usage_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                   ON CONFLICT(text, wrong_action) DO UPDATE
+                     SET usage_count = usage_count + 1, ts = excluded.ts""",
+                (
+                    command_id if (command_id and command_id > 0) else None,
+                    cmd.text, wrong_action, reason, cmd.source, domain, now,
+                ),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.upsert_few_shot_counterexample failed: %s", exc)
+            return
+        try:
+            encoder = await _get_encoder()
+            if encoder is None:
+                return
+            emb = await asyncio.to_thread(_encode_sync, cmd.text, encoder)
+            await self._conn.execute(
+                """UPDATE few_shot_counterexamples SET embedding = ?
+                   WHERE text = ? AND wrong_action = ? AND embedding IS NULL""",
+                (emb, cmd.text, wrong_action),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.debug("Counterexample embedding update failed (non-fatal): %s", exc)
+
+    async def get_few_shot_counterexamples(
+        self,
+        cmd: "Command",
+        n: int = 3,
+        domain: str = "command",
+    ) -> list[dict]:
+        """Return up to n counterexamples ranked by (cosine | Jaccard) × recency × usage."""
+        if not self._conn:
+            return []
+        try:
+            now = time.time()
+            query_tokens = _tokens(cmd.text)
+            encoder = await _get_encoder()
+            query_emb: Optional[bytes] = None
+            if encoder is not None:
+                try:
+                    query_emb = await asyncio.to_thread(_encode_sync, cmd.text, encoder)
+                except Exception:
+                    pass
+            async with self._conn.execute(
+                """SELECT text, wrong_action, ts, usage_count, embedding
+                   FROM few_shot_counterexamples
+                   WHERE domain = ?
+                   ORDER BY ts DESC LIMIT 500""",
+                (domain,),
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+
+            def _cscore(row: dict) -> float:
+                recency = _recency_weight(row["ts"], now)
+                usage   = math.log1p(row["usage_count"])
+                if query_emb is not None and row.get("embedding"):
+                    sim = _cosine(query_emb, row["embedding"])
+                else:
+                    sim = _jaccard(query_tokens, _tokens(row["text"]))
+                return sim * recency * usage
+
+            scored = sorted(rows, key=_cscore, reverse=True)
+            return [
+                {"command_text": r["text"], "wrong_action": r["wrong_action"]}
+                for r in scored[:n]
+                if _cscore(r) > 0.0
+            ]
+        except Exception as exc:
+            log.warning("AgentDB.get_few_shot_counterexamples failed: %s", exc)
             return []
 
     # ---------------------------------------------------------------------- #

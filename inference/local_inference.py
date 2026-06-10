@@ -20,6 +20,7 @@ Embedding:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -70,7 +71,11 @@ Rules:
 """
 
 
-def _build_prompt(cmd: Command, few_shot_examples: list[dict] | None = None) -> str:
+def _build_prompt(
+    cmd: Command,
+    few_shot_examples: list[dict] | None = None,
+    counterexamples: list[dict] | None = None,
+) -> str:
     """Build the full prompt sent to the LLM."""
     parts = [_SYSTEM_PROMPT]
 
@@ -78,6 +83,11 @@ def _build_prompt(cmd: Command, few_shot_examples: list[dict] | None = None) -> 
         parts.append("\nExamples:")
         for ex in few_shot_examples:
             parts.append(f'User: {ex["command_text"]}\nAssistant: {ex["action_text"]}')
+
+    if counterexamples:
+        parts.append("\nDo NOT produce these responses:")
+        for ex in counterexamples:
+            parts.append(f'User: {ex["command_text"]} | Wrong: {ex["wrong_action"]}')
 
     if cmd.session_context:
         context = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
@@ -90,9 +100,17 @@ def _build_prompt(cmd: Command, few_shot_examples: list[dict] | None = None) -> 
 def _build_chat_messages(
     cmd: Command,
     few_shot_examples: list[dict] | None = None,
+    counterexamples: list[dict] | None = None,
 ) -> list[dict]:
     """Build OpenAI/Ollama-style chat messages for the /api/chat tool path."""
-    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    system_content = _SYSTEM_PROMPT
+    if counterexamples:
+        neg_block = "Avoid these incorrect mappings:\n" + "\n".join(
+            f'"{ex["command_text"]}" -> NOT "{ex["wrong_action"]}"'
+            for ex in counterexamples
+        )
+        system_content += "\n\n" + neg_block
+    messages: list[dict] = [{"role": "system", "content": system_content}]
     if few_shot_examples:
         for ex in few_shot_examples:
             messages.append({"role": "user", "content": ex["command_text"]})
@@ -246,6 +264,7 @@ class LocalInference(ABC):
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
+        counterexamples: list[dict] | None = None,
     ) -> str:
         """Run inference and return an action string (e.g. 'CLICK Save button').
 
@@ -253,6 +272,8 @@ class LocalInference(ABC):
             cmd: The command to classify.
             few_shot_examples: Optional list of {'command_text', 'action_text'} dicts
                 from ContinuousTrainer; injected into the prompt when provided.
+            counterexamples: Optional list of {'command_text', 'wrong_action'} dicts
+                injected as "do NOT" guidance from the few_shot_counterexamples store.
         """
 
     async def infer_stream(
@@ -318,14 +339,20 @@ class OllamaInference(LocalInference):
         # paying the full timeout on every request until it recovers.
         from core.circuit_breaker import CircuitBreaker
         self._breaker = CircuitBreaker(name="ollama", fail_threshold=3, cooldown_s=30.0)
+        # Fine-tuning data capture: last inference's prompt and token counts.
+        # Set on every successful infer() call; read by HybridCoordinator._run_local().
+        self.last_prompt: str | None = None
+        self.last_tokens_in: int | None = None
+        self.last_tokens_out: int | None = None
 
     async def infer(
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
+        counterexamples: list[dict] | None = None,
     ) -> str:
         if self.use_tools:
-            return await self._infer_tools(cmd, few_shot_examples)
+            return await self._infer_tools(cmd, few_shot_examples, counterexamples)
 
         try:
             import aiohttp
@@ -335,7 +362,10 @@ class OllamaInference(LocalInference):
         if not self._breaker.allow():
             return "CLARIFY inference backend unavailable (circuit open)"
 
-        prompt = _build_prompt(cmd, few_shot_examples)
+        prompt = _build_prompt(cmd, few_shot_examples, counterexamples)
+        self.last_prompt = prompt
+        self.last_tokens_in = None
+        self.last_tokens_out = None
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -355,6 +385,8 @@ class OllamaInference(LocalInference):
                         raise RuntimeError(f"Ollama HTTP {resp.status}")
                     data = await resp.json()
                     action = data.get("response", "").strip().splitlines()[0].strip()
+                    self.last_tokens_in = data.get("prompt_eval_count")
+                    self.last_tokens_out = data.get("eval_count")
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
@@ -397,6 +429,7 @@ class OllamaInference(LocalInference):
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
+        counterexamples: list[dict] | None = None,
     ) -> str:
         """Native tool-calling path: /api/chat with the constrained desktop_action tool.
 
@@ -413,7 +446,10 @@ class OllamaInference(LocalInference):
         if not self._breaker.allow():
             return "CLARIFY inference backend unavailable (circuit open)"
 
-        messages = _build_chat_messages(cmd, few_shot_examples)
+        messages = _build_chat_messages(cmd, few_shot_examples, counterexamples)
+        self.last_prompt = json.dumps(messages)
+        self.last_tokens_in = None
+        self.last_tokens_out = None
         t0 = time.monotonic()
         try:
             data = await self._chat(messages, tools=[_DESKTOP_ACTION_TOOL])
@@ -425,6 +461,8 @@ class OllamaInference(LocalInference):
 
         self._available = True
         self._breaker.record_success()
+        self.last_tokens_in = data.get("prompt_eval_count")
+        self.last_tokens_out = data.get("eval_count")
         latency_ms = (time.monotonic() - t0) * 1000
         message = data.get("message", {}) or {}
 
@@ -731,6 +769,7 @@ class VLLMInference(LocalInference):
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
+        counterexamples: list[dict] | None = None,
     ) -> str:
         try:
             await self._ensure_loaded()
@@ -764,7 +803,14 @@ class VLLMInference(LocalInference):
                 log.debug("VLLMInference: no structured-output API found — using stop=[\\n]")
 
         # Build chat messages — LLM.chat() applies the model's native template.
-        messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        system_content = _SYSTEM_PROMPT
+        if counterexamples:
+            neg_block = "Avoid these incorrect mappings:\n" + "\n".join(
+                f'"{ex["command_text"]}" -> NOT "{ex["wrong_action"]}"'
+                for ex in counterexamples
+            )
+            system_content += "\n\n" + neg_block
+        messages = [{"role": "system", "content": system_content}]
         if few_shot_examples:
             for ex in few_shot_examples:
                 messages.append({"role": "user",      "content": ex["command_text"]})
@@ -875,8 +921,16 @@ class VLLMServerInference(LocalInference):
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None,
+        counterexamples: list[dict] | None = None,
     ) -> list[dict]:
-        messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        system_content = _SYSTEM_PROMPT
+        if counterexamples:
+            neg_block = "Avoid these incorrect mappings:\n" + "\n".join(
+                f'"{ex["command_text"]}" -> NOT "{ex["wrong_action"]}"'
+                for ex in counterexamples
+            )
+            system_content += "\n\n" + neg_block
+        messages = [{"role": "system", "content": system_content}]
         if few_shot_examples:
             for ex in few_shot_examples:
                 messages.append({"role": "user",      "content": ex["command_text"]})
@@ -896,6 +950,7 @@ class VLLMServerInference(LocalInference):
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
+        counterexamples: list[dict] | None = None,
     ) -> str:
         try:
             import aiohttp
@@ -904,7 +959,7 @@ class VLLMServerInference(LocalInference):
 
         payload = {
             "model": self.model,
-            "messages": self._build_messages(cmd, few_shot_examples),
+            "messages": self._build_messages(cmd, few_shot_examples, counterexamples),
             "temperature": 0.0,
             "max_tokens": 64,
             # vLLM's OpenAI server accepts guided_regex as an extra body field —
@@ -1189,6 +1244,7 @@ class LlamaCppInference(LocalInference):
         self,
         cmd: Command,
         few_shot_examples: list[dict] | None = None,
+        counterexamples: list[dict] | None = None,
     ) -> str:
         try:
             import aiohttp
@@ -1197,6 +1253,12 @@ class LlamaCppInference(LocalInference):
 
         # Build OpenAI-compatible chat messages from the shared prompt builder
         system_prompt = _SYSTEM_PROMPT
+        if counterexamples:
+            neg_block = "Avoid these incorrect mappings:\n" + "\n".join(
+                f'"{ex["command_text"]}" -> NOT "{ex["wrong_action"]}"'
+                for ex in counterexamples
+            )
+            system_prompt = system_prompt + "\n\n" + neg_block
         user_content = _build_user_content(cmd, few_shot_examples)
 
         payload = {

@@ -189,9 +189,9 @@ con.sql("""
 
 ## 11. Entity-Relationship Diagrams
 
-These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **38 tables** across schema versions v1–v3; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
+These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **39 tables** across schema versions v1–v5; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
 
-### 11.1 `agent.db` — relationship overview (all 38 tables)
+### 11.1 `agent.db` — relationship overview (all 39 tables)
 
 ```mermaid
 erDiagram
@@ -207,6 +207,7 @@ erDiagram
     commands ||--o{ inferences : "triggers"
     commands ||--o{ agent_runs : "spawns"
     commands ||--o{ few_shot_examples : "seeds"
+    commands ||--o{ few_shot_counterexamples : "warns-against"
     commands ||--o{ gesture_samples : "emits"
     commands ||--o{ sensor_events : "emits"
     commands ||--o{ event_log : "referenced-by"
@@ -281,6 +282,7 @@ erDiagram
         text model
         text domain
         text prompt_hash
+        text prompt
         text response
         int tokens_in
         int tokens_out
@@ -333,6 +335,7 @@ erDiagram
 ```mermaid
 erDiagram
     commands ||--o{ few_shot_examples : "seeds"
+    commands ||--o{ few_shot_counterexamples : "warns-against"
     commands { int id PK }
     few_shot_examples {
         int id PK
@@ -345,6 +348,18 @@ erDiagram
         int usage_count
         blob embedding
     }
+    few_shot_counterexamples {
+        int id PK
+        int command_id FK
+        text text
+        text wrong_action
+        text reason
+        text source
+        text domain
+        real ts
+        blob embedding
+        int usage_count
+    }
     word_counts {
         text word PK
         int count
@@ -354,6 +369,8 @@ erDiagram
         real added
     }
 ```
+
+`few_shot_counterexamples` is the negative-example counterpart to `few_shot_examples` (schema v5). It captures `(text, wrong_action)` pairs from two sources: pipeline failures (`reason = "pipeline_failure"`, the action that failed) and user corrections (`reason = "user_correction"`, the action the user rejected). `UNIQUE(text, wrong_action)` so a repeated mistake bumps `usage_count` rather than duplicating. Retrieval mirrors the positive store — cosine over embeddings with Jaccard fallback, × recency × `log(usage_count)` — and the top matches are injected into the local-LLM prompt as a "do NOT produce" block so the model stops re-mapping a phrasing to an action already known to be wrong. The store stays strictly separate from the success-biased positive few-shot store, `PreferenceModel`, and `SemanticMemory`.
 
 ### 11.4 Group C — gesture & sensor telemetry
 
@@ -840,6 +857,6 @@ erDiagram
 The persistence layer is deliberately two-tier, unified for callers by the `MemoryManager` syscall facade (`storage/memory_manager.py`):
 
 - **Vector / semantic tier (ChromaDB + `all-MiniLM-L6-v2`, 384-dim, cosine).** Three logical stores under `./chroma_db`: the RAG **`codebase`/`documents`** collections (`inference/codebase_indexer.py`), the **`behavioral_memory`** few-shot collection (`storage/semantic_memory.py`), and the behavioral-twin backing (which reuses `behavioral_memory`). All degrade to a Jaccard word-overlap fallback over SQLite rows when ChromaDB is unavailable, with a time-gated re-probe that restores the vector path after a transient outage.
-- **Structured tier.** `agent.db` (SQLite/`aiosqlite`, OLTP — §11.1–11.11), `analytics.duckdb` (DuckDB, OLAP — §11.8), and `audit.db` (append-only, trigger-immutable — §11.9). `agent.db` migrations are versioned via `PRAGMA user_version` (`AgentDB._migrate`); current version is **3** (38 tables).
+- **Structured tier.** `agent.db` (SQLite/`aiosqlite`, OLTP — §11.1–11.11), `analytics.duckdb` (DuckDB, OLAP — §11.8), and `audit.db` (append-only, trigger-immutable — §11.9). `agent.db` migrations are versioned via `PRAGMA user_version` (`AgentDB._migrate`); current version is **5** (39 tables). v4 added `inferences.prompt` (full prompt text for fine-tuning capture); v5 added the `few_shot_counterexamples` table (negative few-shot, §11.3).
 
 The SQLite `few_shot_examples` table (§5) is the embedding store on the **per-command prompt hot path**; the ChromaDB `behavioral_memory` collection feeds the **behavioral-twin context layer**. Same embedding model, two independent storage paths — see §5.

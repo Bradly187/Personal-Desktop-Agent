@@ -56,6 +56,7 @@ def _make_db(gesture_samples: Optional[dict[str, list[float]]] = None, gesture_f
     db = MagicMock()
     db.available = True
     db.upsert_few_shot_example = AsyncMock()
+    db.upsert_few_shot_counterexample = AsyncMock()
     db.get_recent_routing_stats = AsyncMock(return_value=[])
     db.promote_hotwords = AsyncMock()
     db.get_gesture_floor = AsyncMock(side_effect=lambda g: (gesture_floors or {}).get(g, 0.0))

@@ -42,6 +42,7 @@ discarded gestures (Gate 1, low confidence) return early WITHOUT a DB row, so
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -159,6 +160,10 @@ class _CloudInference:
     def __init__(self, model: str) -> None:
         self._model = model
         self._client = None
+        # Fine-tuning data capture: last inference's prompt and token counts.
+        self.last_prompt: str | None = None
+        self.last_tokens_in: int | None = None
+        self.last_tokens_out: int | None = None
 
     def _get_client(self):
         if self._client is None:
@@ -182,6 +187,12 @@ class _CloudInference:
             context_lines = f"\n\nRecent commands:\n{joined}"
 
         user_content = f"Command: {cmd.text}{context_lines}"
+        self.last_prompt = json.dumps([
+            {"role": "system", "content": _CLOUD_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ])
+        self.last_tokens_in = None
+        self.last_tokens_out = None
 
         t0 = time.monotonic()
         try:
@@ -194,6 +205,9 @@ class _CloudInference:
                 messages=[{"role": "user", "content": user_content}],
             )
             action = response.content[0].text.strip().splitlines()[0].strip()
+            if hasattr(response, "usage") and response.usage:
+                self.last_tokens_in = response.usage.input_tokens
+                self.last_tokens_out = response.usage.output_tokens
             latency_ms = (time.monotonic() - t0) * 1000
             log.info("CloudInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
             return action
@@ -1232,6 +1246,10 @@ class HybridCoordinator:
             await self._trainer.get_few_shot_examples(cmd)
             if self._trainer else None
         )
+        counterexamples = (
+            await self._trainer.get_few_shot_counterexamples(cmd)
+            if self._trainer else None
+        )
         t0 = time.monotonic()
         # Circuit-breaker: a wedged local backend (Ollama hung, GPU stuck during
         # a flare, stalled model reload) must not stall the pipeline forever.
@@ -1239,7 +1257,9 @@ class HybridCoordinator:
         # path indefinitely. Mirrors the cloud-path guard in _run_cloud().
         try:
             async with asyncio.timeout(self._cfg.local_timeout_s):
-                action_str = await self._local.infer(cmd, few_shot_examples=examples)
+                action_str = await self._local.infer(
+                    cmd, few_shot_examples=examples, counterexamples=counterexamples
+                )
         except TimeoutError:
             log.error(
                 "HybridCoordinator: local inference timed out after %.0fs — CLARIFY fallback",
@@ -1257,10 +1277,10 @@ class HybridCoordinator:
                 command_id=None,
                 model=status.get("model", "unknown"),
                 domain="command",
-                prompt=None,
+                prompt=getattr(self._local, "last_prompt", None),
                 response=action_str,
-                tokens_in=None,
-                tokens_out=None,
+                tokens_in=getattr(self._local, "last_tokens_in", None),
+                tokens_out=getattr(self._local, "last_tokens_out", None),
                 latency_ms=latency_ms,
                 backend=status.get("backend", "ollama"),
                 error=error,
@@ -1297,16 +1317,33 @@ class HybridCoordinator:
                 # `action` and used a nonexistent `_gaze_coords` kwarg (TypeError).
                 cmd = _dc_replace(cmd, text=clean_text)
 
+        t0 = time.monotonic()
         try:
             async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
                 with get_tracer().timed("inference", route="cloud"):
-                    return await self._cloud.infer(cmd)
+                    action_str = await self._cloud.infer(cmd)
         except TimeoutError:
             log.error(
                 "HybridCoordinator: cloud inference timed out after %.0fs — CLARIFY fallback",
                 self._CLOUD_TIMEOUT_S,
             )
             return "CLARIFY cloud inference timed out"
+        latency_ms = (time.monotonic() - t0) * 1000
+        if self._agent_db and self._agent_db.available:
+            error = action_str if action_str.startswith("CLARIFY") else None
+            await self._agent_db.insert_inference(
+                command_id=None,
+                model=self._cfg.anthropic_model,
+                domain="command",
+                prompt=getattr(self._cloud, "last_prompt", None),
+                response=action_str,
+                tokens_in=getattr(self._cloud, "last_tokens_in", None),
+                tokens_out=getattr(self._cloud, "last_tokens_out", None),
+                latency_ms=latency_ms,
+                backend="anthropic",
+                error=error,
+            )
+        return action_str
 
     # ---------------------------------------------------------------------- #
     # Action execution
