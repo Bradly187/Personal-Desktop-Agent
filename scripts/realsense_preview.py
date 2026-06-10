@@ -20,7 +20,9 @@ WIN = "L515 preview  (left=color  right=depth)   q/ESC to quit"
 def main() -> int:
     pipe = rs.pipeline()
     cfg = rs.config()
-    cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
+    # The L515 RGB camera has NO 640x480 mode — its smallest color profile is
+    # 960x540. Requesting 640x480 color fails with "Couldn't resolve requests".
+    cfg.enable_stream(rs.stream.color, 960, 540, rs.format.bgr8, 15)
     cfg.enable_stream(rs.stream.depth)
     align = rs.align(rs.stream.color)
     prof = pipe.start(cfg)
