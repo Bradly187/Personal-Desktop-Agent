@@ -1452,6 +1452,33 @@ class AgentDB:
             log.warning("AgentDB.insert_inference failed: %s", exc)
             return -1
 
+    async def link_inferences_to_command(
+        self, inference_ids: list[int], command_id: int
+    ) -> None:
+        """Backfill inferences.command_id once the command row exists.
+
+        insert_command necessarily runs AFTER inference returns, so inference
+        rows are first written with command_id=NULL and linked here (audit
+        2026-06-09: without this backfill every command-pipeline inference row
+        was unlinkable and the fine-tuning extraction JOIN matched nothing).
+        Only NULL rows are updated — never relinks an already-linked row.
+        """
+        if not self._conn or not command_id or command_id <= 0:
+            return
+        ids = [int(i) for i in inference_ids if i and i > 0]
+        if not ids:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE inferences SET command_id = ?"
+                f" WHERE id IN ({','.join('?' * len(ids))})"
+                " AND command_id IS NULL",
+                (command_id, *ids),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.link_inferences_to_command failed: %s", exc)
+
     # ---------------------------------------------------------------------- #
     # Agent runs / steps
     # ---------------------------------------------------------------------- #
@@ -2115,8 +2142,15 @@ class AgentDB:
             log.warning("AgentDB.update_gesture_velocity_calibration failed: %s", exc)
 
     async def get_gesture_velocity_floor(
-        self, gesture: str, default: float = 1.2
-    ) -> float:
+        self, gesture: str, default: Optional[float] = None
+    ) -> Optional[float]:
+        """Latest calibrated velocity floor for `gesture`, or `default` when no
+        calibration row exists. The default is None — NOT a numeric guess:
+        swipe floors are ~1.2 normalized coords/s but push/pull floors are
+        ~0.30 m/s (different units), so a shared numeric default poisons the
+        other gesture class (audit 2026-06-09: the old 1.2 default made
+        push/pull/snap gestures 4x harder on every uncalibrated startup,
+        permanently, because below-threshold motions are never sampled)."""
         if not self._conn:
             return default
         try:
@@ -2697,7 +2731,9 @@ class AgentDB:
     async def get_recent_adaptation_log(
         self, component: str, limit: int = 5
     ) -> list[dict]:
-        """Return the most recent adaptation_log rows for a component."""
+        """Return the most recent NON-rolled-back adaptation_log rows for a
+        component. Rolled-back rows are excluded so the D5 rollback check never
+        re-evaluates (and re-triggers on) an adaptation it already undid."""
         if not self._conn:
             return []
         try:
@@ -2705,7 +2741,7 @@ class AgentDB:
                 """SELECT id, ts, metric_before, metric_after,
                           cloud_rate, failure_rate, rolled_back
                    FROM adaptation_log
-                   WHERE component = ?
+                   WHERE component = ? AND rolled_back = 0
                    ORDER BY ts DESC LIMIT ?""",
                 (component, limit),
             ) as cur:

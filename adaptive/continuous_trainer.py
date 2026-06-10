@@ -227,7 +227,15 @@ class ContinuousTrainer:
         return await self._db.get_gesture_floor(gesture)
 
     async def load_velocity_calibration(self) -> None:
-        """Load persisted velocity floors from DB into GestureProcessor at startup (Gap 3)."""
+        """Load persisted velocity floors from DB into GestureProcessor at startup (Gap 3).
+
+        Only gestures with an actual calibration row contribute: SWIPE floors
+        (normalized coords/s) and PUSH floors (m/s) are different units, so an
+        uncalibrated gesture must fall back to GestureProcessor's own per-class
+        default rather than inheriting a number from the other class. On a
+        fresh DB this is a no-op (built-in defaults stay in effect). Preserves
+        the current pain-day relaxation instead of clobbering it to False.
+        """
         if self._gesture_proc is None or not self._db.available:
             return
         motion_gestures = [
@@ -238,11 +246,21 @@ class ContinuousTrainer:
         calibrated: dict[str, float] = {}
         for gesture in motion_gestures:
             floor = await self._db.get_gesture_velocity_floor(gesture)
+            if floor is None:               # no calibration row — keep class default
+                continue
             key = "SWIPE" if "SWIPE" in gesture else "PUSH"
             if key not in calibrated or floor < calibrated[key]:
                 calibrated[key] = floor
         if calibrated:
-            self._gesture_proc.set_velocity_thresholds(calibrated)
+            pain_active = False
+            if self._twin is not None:
+                try:
+                    pain_active = bool((await self._twin.get_snapshot()).pain_day_active)
+                except Exception:
+                    pain_active = False
+            self._gesture_proc.set_velocity_thresholds(
+                calibrated, pain_day_active=pain_active
+            )
             log.info("GestureProcessor: loaded velocity floors from DB — %s", calibrated)
 
     # ---------------------------------------------------------------------- #
@@ -363,22 +381,41 @@ class ContinuousTrainer:
         if not self._config:
             return
 
-        # D5: check last 2 passes — if cloud_rate increased both times, roll back
+        # D5: rollback check — roll back the latest loosening only when
+        # cloud_rate rose across two consecutive adaptation passes (three data
+        # points, strictly rising: oldest → middle → newest). The previous
+        # comparand mixed units (cloud_rate vs. metric_before, which for gate1
+        # rows is the old logprob floor ≈ −1.0 — vacuously true), so the
+        # rollback fired on any single noisy increase; rolled-back rows were
+        # then re-read and the rollback never persisted, so gate-1 adaptation
+        # latched off for the life of the DB (audit 2026-06-09).
         try:
             if self._db and self._db.available:
-                history = await self._db.get_recent_adaptation_log("gate1", limit=2)
-                if len(history) >= 2:
-                    if (history[0]["cloud_rate"] > history[1]["cloud_rate"]
-                            and history[1]["cloud_rate"] > (history[1].get("metric_before") or 0.0)):
-                        log.warning(
-                            "Gate 1: cloud_rate increased in 2 consecutive passes "
-                            "(%.0f%% → %.0f%%) — rolling back last threshold change",
-                            history[1]["cloud_rate"] * 100, history[0]["cloud_rate"] * 100,
+                history = await self._db.get_recent_adaptation_log("gate1", limit=3)
+                rates = [h.get("cloud_rate") for h in history]
+                if (len(history) >= 3
+                        and all(r is not None for r in rates[:3])
+                        and rates[0] > rates[1] > rates[2]):
+                    log.warning(
+                        "Gate 1: cloud_rate rose across 2 consecutive passes "
+                        "(%.0f%% → %.0f%% → %.0f%%) — rolling back last threshold change",
+                        rates[2] * 100, rates[1] * 100, rates[0] * 100,
+                    )
+                    if history[0].get("metric_before") is not None:
+                        rolled_from = self._config.whisper_logprob_min
+                        self._config.whisper_logprob_min = history[0]["metric_before"]
+                        # Persist: without this, startup restores the latest
+                        # settings_versions row — the loosened value we just
+                        # rejected — and the rollback evaporates on restart.
+                        await self._db.log_settings_change(
+                            component="coordinator",
+                            key="whisper_logprob_min",
+                            old_value=rolled_from,
+                            new_value=self._config.whisper_logprob_min,
+                            changed_by="continuous_trainer_rollback",
                         )
-                        if history[0].get("metric_before") is not None:
-                            self._config.whisper_logprob_min = history[0]["metric_before"]
-                        await self._db.mark_adaptation_rolled_back(history[0]["id"])
-                        return
+                    await self._db.mark_adaptation_rolled_back(history[0]["id"])
+                    return
         except Exception as exc:
             log.debug("Gate 1 rollback check skipped: %s", exc)
 
@@ -470,6 +507,8 @@ class ContinuousTrainer:
             p10 = samples_sorted[p10_idx]
             floor = max(0.1, p10)              # always at least 0.1 coords/s
             old_floor = await self._db.get_gesture_velocity_floor(gesture)
+            if old_floor is None:              # first calibration for this gesture
+                old_floor = floor
             await self._db.update_gesture_velocity_calibration(
                 gesture, floor, len(samples), p10
             )

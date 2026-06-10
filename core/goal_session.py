@@ -61,22 +61,26 @@ def _is_high_risk_bash(command: str) -> bool:
 # the list) and `curl x | sh` (sh is not on the list).
 #
 # Executables auto-approvable with any args (read-only, build, test, format).
+# NOTE intentionally EXCLUDED (audit 2026-06-09): `npx` (fetches + runs
+# arbitrary remote packages) and `bash`/`sh` (already absent). `git config` is
+# excluded from safe git subcommands below because it can set core.hooksPath /
+# alias.x='!cmd' → code exec on the next allowlisted git call.
 _SAFE_BASH_EXE: frozenset[str] = frozenset({
     "ls", "dir", "pwd", "cat", "type", "head", "tail", "wc", "echo", "printf",
     "grep", "rg", "find", "tree", "diff", "sort", "uniq", "cut", "awk", "sed",
     "pytest", "tox", "nox", "coverage", "ruff", "black", "mypy", "flake8",
     "isort", "pylint", "pyright",
-    "node", "npm", "npx", "yarn", "pnpm", "tsc", "eslint", "prettier",
+    "node", "npm", "yarn", "pnpm", "tsc", "eslint", "prettier",
     "cargo", "rustc", "go", "make", "cmake", "ctest",
     "true", "false", "which", "where", "whoami", "date", "env", "test",
 })
 # Multi-mode tools whose first SUBCOMMAND must be on the safe list. Mutating /
 # remote / history-rewriting subcommands (push, reset, checkout, clean, rebase,
-# install, …) are intentionally absent → they require explicit approval.
+# install, config, …) are intentionally absent → they require explicit approval.
 _SAFE_SUBCOMMANDS: dict[str, frozenset[str]] = {
     "git": frozenset({
         "status", "diff", "log", "show", "branch", "add", "commit", "stash",
-        "fetch", "rev-parse", "describe", "blame", "remote", "tag", "config",
+        "fetch", "rev-parse", "describe", "blame", "remote", "tag",
     }),
     "pip": frozenset({"list", "show", "freeze", "check"}),       # NOT install/uninstall
     "pip3": frozenset({"list", "show", "freeze", "check"}),
@@ -90,16 +94,45 @@ _SAFE_SUBCOMMANDS: dict[str, frozenset[str]] = {
 _INLINE_CODE_FLAGS: frozenset[str] = frozenset({"-c", "-e", "--eval", "--command"})
 _INTERPRETERS: frozenset[str] = frozenset({"python", "python3", "py", "node"})
 
+# Shell metacharacters that grant write/exec power the per-segment exe check
+# can't see (audit 2026-06-09):
+#   >, >>, <>, n>   — output redirection: `echo evil > C:\anywhere` writes any
+#                     file via a "safe" exe, bypassing the cwd_scope jail.
+#   $( … ), ` … `   — command substitution: `cat $(python -c "evil")` hides
+#                     arbitrary code behind a safe-looking head exe.
+#   <( … ), >( … )  — process substitution: same.
+# Any of these → not allowlisted (require explicit approval). Detected on the
+# raw command, ignoring quoted spans so a literal '>' inside a string is fine.
+_DANGEROUS_SHELL_RE = re.compile(r"\$\(|`|<\(|>\(|(?<![0-9])>|>>|<>|\d+>")
+
+
+def _strip_quoted(command: str) -> str:
+    """Remove single/double-quoted spans so metacharacters inside string
+    literals (e.g. echo "a > b") don't trip the shell-operator check. Crude but
+    fail-safe: an unterminated quote leaves the tail in place (still scanned)."""
+    return re.sub(r"'[^']*'|\"[^\"]*\"", "", command)
+
+
+def _has_dangerous_shell_ops(command: str) -> bool:
+    """True if the command (outside quotes) uses redirection or substitution."""
+    return _DANGEROUS_SHELL_RE.search(_strip_quoted(command)) is not None
+
 
 def _bash_is_allowlisted(command: str) -> bool:
     """True if EVERY segment of `command` runs a known-safe executable (gap G).
 
     Deny-by-default: unknown executables, inline interpreter code (`python -c`),
+    output redirection (`> file`), command/process substitution (`$(…)`, backticks),
     unbalanced quotes, or any unsafe segment → False (requires explicit approval).
     """
     import shlex
 
     if not command or not command.strip():
+        return False
+    # Redirection / command substitution bypass the per-segment exe check
+    # entirely (a safe head exe + `>` writes arbitrary files; `$(…)` runs
+    # arbitrary code) — reject before splitting.
+    if _has_dangerous_shell_ops(command):
         return False
     # Split on shell operators: ; | & cover ;, |, ||, &&, & (and their doublings).
     for seg in re.split(r"[;&|\n]+", command):

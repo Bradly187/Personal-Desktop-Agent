@@ -63,6 +63,16 @@ def test_allowlisted_commands(cmd):
     "",                                  # empty → not allowlisted
     "someunknownbinary --do",
     "git unknownsub",                    # unknown git subcommand
+    # --- audit 2026-06-09: redirection / substitution / dropped exes ---
+    "echo pwned > C:\\Windows\\System32\\evil.txt",  # redirection bypasses cwd jail
+    "echo data >> ~/.bashrc",                        # append redirection
+    "cat secrets.txt > out.txt",                     # safe head exe + redirect
+    "cat $(python -c 'print(1)')",                   # command substitution hides code
+    "echo `whoami`",                                 # backtick substitution
+    "diff <(cat a) <(cat b)",                        # process substitution
+    "ls 2> errors.log",                              # numbered fd redirection
+    "npx some-remote-pkg",                           # npx dropped from safe exes
+    "git config core.hooksPath .evil",               # git config dropped (hook exec)
 ])
 def test_not_allowlisted_commands(cmd):
     assert _bash_is_allowlisted(cmd) is False
@@ -70,6 +80,12 @@ def test_not_allowlisted_commands(cmd):
 
 def test_unbalanced_quotes_denied():
     assert _bash_is_allowlisted('echo "unterminated') is False
+
+
+def test_literal_redirect_char_inside_quotes_is_fine():
+    # A '>' inside a quoted string is data, not redirection.
+    assert _bash_is_allowlisted('echo "a > b"') is True
+    assert _bash_is_allowlisted("grep '->' file.py") is True
 
 
 # ---------------------------------------------------------------------------

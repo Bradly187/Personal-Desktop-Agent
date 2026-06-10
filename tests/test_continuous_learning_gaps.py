@@ -112,6 +112,102 @@ class TestGap1ThresholdPersistence:
 
 
 # ============================================================================
+# Gate-1 D5 rollback (audit fix 2026-06-09: comparand + persistence + latch)
+# ============================================================================
+
+class TestGate1Rollback(TestGap1ThresholdPersistence):
+    """The rollback must require cloud_rate strictly rising across THREE
+    adaptation passes, persist the restored value to settings_versions, and
+    never re-trigger on already-rolled-back rows."""
+
+    def _history(self, *rates, metric_before=-1.0):
+        # newest first, as get_recent_adaptation_log returns
+        return [
+            {"id": 100 + i, "cloud_rate": r, "metric_before": metric_before,
+             "metric_after": metric_before - 0.05, "rolled_back": 0}
+            for i, r in enumerate(rates)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_two_rows_never_trigger_rollback(self):
+        """The old comparand (cloud_rate > metric_before ≈ -1.0) was vacuously
+        true and rolled back on any single noisy increase. Two rows are not
+        enough evidence: loosening must proceed."""
+        trainer = self._make_trainer()
+        trainer._db.mark_adaptation_rolled_back = AsyncMock()
+        trainer._db.get_recent_adaptation_log = AsyncMock(
+            return_value=self._history(0.45, 0.40)   # newest > older (noise)
+        )
+        await trainer._adapt_gate1_with_log(
+            cloud_rate=0.5, failure_rate=0.1, pain_day_active=False
+        )
+        trainer._db.mark_adaptation_rolled_back.assert_not_awaited()
+        trainer._db.log_adaptation.assert_awaited_once()   # loosening happened
+
+    @pytest.mark.asyncio
+    async def test_three_rising_rows_roll_back_and_persist(self):
+        trainer = self._make_trainer()
+        trainer._config.whisper_logprob_min = -1.15
+        trainer._db.mark_adaptation_rolled_back = AsyncMock()
+        trainer._db.get_recent_adaptation_log = AsyncMock(
+            return_value=self._history(0.50, 0.42, 0.35, metric_before=-1.10)
+        )
+        await trainer._adapt_gate1_with_log(
+            cloud_rate=0.55, failure_rate=0.1, pain_day_active=False
+        )
+        # Threshold restored to the pre-loosening value of the newest row
+        assert trainer._config.whisper_logprob_min == pytest.approx(-1.10)
+        # The undone adaptation row is marked so it is never re-read
+        trainer._db.mark_adaptation_rolled_back.assert_awaited_once_with(100)
+        # Rollback is PERSISTED — without this, restart restores the rejected
+        # loosened value from settings_versions
+        kwargs = trainer._db.log_settings_change.call_args.kwargs
+        assert kwargs["key"] == "whisper_logprob_min"
+        assert kwargs["new_value"] == pytest.approx(-1.10)
+        assert kwargs["changed_by"] == "continuous_trainer_rollback"
+        # And no new loosening in the same pass
+        trainer._db.log_adaptation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_monotonic_rates_do_not_roll_back(self):
+        trainer = self._make_trainer()
+        trainer._db.mark_adaptation_rolled_back = AsyncMock()
+        trainer._db.get_recent_adaptation_log = AsyncMock(
+            return_value=self._history(0.50, 0.30, 0.40)   # dipped in the middle
+        )
+        await trainer._adapt_gate1_with_log(
+            cloud_rate=0.5, failure_rate=0.1, pain_day_active=False
+        )
+        trainer._db.mark_adaptation_rolled_back.assert_not_awaited()
+        trainer._db.log_adaptation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rolled_back_rows_excluded_from_history_read(self, tmp_path):
+        """DB-level: get_recent_adaptation_log must skip rolled_back=1 rows so
+        the rollback cannot re-trigger forever on the same history."""
+        from storage.db import AgentDB
+        db = AgentDB()
+        await db.open(tmp_path / "agent.db")
+        if not db.available:
+            pytest.skip("aiosqlite unavailable")
+        try:
+            for rate in (0.35, 0.42, 0.50):
+                await db.log_adaptation(
+                    component="gate1", metric_before=-1.0, metric_after=-1.05,
+                    cloud_rate=rate, failure_rate=0.1,
+                )
+            rows = await db.get_recent_adaptation_log("gate1", limit=3)
+            assert len(rows) == 3
+            newest_id = rows[0]["id"]
+            await db.mark_adaptation_rolled_back(newest_id)
+            rows_after = await db.get_recent_adaptation_log("gate1", limit=3)
+            assert all(r["id"] != newest_id for r in rows_after)
+            assert len(rows_after) == 2
+        finally:
+            await db.close()
+
+
+# ============================================================================
 # Gap 1 — main.py startup restore (unit-level: CoordinatorConfig applied)
 # ============================================================================
 
@@ -465,7 +561,7 @@ class TestGap3VelocityCalibrationLoad:
         _db = MagicMock()
         _db.available = True
 
-        async def _fake_floor(gesture, default=1.2):
+        async def _fake_floor(gesture, default=None):
             return (db_floors or {}).get(gesture, default)
 
         _db.get_gesture_velocity_floor = _fake_floor
@@ -525,13 +621,27 @@ class TestGap3VelocityCalibrationLoad:
         gesture_proc.set_velocity_thresholds.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_uses_default_when_no_db_data(self):
-        """When DB has no calibration rows (returns default 1.2 for all), still calls set."""
+    async def test_fresh_db_is_a_noop(self):
+        """No calibration rows → do NOT push anything: GestureProcessor's own
+        per-class defaults (SWIPE 1.2 coords/s, PUSH 0.30 m/s) must stay in
+        effect. (Audit 2026-06-09: pushing a shared 1.2 default put the SWIPE
+        number into the PUSH class — 4x harder — and locked out calibration.)"""
         trainer, gesture_proc = self._make_trainer(db_floors={})
         await trainer.load_velocity_calibration()
-        gesture_proc.set_velocity_thresholds.assert_called_once()
+        gesture_proc.set_velocity_thresholds.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_swipe_only_calibration_does_not_clobber_push(self):
+        """A calibrated SWIPE floor must not introduce a PUSH key: the pushed
+        dict omits PUSH so _push_threshold() falls back to its 0.30 m/s class
+        default rather than inheriting the swipe-unit value."""
+        trainer, gesture_proc = self._make_trainer(
+            db_floors={"PEACE_SWIPE_LEFT": 1.1}
+        )
+        await trainer.load_velocity_calibration()
         call_arg = gesture_proc.set_velocity_thresholds.call_args[0][0]
-        assert call_arg["SWIPE"] == pytest.approx(1.2)
+        assert call_arg == {"SWIPE": pytest.approx(1.1)}
+        assert "PUSH" not in call_arg
 
     @pytest.mark.asyncio
     async def test_swipe_gestures_map_to_swipe_key(self):

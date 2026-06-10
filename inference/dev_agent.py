@@ -257,6 +257,15 @@ class DevAgent:
 
         # Goal-level authorization state (reset after each plan)
         self._plan_authorized: bool = False
+        self._approved_verbs: frozenset[str] = frozenset()
+        self._confirm_lock: asyncio.Lock = asyncio.Lock()
+        # Concurrency guards: plan state (_plan_authorized/_cancel_event/
+        # _current_goal/…) is per-plan instance state, so plans must never
+        # interleave; the drainer must be single-flight (claim_next_goal's
+        # SELECT-then-UPDATE assumes a single consumer).
+        self._plan_lock: asyncio.Lock = asyncio.Lock()
+        self._drain_lock: asyncio.Lock = asyncio.Lock()
+        self._drain_signal: bool = False   # set when drain is requested while one is active
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._current_goal: Optional[str] = None
         self._current_step: int = 0
@@ -396,7 +405,16 @@ class DevAgent:
     # ---------------------------------------------------------------------- #
 
     async def plan_and_run(self, goal: str) -> AgentResult:
-        """Decompose a complex goal into steps and execute them sequentially."""
+        """Decompose a complex goal into steps and execute them sequentially.
+
+        Serialized: plan state (_plan_authorized, _cancel_event, _current_goal,
+        step counters, GoalSession) is instance-level, so two interleaved plans
+        would answer each other's confirmations and un-cancel each other.
+        """
+        async with self._plan_lock:
+            return await self._plan_and_run_locked(goal)
+
+    async def _plan_and_run_locked(self, goal: str) -> AgentResult:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
@@ -433,6 +451,7 @@ class DevAgent:
             return AgentResult(
                 goal=goal, domain="plan",
                 model_used=plan_result.model,
+                success=False,
                 error=plan_result.error,
                 total_latency_ms=(time.monotonic() - t0) * 1000,
             )
@@ -444,8 +463,33 @@ class DevAgent:
 
         log.info("DevAgent: plan has %d steps", len(steps))
 
-        # Upfront plan approval gate: speak summary → voice yes/no → authorize all steps
-        self._plan_authorized = await self._approve_plan_upfront(goal, steps)
+        # Upfront plan approval gate: speak summary → voice yes/no.
+        # "denied" ABORTS the plan — an explicit "no" (or fail-safe DENY on a
+        # destructive plan) must stop every step, not just the three git verbs.
+        # "approved" authorizes all steps; "auto" (read-only convenience grant)
+        # runs the plan but leaves _plan_authorized False so any destructive
+        # step a later replan injects still requires per-op confirmation.
+        verdict = await self._approve_plan_upfront(goal, steps)
+        if verdict is True:        # legacy bool contract (tests / older callers)
+            verdict = "approved"
+        elif verdict is False:
+            verdict = "denied"
+        if verdict == "denied":
+            log.info("DevAgent: plan REJECTED by user — aborting before execution")
+            self._reset_plan_state()
+            _tracer.record_span("plan_done", trace_id=trace_id, status="rejected")
+            _tracer.reset_current(_trace_tok)
+            return AgentResult(
+                goal=goal, domain="plan",
+                model_used=plan_result.model,
+                success=False,
+                error="Plan rejected by user",
+                total_latency_ms=(time.monotonic() - t0) * 1000,
+            )
+        self._plan_authorized = verdict == "approved"
+        self._approved_verbs = frozenset(
+            s.action.upper() for s in steps[: self.MAX_STEPS]
+        )
         self._cancel_event.clear()
         self._current_goal = goal
         self._total_steps = min(len(steps), self.MAX_STEPS)
@@ -505,6 +549,21 @@ class DevAgent:
                 replans += 1
                 new_steps = await self._replan(goal, executed, remaining)
                 if new_steps:
+                    # Recompute destructiveness: the upfront approval covered
+                    # the ORIGINAL plan's verbs. If the replan injects a
+                    # destructive verb the user never heard described, revoke
+                    # the blanket authorization so that step (and every later
+                    # destructive step) goes through per-op confirmation.
+                    injected = {
+                        s.action.upper() for s in new_steps
+                    } & self._DESTRUCTIVE_VERBS - self._approved_verbs
+                    if injected and self._plan_authorized:
+                        log.warning(
+                            "DevAgent: replan injected unapproved destructive "
+                            "verb(s) %s — revoking blanket plan authorization",
+                            sorted(injected),
+                        )
+                        self._plan_authorized = False
                     budget = max(0, self.MAX_STEPS - len(executed))
                     remaining = new_steps[:budget]
                     self._total_steps = len(executed) + len(remaining)
@@ -902,47 +961,85 @@ class DevAgent:
     async def drain_goal_queue(self, max_goals: int = 0) -> int:
         """Drain the durable goal backlog (gap D): claim → run → mark terminal.
 
-        Claims goals one at a time (single-consumer) and runs each through
-        plan_and_run, which keeps its own crash-recoverable ledger and applies the
-        upfront voice-approval gate for destructive plans. Stops when the queue is
-        empty, on cancellation, or after `max_goals` (0 = until empty). Returns the
-        number processed. Each goal's outcome is persisted, so this is safe to call
-        again at any time (e.g. after a crash — see AgentDB.requeue_stale_running).
+        Single-flight: claim_next_goal's SELECT-then-guarded-UPDATE is only
+        race-safe with one consumer, and concurrent drainers would interleave
+        plan state. If a drain is already active (startup drain still running
+        when a voice "authorize" enqueues a new goal), this call signals the
+        active drainer to re-check the queue after it thinks it's empty, and
+        returns 0 — the goal is never abandoned.
+
+        Flare gate: before each claim, waits on the scheduler's dev-admission
+        event so no NEW heavy plan starts mid-flare (the real production
+        enforcement of pause_dev for this path).
+
+        Stops when the queue is empty, on cancellation, or after `max_goals`
+        (0 = until empty). Returns the number processed. Each goal's outcome is
+        persisted, so this is safe to call again at any time (e.g. after a
+        crash — see AgentDB.requeue_stale_running).
         """
         db = self._db()
         if not db or not getattr(db, "available", False):
             return 0
-        processed = 0
-        while not (max_goals and processed >= max_goals):
-            if self._cancel_event.is_set():
-                break
-            goal = await db.claim_next_goal()
-            if goal is None:
-                break
-            gid = int(goal["id"])
-            log.info("DevAgent.drain_goal_queue: running goal %s — %r", gid, goal["goal"][:60])
-            try:
-                result = await self.plan_and_run(goal["goal"])
-                await db.complete_goal(
-                    gid, "done" if result.success else "failed", error=result.error,
-                )
-            except Exception as exc:
-                log.error("DevAgent.drain_goal_queue: goal %s raised: %s", gid, exc)
-                await db.complete_goal(gid, "failed", error=str(exc))
-            processed += 1
-        if processed:
-            log.info("DevAgent.drain_goal_queue: processed %d goal(s)", processed)
-        return processed
+        if self._drain_lock.locked():
+            # An active drainer exists — tell it to re-check after its final
+            # empty claim so a goal enqueued in that window isn't stranded.
+            self._drain_signal = True
+            log.info("DevAgent.drain_goal_queue: drain already active — signalled re-check")
+            return 0
+        async with self._drain_lock:
+            processed = 0
+            while True:
+                self._drain_signal = False
+                while not (max_goals and processed >= max_goals):
+                    if self._cancel_event.is_set():
+                        break
+                    # Flare admission gate: never START a heavy plan mid-flare.
+                    sched = self._scheduler
+                    if sched is not None and getattr(sched, "dev_paused", False):
+                        log.info(
+                            "DevAgent.drain_goal_queue: dev admission paused "
+                            "(flare) — waiting before next claim"
+                        )
+                        await sched.wait_dev_admission()
+                    goal = await db.claim_next_goal()
+                    if goal is None:
+                        break
+                    gid = int(goal["id"])
+                    log.info("DevAgent.drain_goal_queue: running goal %s — %r",
+                             gid, goal["goal"][:60])
+                    try:
+                        result = await self.plan_and_run(goal["goal"])
+                        await db.complete_goal(
+                            gid, "done" if result.success else "failed",
+                            error=result.error,
+                        )
+                    except Exception as exc:
+                        log.error("DevAgent.drain_goal_queue: goal %s raised: %s", gid, exc)
+                        await db.complete_goal(gid, "failed", error=str(exc))
+                    processed += 1
+                # Re-check once if another caller requested a drain while we ran
+                # (until-empty mode only; bounded calls return at their cap).
+                if not self._drain_signal or max_goals:
+                    break
+            if processed:
+                log.info("DevAgent.drain_goal_queue: processed %d goal(s)", processed)
+            return processed
 
     # ---------------------------------------------------------------------- #
     # Plan-level authorization helpers
     # ---------------------------------------------------------------------- #
 
-    async def _approve_plan_upfront(self, goal: str, steps: list[AgentStep]) -> bool:
+    async def _approve_plan_upfront(self, goal: str, steps: list[AgentStep]) -> str:
         """Speak plan summary, capture voice yes/no, write GoalSession on approval.
 
-        Returns True if the user approved (or TTS/mic unavailable — auto-approve
-        so a hardware failure never silently drops work).
+        Returns a verdict string consumed by plan_and_run:
+          - "approved" — explicit spoken yes; all steps (incl. destructive) run
+            without per-op confirmation.
+          - "denied"   — explicit spoken no, or fail-safe DENY on a destructive
+            plan (silence / ambiguity / hardware failure). The plan must ABORT.
+          - "auto"     — read-only plan with no clear consent (hardware failure /
+            silence): runs for convenience, but WITHOUT blanket authorization,
+            so any destructive step a replan later injects still confirms per-op.
         """
         from core.goal_session import GoalSessionStore
 
@@ -959,25 +1056,26 @@ class DevAgent:
             s.action.upper() in self._DESTRUCTIVE_VERBS for s in steps[: self.MAX_STEPS]
         )
 
-        def _grant() -> bool:
+        def _grant(verdict: str) -> str:
             GoalSessionStore.create(goal=goal, domain="plan")
-            return True
+            return verdict
 
-        def _fallback(reason: str) -> bool:
+        def _fallback(reason: str) -> str:
             """No clear consent obtained (hardware failure / silence / ambiguity).
 
-            Read-only plans auto-approve for convenience; destructive plans
+            Read-only plans auto-run for convenience (but WITHOUT blanket
+            authorization — see "auto" in the docstring); destructive plans
             fail-safe to DENY — never run side effects without an explicit yes.
             """
             if plan_is_destructive:
                 log.info(
                     "DevAgent._approve_plan_upfront: %s + destructive plan → DENY", reason
                 )
-                return False
+                return "denied"
             log.info(
-                "DevAgent._approve_plan_upfront: %s + read-only plan → auto-approve", reason
+                "DevAgent._approve_plan_upfront: %s + read-only plan → auto-run", reason
             )
-            return _grant()
+            return _grant("auto")
 
         # Speak via TTS
         try:
@@ -1022,9 +1120,17 @@ class DevAgent:
                     return _fallback("silence")
                 if self._confirm_whisper is None:
                     from faster_whisper import WhisperModel
-                    self._confirm_whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
-                segs, _ = self._confirm_whisper.transcribe(audio, language="en", beam_size=1, vad_filter=False)
-                transcript = " ".join(s.text for s in segs).lower().strip()
+                    self._confirm_whisper = await asyncio.to_thread(
+                        WhisperModel, "tiny", device="cpu", compute_type="int8"
+                    )
+
+                def _transcribe() -> str:
+                    segs, _ = self._confirm_whisper.transcribe(
+                        audio, language="en", beam_size=1, vad_filter=False
+                    )
+                    return " ".join(s.text for s in segs).lower().strip()
+
+                transcript = await asyncio.to_thread(_transcribe)
             except Exception as exc:
                 return _fallback(f"mic fallback failed ({exc})")
 
@@ -1035,10 +1141,10 @@ class DevAgent:
         verdict = classify_confirmation(transcript)
         if verdict == "deny":
             log.info("DevAgent._approve_plan_upfront: REJECTED — %r", transcript)
-            return False
+            return "denied"
         if verdict == "approve":
             log.info("DevAgent._approve_plan_upfront: approved — %r", transcript)
-            return _grant()
+            return _grant("approved")
         return _fallback(f"ambiguous reply {transcript!r}")
 
     async def _speak_plan_completion(self, result: AgentResult, cancelled: bool) -> None:
@@ -1063,6 +1169,7 @@ class DevAgent:
         from core.goal_session import GoalSessionStore
         GoalSessionStore.cancel()
         self._plan_authorized = False
+        self._approved_verbs = frozenset()
         self._cancel_event.clear()
         self._current_goal = None
         self._current_step = 0
@@ -1123,10 +1230,22 @@ class DevAgent:
         action = step.action.upper()
 
         if action == "WRITE_FILE":
+            # Destructive: gated like the git verbs. _confirm_destructive_op
+            # short-circuits to approve when the whole plan was explicitly
+            # authorized upfront, so an approved plan stays prompt-free.
+            target = (step.args or "").strip()
+            if not await self._confirm_destructive_op(
+                f"Approve writing file {target[:60]}?"
+            ):
+                return "WRITE_FILE cancelled by user"
             return await asyncio.to_thread(self._write_file, step.args, step.body)
 
         if action == "RUN_TERMINAL":
             cmd = step.args or step.body
+            if not await self._confirm_destructive_op(
+                f"Approve running command: {cmd.strip()[:60]}?"
+            ):
+                return "RUN_TERMINAL cancelled by user"
             return await asyncio.to_thread(self._run_terminal, cmd)
 
         if action == "EXPLAIN":
@@ -1339,12 +1458,18 @@ class DevAgent:
         False — the op is skipped rather than run without clear consent. Mirrors
         the hardened voice approval gate (approval_hook.py, timeout→reject).
         """
-        import numpy as np
-
         # If the user already approved the entire plan upfront, skip per-op confirmation
         if self._plan_authorized:
             log.info("DevAgent._confirm: skipping (plan authorized) — %s", description)
             return True
+
+        # Serialize: DAG waves may run two destructive steps concurrently;
+        # overlapping TTS prompts + mic captures would garble both answers.
+        async with self._confirm_lock:
+            return await self._confirm_destructive_op_locked(description)
+
+    async def _confirm_destructive_op_locked(self, description: str) -> bool:
+        import numpy as np
 
         log.info("DevAgent: confirmation required — %s", description)
 
@@ -1382,10 +1507,18 @@ class DevAgent:
         try:
             if self._confirm_whisper is None:
                 from faster_whisper import WhisperModel
-                self._confirm_whisper = WhisperModel("tiny", device="cpu", compute_type="int8")
+                self._confirm_whisper = await asyncio.to_thread(
+                    WhisperModel, "tiny", device="cpu", compute_type="int8"
+                )
             model = self._confirm_whisper
-            segs, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=False)
-            text = " ".join(s.text for s in segs).lower().strip()
+
+            def _transcribe() -> str:
+                segs, _ = model.transcribe(
+                    audio, language="en", beam_size=1, vad_filter=False
+                )
+                return " ".join(s.text for s in segs).lower().strip()
+
+            text = await asyncio.to_thread(_transcribe)
             log.info("DevAgent._confirm: heard %r", text)
         except Exception as exc:
             log.info("DevAgent._confirm: transcription failed (%s) — DENY (fail-safe)", exc)
