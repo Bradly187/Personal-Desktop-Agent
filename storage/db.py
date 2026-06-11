@@ -421,7 +421,7 @@ CREATE TABLE IF NOT EXISTS flare_profile (
 CREATE TABLE IF NOT EXISTS voice_calibration_sessions (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     ts        REAL    NOT NULL,
-    condition TEXT    NOT NULL,  -- good_day | flare_day | allergy_day | svt_attack
+    condition TEXT    NOT NULL,  -- good_day | flare_day | allergy_day (legacy rows may hold svt_attack)
     notes     TEXT
 );
 

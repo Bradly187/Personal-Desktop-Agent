@@ -245,7 +245,7 @@ struct SettingsView: View {
                     .disabled(wsManager.state != .connected)
                     .accessibilityHint("PC-driven session: corrects pronunciation errors and adapts recognition to today's condition.")
 
-                    Text("PC plays prompts, scores your speech, and saves per-condition corrections (good day / flare / allergy / SVT). Requires bridge connection.")
+                    Text("PC plays prompts, scores your speech, and saves per-condition corrections (good day / flare / allergy). Requires bridge connection.")
                         .font(DesignTokens.Typography.caption)
                         .foregroundStyle(theme.textSecondary)
 
@@ -255,7 +255,6 @@ struct SettingsView: View {
                             Text("Good day").tag("good_day")
                             Text("Flare day").tag("flare_day")
                             Text("Allergy day").tag("allergy_day")
-                            Text("SVT attack").tag("svt_attack")
                         }
                         .pickerStyle(.menu)
                     }

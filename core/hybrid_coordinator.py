@@ -346,10 +346,8 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "this is a good day", "good day mode", "feeling well",
     "this is a flare day", "flare day", "flare mode",
     "this is an allergy day", "allergy day", "allergy mode",
-    "having an svt", "svt attack", "svt mode", "this is an svt day",
     "run voice calibration", "calibrate my voice", "quick calibration",
     "calibrate flare day", "calibrate allergy day",
-    "calibrate svt", "calibrate svt attack",
     # Goal-level agent control
     "hey agent status", "what are you doing", "agent status",
     "status", "what's happening",
@@ -791,10 +789,6 @@ class HybridCoordinator:
                 "this is an allergy day":  "allergy_day",
                 "allergy day":             "allergy_day",
                 "allergy mode":            "allergy_day",
-                "having an svt":           "svt_attack",
-                "svt attack":              "svt_attack",
-                "svt mode":                "svt_attack",
-                "this is an svt day":      "svt_attack",
             }
             if _lower in _CONDITION_TRIGGERS and self._profiler:
                 condition = _CONDITION_TRIGGERS[_lower]
@@ -810,8 +804,6 @@ class HybridCoordinator:
                 "quick calibration":       ("good_day",    True),
                 "calibrate flare day":     ("flare_day",   False),
                 "calibrate allergy day":   ("allergy_day", False),
-                "calibrate svt":           ("svt_attack",  False),
-                "calibrate svt attack":    ("svt_attack",  False),
             }
             if _lower in _CALIBRATION_TRIGGERS and self._calibrator:
                 condition, quick = _CALIBRATION_TRIGGERS[_lower]

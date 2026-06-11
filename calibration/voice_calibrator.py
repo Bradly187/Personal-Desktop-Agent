@@ -1,6 +1,6 @@
 """VoiceCalibrator — guided voice calibration for condition-aware speech recognition.
 
-Addresses the critical accessibility gap: disabled users (RA, SVT, allergies)
+Addresses the critical accessibility gap: disabled users (RA, allergies)
 have voices that vary significantly across conditions.  This calibrator:
 
   1. Announces each phrase via Danielle TTS: "Please say: scroll down"
@@ -13,13 +13,11 @@ Conditions:
     good_day     — baseline; calibrated when feeling well
     flare_day    — RA flare; fatigue, reduced breath support, slower speech
     allergy_day  — nasal congestion changes vowels significantly
-    svt_attack   — elevated heart rate, strained/breathless voice
 
 Trigger via voice:
     "hey agent run voice calibration"         → good_day session
     "hey agent calibrate flare day"           → flare_day session
     "hey agent calibrate allergy day"         → allergy_day session
-    "hey agent calibrate svt"                 → svt_attack session
     "hey agent quick calibration"             → 5-phrase quick session
 
 Trigger via iPad:
@@ -85,7 +83,6 @@ CONDITION_DISPLAY: dict[str, str] = {
     "good_day":    "Good day (baseline)",
     "flare_day":   "Flare day",
     "allergy_day": "Allergy / congestion day",
-    "svt_attack":  "SVT attack",
 }
 
 
@@ -162,7 +159,7 @@ class VoiceCalibrator:
         """Run a full (or quick) calibration session for the given condition.
 
         Args:
-            condition:    "good_day" | "flare_day" | "allergy_day" | "svt_attack"
+            condition:    "good_day" | "flare_day" | "allergy_day"
             quick:        True → use 5-phrase QUICK_PHRASES set
             on_progress:  callback(phrase_idx, total, result) for iPad UI updates
 
@@ -172,6 +169,14 @@ class VoiceCalibrator:
         if self._running:
             log.warning("VoiceCalibrator: session already in progress")
             return CalibrationReport(condition, -1, 0, 0, 0, 0.0, [])
+
+        if condition not in CONDITION_DISPLAY:
+            # e.g. an old iPad build sending the removed svt_attack condition
+            log.warning(
+                "VoiceCalibrator: unknown condition %r — falling back to good_day",
+                condition,
+            )
+            condition = "good_day"
 
         self._running = True
         t_start = time.monotonic()
