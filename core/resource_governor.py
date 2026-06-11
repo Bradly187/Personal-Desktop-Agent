@@ -158,26 +158,26 @@ class ResourceGovernor:
         await asyncio.to_thread(self._restore_resources_sync)
         log.info("ResourceGovernor stopped (resources restored)")
 
-    # ── SVT fast-path ────────────────────────────────────────────────────────
+    # ── Flare fast-path ──────────────────────────────────────────────────────
 
     def notify_pain_day_change(self, score: float) -> None:
         """Called synchronously by BehavioralTwinState.set_manual_pain_day().
 
         Fires _on_flare_start / _on_flare_end immediately via create_task so
-        VRAM is released in <100ms on an SVT attack instead of waiting up to
-        POLL_INTERVAL_S (5s) for the next poll cycle.
+        VRAM is released in <100ms on a manually declared flare instead of
+        waiting up to POLL_INTERVAL_S (5s) for the next poll cycle.
         """
         if not self._running:
             return
         if not self._flare_active and score >= _ACTIVATE_THRESHOLD:
             t = asyncio.create_task(
-                self._on_flare_start(score), name="governor_svt_flare_start"
+                self._on_flare_start(score), name="governor_fast_flare_start"
             )
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
         elif self._flare_active and score < _DEACTIVATE_THRESHOLD:
             t = asyncio.create_task(
-                self._on_flare_end(score), name="governor_svt_flare_end"
+                self._on_flare_end(score), name="governor_fast_flare_end"
             )
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)

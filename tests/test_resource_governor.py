@@ -478,10 +478,10 @@ def _noop_to_thread_factory():
 
 
 # ---------------------------------------------------------------------------
-# SVT fast-path: notify_pain_day_change()
+# Flare fast-path: notify_pain_day_change()
 # ---------------------------------------------------------------------------
 
-class TestSVTFastPath:
+class TestFlareFastPath:
     """notify_pain_day_change() must trigger flare start/end immediately
     without waiting for the 5-second poll cycle."""
 
@@ -548,7 +548,7 @@ class TestSVTFastPath:
         assert called == []   # already active — no second start
 
     @pytest.mark.asyncio
-    async def test_svt_fast_path_wired_from_twin_state(self):
+    async def test_flare_fast_path_wired_from_twin_state(self):
         """BehavioralTwinState.set_manual_pain_day(True) fires governor immediately."""
         from adaptive.behavioral_twin_state import BehavioralTwinState
 
