@@ -152,7 +152,7 @@ Push to `iPadApp/` → GitHub Actions builds and uploads to TestFlight. See `.gi
 
 ## Health-Aware Design
 
-Built for rheumatoid arthritis first: large touch targets, minimal fine-motor input, and a `PainDayEngine` that detects flare days from passive signals and relaxes the whole sensor stack in response (thresholds, gesture velocity floors, Whisper VAD, VRAM pressure). Voice calibration profiles cover distinct conditions (good day / flare / allergy / SVT episode). Reliability is always preferred over speed.
+Built for rheumatoid arthritis first: large touch targets, minimal fine-motor input, and a `PainDayEngine` that detects flare days from passive signals and relaxes the whole sensor stack in response (thresholds, gesture velocity floors, Whisper VAD, VRAM pressure). Voice calibration profiles cover distinct conditions (good day / flare / allergy). Reliability is always preferred over speed.
 
 ## License
 
