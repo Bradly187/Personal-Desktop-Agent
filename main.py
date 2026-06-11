@@ -603,8 +603,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         )
     elif _backend == "vllm-server":
         local = VLLMServerInference(
-            base_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
-            model=getattr(args, "vllm_server_model", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
+            base_url=getattr(args, "vllm_server_url", "http://127.0.0.1:8000"),
+            model=getattr(args, "vllm_server_model",
+                          "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"),
         )
         log.info(
             "Using vLLM-server backend (OpenAI-compatible HTTP at %s) — "
@@ -1197,12 +1198,14 @@ def _parse_args() -> argparse.Namespace:
                    default="meta-llama/Meta-Llama-3.1-8B-Instruct",
                    help="HuggingFace model ID for vLLM backend")
     # ── vLLM-server backend (Option C: WSL2 `vllm serve` over HTTP) ──────────
-    p.add_argument("--vllm-server-url", type=str, default="http://localhost:8000",
+    p.add_argument("--vllm-server-url", type=str, default="http://127.0.0.1:8000",
                    help="Base URL of the WSL2 `vllm serve` OpenAI-compatible server "
                         "(requires --backend vllm-server). Start it with "
-                        "scripts/start_vllm_server.bat.")
+                        "scripts/start_vllm_server.bat. Use 127.0.0.1, not "
+                        "localhost: the ::1 resolution adds ~2s per request "
+                        "(WSL NAT forwarding is IPv4-only).")
     p.add_argument("--vllm-server-model", type=str,
-                   default="meta-llama/Meta-Llama-3.1-8B-Instruct",
+                   default="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
                    help="Model name the vllm-server was started with (must match the "
                         "--model passed to `vllm serve`).")
     p.add_argument("--speculative", action="store_true",
