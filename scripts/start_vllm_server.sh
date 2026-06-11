@@ -15,11 +15,12 @@ set -euo pipefail
 MODEL="${VLLM_MODEL:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
 HOST="${VLLM_HOST:-0.0.0.0}"
 PORT="${VLLM_PORT:-8000}"
-VENV="${VLLM_VENV:-.venv-wsl}"
+# Default venv is $HOME/.venv-wsl (absolute). Override with VLLM_VENV=<path>.
+VENV="${VLLM_VENV:-$HOME/.venv-wsl}"
 
 cd "$(dirname "$0")/.."
 
-# 1. Activate the WSL virtualenv (.venv-wsl), creating it if missing.
+# 1. Activate the WSL virtualenv, creating it if missing.
 if [[ ! -d "${VENV}" ]]; then
     echo "[start_vllm_server] creating venv ${VENV}"
     python3 -m venv "${VENV}"
@@ -28,18 +29,24 @@ fi
 source "${VENV}/bin/activate"
 
 # 2. Install vllm + torch (CUDA 12.8 wheels) if vllm isn't importable yet.
+#    Use --extra-index-url (not --index-url) so PyPI stays available for
+#    vllm's non-torch dependencies (regex, etc.).
 if ! python -c "import vllm" 2>/dev/null; then
     echo "[start_vllm_server] installing vllm + torch (cu128 wheels)..."
-    pip install vllm torch --index-url https://download.pytorch.org/whl/cu128
+    pip install vllm torch \
+        --extra-index-url https://download.pytorch.org/whl/cu128
 fi
 
-# 3. Serve the model. --enforce-eager skips CUDA-graph compilation (faster
-#    cold start, lower VRAM); --gpu-memory-utilization 0.55 leaves headroom for
-#    Whisper on the 32 GB RTX 5090.
+# 3. Serve the model with CUDA graph optimizations.
+#    --gpu-memory-utilization 0.75 leaves ~8 GB headroom for Whisper.
+#    Env vars must be set in the shell environment, not as vllm arguments.
 echo "[start_vllm_server] serving ${MODEL} on ${HOST}:${PORT}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 exec vllm serve "${MODEL}" \
     --host "${HOST}" \
     --port "${PORT}" \
-    --gpu-memory-utilization 0.55 \
-    --max-model-len 4096 \
-    --enforce-eager
+    --gpu-memory-utilization 0.75 \
+    --max-model-len 8192 \
+    --dtype float16
+
