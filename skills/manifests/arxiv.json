@@ -1,0 +1,33 @@
+{
+  "skill_id": "arxiv",
+  "display_name": "arXiv papers",
+  "enabled": true,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.arxiv_server"]
+  },
+  "tools": {
+    "allow": ["search_papers", "recent_papers", "fetch_paper"],
+    "send_tools": []
+  },
+  "intents": {
+    "search_papers": {
+      "keywords": ["papers about", "papers on", "find papers", "search arxiv"],
+      "tool": "search_papers",
+      "send": false,
+      "summarize": true
+    },
+    "recent_papers": {
+      "keywords": ["new papers", "latest papers", "recent papers", "today's papers"],
+      "tool": "recent_papers",
+      "send": false,
+      "summarize": true
+    },
+    "fetch_paper": {
+      "keywords": ["download the paper", "download paper", "fetch the paper", "get the paper"],
+      "tool": "fetch_paper",
+      "send": false
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "skill_id": "diagrams",
+  "display_name": "Diagrams and wireframes",
+  "enabled": true,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.diagrams_server"]
+  },
+  "tools": {
+    "allow": ["create_diagram", "list_diagrams"],
+    "send_tools": []
+  },
+  "intents": {
+    "create": {
+      "keywords": ["draw a diagram", "make a diagram", "create a diagram", "make a wireframe", "create a wireframe", "draw a flowchart", "make a flowchart"],
+      "tool": "create_diagram",
+      "send": false,
+      "plan": true
+    },
+    "list": {
+      "keywords": ["list my diagrams", "show my diagrams", "recent diagrams"],
+      "tool": "list_diagrams",
+      "send": false
+    }
+  }
+}

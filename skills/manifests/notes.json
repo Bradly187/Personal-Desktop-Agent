@@ -1,0 +1,31 @@
+{
+  "skill_id": "notes",
+  "display_name": "Notes and journal",
+  "enabled": true,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.notes_server"]
+  },
+  "tools": {
+    "allow": ["add_note", "append_journal", "read_recent_notes"],
+    "send_tools": []
+  },
+  "intents": {
+    "add_note": {
+      "keywords": ["add a note", "take a note", "note this down", "make a note", "save a note"],
+      "tool": "add_note",
+      "send": false
+    },
+    "journal": {
+      "keywords": ["append to my journal", "journal entry", "add to my journal"],
+      "tool": "append_journal",
+      "send": false
+    },
+    "recent_notes": {
+      "keywords": ["read my recent notes", "recent notes", "latest notes"],
+      "tool": "read_recent_notes",
+      "send": false
+    }
+  }
+}

@@ -175,6 +175,11 @@ class SkillRegistry:
                             best = {"skill_id": sid, "tool": tool,
                                     "send": bool(intent.get("send", False)),
                                     "summarize": bool(intent.get("summarize", False)),
+                                    # plan=true: the tool needs LLM-generated
+                                    # input (e.g. diagram source), so the intent
+                                    # routes to plan_and_run instead of a direct
+                                    # single-turn call.
+                                    "plan": bool(intent.get("plan", False)),
                                     "intent": iname, "keyword": kw, "score": score}
         return best
 

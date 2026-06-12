@@ -1,0 +1,31 @@
+{
+  "skill_id": "weather",
+  "display_name": "Weather",
+  "enabled": true,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.weather_server"]
+  },
+  "tools": {
+    "allow": ["set_location", "current_weather", "forecast"],
+    "send_tools": []
+  },
+  "intents": {
+    "current": {
+      "keywords": ["the weather", "what's the weather", "how's the weather", "weather right now", "pressure trend"],
+      "tool": "current_weather",
+      "send": false
+    },
+    "forecast": {
+      "keywords": ["the forecast", "weather forecast", "going to rain", "weather tomorrow"],
+      "tool": "forecast",
+      "send": false
+    },
+    "set_location": {
+      "keywords": ["set my location to", "change my location to"],
+      "tool": "set_location",
+      "send": false
+    }
+  }
+}
