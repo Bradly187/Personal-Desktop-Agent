@@ -39,6 +39,23 @@ keywords so utterances route to the `skill` domain.
 2. Implement the server with `FastMCP` (see `skills/servers/echo_server.py`).
    `send_tools` are the egress/mutation tools that get gated.
 
+## Bundled skills (auth-free, enabled by default)
+
+| Skill | Say | Notes |
+|-------|-----|-------|
+| `notes` | "add a note: …", "append to my journal: …", "read my recent notes" | Writes markdown under `~/Notes` (override: `DA_NOTES_ROOT`); the Personal KB indexes it |
+| `arxiv` | "any new papers in quant-ph?", "find papers about …", "download the paper 2406.01234" | Open arXiv API; PDFs land in `~/Documents/papers/` (KB-indexed); abstracts summarised on-device |
+| `weather` | "what's the weather?", "the forecast", "set my location to Austin Texas" | Open-Meteo, keyless; includes the 12-h barometric **pressure trend** (flare-relevant) |
+| `files` | "my recent files", "my latest download", "find the file called budget" | Name search + open across Downloads/Documents/Desktop/Notes (allowlisted); content search belongs to the KB |
+| `diagrams` | "draw a diagram of …", "make a wireframe of …", "list my diagrams" | The planner generates Mermaid/SVG, the skill renders+opens it; saved under `~/Documents/diagrams/` |
+
+These write only inside their dedicated directories (path-locked in each
+server) and are not send-gated — the blast radius is new files in one folder,
+and gating "add a note" behind a voice approval would defeat the accessibility
+purpose. An intent may set `"plan": true` when its tool needs LLM-generated
+input (the diagrams `create` intent does this), routing the utterance through
+the planner instead of a direct call.
+
 ## Gmail + Calendar (`google_pim`)
 
 A **locally-owned** server (not a third-party MCP server, so your mail and OAuth

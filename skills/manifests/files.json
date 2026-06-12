@@ -1,0 +1,26 @@
+{
+  "skill_id": "files",
+  "display_name": "Files",
+  "enabled": true,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.files_server"]
+  },
+  "tools": {
+    "allow": ["recent_files", "find_file", "open_file"],
+    "send_tools": []
+  },
+  "intents": {
+    "recent": {
+      "keywords": ["recent files", "my recent files", "latest download", "my latest download", "newest files"],
+      "tool": "recent_files",
+      "send": false
+    },
+    "find": {
+      "keywords": ["find the file", "find a file called", "locate the file"],
+      "tool": "find_file",
+      "send": false
+    }
+  }
+}

@@ -1821,6 +1821,11 @@ class DevAgent:
         utterance to a registered skill intent."""
         t0 = time.monotonic()
         match = self._skill_registry.match_intent(text)
+        if match.get("plan"):
+            # The tool needs LLM-generated input (e.g. a diagram's Mermaid/SVG
+            # source) — a direct call can't synthesise it. Route through the
+            # planner, which generates the content and emits the skill step.
+            return await self.plan_and_run(text)
         schema = self._skill_registry.tool_schema(match["skill_id"], match["tool"])
         args = self._build_skill_args(text, match, schema)
         step = AgentStep(
