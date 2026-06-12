@@ -294,6 +294,7 @@ class DevAgent:
         # Goal-level authorization state (reset after each plan)
         self._plan_authorized: bool = False
         self._approved_verbs: frozenset[str] = frozenset()
+        self._escalated_this_run: bool = False  # halted plan landed in review queue
         self._confirm_lock: asyncio.Lock = asyncio.Lock()
         # Concurrency guards: plan state (_plan_authorized/_cancel_event/
         # _current_goal/…) is per-plan instance state, so plans must never
@@ -541,6 +542,7 @@ class DevAgent:
         self._current_goal = goal
         self._total_steps = min(len(steps), self.MAX_STEPS)
         self._current_step = 0
+        self._escalated_this_run = False
 
         # Durable ledger: write a 'running' run row now so a crash mid-plan is
         # recoverable (reconciled to 'interrupted' on next startup).
@@ -605,6 +607,7 @@ class DevAgent:
                 # Roll back completed side effects — a partial plan halted by the
                 # step cap should not leave half-done destructive work.
                 await self._run_compensations(run_id, triggered_by="max_steps")
+                await self._record_escalation(run_id, goal, "max_steps", None, replans)
                 compensated = True
                 break
             if self._cancel_event.is_set():
@@ -1059,6 +1062,34 @@ class DevAgent:
             except Exception as _pub_exc:
                 log.debug("DevAgent: event publish failed: %s", _pub_exc)
         await self._run_compensations(run_id, triggered_by="max_replans")
+        await self._record_escalation(run_id, goal, "max_replans", failed_action, replans)
+
+    async def _record_escalation(
+        self, run_id: int, goal: str, reason: str,
+        failed_action: Optional[str], replans: int,
+    ) -> None:
+        """Persist a halted plan to the human-review escalation queue.
+
+        Called only on budget-exhaustion halts (max_replans / max_steps) — a
+        user cancel is deliberate and never escalates. Best-effort: the rollback
+        already ran, so a DB failure here must not raise. Sets
+        _escalated_this_run so the completion TTS can mention the review queue.
+        """
+        db = self._db()
+        if not db or not getattr(db, "available", False):
+            return
+        try:
+            detail = json.dumps({"current_step": self._current_step,
+                                 "total_steps": self._total_steps})
+            await db.insert_escalation(
+                run_id, goal, reason,
+                failed_action=failed_action, replans=replans, detail=detail,
+            )
+            self._escalated_this_run = True
+            log.info("DevAgent: escalated halted plan to review queue (%s): %.60s",
+                     reason, goal)
+        except Exception as exc:
+            log.warning("DevAgent._record_escalation failed: %s", exc)
 
     async def _run_compensations(
         self, run_id: int, triggered_by: str = "step_failure"
@@ -1374,6 +1405,8 @@ class DevAgent:
             failed = [s for s in result.steps if not s.success]
             first_err = (failed[0].result or "")[:60] if failed else ""
             msg = f"Task failed at step {self._current_step}: {first_err}" if first_err else "Plan failed."
+            if self._escalated_this_run:
+                msg += " Changes rolled back and saved to the review queue."
         try:
             from tts.polly_stream import get_client as _get_tts
             asyncio.create_task(_get_tts().speak(msg))
@@ -1386,6 +1419,7 @@ class DevAgent:
         GoalSessionStore.cancel()
         self._plan_authorized = False
         self._approved_verbs = frozenset()
+        self._escalated_this_run = False
         self._cancel_event.clear()
         self._current_goal = None
         self._current_step = 0
