@@ -738,7 +738,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # Cluster offload: route DevAgent RAG queries to the laptop indexer service.
     if cluster_cfg.has_remote_indexer:
-        dev_agent.set_remote_indexer_url(cluster_cfg.laptop_indexer_url)
+        dev_agent.set_remote_indexer_url(cluster_cfg.laptop_indexer_url,
+                                         token=cluster_cfg.laptop_indexer_token)
         dev_agent.set_cluster_health(cluster_health)
 
     # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────

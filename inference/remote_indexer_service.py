@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import logging
 import os
 import sys
@@ -121,14 +122,41 @@ class RemoteIndexerService:
         })
 
 
+def _make_auth_middleware(token: str):
+    """Require a shared bearer token on the data-returning /query/* routes (C2).
+
+    /health stays open so ClusterHealthMonitor can probe liveness without the
+    token. Constant-time comparison; any mismatch → 401.
+    """
+    @web.middleware
+    async def _auth(request: web.Request, handler):
+        if request.path.startswith("/query"):
+            supplied = request.headers.get("Authorization", "")
+            if not hmac.compare_digest(supplied, f"Bearer {token}"):
+                return web.json_response({"results": [], "error": "unauthorized"}, status=401)
+        return await handler(request)
+    return _auth
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Remote CodebaseIndexer service (laptop node)")
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="Bind address (default 0.0.0.0; pin to the WireGuard IP if available)")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     help="Project root to index (default: this repo clone)")
     ap.add_argument("--watch", action="store_true", help="Watch files for incremental reindex")
+    ap.add_argument("--token", default=None,
+                    help="Shared bearer token; falls back to the INDEXER_TOKEN env var")
     args = ap.parse_args()
+
+    # C2: refuse to run unauthenticated. The desktop client must present the
+    # same token (cluster_config.json laptop.indexer_token).
+    token = os.environ.get("INDEXER_TOKEN") or args.token
+    if not token:
+        log.error("No indexer token set (INDEXER_TOKEN env or --token). Refusing to "
+                  "start an unauthenticated indexer service.")
+        sys.exit(2)
 
     svc = RemoteIndexerService(args.root, watch=args.watch)
 
@@ -138,7 +166,7 @@ def main() -> None:
     async def _on_cleanup(app):
         await svc.stop()
 
-    app = web.Application()
+    app = web.Application(middlewares=[_make_auth_middleware(token)])
     app.router.add_get("/query/combined", svc.handle_combined)
     app.router.add_get("/query/codebase", svc.handle_codebase)
     app.router.add_get("/query/docs", svc.handle_docs)

@@ -17,7 +17,8 @@ Example cluster_config.json:
         "hostname": "Brad_Laptop",
         "ollama_url":  "http://192.168.18.12:11434",
         "whisper_url": "http://192.168.18.12:8888",
-        "indexer_url": "http://192.168.18.12:9000"
+        "indexer_url": "http://192.168.18.12:9000",
+        "indexer_token": "shared-secret-matching-the-service-INDEXER_TOKEN"
       },
       "routing": { "lightweight_host": "laptop" },
       "smb_share": null
@@ -52,6 +53,9 @@ class ClusterConfig:
     laptop_ollama_url: Optional[str] = None
     laptop_whisper_url: Optional[str] = None
     laptop_indexer_url: Optional[str] = None
+    # C2: shared bearer token the desktop presents to the laptop indexer service
+    # (must match the service's INDEXER_TOKEN). None → no auth header sent.
+    laptop_indexer_token: Optional[str] = None
     # "laptop" → offload the lightweight (command-domain) inference to the laptop.
     # "desktop" (or anything else) → keep it local.
     lightweight_host: str = "desktop"
@@ -88,6 +92,7 @@ class ClusterConfig:
             laptop_ollama_url=_clean_url(laptop.get("ollama_url")),
             laptop_whisper_url=_clean_url(laptop.get("whisper_url")),
             laptop_indexer_url=_clean_url(laptop.get("indexer_url")),
+            laptop_indexer_token=(laptop.get("indexer_token") or None),
             lightweight_host=(routing.get("lightweight_host") or "desktop"),
             smb_share=data.get("smb_share"),
         )
