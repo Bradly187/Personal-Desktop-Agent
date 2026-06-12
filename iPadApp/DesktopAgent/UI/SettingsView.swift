@@ -45,6 +45,33 @@ struct SettingsView: View {
                             .keyboardType(.numberPad)
                     }
 
+                    // Pairing token (security fix C1). The PC prints it once at
+                    // startup; the bridge rejects tokenless connections with 401.
+                    VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
+                        Text("Pairing Token")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(theme.textSecondary)
+                        TextField("paste the token from the PC startup log", text: $settings.pairingToken)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(.footnote, design: .monospaced))
+                            .submitLabel(.done)
+                            .accessibilityLabel("Pairing token")
+                            .accessibilityHint("Paste the token printed in the PC startup log. Required to connect.")
+                        Text("The PC prints this once at startup (“iPad pairing token: …”). After pasting, tap Reconnect.")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(theme.textSecondary)
+                    }
+
+                    // Auth-failure banner — shown when the bridge rejected the
+                    // last attempt with HTTP 401 (missing or wrong token).
+                    if let authError = wsManager.lastConnectionError {
+                        Label(authError, systemImage: "lock.trianglebadge.exclamationmark")
+                            .font(DesignTokens.Typography.caption)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("Connection failed: \(authError)")
+                    }
+
                     if settings.wsURL == nil {
                         Label("Invalid host or port. Using default address.", systemImage: "exclamationmark.triangle.fill")
                             .font(DesignTokens.Typography.caption)

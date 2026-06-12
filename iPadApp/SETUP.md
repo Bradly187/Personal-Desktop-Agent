@@ -66,6 +66,7 @@ All sensor preferences are persisted in `UserDefaults` via `SettingsStore.swift`
 - Target a **physical iPad** — Core Motion (tilt) is unavailable on the Simulator.
 - Set `serverHost` in Settings to your PC's local IP address.
 - Start the PC bridge first: `python ipad_bridge.py`
+- **Pairing token (required, security fix C1):** the bridge prints a token once at startup (`iPad pairing token: …`). Paste it into Settings → Connection → **Pairing Token** (or the Connection step of onboarding). Without it the bridge rejects the connection with HTTP 401; the app shows a clear "Connection refused (401)" message until a valid token is entered. The token is stored at `~/.claude/ipad_bridge/paired_token` on the PC.
 
 ### Option B: Swift Package Manager
 
