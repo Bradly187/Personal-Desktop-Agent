@@ -27,7 +27,22 @@ except ImportError:
     print("ERROR: aiohttp not installed. Run: pip install aiohttp")
     sys.exit(1)
 
-BRIDGE_URL = "ws://localhost:8765/ws"
+# Read the bridge pairing token (C1) so this manual client can authenticate.
+# Override with the DA_BRIDGE_TOKEN env var if the bridge runs on another machine.
+def _bridge_token() -> str:
+    import os
+    from pathlib import Path
+    tok = os.environ.get("DA_BRIDGE_TOKEN")
+    if tok:
+        return tok.strip()
+    path = Path.home() / ".claude" / "ipad_bridge" / "paired_token"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+BRIDGE_URL = f"ws://localhost:8765/ws?token={_bridge_token()}"
 
 
 # ---------------------------------------------------------------------------

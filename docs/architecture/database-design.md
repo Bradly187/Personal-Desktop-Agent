@@ -101,7 +101,7 @@ The JSON fallback in `benchmark_models.py` remains for environments where DuckDB
 
 | Legacy format | Problems | Replaced by |
 |---|---|---|
-| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — those 3 tables expanded, plus the rest of today's **38-table** schema (§11) |
+| `trainer.db` (SQLite, 3 tables) | No session context; `command_id` backlink missing; embedding path absent | `agent.db` — those 3 tables expanded, plus the rest of today's **40-table** schema (§11) |
 | `routing_log.jsonl` | Full-file read every 5 min; no session; no referential integrity | `agent.db` `commands` table |
 | `gesture_calibration.json` | Overwrote history on every write; in-memory samples lost on crash | `agent.db` `gesture_samples` (full history) + `gesture_calibration` (append-only floor log) |
 | `benchmark_results.json` | Single-run snapshot; no history; not queryable | `analytics.duckdb` `benchmark_runs / results / prompts` |
@@ -189,9 +189,9 @@ con.sql("""
 
 ## 11. Entity-Relationship Diagrams
 
-These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **39 tables** across schema versions v1–v5; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
+These diagrams reflect the live schema (`storage/db.py` for `agent.db`, the `_ANALYTICS_SCHEMA` block for `analytics.duckdb`, and `storage/audit_log.py` for `audit.db`). The `agent.db` schema currently defines **40 tables** across schema versions v1–v5; `sessions` and `commands` are the two hubs (the star-schema fact tables of §2–§3), and 11 tables are standalone singleton/calibration/append-only logs with no foreign key.
 
-### 11.1 `agent.db` — relationship overview (all 39 tables)
+### 11.1 `agent.db` — relationship overview (all 40 tables)
 
 ```mermaid
 erDiagram
@@ -857,6 +857,6 @@ erDiagram
 The persistence layer is deliberately two-tier, unified for callers by the `MemoryManager` syscall facade (`storage/memory_manager.py`):
 
 - **Vector / semantic tier (ChromaDB + `all-MiniLM-L6-v2`, 384-dim, cosine).** Three logical stores under `./chroma_db`: the RAG **`codebase`/`documents`** collections (`inference/codebase_indexer.py`), the **`behavioral_memory`** few-shot collection (`storage/semantic_memory.py`), and the behavioral-twin backing (which reuses `behavioral_memory`). All degrade to a Jaccard word-overlap fallback over SQLite rows when ChromaDB is unavailable, with a time-gated re-probe that restores the vector path after a transient outage.
-- **Structured tier.** `agent.db` (SQLite/`aiosqlite`, OLTP — §11.1–11.11), `analytics.duckdb` (DuckDB, OLAP — §11.8), and `audit.db` (append-only, trigger-immutable — §11.9). `agent.db` migrations are versioned via `PRAGMA user_version` (`AgentDB._migrate`); current version is **5** (39 tables). v4 added `inferences.prompt` (full prompt text for fine-tuning capture); v5 added the `few_shot_counterexamples` table (negative few-shot, §11.3).
+- **Structured tier.** `agent.db` (SQLite/`aiosqlite`, OLTP — §11.1–11.11), `analytics.duckdb` (DuckDB, OLAP — §11.8), and `audit.db` (append-only, trigger-immutable — §11.9). `agent.db` migrations are versioned via `PRAGMA user_version` (`AgentDB._migrate`); current version is **5** (40 tables). v4 added `inferences.prompt` (full prompt text for fine-tuning capture); v5 added the `few_shot_counterexamples` table (negative few-shot, §11.3).
 
 The SQLite `few_shot_examples` table (§5) is the embedding store on the **per-command prompt hot path**; the ChromaDB `behavioral_memory` collection feeds the **behavioral-twin context layer**. Same embedding model, two independent storage paths — see §5.

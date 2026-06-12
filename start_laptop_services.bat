@@ -60,11 +60,16 @@ if %errorlevel%==0 (
 )
 
 echo Starting Indexer service on :9000 ...
+if not defined INDEXER_TOKEN (
+  echo   WARNING: INDEXER_TOKEN is not set - the indexer service will refuse to start.
+  echo   Set it to the same value as cluster_config.json laptop.indexer_token, e.g.:
+  echo       set INDEXER_TOKEN=your-shared-secret
+)
 netstat -ano | findstr "LISTENING" | findstr ":9000" >nul 2>&1
 if %errorlevel%==0 (
   echo   already listening on :9000 - skipping
 ) else (
-  start "Laptop Indexer :9000" /D "%ROOT%" "%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch
+  start "Laptop Indexer :9000" /D "%ROOT%" "%PY%" "%ROOT%inference\remote_indexer_service.py" --port 9000 --watch --token "%INDEXER_TOKEN%"
 )
 
 echo.

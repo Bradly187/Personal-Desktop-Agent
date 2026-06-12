@@ -37,6 +37,7 @@ from core.command_executor import Command
 from tests.conftest import make_depth_msg, make_camera_msg, make_lm_mock, make_hands_result
 
 BRIDGE_PORT = 8770
+_TEST_TOKEN = "sprint-n-test-token"  # C1 pairing token for the in-process bridge
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +53,7 @@ async def start_gesture_bridge(
     mock_gesture_result: Command or None returned by mock GestureProcessor.
     infer_return: string the mock LLM returns (verb that CommandExecutor will run).
     """
-    bridge = IPadBridge(port=BRIDGE_PORT)
+    bridge = IPadBridge(port=BRIDGE_PORT, token=_TEST_TOKEN)
 
     mock_local = MagicMock()
     mock_local.infer = AsyncMock(return_value=infer_return)
@@ -108,7 +109,7 @@ async def test_gbe01_point_gesture_fires_click():
         bridge, fusion, mock_gp, bt, ft = await start_gesture_bridge(mock_gesture_result=gesture_cmd)
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
                     await ws.send_json(make_camera_msg())
                     await asyncio.sleep(0.5)
 
@@ -132,7 +133,7 @@ async def test_gbe02_no_gesture_no_click():
         bridge, fusion, mock_gp, bt, ft = await start_gesture_bridge(mock_gesture_result=None)
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
                     await ws.send_json(make_camera_msg())
                     await asyncio.sleep(0.5)
 
@@ -180,7 +181,7 @@ async def _start_lidar_gesture_bridge(infer_return="CLICK"):
     from sensors.lidar_receiver import LiDARReceiver
     from sensors.gesture_processor import GestureProcessor
 
-    bridge = IPadBridge(port=BRIDGE_PORT)
+    bridge = IPadBridge(port=BRIDGE_PORT, token=_TEST_TOKEN)
     mock_local = MagicMock()
     mock_local.infer = AsyncMock(return_value=infer_return)
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
@@ -222,7 +223,7 @@ async def test_gbe03_real_lidar_pinch_accept():
 
             depth = _build_pinch_depth(index_depth=1.000, thumb_depth=1.020)  # 20mm
             async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
                     await ws.send_json(make_depth_msg(depth_array=depth, conf_array=None))
                     await asyncio.sleep(0.05)
                     await ws.send_json(make_camera_msg())
@@ -248,7 +249,7 @@ async def test_gbe04_real_lidar_pinch_reject():
 
             depth = _build_pinch_depth(index_depth=1.000, thumb_depth=1.060)  # 60mm
             async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
                     await ws.send_json(make_depth_msg(depth_array=depth, conf_array=None))
                     await asyncio.sleep(0.05)
                     await ws.send_json(make_camera_msg())
@@ -266,7 +267,7 @@ async def test_gbe04_real_lidar_pinch_reject():
 # ---------------------------------------------------------------------------
 
 async def test_gbe05_no_gesture_proc_no_crash():
-    bridge = IPadBridge(port=BRIDGE_PORT)
+    bridge = IPadBridge(port=BRIDGE_PORT, token=_TEST_TOKEN)
     mock_local = MagicMock()
     mock_local.infer = AsyncMock(return_value="CLICK")
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
@@ -284,7 +285,7 @@ async def test_gbe05_no_gesture_proc_no_crash():
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+            async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
                 await ws.send_json(make_camera_msg())
                 await asyncio.sleep(0.3)
         # If we reach here without exception, the test passes
@@ -302,7 +303,7 @@ async def test_gbe05_no_gesture_proc_no_crash():
 # ---------------------------------------------------------------------------
 
 async def test_gbe06_no_lidar_wired_no_crash():
-    bridge = IPadBridge(port=BRIDGE_PORT)
+    bridge = IPadBridge(port=BRIDGE_PORT, token=_TEST_TOKEN)
     mock_local = MagicMock()
     mock_local.infer = AsyncMock(return_value="CLICK")
     mock_local.get_status = MagicMock(return_value={"backend": "mock"})
@@ -320,7 +321,7 @@ async def test_gbe06_no_lidar_wired_no_crash():
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+            async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
                 await ws.send_json(make_depth_msg())
                 await asyncio.sleep(0.3)
         assert bridge._lidar is None
@@ -359,7 +360,7 @@ async def test_gbe07_fist_produces_close():
         )
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+                async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
                     await ws.send_json(make_camera_msg())
                     await asyncio.sleep(0.5)
 
