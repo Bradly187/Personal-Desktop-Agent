@@ -69,10 +69,16 @@ async def test_dedup_no_repeat():
     assert bus.publish.await_count == 1
 
 
-async def test_idle_when_skill_absent():
+async def test_runs_and_waits_when_skill_absent():
+    # OAuth-lifecycle change: the loop ALWAYS runs (skill presence re-checked
+    # per tick) so a google_pim hot-started by voice "connect Google" is picked
+    # up within one poll — previously start() gave up and a restart was needed.
     reg = MagicMock(); reg.has_skills = MagicMock(return_value=False); reg._skills = {}
+    reg.call = AsyncMock()
     bus = MagicMock(); bus.publish = AsyncMock()
     w = EmailWatcher(reg, bus)
     await w.start()
-    assert not w.is_healthy()             # never started — skill not active
+    assert w.is_healthy()                 # running, waiting for the skill
+    assert await w._tick() == 0
+    reg.call.assert_not_awaited()         # absent skill → no API call
     await w.stop()

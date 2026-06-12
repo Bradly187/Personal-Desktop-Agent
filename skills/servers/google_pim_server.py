@@ -44,24 +44,41 @@ class _NotAuthorized(RuntimeError):
     pass
 
 
+# One actionable sentence for EVERY auth failure mode (missing, expired,
+# revoked). The phrase "reconnect Google" is load-bearing: the EmailWatcher
+# detects it for the one-time spoken expiry alert, and the coordinator's voice
+# "reconnect Google" command is the fix it names.
+RECONNECT_MSG = ("Google access needs to be reconnected — say 'reconnect "
+                 "Google', or run: python -m skills.servers.google_pim_auth")
+
+
 # ---------------------------------------------------------------------------
 # Credentials / service builders (lazy google imports)
 # ---------------------------------------------------------------------------
 
 def _credentials():
-    """Load and refresh the stored OAuth credentials. Raises _NotAuthorized if
-    no token has been set up yet."""
+    """Load and refresh the stored OAuth credentials.
+
+    Raises _NotAuthorized with the actionable RECONNECT_MSG for every auth
+    failure mode: no token yet, expired token without a refresh token, and a
+    revoked/expired refresh token (Google RefreshError / invalid_grant).
+    """
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
 
     if not _TOKEN_PATH.exists():
-        raise _NotAuthorized(
-            f"No Google token at {_TOKEN_PATH}. Run: "
-            "python -m skills.servers.google_pim_auth"
-        )
-    creds = Credentials.from_authorized_user_file(str(_TOKEN_PATH), _SCOPES)
-    if not creds.valid and getattr(creds, "refresh_token", None):
-        creds.refresh(Request())
+        raise _NotAuthorized(RECONNECT_MSG)
+    try:
+        creds = Credentials.from_authorized_user_file(str(_TOKEN_PATH), _SCOPES)
+    except Exception as exc:                      # corrupt/foreign token file
+        raise _NotAuthorized(RECONNECT_MSG) from exc
+    if not creds.valid:
+        if not getattr(creds, "refresh_token", None):
+            raise _NotAuthorized(RECONNECT_MSG)
+        try:
+            creds.refresh(Request())
+        except Exception as exc:                  # revoked / invalid_grant
+            raise _NotAuthorized(RECONNECT_MSG) from exc
         _TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
@@ -169,7 +186,37 @@ def _create_event(cal, *, summary: str, start_iso: str, end_iso: str,
 # MCP tool wrappers
 # ---------------------------------------------------------------------------
 
+def _auth_guard(fn):
+    """Return RECONNECT_MSG (a normal string the pipeline can speak) instead of
+    raising when credentials are missing/expired/revoked — a raw exception
+    would surface as a cryptic MCP error. Mid-call 401s from a token revoked
+    between refresh and use are caught by the invalid_grant sniff."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except _NotAuthorized:
+            return RECONNECT_MSG
+        except Exception as exc:
+            text = str(exc).lower()
+            if "invalid_grant" in text or "unauthorized" in text or "401" in text:
+                return RECONNECT_MSG
+            raise
+    return wrapper
+
+
 @mcp.tool()
+@_auth_guard
+def auth_status() -> str:
+    """Whether Google access is currently working (read-only health probe)."""
+    _credentials()
+    return "Google access is connected and valid."
+
+
+@mcp.tool()
+@_auth_guard
 def list_next_event() -> str:
     """Return the user's next upcoming calendar event (read-only)."""
     from datetime import datetime, timezone
@@ -177,12 +224,14 @@ def list_next_event() -> str:
 
 
 @mcp.tool()
+@_auth_guard
 def list_unread(max_results: int = 5) -> str:
     """Return raw snippets of the most recent unread inbox emails (read-only)."""
     return _list_unread(_gmail(), max_results)
 
 
 @mcp.tool()
+@_auth_guard
 def unread_messages(max_results: int = 10) -> str:
     """Unread inbox messages as JSON [{id, from, subject, snippet, thread_id}]
     (read-only; consumed by the email-arrived watcher to publish events)."""
@@ -191,12 +240,14 @@ def unread_messages(max_results: int = 10) -> str:
 
 
 @mcp.tool()
+@_auth_guard
 def send_reply(to: str, subject: str, body: str, thread_id: str = "") -> str:
     """Send an email (egress/send). Reply within a thread by passing thread_id."""
     return _send_reply(_gmail(), to=to, subject=subject, body=body, thread_id=thread_id)
 
 
 @mcp.tool()
+@_auth_guard
 def create_event(summary: str, start_iso: str, end_iso: str, attendees: str = "") -> str:
     """Create a calendar event (egress/send). attendees = comma-separated emails."""
     att = [a.strip() for a in attendees.split(",") if a.strip()] if attendees else None

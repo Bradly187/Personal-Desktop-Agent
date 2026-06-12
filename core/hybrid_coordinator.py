@@ -364,6 +364,9 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     # Capability discovery + personal KB maintenance
     "help", "what can you do", "what can i say", "list your skills",
     "index my notes", "reindex my notes", "index my documents",
+    # Google PIM auth lifecycle (one-time setup + expired-token recovery)
+    "connect google", "reconnect google", "connect gmail", "set up gmail",
+    "set up google",
 })
 
 from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
@@ -639,6 +642,40 @@ class HybridCoordinator:
             await asyncio.to_thread(_get_tts().speak_sync, text)
         except Exception as exc:
             log.debug("HybridCoordinator._tts_speak failed: %s", exc)
+
+    async def _handle_google_connect(self) -> dict:
+        """Start the Google OAuth consent flow by voice (setup or recovery).
+
+        Speaks any setup blocker (libraries / client secret) with the exact fix;
+        otherwise launches the browser consent flow in the background and, on
+        success, hot-starts the google_pim skill — no agent restart.
+        """
+        from skills import google_setup
+        blocker = google_setup.setup_blocker()
+        if blocker:
+            asyncio.create_task(self._tts_speak(blocker))
+            return {"status": "ok", "action": "GOOGLE_CONNECT_BLOCKED",
+                    "reason": blocker}
+        from core.async_utils import fire_and_log
+        asyncio.create_task(self._tts_speak(
+            "Opening Google sign-in in your browser — approve access there, "
+            "and I'll tell you when it's done."))
+        fire_and_log(self._google_connect_flow(), log, label="google connect flow")
+        return {"status": "ok", "action": "GOOGLE_CONNECT_STARTED"}
+
+    async def _google_connect_flow(self) -> None:
+        """Background half of the connect flow: await consent, hot-start, report."""
+        from skills.google_setup import run_auth_flow
+        ok, message = await run_auth_flow()
+        if ok and self._skill_registry is not None:
+            try:
+                started = await self._skill_registry.start_skill("google_pim")
+                if not started:
+                    message += " The skill will start on the next agent launch."
+            except Exception as exc:
+                log.warning("google_pim hot-start failed: %s", exc)
+                message += " The skill will start on the next agent launch."
+        await self._tts_speak(message)
 
     async def _handle_schedule_command(self, spec: Optional[dict]) -> dict:
         """Act on a parsed voice schedule / reminder / event-rule / management
@@ -1059,6 +1096,14 @@ class HybridCoordinator:
                 asyncio.create_task(self._tts_speak(
                     "The personal knowledge base isn't available."))
                 return {"status": "ok", "action": "PERSONAL_KB_UNAVAILABLE"}
+
+            # Google PIM auth — "connect google" / "reconnect google".
+            # One spoken phrase + one browser consent click replaces the old
+            # env-var + script + manifest-edit setup; also the recovery path
+            # the expired-token messages name.
+            elif _lower in ("connect google", "reconnect google",
+                            "connect gmail", "set up gmail", "set up google"):
+                return await self._handle_google_connect()
 
         t0 = time.monotonic()
         route_label = "local"

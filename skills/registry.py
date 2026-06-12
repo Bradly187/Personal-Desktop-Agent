@@ -115,6 +115,38 @@ class SkillRegistry:
             manifest=manifest, session=session, tools=tools, lock=asyncio.Lock()
         )
 
+    async def start_skill(self, skill_id: str) -> bool:
+        """Hot-start one skill after the registry is already running.
+
+        Used by the voice "connect Google" flow: after a successful OAuth the
+        skill becomes usable WITHOUT restarting the agent. Re-reads the
+        manifest (so a fresh enabled override applies), starts the server, and
+        re-registers the merged intent keywords. True on success or if already
+        running.
+        """
+        if skill_id in self._skills:
+            return True
+        if self._stack is None:
+            self._stack = AsyncExitStack()
+        manifest = next((m for m in self._load_manifests()
+                         if m.get("skill_id") == skill_id), None)
+        if manifest is None or not manifest.get("enabled", False):
+            log.warning("SkillRegistry.start_skill: %s missing or disabled", skill_id)
+            return False
+        try:
+            await self._start_skill(manifest)
+        except Exception as exc:
+            log.warning("SkillRegistry.start_skill: %s failed: %s", skill_id, exc)
+            return False
+        try:
+            from core.domain_classifier import DomainClassifier
+            DomainClassifier.register_skill_keywords(self.skill_keywords())
+        except Exception as exc:
+            log.debug("SkillRegistry.start_skill: keyword refresh skipped: %s", exc)
+        log.info("SkillRegistry: hot-started skill %s (%d tools)",
+                 skill_id, len(self._skills[skill_id].tools))
+        return True
+
     async def stop(self) -> None:
         """Tear down every skill session and its stdio subprocess."""
         if self._stack is not None:
@@ -244,12 +276,27 @@ class SkillRegistry:
     # ------------------------------------------------------------------ #
 
     def _load_manifests(self) -> list[dict]:
+        """Load all manifests, applying the user's enabled-state overrides.
+
+        ~/.claude/skills/enabled.json holds {skill_id: bool} — USER state, so
+        enabling a skill (e.g. google_pim after OAuth) never edits the
+        checked-in manifest. Overrides win over the manifest's enabled flag.
+        """
         manifests: list[dict] = []
         if not self._manifest_dir.is_dir():
             return manifests
+        try:
+            from skills.google_setup import load_enabled_overrides
+            overrides = load_enabled_overrides()
+        except Exception:
+            overrides = {}
         for p in sorted(self._manifest_dir.glob("*.json")):
             try:
-                manifests.append(json.loads(p.read_text(encoding="utf-8")))
+                m = json.loads(p.read_text(encoding="utf-8"))
+                sid = m.get("skill_id")
+                if sid in overrides:
+                    m["enabled"] = overrides[sid]
+                manifests.append(m)
             except (OSError, ValueError) as exc:
                 log.warning("SkillRegistry: bad manifest %s: %s", p, exc)
         return manifests
