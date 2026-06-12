@@ -142,10 +142,21 @@ def _score_against(tokens: list[str], keyword_set: set[str]) -> tuple[float, lis
 class DomainClassifier:
     """Classify a query into one of six domains using keyword scoring."""
 
-    DOMAINS = ("command", "code", "math", "vision", "plan", "general")
+    DOMAINS = ("command", "code", "math", "vision", "plan", "general", "skill")
 
     # Minimum query length (words) before considering non-command domains
     _MIN_WORDS_FOR_DEV = 4
+
+    # Skill intent keywords, populated at startup by SkillRegistry. Class-level
+    # so the coordinator's and DevAgent's classifiers share ONE vocabulary.
+    # Empty → the skill domain never scores (no regression when no skills load).
+    _SKILL_KEYWORDS: set[str] = set()
+
+    @classmethod
+    def register_skill_keywords(cls, keywords) -> None:
+        """Replace the shared skill-intent keyword vocabulary (called once by
+        SkillRegistry.start() with the union of all manifest intent phrases)."""
+        cls._SKILL_KEYWORDS = {k.lower() for k in (keywords or ())}
 
     def classify(self, text: str) -> str:
         """Return the most likely domain string."""
@@ -164,6 +175,15 @@ class DomainClassifier:
         if word_count <= 5 and tokens and tokens[0] in _COMMAND_VERBS:
             cmd_score = max(cmd_score, 40.0)
         scores.append(DomainScore("command", cmd_score, cmd_matched))
+
+        # Skill domain — substring match against manifest intent phrases (which
+        # may be multi-word, beyond what the bigram tokenizer represents). Scored
+        # for queries of ANY length; a matched intent phrase gets a strong score
+        # so it beats an incidental dev/vision keyword overlap.
+        text_l = text.lower()
+        skill_matched = [kw for kw in self._SKILL_KEYWORDS if kw in text_l]
+        skill_score = (30.0 + 5.0 * len(skill_matched)) if skill_matched else 0.0
+        scores.append(DomainScore("skill", skill_score, skill_matched))
 
         # Dev domains only make sense for longer queries
         if word_count >= self._MIN_WORDS_FOR_DEV:

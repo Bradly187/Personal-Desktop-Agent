@@ -183,6 +183,10 @@ Output / explain:
   [EXPLAIN <text>]           — note something for the user (no action taken)
   [READ_SCREEN]              — take a screenshot and analyse it
 
+Skills (use ONLY the tools listed under "Available skills" in the context, if present):
+  [SKILL_QUERY <skill_id> <tool> {<json args>}]  — read via an external skill tool
+  [SKILL_CALL <skill_id> <tool> {<json args>}]   — send/mutate via a skill tool (the user is asked to approve)
+
 Rules:
 - Think step by step before producing the plan
 - Be specific: exact file paths, exact commands, exact content
@@ -213,6 +217,7 @@ _PLAN_VERBS: list[str] = [
     "GIT_STATUS", "GIT_DIFF", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR",
     "FETCH_URL", "SEARCH_WEB", "CLICK", "OPEN", "HOTKEY", "SCROLL", "TYPE",
     "EXPLAIN", "READ_SCREEN",
+    "SKILL_QUERY", "SKILL_CALL",
 ]
 
 # Ollama `format` JSON Schema constraining the plan response (gap: free-text

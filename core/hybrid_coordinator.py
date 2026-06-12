@@ -663,6 +663,10 @@ class HybridCoordinator:
                 # must never reach the cloud. A Gate-0 failure forces the LOCAL
                 # DevAgent regardless of the cloud-routing preference.
                 route_cloud = self._should_route_cloud_dev()
+                if domain == "skill":
+                    # Skills execute LOCALLY via the SkillRegistry (the cloud dev
+                    # agent has no registry) — never route a skill to the cloud.
+                    route_cloud = False
                 if route_cloud and not self._gate0(cmd):
                     log.info("HybridCoordinator: dev-domain=%s contains sensitive "
                              "data — forcing LOCAL DevAgent (Gate 0)", domain)
