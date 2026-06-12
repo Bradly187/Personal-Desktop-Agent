@@ -19,17 +19,49 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.goal_session import _path_in_scope
+
 log = logging.getLogger(__name__)
 
 # If set, all desktop actions are forwarded to the Windows action proxy via HTTP.
 # Set by start_agent_wsl.sh: WSL_ACTION_PROXY=http://127.0.0.1:8768
 _PROXY_URL: str | None = os.environ.get("WSL_ACTION_PROXY")
+
+
+# ---------------------------------------------------------------------------
+# Writable-root allowlist (M2) — bound WRITE_FILE / RUN_TERMINAL cwd
+# ---------------------------------------------------------------------------
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_BRIDGE_CONFIG_PATH = Path.home() / ".claude" / "ipad_bridge" / "config.json"
+
+
+def _load_writable_roots() -> list[str]:
+    """Return the writable-root allowlist for WRITE_FILE / RUN_TERMINAL cwd.
+
+    Read from ``~/.claude/ipad_bridge/config.json`` key ``writable_roots``;
+    otherwise defaults to ``[repo root, system temp]``. Deny-by-default — never
+    "everything". A replanned or injected step targeting a path outside these
+    roots is rejected at the executor, independent of the goal-session layer
+    (whose ``cwd_scope`` only governs Claude Code's Write/Edit tools).
+    """
+    default = [str(_REPO_ROOT), tempfile.gettempdir()]
+    try:
+        if _BRIDGE_CONFIG_PATH.exists():
+            import json as _cfg_json
+            cfg = _cfg_json.loads(_BRIDGE_CONFIG_PATH.read_text(encoding="utf-8"))
+            roots = cfg.get("writable_roots")
+            if isinstance(roots, list) and roots:
+                return [os.path.expanduser(str(r)) for r in roots]
+    except (OSError, ValueError):
+        pass
+    return default
 
 # Only import pyautogui / win32gui tools when NOT running under the WSL proxy.
 # In proxy mode these libraries are never called and importing them in WSL
@@ -349,6 +381,7 @@ class CommandExecutor:
 
     def __init__(self) -> None:
         self._agent_db = None  # AgentDB — set via set_agent_db(); optional
+        self._writable_roots = _load_writable_roots()  # M2: WRITE_FILE/RUN_TERMINAL scope
 
     def set_agent_db(self, db) -> None:
         """Wire AgentDB for per-call idempotency tracking and timeout config."""
@@ -651,6 +684,12 @@ class CommandExecutor:
         if action == "WRITE_FILE":
             path = Path(p.get("path", "").strip())
             content = p.get("content", cmd.text)
+            # M2: deny writes outside the writable-root allowlist. Fail-closed —
+            # independent of goal_session, so a replan/injection can't escape it.
+            if not _path_in_scope(str(path), self._writable_roots):
+                log.warning("WRITE_FILE denied: %s is outside writable roots", path)
+                return {"status": "error",
+                        "error": f"WRITE_FILE denied: {path} is outside the writable-root allowlist"}
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
             return {"written": str(path), "bytes": len(content)}
@@ -662,6 +701,13 @@ class CommandExecutor:
         if action == "RUN_TERMINAL":
             command = p.get("command", cmd.text)
             cwd = p.get("cwd") or None
+            # M2: a non-default cwd must be inside the writable-root allowlist.
+            # On Windows run_sandboxed has no namespace jail, so this is the only
+            # working-directory containment. Fail-closed.
+            if cwd is not None and not _path_in_scope(str(cwd), self._writable_roots):
+                log.warning("RUN_TERMINAL denied: cwd %s is outside writable roots", cwd)
+                return {"status": "error",
+                        "error": f"RUN_TERMINAL denied: cwd {cwd} is outside the writable-root allowlist"}
             # Sandbox (mistake-containment): cwd-jail + caps. Network granted only
             # for curated package/VCS/fetch ops, or when the caller explicitly
             # passes allow_network in params (e.g. an approved network step).
