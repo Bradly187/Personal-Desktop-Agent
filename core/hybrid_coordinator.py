@@ -363,6 +363,8 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "mute mic", "mute microphone", "mic off", "silence mic",
 })
 
+from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
+
 
 def _is_system_control_voice(cmd) -> bool:
     """True if `cmd` is a voice system-control keyword that route()'s keyword
@@ -377,6 +379,8 @@ def _is_system_control_voice(cmd) -> bool:
         return True
     # "hey agent authorize <goal>" — prefix match
     if norm.startswith("hey agent authorize ") or norm.startswith("authorize "):
+        return True
+    if is_schedule_phrase(norm):       # N+2: reminders / schedules / event rules
         return True
     return False
 
@@ -594,6 +598,62 @@ class HybridCoordinator:
             await asyncio.to_thread(_get_tts().speak_sync, text)
         except Exception as exc:
             log.debug("HybridCoordinator._tts_speak failed: %s", exc)
+
+    async def _handle_schedule_command(self, spec: Optional[dict]) -> dict:
+        """Act on a parsed voice schedule / reminder / event-rule / management
+        command (N+2). Writes to AgentDB; the ProactiveScheduler and
+        EventRuleEngine pick the new rows up on their next tick/event."""
+        if spec is None:
+            asyncio.create_task(self._tts_speak(
+                "Sorry, I didn't catch that. Try 'every morning at 8 brief me'."))
+            return {"status": "ok", "action": "SCHEDULE_UNPARSED"}
+        db = self._agent_db
+        if not (db and db.available):
+            return {"status": "ok", "action": "SCHEDULE_NOOP"}
+        kind = spec.get("kind")
+
+        if kind == "schedule":
+            key = f"sched:{spec['goal'][:60]}:{spec['execute_at']:.0f}"
+            await db.enqueue_scheduled_goal(
+                spec["goal"], execute_at=spec["execute_at"],
+                recurrence=spec.get("recurrence"), source_trigger="schedule",
+                idempotency_key=key)
+            asyncio.create_task(self._tts_speak(spec.get("spoken", "Reminder set.")))
+            return {"status": "ok", "action": "SCHEDULE_SET", "goal": spec["goal"]}
+
+        if kind == "event_rule":
+            await db.insert_event_rule(
+                topic_pattern=spec["topic_pattern"], goal_template=spec["goal_template"],
+                name=spec.get("name"), predicate=spec.get("predicate"),
+                action_kind=spec.get("action_kind", "notify"))
+            asyncio.create_task(self._tts_speak(spec.get("spoken", "Rule set.")))
+            return {"status": "ok", "action": "EVENT_RULE_SET"}
+
+        if kind == "list":
+            scheds = await db.list_schedules()
+            rules = await db.list_event_rules()
+            total = len(scheds) + len(rules)
+            if not total:
+                msg = "You have no reminders set."
+            else:
+                parts = [s["goal"][:40] for s in scheds[:5]]
+                parts += [(r.get("name") or r["topic_pattern"]) for r in rules[:5]]
+                msg = f"You have {total} reminder{'s' if total != 1 else ''}: " + "; ".join(parts) + "."
+            asyncio.create_task(self._tts_speak(msg))
+            return {"status": "ok", "action": "SCHEDULE_LIST", "count": total}
+
+        if kind == "cancel":
+            q = (spec.get("query") or "").strip().lower()
+            cancelled = 0
+            for s in await db.list_schedules():
+                if not q or q in s["goal"].lower():
+                    if await db.cancel_schedule(s["id"]):
+                        cancelled += 1
+            asyncio.create_task(self._tts_speak(
+                f"Cancelled {cancelled} reminder{'s' if cancelled != 1 else ''}."))
+            return {"status": "ok", "action": "SCHEDULE_CANCEL", "count": cancelled}
+
+        return {"status": "ok", "action": "SCHEDULE_NOOP"}
 
     async def _audit_history_summary(self, n: int = 5) -> str:
         """Query audit.db for the last `n` mcp_call events and return a spoken summary."""
@@ -864,6 +924,12 @@ class HybridCoordinator:
                         self._tts_speak(f"Goal authorized for {mins} minutes: {goal_text[:40]}")
                     )
                     return {"status": "ok", "action": "GOAL_AUTHORIZE", "goal": goal_text}
+
+            # ── Proactive scheduling / reminders / event rules (N+2) ──────────
+            elif is_schedule_phrase(_lower):
+                import time as _t
+                return await self._handle_schedule_command(
+                    parse_schedule(cmd.text, _t.time()))
 
             # "hey agent history" / "what did you do"
             elif _lower in ("hey agent history", "what did you do", "agent history",

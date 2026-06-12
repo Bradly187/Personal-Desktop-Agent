@@ -12,6 +12,8 @@ Topic namespace (dotted paths):
   voice.drift        — acoustic drift detected; payload: {drift_pct, sessions_since_cal}
   step.failed        — DevAgent step failure before replan; payload: {run_id, step_num, action, error}
   replan.exhausted   — MAX_REPLANS hit; payload: {run_id, goal, replans}
+  email.arrived      — external event published by the Gmail skill; payload:
+                       {from, subject, snippet, thread_id} — drives event rules (N+2)
 """
 from __future__ import annotations
 
@@ -34,6 +36,7 @@ TOPIC_GATE_DECIDED      = "gate.decided"
 TOPIC_VOICE_DRIFT       = "voice.drift"
 TOPIC_STEP_FAILED       = "step.failed"
 TOPIC_REPLAN_EXHAUSTED  = "replan.exhausted"
+TOPIC_EMAIL_ARRIVED     = "email.arrived"   # external (Gmail skill) → event rules (N+2)
 
 
 class EventBus:

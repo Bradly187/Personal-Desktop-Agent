@@ -1008,6 +1008,22 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if target_cache is not None:
         shutdown.register(target_cache)
 
+    # --- Proactivity (N+2): time- + event-triggered automation ---
+    # ProactiveScheduler promotes due scheduled goals; EventRuleEngine fires rules
+    # off the EventBus. Both feed the existing goal_queue/drainer; notifications go
+    # out via Notifier (Danielle TTS + iPad push).
+    from core.notifier import Notifier
+    from core.proactive_scheduler import ProactiveScheduler
+    from core.event_rule_engine import EventRuleEngine
+    notifier = Notifier(bridge=bridge)
+    proactive = ProactiveScheduler(agent_db, dev_agent=dev_agent, scheduler=scheduler,
+                                   notifier=notifier)
+    event_rules = EventRuleEngine(agent_db, event_bus, notifier=notifier, dev_agent=dev_agent)
+    await proactive.start()
+    await event_rules.start()
+    shutdown.register(proactive)
+    shutdown.register(event_rules)
+
     # --- Supervisor — liveness watchdog for the critical background loops ---
     # (gap #2) Restarts the scheduler worker / governor poll loop if either dies
     # unexpectedly. Registered LAST so reversed-order shutdown stops it FIRST —
@@ -1025,6 +1041,18 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         is_alive=governor.is_healthy,
         restart=governor.restart,
         enabled=lambda: governor._running,
+    ))
+    supervisor.supervise(SupervisedSpec(
+        name="proactive_scheduler",
+        is_alive=proactive.is_healthy,
+        restart=proactive.restart,
+        enabled=lambda: proactive._running,
+    ))
+    supervisor.supervise(SupervisedSpec(
+        name="event_rule_engine",
+        is_alive=event_rules.is_healthy,
+        restart=event_rules.restart,
+        enabled=lambda: event_rules._running,
     ))
 
     # Escalation (gap E): when a subsystem can't be restarted, TELL the user

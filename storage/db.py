@@ -208,9 +208,34 @@ CREATE TABLE IF NOT EXISTS goal_queue (
     attempts        INTEGER NOT NULL DEFAULT 0,
     max_attempts    INTEGER NOT NULL DEFAULT 3,
     last_error      TEXT,
-    run_id          INTEGER REFERENCES agent_runs(id)
+    run_id          INTEGER REFERENCES agent_runs(id),
+    -- N+2 proactivity: a future-dated goal is enqueued with status='scheduled'
+    -- and execute_at set; the ProactiveScheduler promotes it to 'queued' when due
+    -- (claim_next_goal only sees 'queued', so the hot drain path is untouched).
+    execute_at      REAL,                  -- NULL = run ASAP; else promote when now >= execute_at
+    recurrence      TEXT,                  -- NULL = one-shot; else JSON rule (daily/interval)
+    source_trigger  TEXT                   -- provenance: manual | schedule | event_rule:<id>
 );
 CREATE INDEX IF NOT EXISTS idx_goalq_status ON goal_queue(status, ts);
+CREATE INDEX IF NOT EXISTS idx_goalq_sched  ON goal_queue(execute_at);
+
+-- ── Event rules — event-triggered automation (N+2) ───────────────────────────
+-- "when <topic matches + predicate>, notify me / run a goal". Consumed by
+-- core/event_rule_engine.py off the EventBus.
+CREATE TABLE IF NOT EXISTS event_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      REAL    NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    name            TEXT,
+    topic_pattern   TEXT    NOT NULL,           -- SQL-LIKE, same semantics as EventBus
+    predicate       TEXT,                       -- JSON [{path,op,value}] AND-ed; NULL = any match
+    goal_template   TEXT    NOT NULL,           -- rendered with the event payload
+    action_kind     TEXT    NOT NULL DEFAULT 'notify',  -- 'notify' | 'enqueue_goal'
+    cooldown_s      REAL    NOT NULL DEFAULT 0, -- min seconds between fires (anti-storm)
+    last_fired_at   REAL,
+    fire_count      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_event_rules_enabled ON event_rules(enabled);
 
 CREATE TABLE IF NOT EXISTS few_shot_examples (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -684,7 +709,7 @@ CREATE INDEX IF NOT EXISTS idx_rle_resource_ts ON rate_limit_events(resource, ts
 # a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
 # append a row when introducing a new additive column; the batch is gated by
 # PRAGMA user_version so it runs at most once per database file.
-_AGENT_DB_SCHEMA_VERSION = 5
+_AGENT_DB_SCHEMA_VERSION = 6
 _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # v1→2
     ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
@@ -697,6 +722,10 @@ _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("agent_steps", "compensation_args",   "TEXT"),          # saga: reverse args JSON
     # v3→4
     ("inferences", "prompt", "TEXT"),           # fine-tuning: full prompt text
+    # v5→6 (N+2: proactive scheduling on goal_queue)
+    ("goal_queue", "execute_at",     "REAL"),
+    ("goal_queue", "recurrence",     "TEXT"),
+    ("goal_queue", "source_trigger", "TEXT"),
 )
 
 
@@ -1790,6 +1819,175 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.requeue_stale_running failed: %s", exc)
             return 0
+
+    # ------------------------------------------------------------------ #
+    # Proactive scheduling (N+2) — scheduled goals + event rules
+    # ------------------------------------------------------------------ #
+
+    async def enqueue_scheduled_goal(
+        self,
+        goal: str,
+        *,
+        execute_at: float,
+        recurrence: Optional[str] = None,
+        domain: str = "plan",
+        source_trigger: str = "schedule",
+        idempotency_key: Optional[str] = None,
+    ) -> int:
+        """Persist a future-dated goal with status='scheduled'. The
+        ProactiveScheduler promotes it to 'queued' when execute_at <= now.
+        Returns its row id, or -1."""
+        if not self._conn:
+            return -1
+        try:
+            await self._conn.execute(
+                """INSERT OR IGNORE INTO goal_queue
+                   (ts, goal, domain, status, idempotency_key, execute_at,
+                    recurrence, source_trigger)
+                   VALUES (?, ?, ?, 'scheduled', ?, ?, ?, ?)""",
+                (time.time(), goal, domain, idempotency_key, execute_at,
+                 recurrence, source_trigger),
+            )
+            await self._conn.commit()
+            if idempotency_key is not None:
+                cur = await self._conn.execute(
+                    "SELECT id FROM goal_queue WHERE idempotency_key=?",
+                    (idempotency_key,),
+                )
+                row = await cur.fetchone()
+                return int(row["id"]) if row else -1
+            cur = await self._conn.execute("SELECT last_insert_rowid() AS id")
+            row = await cur.fetchone()
+            return int(row["id"]) if row else -1
+        except Exception as exc:
+            log.warning("AgentDB.enqueue_scheduled_goal failed: %s", exc)
+            return -1
+
+    async def promote_due_goals(self, now: float) -> list[dict]:
+        """Promote every scheduled goal whose execute_at has passed to 'queued'
+        and return the promoted rows (so the scheduler can re-lay recurrences and
+        kick the drainer). Single-consumer (the ProactiveScheduler)."""
+        if not self._conn:
+            return []
+        try:
+            cur = await self._conn.execute(
+                "SELECT * FROM goal_queue WHERE status='scheduled' "
+                "AND execute_at IS NOT NULL AND execute_at <= ? ORDER BY execute_at",
+                (now,),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+            if not rows:
+                return []
+            ids = [r["id"] for r in rows]
+            qmarks = ",".join("?" for _ in ids)
+            await self._conn.execute(
+                f"UPDATE goal_queue SET status='queued' WHERE id IN ({qmarks})",
+                ids,
+            )
+            await self._conn.commit()
+            return rows
+        except Exception as exc:
+            log.warning("AgentDB.promote_due_goals failed: %s", exc)
+            return []
+
+    async def list_schedules(self) -> list[dict]:
+        """All pending scheduled goals (status='scheduled')."""
+        if not self._conn:
+            return []
+        try:
+            cur = await self._conn.execute(
+                "SELECT id, goal, execute_at, recurrence, source_trigger "
+                "FROM goal_queue WHERE status='scheduled' ORDER BY execute_at"
+            )
+            return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.list_schedules failed: %s", exc)
+            return []
+
+    async def cancel_schedule(self, goal_id: int) -> bool:
+        """Cancel a scheduled goal. Returns True if one was cancelled."""
+        if not self._conn:
+            return False
+        try:
+            cur = await self._conn.execute(
+                "UPDATE goal_queue SET status='cancelled' "
+                "WHERE id=? AND status='scheduled'",
+                (goal_id,),
+            )
+            await self._conn.commit()
+            return (cur.rowcount or 0) > 0
+        except Exception as exc:
+            log.warning("AgentDB.cancel_schedule failed: %s", exc)
+            return False
+
+    async def insert_event_rule(
+        self,
+        *,
+        topic_pattern: str,
+        goal_template: str,
+        name: Optional[str] = None,
+        predicate: Optional[str] = None,
+        action_kind: str = "notify",
+        cooldown_s: float = 0.0,
+    ) -> int:
+        """Insert an event-triggered automation rule. Returns its row id, or -1."""
+        if not self._conn:
+            return -1
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO event_rules
+                   (created_at, enabled, name, topic_pattern, predicate,
+                    goal_template, action_kind, cooldown_s)
+                   VALUES (?, 1, ?, ?, ?, ?, ?, ?)""",
+                (time.time(), name, topic_pattern, predicate, goal_template,
+                 action_kind, cooldown_s),
+            )
+            await self._conn.commit()
+            return int(cur.lastrowid) if cur.lastrowid else -1
+        except Exception as exc:
+            log.warning("AgentDB.insert_event_rule failed: %s", exc)
+            return -1
+
+    async def list_event_rules(self, enabled_only: bool = True) -> list[dict]:
+        if not self._conn:
+            return []
+        try:
+            sql = "SELECT * FROM event_rules"
+            if enabled_only:
+                sql += " WHERE enabled=1"
+            cur = await self._conn.execute(sql)
+            return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.list_event_rules failed: %s", exc)
+            return []
+
+    async def touch_rule_fired(self, rule_id: int, now: float) -> None:
+        """Record a rule firing (for cooldown + observability)."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE event_rules SET last_fired_at=?, fire_count=fire_count+1 "
+                "WHERE id=?",
+                (now, rule_id),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.touch_rule_fired failed: %s", exc)
+
+    async def cancel_event_rule(self, rule_id: int) -> bool:
+        if not self._conn:
+            return False
+        try:
+            cur = await self._conn.execute(
+                "UPDATE event_rules SET enabled=0 WHERE id=? AND enabled=1",
+                (rule_id,),
+            )
+            await self._conn.commit()
+            return (cur.rowcount or 0) > 0
+        except Exception as exc:
+            log.warning("AgentDB.cancel_event_rule failed: %s", exc)
+            return False
 
     async def get_queued_goals(self, limit: int = 50) -> list[dict]:
         """Return queued goals (oldest first) for status queries / draining."""
