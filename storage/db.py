@@ -506,6 +506,9 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
     ts               REAL    NOT NULL,
     tilt_rx          REAL,
     tilt_ry          REAL,
+    -- DEAD (legacy): gaze_*/head_* are always NULL since gaze + head-pose removal
+    -- (2026-05-30). Kept because the schema is additive-only; no writer populates
+    -- them. Do not reintroduce gaze/head pipelines here.
     gaze_dx          REAL,
     gaze_dy          REAL,
     gaze_conf        REAL,
