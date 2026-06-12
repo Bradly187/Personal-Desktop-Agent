@@ -1066,9 +1066,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     shutdown.register(event_rules)
 
     # Email watcher (N+2): polls the Gmail skill and publishes email.arrived onto
-    # the bus so event rules can fire. No-op unless the google_pim skill is active.
+    # the bus so event rules can fire. The loop always runs (skill presence is
+    # re-checked per tick) so a google_pim hot-started by voice "connect Google"
+    # is picked up without a restart; the notifier carries the one-time
+    # token-expired alert.
     from core.email_watcher import EmailWatcher
-    email_watcher = EmailWatcher(skill_registry, event_bus)
+    email_watcher = EmailWatcher(skill_registry, event_bus, notifier=notifier)
     await email_watcher.start()
     shutdown.register(email_watcher)
 

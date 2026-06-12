@@ -29,13 +29,17 @@ class EmailWatcher:
     _TOOL = "unread_messages"
     _MAX_SEEN = 1000
 
-    def __init__(self, skill_registry, event_bus) -> None:
+    def __init__(self, skill_registry, event_bus, notifier=None) -> None:
         self._skills = skill_registry
         self._bus = event_bus
+        self._notifier = notifier
         self._seen: set = set()
         self._baselined = False
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        # One-time expiry alert: set after notifying, cleared on the next
+        # successful poll so a future expiry alerts again.
+        self._auth_alerted = False
 
     def _available(self) -> bool:
         if self._skills is None or self._bus is None:
@@ -48,14 +52,18 @@ class EmailWatcher:
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
     async def start(self) -> None:
+        """Always start the loop (skill presence is re-checked per tick) so a
+        google_pim hot-started later — the voice "connect Google" flow — is
+        picked up within one poll interval, no agent restart needed."""
         if self._running:
             return
-        if not self._available():
-            log.info("EmailWatcher: google_pim skill not active — watcher idle")
+        if self._skills is None or self._bus is None:
+            log.info("EmailWatcher: registry/bus not wired — watcher idle")
             return
         self._running = True
         self._task = asyncio.create_task(self._poll_loop(), name="email_watcher")
-        log.info("EmailWatcher started (poll=%.0fs)", self.POLL_INTERVAL_S)
+        log.info("EmailWatcher started (poll=%.0fs%s)", self.POLL_INTERVAL_S,
+                 "" if self._available() else "; waiting for google_pim")
 
     async def stop(self) -> None:
         self._running = False
@@ -79,15 +87,33 @@ class EmailWatcher:
     async def _tick(self) -> int:
         """Poll unread mail; publish email.arrived for new messages. Returns the
         number published (0 on the baseline poll). Public for tests."""
+        if not self._available():
+            return 0   # skill not (yet) running — re-checked next tick
         res = await self._skills.call(self._SKILL_ID, self._TOOL, {})
         if not isinstance(res, dict) or res.get("status") != "ok":
             return 0
+        text = res.get("text") or ""
+        # Auth expiry: the server returns its RECONNECT message as a normal
+        # string. Tell the user ONCE (spoken + iPad banner) instead of failing
+        # silently every 2 minutes forever; re-arm after the next success.
+        if "reconnect google" in text.lower():
+            if not self._auth_alerted and self._notifier is not None:
+                self._auth_alerted = True
+                try:
+                    await self._notifier.notify(
+                        "Google access expired",
+                        "Email alerts are paused. Say 'reconnect Google' to sign "
+                        "in again.")
+                except Exception as exc:
+                    log.debug("EmailWatcher expiry notify failed: %s", exc)
+            return 0
         try:
-            messages = json.loads(res.get("text") or "[]")
+            messages = json.loads(text or "[]")
         except (ValueError, TypeError):
             return 0
         if not isinstance(messages, list):
             return 0
+        self._auth_alerted = False   # healthy again — re-arm the alert
 
         published = 0
         for m in messages:

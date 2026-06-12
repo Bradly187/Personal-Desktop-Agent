@@ -59,14 +59,22 @@ the planner instead of a direct call.
 ## Gmail + Calendar (`google_pim`)
 
 A **locally-owned** server (not a third-party MCP server, so your mail and OAuth
-token never leave the machine). Ships **disabled**. To enable:
+token never leave the machine). Ships **disabled** until connected. Setup:
 
 ```bash
 pip install google-api-python-client google-auth-oauthlib google-auth-httplib2
-set GOOGLE_OAUTH_CLIENT_SECRETS=C:\path\to\client_secret.json
-python -m skills.servers.google_pim_auth     # one-time browser consent
-# then set "enabled": true in skills/manifests/google_pim.json
+# save your OAuth *desktop* client JSON from Google Cloud Console as:
+#   ~/.claude/skills/credentials/google_pim/client_secret.json
 ```
+
+then just say **"connect Google"** — the agent opens the browser consent flow,
+auto-enables the skill (via `~/.claude/skills/enabled.json`, never a manifest
+edit), and hot-starts it without a restart. (`python -m
+skills.servers.google_pim_auth` does the same from a terminal.)
+
+**Token expiry is handled:** every tool returns an actionable "reconnect
+Google" message instead of a raw error, and the email watcher speaks a one-time
+alert when access expires. Say **"reconnect Google"** to repair it.
 
 Capabilities: "read my next meeting", "summarize my unread email" (read +
 on-device summary), "reply to this email" / "create an event" (gated sends). The
