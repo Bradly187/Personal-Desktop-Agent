@@ -104,7 +104,8 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# agent.db schema — all 29 tables
+# agent.db schema — every table lives in this block (count it, don't trust a
+# comment: the hardcoded number here has gone stale twice)
 # ---------------------------------------------------------------------------
 
 AGENT_DB_SCHEMA = """
@@ -591,6 +592,26 @@ CREATE TABLE IF NOT EXISTS saga_compensations (
 );
 CREATE INDEX IF NOT EXISTS idx_saga_run  ON saga_compensations(run_id);
 CREATE INDEX IF NOT EXISTS idx_saga_step ON saga_compensations(step_id);
+
+-- ── Dev-plan escalation queue — human-review backlog (R-10 residual) ──────────
+-- When a dev plan exhausts MAX_REPLANS or hits MAX_STEPS, the run is rolled back
+-- (saga above) and the failed goal lands HERE for review instead of evaporating.
+-- A user cancel is deliberate and is NOT escalated. Lifecycle: pending →
+-- acknowledged (reviewed) / dismissed. Never auto-requeued — re-running a goal
+-- that failed twice needs a human decision.
+CREATE TABLE IF NOT EXISTS dev_escalations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL    NOT NULL,
+    run_id        INTEGER REFERENCES agent_runs(id),
+    goal          TEXT    NOT NULL,
+    reason        TEXT    NOT NULL,   -- 'max_replans' | 'max_steps'
+    failed_action TEXT,               -- verb of the step that exhausted the budget
+    replans       INTEGER NOT NULL DEFAULT 0,
+    detail        TEXT,               -- JSON: executed-step summary for review
+    status        TEXT    NOT NULL DEFAULT 'pending',  -- pending/acknowledged/dismissed
+    resolved_ts   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_escalations_status ON dev_escalations(status, ts);
 
 -- ── Per-call tool execution log — idempotency + timeout tracking ─────────────
 -- Records every MCP/desktop tool invocation. idempotency_key is
@@ -2540,6 +2561,90 @@ class AgentDB:
             return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         except Exception as exc:
             log.warning("AgentDB.skip_pending_compensations failed: %s", exc)
+            return 0
+
+    # ---------------------------------------------------------------------- #
+    # Dev-plan escalation queue (human-review backlog)
+    # ---------------------------------------------------------------------- #
+
+    async def insert_escalation(
+        self,
+        run_id: int,
+        goal: str,
+        reason: str,
+        failed_action: Optional[str] = None,
+        replans: int = 0,
+        detail: Optional[str] = None,
+    ) -> Optional[int]:
+        """Escalate a halted dev plan for human review. Returns new row id."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                "INSERT INTO dev_escalations"
+                " (ts, run_id, goal, reason, failed_action, replans, detail)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (time.time(), run_id, goal, reason, failed_action, replans, detail),
+            ) as cur:
+                row_id = cur.lastrowid
+            await self._conn.commit()
+            return row_id
+        except Exception as exc:
+            log.warning("AgentDB.insert_escalation failed: %s", exc)
+            return None
+
+    async def get_pending_escalations(self, limit: int = 10) -> list[dict]:
+        """Pending escalations, newest first."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT id, ts, run_id, goal, reason, failed_action, replans, detail"
+                " FROM dev_escalations WHERE status = 'pending'"
+                " ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_pending_escalations failed: %s", exc)
+            return []
+
+    async def count_pending_escalations(self) -> int:
+        if not self._conn:
+            return 0
+        try:
+            async with self._conn.execute(
+                "SELECT COUNT(*) FROM dev_escalations WHERE status = 'pending'"
+            ) as cur:
+                row = await cur.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as exc:
+            log.warning("AgentDB.count_pending_escalations failed: %s", exc)
+            return 0
+
+    async def resolve_escalations(
+        self, status: str = "acknowledged", escalation_id: Optional[int] = None
+    ) -> int:
+        """Resolve one escalation (by id) or every pending one. Returns count."""
+        if not self._conn:
+            return 0
+        try:
+            if escalation_id is not None:
+                cur = await self._conn.execute(
+                    "UPDATE dev_escalations SET status = ?, resolved_ts = ?"
+                    " WHERE id = ? AND status = 'pending'",
+                    (status, time.time(), escalation_id),
+                )
+            else:
+                cur = await self._conn.execute(
+                    "UPDATE dev_escalations SET status = ?, resolved_ts = ?"
+                    " WHERE status = 'pending'",
+                    (status, time.time()),
+                )
+            await self._conn.commit()
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        except Exception as exc:
+            log.warning("AgentDB.resolve_escalations failed: %s", exc)
             return 0
 
     # ---------------------------------------------------------------------- #

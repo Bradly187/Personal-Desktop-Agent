@@ -357,6 +357,9 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "stop the agent", "cancel the task",
     "hey agent history", "what did you do", "agent history",
     "show history", "recent actions",
+    "review queue", "show review queue", "what needs review",
+    "hey agent review queue", "show escalations", "pending reviews",
+    "clear review queue", "dismiss reviews", "clear escalations",
     # Mic mute — voice can only mute; unmute requires the iPad button
     # (mic is deaf once muted, so a voice unmute command can never arrive)
     "mute mic", "mute microphone", "mic off", "silence mic",
@@ -876,6 +879,40 @@ class HybridCoordinator:
                 summary = await self._audit_history_summary(n=5)
                 asyncio.create_task(self._tts_speak(summary))
                 return {"status": "ok", "action": "AGENT_HISTORY", "summary": summary}
+
+            # "review queue" / "what needs review" — dev plans that exhausted
+            # their replan/step budget, were rolled back, and now need a human
+            # decision (R-10 escalation queue)
+            elif _lower in ("review queue", "show review queue", "what needs review",
+                            "hey agent review queue", "show escalations",
+                            "pending reviews"):
+                items: list = []
+                total = 0
+                if self._agent_db and self._agent_db.available:
+                    total = await self._agent_db.count_pending_escalations()
+                    items = await self._agent_db.get_pending_escalations(limit=5)
+                if total:
+                    newest = items[0]
+                    msg = (f"{total} plan{'s' if total != 1 else ''} need review. "
+                           f"Most recent: {newest['goal'][:50]}, "
+                           f"{newest['reason'].replace('_', ' ')}.")
+                else:
+                    msg = "Review queue is empty."
+                asyncio.create_task(self._tts_speak(msg))
+                return {"status": "ok", "action": "AGENT_ESCALATIONS",
+                        "count": total, "items": items}
+
+            # "clear review queue" — acknowledge every pending escalation
+            elif _lower in ("clear review queue", "dismiss reviews",
+                            "clear escalations"):
+                cleared = 0
+                if self._agent_db and self._agent_db.available:
+                    cleared = await self._agent_db.resolve_escalations(
+                        status="acknowledged")
+                asyncio.create_task(self._tts_speak(
+                    f"Cleared {cleared} review item{'s' if cleared != 1 else ''}."))
+                return {"status": "ok", "action": "AGENT_ESCALATIONS_CLEAR",
+                        "count": cleared}
 
             # Mic mute — voice one-way; unmute via iPad mic_mute message
             elif _lower in ("mute mic", "mute microphone", "mic off", "silence mic"):
