@@ -10,6 +10,15 @@ struct RecalibrationRequest {
     let degradationPct: Double  // 0–100
 }
 
+// MARK: — Proactive notification (PC → iPad)
+
+/// A proactive notification pushed by the PC (N+2): a morning brief, a reminder,
+/// or an event-rule alert ("Email from … arrived"). Surfaced as a banner.
+struct ProactiveNotification {
+    let title: String
+    let body: String
+}
+
 // MARK: — Connection state
 
 enum ConnectionState: Equatable {
@@ -65,6 +74,10 @@ final class WebSocketManager: ObservableObject {
 
     /// Feed of re-calibration requests from the PC (voice drift or seasonal prompt).
     let recalibrationFeed = PassthroughSubject<RecalibrationRequest, Never>()
+
+    /// Feed of proactive notifications from the PC (N+2): morning briefs,
+    /// reminders, and event-rule alerts. Rendered as a banner.
+    let proactiveFeed = PassthroughSubject<ProactiveNotification, Never>()
 
     /// Feed of voice calibration events from the PC (phrase prompts, results, completion).
     let calibrationEventPublisher = PassthroughSubject<CalibrationEvent, Never>()
@@ -373,6 +386,12 @@ final class WebSocketManager: ObservableObject {
             let reason  = json["reason"]          as? String ?? "voice_clarity"
             let pct     = json["degradation_pct"] as? Double ?? 0.0
             recalibrationFeed.send(RecalibrationRequest(reason: reason, degradationPct: pct))
+            parsed = .unknown(type: type, raw: json)
+
+        case "proactive_notification":
+            let title = json["title"] as? String ?? "Notification"
+            let body  = json["body"]  as? String ?? ""
+            proactiveFeed.send(ProactiveNotification(title: title, body: body))
             parsed = .unknown(type: type, raw: json)
 
         case "calibration_phrase":

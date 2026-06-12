@@ -106,9 +106,77 @@ struct CommandToastOverlay: ViewModifier {
     }
 }
 
+/// A more prominent banner for PC-pushed proactive notifications (N+2): morning
+/// briefs, reminders, and event-rule alerts. Distinct from the command toast —
+/// shows title + body, a bell icon, stays ~6 s, and is tap-to-dismiss.
+struct ProactiveNotificationOverlay: ViewModifier {
+    @EnvironmentObject var wsManager: WebSocketManager
+    @Environment(\.appTheme) private var theme
+
+    @State private var current: ProactiveNotification?
+    @State private var dismissTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .top) {
+                if let note = current {
+                    VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
+                        HStack(spacing: DesignTokens.Spacing.sm) {
+                            Image(systemName: "bell.badge.fill")
+                                .foregroundStyle(theme.accent)
+                                .font(.system(size: 18))
+                            Text(note.title)
+                                .font(DesignTokens.Typography.headline)
+                                .foregroundStyle(theme.textPrimary)
+                                .lineLimit(1)
+                        }
+                        if !note.body.isEmpty {
+                            Text(note.body)
+                                .font(DesignTokens.Typography.caption)
+                                .foregroundStyle(theme.textSecondary)
+                                .lineLimit(3)
+                        }
+                    }
+                    .frame(maxWidth: 420, alignment: .leading)
+                    .padding(.horizontal, DesignTokens.Spacing.lg)
+                    .padding(.vertical, DesignTokens.Spacing.md)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                    .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
+                    .padding(.top, 60)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Notification: \(note.title). \(note.body)")
+                    .onTapGesture { dismiss() }
+                }
+            }
+            .onReceive(wsManager.proactiveFeed) { note in
+                show(note)
+            }
+    }
+
+    private func show(_ note: ProactiveNotification) {
+        withAnimation(.easeInOut(duration: 0.25)) { current = note }
+        dismissTask?.cancel()
+        dismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            dismiss()
+        }
+    }
+
+    private func dismiss() {
+        withAnimation(.easeInOut(duration: 0.3)) { current = nil }
+    }
+}
+
 extension View {
     /// Adds a floating command toast that shows the last action sent to the PC.
     func commandToast() -> some View {
         modifier(CommandToastOverlay())
+    }
+
+    /// Adds a banner for PC-pushed proactive notifications (briefs, reminders, alerts).
+    func proactiveNotificationBanner() -> some View {
+        modifier(ProactiveNotificationOverlay())
     }
 }

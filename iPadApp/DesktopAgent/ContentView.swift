@@ -67,6 +67,7 @@ struct ContentView: View {
         }
         .ignoresSafeArea(.keyboard)
         .commandToast() // Last-command floating toast
+        .proactiveNotificationBanner() // PC-pushed briefs / reminders / alerts (N+2)
         .onReceive(wsManager.messageStream) { message in
             if case .screenshot(_, let imageBase64, let mime) = message {
                 screenshotStore.handleScreenshot(base64: imageBase64, mime: mime)
