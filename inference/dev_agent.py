@@ -74,6 +74,18 @@ def _get_trust_classifier():
     return _trust_classifier_singleton
 
 
+_content_filter_singleton = None
+
+
+def _get_content_filter():
+    """Lazy ContentFilter singleton for scrubbing outbound skill-send payloads."""
+    global _content_filter_singleton
+    if _content_filter_singleton is None:
+        from adaptive.content_filter import ContentFilter
+        _content_filter_singleton = ContentFilter()
+    return _content_filter_singleton
+
+
 # ---------------------------------------------------------------------------
 # HTML text extraction helper
 # ---------------------------------------------------------------------------
@@ -104,6 +116,8 @@ _PLAN_ACTIONS = {
     "GITHUB_PR",
     # Web retrieval (replaces browser-open SEARCH_WEB for context injection)
     "FETCH_URL",
+    # Skills — MCP-client tool calls (SKILL_QUERY=read, SKILL_CALL=send/mutate).
+    "SKILL_QUERY", "SKILL_CALL",
 }
 
 _STEP_PATTERN = re.compile(
@@ -111,7 +125,8 @@ _STEP_PATTERN = re.compile(
     r"\[?"                                   # optional [
     r"(WRITE_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
     r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE"
-    r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL)"
+    r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL"
+    r"|SKILL_QUERY|SKILL_CALL)"
     r"(?:\s+([^\]\n]+))?"                   # optional args (up to a closing ] or EOL)
     r"\s*\]?",                              # optional ]
     re.IGNORECASE,
@@ -307,6 +322,7 @@ class DevAgent:
         self._remote_indexer = None       # RemoteIndexerClient | None (laptop offload)
         self._cluster_health = None        # ClusterHealthMonitor | None
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
+        self._skill_registry = None        # SkillRegistry | None (set via set_skill_registry)
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -363,6 +379,11 @@ class DevAgent:
         """Wire MemoryManager for standardised storage access."""
         self._memory = memory
 
+    def set_skill_registry(self, registry) -> None:
+        """Wire the SkillRegistry so SKILL_QUERY/SKILL_CALL steps can run and the
+        planner can see available skills."""
+        self._skill_registry = registry
+
     def request_cancel(self) -> None:
         """Signal the running plan to stop after the current step completes."""
         self._cancel_event.set()
@@ -408,6 +429,10 @@ class DevAgent:
                 response_text=str(result_dict),
                 total_latency_ms=(time.monotonic() - t0) * 1000,
             )
+
+        if domain == "skill" and self._skill_registry is not None \
+                and self._skill_registry.match_intent(text):
+            return await self._handle_skill(text)
 
         if domain == "plan":
             return await self.plan_and_run(text)
@@ -489,6 +514,12 @@ class DevAgent:
 
         # Step 1: Generate plan — inject RAG context + git/IDE context
         extra_ctx = self._format_context()
+        # Make registered skills available to the planner — data-driven, no
+        # per-feature prompt edit. describe_for_prompt() is "" when no skills load.
+        if self._skill_registry is not None:
+            skills_desc = self._skill_registry.describe_for_prompt()
+            if skills_desc:
+                extra_ctx = f"{skills_desc}\n\n{extra_ctx}" if extra_ctx else skills_desc
         rag = await self._rag_context(goal, n=4)
         if rag:
             extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
@@ -1606,6 +1637,9 @@ class DevAgent:
                 raise ValueError("FETCH_URL requires a URL")
             return await self._fetch_url(url)
 
+        if action in ("SKILL_QUERY", "SKILL_CALL"):
+            return await self._execute_skill_step(step)
+
         # Fall through: accessibility verbs → CommandExecutor
         if self._coordinator:
             from core.command_executor import Command
@@ -1619,6 +1653,165 @@ class DevAgent:
             return json.dumps(result_dict)
 
         return f"No executor for action: {action}"
+
+    # ---------------------------------------------------------------------- #
+    # Skill execution (MCP-client tool calls)
+    # ---------------------------------------------------------------------- #
+
+    @staticmethod
+    def _parse_skill_args(raw: str, body: str = "") -> tuple[str, str, dict]:
+        """Parse a SKILL step's args: `<skill_id> <tool> {json}` (json optional;
+        may also arrive as the step body)."""
+        parts = (raw or "").split(None, 2)
+        skill_id = parts[0] if parts else ""
+        tool = parts[1] if len(parts) > 1 else ""
+        blob = parts[2] if len(parts) > 2 else (body or "")
+        args: dict = {}
+        if blob.strip():
+            try:
+                parsed = json.loads(blob)
+                if isinstance(parsed, dict):
+                    args = parsed
+            except (ValueError, TypeError):
+                args = {}
+        return skill_id, tool, args
+
+    @staticmethod
+    def _build_skill_args(text: str, match: dict, schema: dict) -> dict:
+        """Heuristic NL→args for the single-turn path: a tool with exactly one
+        required string param gets the utterance (minus the matched keyword); a
+        no-arg tool gets {}. Complex multi-arg tools are best driven by the
+        planner (which emits explicit JSON args)."""
+        props = (schema or {}).get("properties", {})
+        required = (schema or {}).get("required", [])
+        payload = text
+        kw = (match or {}).get("keyword")
+        if kw:
+            idx = text.lower().find(kw.lower())
+            if idx >= 0:
+                payload = (text[:idx] + text[idx + len(kw):]).strip()
+        str_required = [p for p in required if props.get(p, {}).get("type") == "string"]
+        if len(str_required) == 1:
+            return {str_required[0]: payload or text}
+        return {}
+
+    async def _execute_skill_step(self, step: AgentStep) -> str:
+        """Run a SKILL_QUERY/SKILL_CALL step through the registry with the full
+        trust flow: outbound scrub + send-gate on SEND tools, inbound taint check
+        on read results, and an audit record."""
+        if self._skill_registry is None:
+            return "No skills available (registry not wired)"
+
+        skill_id, tool, args = self._parse_skill_args(step.args, step.body)
+        if not skill_id or not tool:
+            return "SKILL step needs '<skill_id> <tool> {json args}'"
+
+        is_send = (step.action.upper() == "SKILL_CALL"
+                   or self._skill_registry.is_send_tool(skill_id, tool))
+
+        if is_send:
+            # Outbound scrub: redact secrets/PII from the payload before egress.
+            try:
+                clean_blob, findings = _get_content_filter().scrub_sync(json.dumps(args))
+                scrubbed = json.loads(clean_blob)
+                if isinstance(scrubbed, dict):
+                    args = scrubbed
+                if findings:
+                    log.info("Skill send: scrubbed %d secret(s) from %s.%s payload",
+                             len(findings), skill_id, tool)
+            except Exception as exc:
+                log.debug("Skill send scrub failed (%s) — proceeding with raw args", exc)
+            # Send-gate: fail-safe DENY voice confirmation (same gate as git verbs).
+            if not await self._confirm_destructive_op(
+                f"Approve sending via skill {skill_id}.{tool}?"
+            ):
+                return f"SKILL_CALL {skill_id}.{tool} cancelled by user"
+
+        result = await self._skill_registry.call(skill_id, tool, args)
+        text = result.get("text", "") if isinstance(result, dict) else str(result)
+
+        # Inbound taint: read results are untrusted external data — never let a
+        # HIGH-risk (prompt-injection) payload reach a downstream prompt.
+        if not is_send and text:
+            try:
+                verdict = _get_trust_classifier().classify_sync(
+                    f"skill:{skill_id}.{tool}", text
+                )
+                if verdict.should_block:
+                    log.warning("Skill %s.%s result quarantined (trust=HIGH)",
+                                skill_id, tool)
+                    await self._audit_skill(skill_id, tool, is_send, result, blocked=True)
+                    return "[skill result withheld — flagged as potentially unsafe]"
+            except Exception as exc:
+                log.debug("Skill taint check failed: %s", exc)
+
+        await self._audit_skill(skill_id, tool, is_send, result, blocked=False)
+        if isinstance(result, dict) and result.get("status") == "error":
+            return f"SKILL error: {result.get('error', 'unknown')}"
+        return text or "(no output)"
+
+    async def _audit_skill(self, skill_id: str, tool: str, is_send: bool,
+                           result: dict, blocked: bool) -> None:
+        if self._agent_db is None:
+            return
+        try:
+            summary = ""
+            if isinstance(result, dict):
+                summary = (result.get("text") or result.get("error") or "")[:300]
+            await self._agent_db.log_skill_invocation(
+                skill_id=skill_id, tool_name=tool, send=is_send,
+                status=(result.get("status", "?") if isinstance(result, dict) else "?"),
+                blocked=blocked, result_summary=summary,
+            )
+        except Exception as exc:
+            log.debug("Skill audit write failed: %s", exc)
+
+    async def _handle_skill(self, text: str) -> "AgentResult":
+        """Single-turn skill path: resolve the intent, build args, execute, and
+        (for reads) speak the result. Used when the classifier routes a short
+        utterance to a registered skill intent."""
+        t0 = time.monotonic()
+        match = self._skill_registry.match_intent(text)
+        schema = self._skill_registry.tool_schema(match["skill_id"], match["tool"])
+        args = self._build_skill_args(text, match, schema)
+        step = AgentStep(
+            action="SKILL_CALL" if match["send"] else "SKILL_QUERY",
+            args=f"{match['skill_id']} {match['tool']} {json.dumps(args)}",
+        )
+        result_text = await self._execute_skill_step(step)
+
+        # Optional on-device summarisation (e.g. "summarize my inbox"): the raw
+        # result has ALREADY been taint-checked in _execute_skill_step, so a
+        # quarantined ("withheld") payload is never summarised. Summarisation
+        # stays local (domain="general").
+        if (not match["send"] and match.get("summarize") and result_text
+                and "withheld" not in result_text.lower()):
+            try:
+                r = await self._router.infer(
+                    domain="general",
+                    user_text=f"Summarize these items concisely for the user:\n\n{result_text}",
+                )
+                if getattr(r, "ok", False) and getattr(r, "text", ""):
+                    result_text = r.text
+            except Exception as exc:
+                log.debug("Skill summarise failed: %s", exc)
+
+        if not match["send"] and result_text:
+            try:
+                from tts.polly_stream import get_client as _get_tts
+                asyncio.create_task(_get_tts().speak(result_text))
+            except Exception as exc:
+                log.debug("Skill TTS failed: %s", exc)
+
+        result = AgentResult(
+            goal=text,
+            domain="skill",
+            model_used=f"skill:{match['skill_id']}.{match['tool']}",
+            response_text=result_text,
+            total_latency_ms=(time.monotonic() - t0) * 1000,
+        )
+        self._results_log.append(result)
+        return result
 
     # ---------------------------------------------------------------------- #
     # Dev action implementations

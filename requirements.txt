@@ -21,6 +21,14 @@ mcp==1.27.0
 aiohttp==3.14.0
 zeroconf==0.149.16  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
 
+# ── Skills — Google PIM (OPTIONAL; only needed to enable the Gmail/Calendar
+# skill). Install + run `python -m skills.servers.google_pim_auth` once, then
+# enable skills/manifests/google_pim.json. The skill server imports these lazily,
+# so the rest of the agent runs without them.
+# google-api-python-client>=2.0
+# google-auth-oauthlib>=1.0
+# google-auth-httplib2>=0.2
+
 # ── Desktop control ───────────────────────────────────────────────────────────
 pyautogui==0.9.54
 pywin32==311

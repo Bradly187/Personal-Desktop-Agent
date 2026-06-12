@@ -706,6 +706,25 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     )
     coordinator.set_dev_agent(dev_agent)
 
+    # ── Skill model (N+1): MCP-client SkillRegistry ────────────────────────
+    # Connecting an MCP server via a manifest (skills/manifests/*.json) adds
+    # capability without editing core verbs; skills run as DevAgent
+    # SKILL_QUERY/SKILL_CALL tool-calls. A skill that fails to start is skipped.
+    skill_registry = None
+    try:
+        from skills.registry import SkillRegistry
+        skill_registry = SkillRegistry(
+            content_filter=content_filter, trust_classifier=trust_classifier,
+            audit_log=audit, agent_db=agent_db,
+        )
+        await skill_registry.start()
+        dev_agent.set_skill_registry(skill_registry)
+        if skill_registry.has_skills():
+            log.info("SkillRegistry: skills active")
+    except Exception as _skill_exc:
+        log.warning("SkillRegistry: failed to start (%s) — skills disabled", _skill_exc)
+        skill_registry = None
+
     # Wire MemoryManager into all storage-writing components
     coordinator.set_memory(memory)
     dev_agent.set_memory(memory)
@@ -1099,6 +1118,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             await t
         except (asyncio.CancelledError, Exception):
             pass
+
+    # Stop skill MCP-client sessions (tear down their stdio subprocesses)
+    if skill_registry is not None:
+        await skill_registry.stop()
 
     # Stop cluster health monitor
     if cluster_health is not None:
