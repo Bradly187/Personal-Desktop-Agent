@@ -24,7 +24,7 @@ This specification defines refinements to the three cursor-driving sensors (tilt
 
 ### Requirement 1: Replace EMA Smoothing with 1-Euro Filter (Tilt Velocity Mode)
 
-**User Story:** As a user with JIA, I want tilt cursor movement to feel responsive during intentional movements but stable when holding still, so that I can point accurately without fighting jitter or lag.
+**User Story:** As a user with RA, I want tilt cursor movement to feel responsive during intentional movements but stable when holding still, so that I can point accurately without fighting jitter or lag.
 
 #### Acceptance Criteria
 
@@ -37,7 +37,7 @@ This specification defines refinements to the three cursor-driving sensors (tilt
 
 ### Requirement 2: Replace EMA Smoothing with 1-Euro Filter (Tilt Position Mode)
 
-**User Story:** As a user with JIA, I want position-mapped tilt to feel smooth when holding a position but track quickly when I deliberately tilt to a new target, so that I can dwell on targets without cursor wobble.
+**User Story:** As a user with RA, I want position-mapped tilt to feel smooth when holding a position but track quickly when I deliberately tilt to a new target, so that I can dwell on targets without cursor wobble.
 
 #### Acceptance Criteria
 
@@ -73,7 +73,7 @@ This specification defines refinements to the three cursor-driving sensors (tilt
 
 ### Requirement 5: Power-Curve Transfer Function for Tilt Position Mode
 
-**User Story:** As a user with JIA, I want small tilts to produce fine cursor adjustments and large tilts to traverse the screen quickly, so that I can both aim precisely and navigate efficiently without changing sensitivity settings.
+**User Story:** As a user with RA, I want small tilts to produce fine cursor adjustments and large tilts to traverse the screen quickly, so that I can both aim precisely and navigate efficiently without changing sensitivity settings.
 
 #### Acceptance Criteria
 
@@ -87,7 +87,7 @@ This specification defines refinements to the three cursor-driving sensors (tilt
 
 ### Requirement 6: Ratcheting / Re-centering for Tilt Position Mode
 
-**User Story:** As a user with JIA, I want to reset my tilt neutral point without moving the cursor, so that I can reposition my hands or the iPad without losing my cursor location — like lifting and replacing a mouse.
+**User Story:** As a user with RA, I want to reset my tilt neutral point without moving the cursor, so that I can reposition my hands or the iPad without losing my cursor location — like lifting and replacing a mouse.
 
 #### Acceptance Criteria
 
@@ -113,7 +113,7 @@ This specification defines refinements to the three cursor-driving sensors (tilt
 
 ### Requirement 8: Replace Hard Dead Zone with Smooth Ramp (Tilt Velocity Mode)
 
-**User Story:** As a user with JIA, I want the transition from "no movement" to "cursor moving" to be gradual rather than an abrupt jump, so that I can make very small intentional movements without the cursor snapping unpredictably.
+**User Story:** As a user with RA, I want the transition from "no movement" to "cursor moving" to be gradual rather than an abrupt jump, so that I can make very small intentional movements without the cursor snapping unpredictably.
 
 #### Acceptance Criteria
 
@@ -176,7 +176,7 @@ This specification defines refinements to the three cursor-driving sensors (tilt
 
 ### Requirement 13: Sensor Toggle Patterns — Quick-Pause via Sound Action
 
-**User Story:** As a user with JIA, I want to temporarily pause all cursor sensors with a mouth sound so that I can reposition my body or the iPad without the cursor flying across the screen, then resume with the same sound.
+**User Story:** As a user with RA, I want to temporarily pause all cursor sensors with a mouth sound so that I can reposition my body or the iPad without the cursor flying across the screen, then resume with the same sound.
 
 #### Acceptance Criteria
 
@@ -189,7 +189,7 @@ This specification defines refinements to the three cursor-driving sensors (tilt
 
 ### Requirement 14: Power-Curve Transfer Function for Tilt Velocity Mode
 
-**User Story:** As a user with JIA, I want slow tilts to produce precise cursor movements and fast tilts to produce rapid cursor traversal, so that I can both aim at small targets and cross the screen without excessive wrist effort.
+**User Story:** As a user with RA, I want slow tilts to produce precise cursor movements and fast tilts to produce rapid cursor traversal, so that I can both aim at small targets and cross the screen without excessive wrist effort.
 
 #### Acceptance Criteria
 

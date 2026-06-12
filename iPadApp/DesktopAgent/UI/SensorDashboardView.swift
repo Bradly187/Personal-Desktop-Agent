@@ -376,9 +376,9 @@ private struct AudioDetailView: View {
 /// - Pause indicator (shows when cursor sensors are paused)
 ///
 /// Design constraints:
-/// - Large touch targets (80pt min) for JIA accessibility
-/// - No startling transitions (SVT-safe)
-/// - Clear, predictable state indicators (bipolar-friendly)
+/// - Large touch targets (80pt min) for RA accessibility
+/// - No startling transitions (startle-safe)
+/// - Clear, predictable state indicators (low cognitive load)
 private struct CursorControlSection: View {
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var sensorManager: SensorManager
@@ -542,7 +542,7 @@ private struct CursorControlSection: View {
     private func triggerRatchet() {
         sensorManager.tiltSensor.ratchet()
 
-        // Brief visual confirmation (200-400ms, no sound — SVT-safe)
+        // Brief visual confirmation (200-400ms, no sound — startle-safe)
         showRatchetConfirmation = true
         Task {
             try? await Task.sleep(nanoseconds: 300_000_000)  // 300ms
@@ -557,7 +557,7 @@ private struct CursorControlSection: View {
         } else {
             wsManager.sendCursorResume()
         }
-        // Light haptic — subtle confirmation (SVT-safe)
+        // Light haptic — subtle confirmation (startle-safe)
         let generator = UIImpactFeedbackGenerator(style: .light)
         generator.impactOccurred()
     }

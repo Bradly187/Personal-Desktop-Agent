@@ -3,7 +3,7 @@ import SwiftUI
 /// Flare day profile configuration.
 ///
 /// Guides the user through describing how their ability changes during
-/// RA/JIA flare days — which sensors degrade, how much voice volume
+/// RA flare days — which sensors degrade, how much voice volume
 /// drops, and whether they want to manually signal a flare day right now.
 ///
 /// The resulting profile is stored in SettingsStore and synced to the PC

@@ -521,11 +521,11 @@ class BehavioralTwinState:
         self._acoustic_profiler = profiler
 
     def set_resource_governor(self, governor) -> None:
-        """Wire ResourceGovernor for sub-100ms SVT/flare notification.
+        """Wire ResourceGovernor for sub-100ms flare notification.
 
         When set, set_manual_pain_day() calls governor.notify_pain_day_change()
         immediately instead of waiting up to POLL_INTERVAL_S (5s) for the next
-        poll cycle.  Critical for SVT attacks where VRAM must be freed fast.
+        poll cycle.  Critical for sudden flares where VRAM must be freed fast.
         """
         self._resource_governor = governor
 
@@ -542,7 +542,7 @@ class BehavioralTwinState:
 
         Shared by the manual override and the auto-detection loop so both
         paths converge to the same side effects with no poll/tick latency:
-        - ResourceGovernor (SVT fast-path, <100ms VRAM release)
+        - ResourceGovernor (flare fast-path, <100ms VRAM release)
         - GestureProcessor velocity floor (gated by flare_gesture_degrades)
         """
         if self._resource_governor is not None:

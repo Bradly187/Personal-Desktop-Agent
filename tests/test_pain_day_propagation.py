@@ -207,7 +207,7 @@ def test_transition_gates_gesture_but_not_governor():
 
     twin._on_pain_day_transition(True)
 
-    # Governor always notified (VRAM/SVT response is symptom-agnostic)...
+    # Governor always notified (VRAM/flare response is symptom-agnostic)...
     assert governor.scores == [1.0]
     # ...but gesture floor stays off because gesture_degrades is False.
     assert gesture._pain_day_active is False

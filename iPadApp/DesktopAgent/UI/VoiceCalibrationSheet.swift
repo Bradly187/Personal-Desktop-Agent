@@ -11,7 +11,6 @@ import SwiftUI
 ///   good_day    — baseline (feeling well)
 ///   flare_day   — RA flare
 ///   allergy_day — nasal congestion
-///   svt_attack  — elevated heart rate / breathless
 struct VoiceCalibrationSheet: View {
     @ObservedObject var wsManager: WebSocketManager
     @Environment(\.appTheme) private var theme
@@ -32,14 +31,12 @@ struct VoiceCalibrationSheet: View {
         case goodDay    = "good_day"
         case flareDay   = "flare_day"
         case allergyDay = "allergy_day"
-        case svtAttack  = "svt_attack"
 
         var display: String {
             switch self {
             case .goodDay:    return "Good day"
             case .flareDay:   return "Flare day"
             case .allergyDay: return "Allergy / congestion"
-            case .svtAttack:  return "SVT attack"
             }
         }
 
@@ -48,7 +45,6 @@ struct VoiceCalibrationSheet: View {
             case .goodDay:    return "sun.max.fill"
             case .flareDay:   return "flame.fill"
             case .allergyDay: return "allergens"
-            case .svtAttack:  return "waveform.path.ecg"
             }
         }
 
@@ -60,8 +56,6 @@ struct VoiceCalibrationSheet: View {
                 return "RA flare active. Speak at whatever volume is comfortable — the system will adapt."
             case .allergyDay:
                 return "Congested voice. Speak as clearly as you can given the congestion."
-            case .svtAttack:
-                return "SVT episode. Short, breathless speech — say each phrase when you are able."
             }
         }
     }

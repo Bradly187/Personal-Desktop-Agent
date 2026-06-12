@@ -157,7 +157,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - `OnboardingView.swift` — expanded 7 → 10 steps with the 3 new calibration sheets (all skippable)
 
 **Done (Sprint C — Continuous Recalibration — 2026-05-20):**
-- `voice_calibrator.py` — guided voice calibration for good_day / flare_day / allergy_day / svt_attack conditions; 20-phrase full session; voice-triggered (`"hey agent run voice calibration"`) and iPad-triggered (Settings → Voice Calibration tab)
+- `voice_calibrator.py` — guided voice calibration for good_day / flare_day / allergy_day conditions (svt_attack shipped here, removed 2026-06-11); 20-phrase full session; voice-triggered (`"hey agent run voice calibration"`) and iPad-triggered (Settings → Voice Calibration tab)
 - `ipad_bridge.py` — `pain_day_override` message type handler → `BehavioralTwinState.set_manual_pain_day()` → `AcousticProfiler.get_vad_threshold(pain_day=True)` → `WhisperStream._silence_thresh` relaxed immediately
 - After every 20 voice samples: drift check → `bridge.send_recalibration_request()` → `QuickRecalSheet`; after every 50 commands: seasonal prompt (same path)
 
@@ -301,7 +301,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `approval_config.json` | Per-tool approval policy (`"approve"` / `"silent"`), voice, mic device (`"Microphone (Realtek USB Audio)"`), timeout, tts_backend |
 | `start_agent.bat` | Windows startup script; activates venv and runs `main.py`; logs to `logs/agent_startup.log` |
 | `calibration/acoustic_profiler.py` | Per-user VAD threshold + logprob floor from measured RMS/spectral-centroid/Whisper-logprob; passive calibration; drift detection; seasonal re-cal prompt; Signal 5 in PainDayEngine |
-| `calibration/voice_calibrator.py` | Guided voice calibration for 4 conditions (good/flare/allergy/SVT); 20 phrases; voice-triggered or iPad Settings tab; writes to `voice_profile` + `voice_phrases` tables |
+| `calibration/voice_calibrator.py` | Guided voice calibration for 3 conditions (good/flare/allergy — svt_attack removed 2026-06-11, SVT no longer a project factor); 20 phrases; voice-triggered or iPad Settings tab; writes to `voice_profile` + `voice_phrases` tables |
 | `desktop/vision_grounder.py` | Local qwen3-vl:30b (Ollama) resolves named UI targets to pixel coords; claude-sonnet-4-6 as fallback; confidence ≥0.7; 2s cache; fallback chain: vision → gaze → OCR → CLARIFY |
 | `desktop/ui_automation.py` | Win32 UIAutomation BFS tree search; fuzzy name scoring; 0.3s timeout; 1s cache; first fallback in `_resolve_coords` |
 | `desktop/action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |

@@ -1,6 +1,6 @@
 """calibration.acoustic_profiler.py — Per-user voice acoustic profiling for the Desktop Agent.
 
-Addresses the critical gap for disabled users (RA, SVT, etc.) whose voice
+Addresses the critical gap for disabled users (RA, etc.) whose voice
 amplitude, clarity, and pronunciation vary significantly between healthy days
 and flare days.  The profiler:
 
@@ -301,7 +301,7 @@ class AcousticProfiler:
     async def load(self, condition: str | None = None) -> None:
         """Load stored profile from AgentDB and apply thresholds.
 
-        If condition is provided (good_day/flare_day/allergy_day/svt_attack),
+        If condition is provided (good_day/flare_day/allergy_day),
         loads that condition's calibrated corrections and threshold overrides
         from voice_profiles table in addition to the baseline acoustic profile.
         """

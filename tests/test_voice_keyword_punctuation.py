@@ -55,7 +55,7 @@ def test_feeling_better_with_bang_turns_off():
 def test_is_system_control_voice_classifier():
     from core.hybrid_coordinator import _is_system_control_voice
     assert _is_system_control_voice(Command(text="Pain day on.", action="X", source="voice"))
-    assert _is_system_control_voice(Command(text="calibrate svt", action="X", source="voice"))
+    assert _is_system_control_voice(Command(text="calibrate allergy day", action="X", source="voice"))
     # a genuine dev query is NOT system-control
     assert not _is_system_control_voice(
         Command(text="explain this function", action="X", source="voice"))

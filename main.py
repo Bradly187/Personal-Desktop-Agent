@@ -999,7 +999,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if indexer is not None:
         governor.set_indexer(indexer)
     await governor.start()
-    twin_state.set_resource_governor(governor)   # SVT fast-path: <100ms flare response
+    twin_state.set_resource_governor(governor)   # flare fast-path: <100ms flare response
     shutdown.register(governor)
     if target_cache is not None:
         shutdown.register(target_cache)

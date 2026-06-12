@@ -318,7 +318,7 @@ final class SettingsStore: ObservableObject {
     }
 
     // MARK: — Voice condition (G5: persist last-declared condition so it survives reconnects)
-    /// Last condition the user declared: "good_day" | "flare_day" | "allergy_day" | "svt_attack"
+    /// Last condition the user declared: "good_day" | "flare_day" | "allergy_day"
     @Published var voiceCondition: String {
         didSet { defaults.set(voiceCondition, forKey: "voiceCondition") }
     }
@@ -418,7 +418,11 @@ final class SettingsStore: ObservableObject {
         lastCalibrationDate = defaults.object(forKey: "lastCalibrationDate") as? Date
         edgeScrollEnabled = defaults.object(forKey: "edgeScrollEnabled") as? Bool ?? true
 
-        voiceCondition = defaults.string(forKey: "voiceCondition") ?? "good_day"
+        // Sanitize legacy values (the svt_attack condition was removed) so the
+        // Settings picker always has a matching tag.
+        let storedCondition = defaults.string(forKey: "voiceCondition") ?? "good_day"
+        voiceCondition = ["good_day", "flare_day", "allergy_day"].contains(storedCondition)
+            ? storedCondition : "good_day"
         audioStreamEnabled = defaults.object(forKey: "audioStreamEnabled") as? Bool ?? false
 
         if let data = defaults.data(forKey: "commandButtons"),
