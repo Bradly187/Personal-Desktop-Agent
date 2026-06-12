@@ -6,7 +6,7 @@
 C4Context
     title Accessibility Desktop Agent — Deployment Context
 
-    Person(user, "User", "JIA patient controlling desktop\nvia multimodal input")
+    Person(user, "User", "RA patient controlling desktop\nvia multimodal input")
 
     System_Boundary(desktop, "Desktop PC — RTX 5090") {
         System(agent, "Accessibility Agent", "Python 3.11 asyncio\nAll inference local by default")

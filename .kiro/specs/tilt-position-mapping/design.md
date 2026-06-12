@@ -4,7 +4,7 @@
 
 This design replaces the TiltSensor's velocity-based cursor control (streaming rotation-rate deltas integrated on the PC) with a **position-mapped model** where the iPad's physical tilt angle maps directly to an absolute screen position. The cursor rests wherever the iPad is angled — no sustained tilt required.
 
-**Key benefits for Brad's JIA:**
+**Key benefits for Brad's RA:**
 - Eliminates sustained effort to keep cursor moving
 - Holding the iPad at any comfortable angle parks the cursor at a predictable position
 - Configurable tilt range accommodates limited range of motion
