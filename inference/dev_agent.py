@@ -1780,6 +1780,22 @@ class DevAgent:
         )
         result_text = await self._execute_skill_step(step)
 
+        # Optional on-device summarisation (e.g. "summarize my inbox"): the raw
+        # result has ALREADY been taint-checked in _execute_skill_step, so a
+        # quarantined ("withheld") payload is never summarised. Summarisation
+        # stays local (domain="general").
+        if (not match["send"] and match.get("summarize") and result_text
+                and "withheld" not in result_text.lower()):
+            try:
+                r = await self._router.infer(
+                    domain="general",
+                    user_text=f"Summarize these items concisely for the user:\n\n{result_text}",
+                )
+                if getattr(r, "ok", False) and getattr(r, "text", ""):
+                    result_text = r.text
+            except Exception as exc:
+                log.debug("Skill summarise failed: %s", exc)
+
         if not match["send"] and result_text:
             try:
                 from tts.polly_stream import get_client as _get_tts

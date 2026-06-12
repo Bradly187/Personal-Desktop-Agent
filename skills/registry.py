@@ -174,6 +174,7 @@ class SkillRegistry:
                         if best is None or score > best["score"]:
                             best = {"skill_id": sid, "tool": tool,
                                     "send": bool(intent.get("send", False)),
+                                    "summarize": bool(intent.get("summarize", False)),
                                     "intent": iname, "keyword": kw, "score": score}
         return best
 

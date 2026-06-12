@@ -1,0 +1,43 @@
+{
+  "skill_id": "google_pim",
+  "display_name": "Gmail and Calendar",
+  "enabled": false,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.google_pim_server"]
+  },
+  "auth": {
+    "type": "oauth2_google",
+    "token_path": "~/.claude/skills/credentials/google_pim/token.json",
+    "setup": "python -m skills.servers.google_pim_auth",
+    "scopes": ["gmail.readonly", "gmail.send", "calendar.readonly", "calendar.events"]
+  },
+  "tools": {
+    "allow": ["list_next_event", "list_unread", "send_reply", "create_event"],
+    "send_tools": ["send_reply", "create_event"]
+  },
+  "intents": {
+    "next_meeting": {
+      "keywords": ["next meeting", "next event", "what's on my calendar", "my next meeting"],
+      "tool": "list_next_event",
+      "send": false
+    },
+    "summarize_unread": {
+      "keywords": ["unread email", "unread emails", "summarize my inbox", "check my email", "new email"],
+      "tool": "list_unread",
+      "send": false,
+      "summarize": true
+    },
+    "reply_email": {
+      "keywords": ["reply to this email", "reply to the email", "respond to this email"],
+      "tool": "send_reply",
+      "send": true
+    },
+    "create_event": {
+      "keywords": ["schedule a meeting", "add to my calendar", "create an event", "book a meeting"],
+      "tool": "create_event",
+      "send": true
+    }
+  }
+}
