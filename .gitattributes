@@ -1,0 +1,27 @@
+# Normalize line endings: store everything LF in the repo, check out native.
+# Fixes the Windows CRLF/LF churn that previously masked real diffs.
+* text=auto eol=lf
+
+# Windows-only scripts must stay CRLF on checkout to run correctly.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binary assets — never touch line endings.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.docx  binary
+*.xlsx  binary
+*.task  binary
+*.tflite binary
+*.onnx  binary
+*.gguf  binary
+*.bin   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
