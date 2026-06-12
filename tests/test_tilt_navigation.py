@@ -34,6 +34,7 @@ from core.fusion_engine import FusionEngine, FusionConfig
 from core.ipad_bridge import IPadBridge
 
 BRIDGE_PORT = 8766  # Use a different port to avoid conflict with running bridge
+_TEST_TOKEN = "sprint-n-test-token"  # C1 pairing token for the in-process bridge
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ async def start_test_server() -> tuple[IPadBridge, FusionEngine, asyncio.Task, a
     fusion = FusionEngine(screen_width=sw, screen_height=sh, config=config)
     # No coordinator needed — tilt goes direct to pyautogui (rule 6)
 
-    bridge = IPadBridge(port=BRIDGE_PORT)
+    bridge = IPadBridge(port=BRIDGE_PORT, token=_TEST_TOKEN)
     bridge.set_fusion_engine(fusion)
 
     bridge_task = asyncio.create_task(bridge.run(no_mdns=True))
@@ -67,7 +68,7 @@ async def start_test_server() -> tuple[IPadBridge, FusionEngine, asyncio.Task, a
 async def test_tilt_moves_cursor_right() -> tuple[bool, str]:
     """Send tilt ry > dead_zone → cursor should move right (positive dx)."""
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             # Record starting position
             start_x, start_y = pyautogui.position()
 
@@ -92,7 +93,7 @@ async def test_tilt_moves_cursor_right() -> tuple[bool, str]:
 async def test_tilt_moves_cursor_down() -> tuple[bool, str]:
     """Send tilt rx < -dead_zone → cursor should move down (positive dy)."""
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             start_x, start_y = pyautogui.position()
 
             # Send tilt: rx=-0.1 rad/s → dy = int(-(-0.1) * 300) = 30 pixels down
@@ -114,7 +115,7 @@ async def test_tilt_moves_cursor_down() -> tuple[bool, str]:
 async def test_tilt_dead_zone_ignored() -> tuple[bool, str]:
     """Send tilt below dead zone (0.01 < 0.02) → cursor should NOT move."""
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             # Move cursor to a known position first
             pyautogui.moveTo(960, 540)
             await asyncio.sleep(0.1)
@@ -141,7 +142,7 @@ async def test_tilt_dead_zone_ignored() -> tuple[bool, str]:
 async def test_tilt_diagonal() -> tuple[bool, str]:
     """Send tilt with both rx and ry → cursor moves diagonally."""
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             # Move to center so we have room in all directions
             pyautogui.moveTo(960, 540)
             await asyncio.sleep(0.1)

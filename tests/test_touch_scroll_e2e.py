@@ -35,6 +35,7 @@ except ImportError as exc:
 from core.ipad_bridge import IPadBridge
 
 BRIDGE_PORT = 8767  # Unique port to avoid conflicts
+_TEST_TOKEN = "sprint-n-test-token"  # C1 pairing token for the in-process bridge
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ BRIDGE_PORT = 8767  # Unique port to avoid conflicts
 
 async def start_test_bridge() -> tuple[IPadBridge, asyncio.Task]:
     """Start a minimal bridge (no FusionEngine needed for touch_command)."""
-    bridge = IPadBridge(port=BRIDGE_PORT)
+    bridge = IPadBridge(port=BRIDGE_PORT, token=_TEST_TOKEN)
     bridge_task = asyncio.create_task(bridge.run(no_mdns=True))
     await asyncio.sleep(1.0)
     return bridge, bridge_task
@@ -68,7 +69,7 @@ async def recv_ack(ws, timeout: float = 5.0) -> dict:
 async def test_scroll_down_e2e(mock_scroll: MagicMock) -> tuple[bool, str]:
     """Send touch_command SCROLL down → verify mouse_scroll called correctly."""
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             await ws.send_json({
                 "type": "touch_command",
                 "id": "test-scroll-1",
@@ -104,7 +105,7 @@ async def test_scroll_up_e2e(mock_scroll: MagicMock) -> tuple[bool, str]:
     mock_scroll.reset_mock()
 
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             await ws.send_json({
                 "type": "touch_command",
                 "id": "test-scroll-2",
@@ -138,7 +139,7 @@ async def test_scroll_default_params(mock_scroll: MagicMock) -> tuple[bool, str]
     mock_scroll.reset_mock()
 
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             await ws.send_json({
                 "type": "touch_command",
                 "id": "test-scroll-3",
@@ -169,7 +170,7 @@ async def test_scroll_default_params(mock_scroll: MagicMock) -> tuple[bool, str]
 async def test_touch_click_e2e(mock_click: MagicMock) -> tuple[bool, str]:
     """Send touch_command CLICK → verify mouse_click called."""
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws") as ws:
+        async with session.ws_connect(f"ws://localhost:{BRIDGE_PORT}/ws?token={_TEST_TOKEN}") as ws:
             await ws.send_json({
                 "type": "touch_command",
                 "id": "test-click-1",

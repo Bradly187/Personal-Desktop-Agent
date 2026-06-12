@@ -40,9 +40,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import logging
+import os
 import re
+import secrets
 import socket
 import sys
 import time
@@ -83,6 +86,42 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Pairing token (C1) — authenticate every WebSocket connection
+# ---------------------------------------------------------------------------
+
+_BRIDGE_TOKEN_DIR = Path.home() / ".claude" / "ipad_bridge"
+_BRIDGE_TOKEN_PATH = _BRIDGE_TOKEN_DIR / "paired_token"
+
+
+def _load_or_create_bridge_token() -> str:
+    """Return the iPad pairing token, generating one on first run.
+
+    Stored at ``~/.claude/ipad_bridge/paired_token`` (0600). Every WS client
+    must present this token (``X-Agent-Token`` header or ``?token=`` query) or
+    the connection is rejected before it is accepted. Fail-closed: if the token
+    cannot be read or created we raise rather than run an open bridge.
+    """
+    try:
+        if _BRIDGE_TOKEN_PATH.exists():
+            tok = _BRIDGE_TOKEN_PATH.read_text(encoding="utf-8").strip()
+            if tok:
+                return tok
+        _BRIDGE_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        tok = secrets.token_urlsafe(32)
+        _BRIDGE_TOKEN_PATH.write_text(tok, encoding="utf-8")
+        try:
+            os.chmod(_BRIDGE_TOKEN_PATH, 0o600)
+        except OSError:
+            pass  # best-effort; Windows ACLs differ
+        return tok
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot read or create the iPad bridge pairing token at "
+            f"{_BRIDGE_TOKEN_PATH}: {exc}. Refusing to start an unauthenticated bridge."
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # iPad Bridge
 # ---------------------------------------------------------------------------
 
@@ -102,9 +141,14 @@ class IPadBridge:
     # so a 2 s window covers most sensor round-trips without false attribution.
     _TRACE_WINDOW_S: float = 2.0
 
-    def __init__(self, port: int = 8765, host: str = "0.0.0.0"):
+    def __init__(self, port: int = 8765, host: str = "0.0.0.0",
+                 token: Optional[str] = None):
         self.port = port
         self.host = host
+
+        # Pairing token (C1): required on every WS connection. Injectable for
+        # tests; otherwise loaded/generated under ~/.claude/ipad_bridge/.
+        self._token = token or _load_or_create_bridge_token()
 
         # Screen dimensions (resolved lazily at start)
         self._screen_w: int = 1920
@@ -197,7 +241,14 @@ class IPadBridge:
     # WebSocket handler
     # ---------------------------------------------------------------------- #
 
-    async def ws_handler(self, request: web.Request) -> web.WebSocketResponse:
+    async def ws_handler(self, request: web.Request) -> web.StreamResponse:
+        # ── Pairing-token gate (C1): reject before the socket is accepted ──
+        supplied = request.headers.get("X-Agent-Token") or request.query.get("token", "")
+        if not supplied or not hmac.compare_digest(
+                supplied.encode("utf-8"), self._token.encode("utf-8")):
+            log.warning("Rejected unauthenticated WS connection from %s", request.remote)
+            return web.Response(status=401, text="unauthorized")
+
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
 
@@ -1008,6 +1059,9 @@ class IPadBridge:
 
         log.info("Bridge listening on %s:%d  (ws://%s:%d/ws)", self.host, self.port, self.host, self.port)
         log.info("Web client: http://%s:%d/", self.host, self.port)
+        log.info("iPad pairing token: %s", self._token)
+        log.info("  → enter this token in the iPad app, or connect with "
+                 "ws://%s:%d/ws?token=%s", self.host, self.port, self._token)
         self._print_qr()
 
         try:
