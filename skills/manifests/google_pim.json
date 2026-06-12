@@ -14,7 +14,7 @@
     "scopes": ["gmail.readonly", "gmail.send", "calendar.readonly", "calendar.events"]
   },
   "tools": {
-    "allow": ["list_next_event", "list_unread", "send_reply", "create_event"],
+    "allow": ["list_next_event", "list_unread", "unread_messages", "send_reply", "create_event"],
     "send_tools": ["send_reply", "create_event"]
   },
   "intents": {

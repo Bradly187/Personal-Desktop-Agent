@@ -118,6 +118,29 @@ def _list_unread(gmail, n: int = 5) -> str:
     return "\n".join(lines)
 
 
+def _unread_structured(gmail, n: int = 10) -> list:
+    """Unread inbox messages as structured dicts (for the email-arrived watcher)."""
+    resp = gmail.users().messages().list(
+        userId="me", labelIds=["UNREAD", "INBOX"], maxResults=n,
+    ).execute()
+    out: list = []
+    for m in resp.get("messages", []):
+        msg = gmail.users().messages().get(
+            userId="me", id=m["id"], format="metadata",
+            metadataHeaders=["From", "Subject"],
+        ).execute()
+        headers = {h["name"]: h["value"]
+                   for h in msg.get("payload", {}).get("headers", [])}
+        out.append({
+            "id": m["id"],
+            "from": headers.get("From", ""),
+            "subject": headers.get("Subject", ""),
+            "snippet": (msg.get("snippet", "") or "")[:200],
+            "thread_id": msg.get("threadId", ""),
+        })
+    return out
+
+
 def _send_reply(gmail, *, to: str, subject: str, body: str, thread_id: str = "") -> str:
     mime = MIMEText(body)
     mime["To"] = to
@@ -157,6 +180,14 @@ def list_next_event() -> str:
 def list_unread(max_results: int = 5) -> str:
     """Return raw snippets of the most recent unread inbox emails (read-only)."""
     return _list_unread(_gmail(), max_results)
+
+
+@mcp.tool()
+def unread_messages(max_results: int = 10) -> str:
+    """Unread inbox messages as JSON [{id, from, subject, snippet, thread_id}]
+    (read-only; consumed by the email-arrived watcher to publish events)."""
+    import json as _json
+    return _json.dumps(_unread_structured(_gmail(), max_results))
 
 
 @mcp.tool()
