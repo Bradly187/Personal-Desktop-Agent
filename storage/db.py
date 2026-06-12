@@ -702,6 +702,21 @@ CREATE TABLE IF NOT EXISTS rate_limit_events (
     was_dropped INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_rle_resource_ts ON rate_limit_events(resource, ts);
+
+-- ── Skill invocations — audit log for MCP-client skill calls (N+1) ───────────
+-- Every SKILL_QUERY/SKILL_CALL: which skill/tool, send vs read, status, whether
+-- a HIGH-risk taint verdict blocked the result, and a scrubbed result summary.
+CREATE TABLE IF NOT EXISTS skill_invocations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL    NOT NULL,
+    skill_id        TEXT    NOT NULL,
+    tool_name       TEXT    NOT NULL,
+    send            INTEGER NOT NULL DEFAULT 0,
+    status          TEXT,
+    blocked         INTEGER NOT NULL DEFAULT 0,
+    result_summary  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_skillinv_ts ON skill_invocations(ts);
 """
 
 
@@ -944,6 +959,32 @@ class AgentDB:
             "INSERT INTO ipad_logs (session_id, ts, level, subsystem, msg, trace_id)"
             " VALUES (?, ?, ?, ?, ?, ?)",
             rows,
+        )
+        await self._conn.commit()
+
+    async def log_skill_invocation(
+        self,
+        skill_id: str,
+        tool_name: str,
+        *,
+        send: bool = False,
+        status: str = "?",
+        blocked: bool = False,
+        result_summary: str = "",
+    ) -> None:
+        """Append an audit row for an MCP-client skill call (N+1). No-ops if the
+        DB is unavailable."""
+        if not self._conn:
+            return
+        await self._conn.execute(
+            "INSERT INTO skill_invocations "
+            "(ts, skill_id, tool_name, send, status, blocked, result_summary) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                time.time(), str(skill_id)[:128], str(tool_name)[:128],
+                1 if send else 0, str(status)[:32], 1 if blocked else 0,
+                str(result_summary or "")[:512],
+            ),
         )
         await self._conn.commit()
 

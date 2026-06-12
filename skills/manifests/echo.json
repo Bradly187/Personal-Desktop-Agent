@@ -1,0 +1,18 @@
+{
+  "skill_id": "echo",
+  "display_name": "Echo (demo skill)",
+  "enabled": false,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.echo_server"]
+  },
+  "tools": {
+    "allow": ["echo_text", "record_note"],
+    "send_tools": ["record_note"]
+  },
+  "intents": {
+    "echo": {"keywords": ["echo this", "repeat after me"], "tool": "echo_text", "send": false},
+    "record": {"keywords": ["record a note", "save a note"], "tool": "record_note", "send": true}
+  }
+}
