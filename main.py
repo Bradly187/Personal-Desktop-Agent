@@ -931,6 +931,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         try:
             from aiohttp import web as _aio_web
             from monitoring.trace import get_tracer as _get_tracer
+            # H1: bind loopback only. /trace returns recent command text and
+            # /metrics is for local operator inspection — nothing remote needs them.
+            _metrics_host = "127.0.0.1"
             _metrics_app = _aio_web.Application()
             _metrics_app.router.add_get("/metrics", m.aiohttp_handler)
 
@@ -947,9 +950,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             _metrics_app.router.add_get("/trace/{tid}", _trace_one)
             _metrics_runner = _aio_web.AppRunner(_metrics_app)
             await _metrics_runner.setup()
-            _metrics_site = _aio_web.TCPSite(_metrics_runner, "0.0.0.0", args.metrics_port)
+            _metrics_site = _aio_web.TCPSite(_metrics_runner, _metrics_host, args.metrics_port)
             await _metrics_site.start()
-            log.info("Metrics endpoint: http://0.0.0.0:%d/metrics", args.metrics_port)
+            log.info("Metrics endpoint: http://%s:%d/metrics", _metrics_host, args.metrics_port)
         except Exception as _me_exc:
             log.warning("Metrics HTTP endpoint failed: %s", _me_exc)
 
