@@ -719,11 +719,33 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         )
         await skill_registry.start()
         dev_agent.set_skill_registry(skill_registry)
+        coordinator.set_skill_registry(skill_registry)   # voice 'help' listing
         if skill_registry.has_skills():
             log.info("SkillRegistry: skills active")
     except Exception as _skill_exc:
         log.warning("SkillRegistry: failed to start (%s) — skills disabled", _skill_exc)
         skill_registry = None
+
+    # ── Personal knowledge base: semantic search over the user's own files ──
+    # Pure-local (no auth, no cloud); indexes ~/Documents + ~/Notes (or the
+    # roots in ~/.claude/personal_kb/config.json) in a background task so
+    # startup is never blocked. Queried via "what did I write in my notes
+    # about …" or the SEARCH_PERSONAL plan verb; re-index via "index my notes".
+    personal_kb = None
+    _kb_index_task = None
+    try:
+        from storage.personal_kb import PersonalKB
+        personal_kb = PersonalKB()
+        if await personal_kb.start():
+            dev_agent.set_personal_kb(personal_kb)
+            coordinator.set_personal_kb(personal_kb)
+            _kb_index_task = asyncio.create_task(personal_kb.index(),
+                                                 name="personal_kb_index")
+        else:
+            personal_kb = None
+    except Exception as _kb_exc:
+        log.warning("PersonalKB: failed to start (%s) — personal search disabled", _kb_exc)
+        personal_kb = None
 
     # Wire MemoryManager into all storage-writing components
     coordinator.set_memory(memory)
@@ -1163,6 +1185,18 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # Stop skill MCP-client sessions (tear down their stdio subprocesses)
     if skill_registry is not None:
         await skill_registry.stop()
+
+    # Stop the personal KB. Order matters: stop() FIRST — it sets the worker's
+    # cooperative stop event, so a still-running background index exits at the
+    # next file instead of pinning the executor join for the whole Documents
+    # walk. Then bounded-wait the task (cancel alone can't interrupt to_thread).
+    if personal_kb is not None:
+        await personal_kb.stop()
+    if _kb_index_task is not None and not _kb_index_task.done():
+        try:
+            await asyncio.wait_for(_kb_index_task, timeout=10)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
 
     # Stop cluster health monitor
     if cluster_health is not None:

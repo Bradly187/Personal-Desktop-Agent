@@ -361,9 +361,13 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     # Mic mute — voice can only mute; unmute requires the iPad button
     # (mic is deaf once muted, so a voice unmute command can never arrive)
     "mute mic", "mute microphone", "mic off", "silence mic",
+    # Capability discovery + personal KB maintenance
+    "help", "what can you do", "what can i say", "list your skills",
+    "index my notes", "reindex my notes", "index my documents",
 })
 
 from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
+from storage.personal_kb import is_personal_query as _is_personal_query
 
 
 def _is_system_control_voice(cmd) -> bool:
@@ -416,6 +420,8 @@ class HybridCoordinator:
         self._executor = CommandExecutor()
         self._trainer = trainer
         self._dev_agent = dev_agent
+        self._skill_registry = None     # SkillRegistry | None — voice 'help' listing
+        self._personal_kb = None        # PersonalKB | None — voice 'index my notes'
         self._agent_db = agent_db
         self._session_id = session_id
         self._content_filter = content_filter
@@ -468,6 +474,14 @@ class HybridCoordinator:
 
     def set_dev_agent(self, dev_agent: "DevAgent") -> None:
         self._dev_agent = dev_agent
+
+    def set_skill_registry(self, registry) -> None:
+        """Wire the SkillRegistry so the voice 'help' command can list skills."""
+        self._skill_registry = registry
+
+    def set_personal_kb(self, kb) -> None:
+        """Wire the PersonalKB for the voice 'index my notes' command."""
+        self._personal_kb = kb
 
     def set_cloud_dev_agent(
         self,
@@ -590,6 +604,33 @@ class HybridCoordinator:
             return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             return {}
+
+    def _capability_summary(self) -> str:
+        """A concise spoken summary of what the user can ask for (GAP-4).
+
+        Static core abilities plus the DYNAMIC skill intents from the registry
+        and proactivity/personal-KB availability — so the summary never goes
+        stale as skills are added by manifest.
+        """
+        parts = [
+            "I can control the desktop: click, scroll, type, open and close apps, "
+            "take screenshots, and dictate.",
+            "I can write code, run plans, and answer technical questions.",
+            "You can set reminders, like: every morning at 8, brief me. "
+            "Say 'what are my reminders' to review them.",
+        ]
+        if self._personal_kb is not None and getattr(self._personal_kb, "available", False):
+            parts.append("I can search your own documents — ask things like: "
+                         "what did I write in my notes about a topic.")
+        if self._skill_registry is not None and self._skill_registry.has_skills():
+            kws: list[str] = []
+            for action in self._skill_registry.list_actions()[:6]:
+                if action.get("keywords"):
+                    kws.append(action["keywords"][0])
+            if kws:
+                parts.append("Connected skills also let you say: " + "; ".join(kws) + ".")
+        parts.append("Say 'pain day on' when you're flaring and I'll adapt.")
+        return " ".join(parts)
 
     async def _tts_speak(self, text: str) -> None:
         """Speak text via the configured TTS backend (fire-and-forget safe)."""
@@ -725,6 +766,10 @@ class HybridCoordinator:
                     # Skills execute LOCALLY via the SkillRegistry (the cloud dev
                     # agent has no registry) — never route a skill to the cloud.
                     route_cloud = False
+                if _is_personal_query(cmd.text):
+                    # Questions about the user's OWN documents answer from the
+                    # local PersonalKB — the query itself must never go to cloud.
+                    route_cloud = False
                 if route_cloud and not self._gate0(cmd):
                     log.info("HybridCoordinator: dev-domain=%s contains sensitive "
                              "data — forcing LOCAL DevAgent (Gate 0)", domain)
@@ -771,7 +816,12 @@ class HybridCoordinator:
 
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
                 agent_result = await self._dev_agent.handle(cmd.text)
-                self._record_dev_command(cmd.text)
+                # Personal-document queries are NOT recorded in the rolling dev
+                # context: _recent_dev_commands is sent verbatim to the cloud
+                # dev agent on later queries, which would leak the very text the
+                # force-local guard kept on-device.
+                if not _is_personal_query(cmd.text):
+                    self._record_dev_command(cmd.text)
                 if self._twin:
                     self._twin.clear_dev_namespace()
                 return {
@@ -982,6 +1032,33 @@ class HybridCoordinator:
                     self._whisper.set_muted(True)
                 asyncio.create_task(self._tts_speak("Microphone muted. Tap the iPad to unmute."))
                 return {"status": "ok", "action": "MIC_MUTE", "muted": True}
+
+            # Capability discovery — "help" / "what can you do" (GAP-4)
+            elif _lower in ("help", "what can you do", "what can i say",
+                            "list your skills"):
+                summary = self._capability_summary()
+                asyncio.create_task(self._tts_speak(summary))
+                return {"status": "ok", "action": "HELP", "summary": summary}
+
+            # Personal KB maintenance — "index my notes"
+            elif _lower in ("index my notes", "reindex my notes",
+                            "index my documents"):
+                if self._personal_kb is not None and getattr(
+                        self._personal_kb, "available", False):
+                    from core.async_utils import fire_and_log
+                    if self._personal_kb.get_status().get("paused"):
+                        asyncio.create_task(self._tts_speak(
+                            "Indexing is paused during the flare — I'll be able "
+                            "to index after it passes."))
+                        return {"status": "ok", "action": "PERSONAL_KB_PAUSED"}
+                    fire_and_log(self._personal_kb.index(), log,
+                                 label="voice personal_kb index")
+                    asyncio.create_task(self._tts_speak(
+                        "Okay, indexing your documents in the background."))
+                    return {"status": "ok", "action": "PERSONAL_KB_INDEX"}
+                asyncio.create_task(self._tts_speak(
+                    "The personal knowledge base isn't available."))
+                return {"status": "ok", "action": "PERSONAL_KB_UNAVAILABLE"}
 
         t0 = time.monotonic()
         route_label = "local"
@@ -1303,6 +1380,12 @@ class HybridCoordinator:
         Checks command text against patterns for credentials, financial data,
         and PII. A match forces local routing regardless of subsequent gates.
         """
+        # Personal-document queries always stay local — this covers the COMMAND
+        # path too (e.g. "open my notes about <topic>" classifies as command,
+        # where Gates 1–4 could otherwise escalate the text to cloud). Checked
+        # before the enabled flag: disabling keyword Gate-0 must not disable it.
+        if _is_personal_query(cmd.text):
+            return False
         if not self._cfg.gate0_enabled:
             return True
         text = cmd.text.lower()

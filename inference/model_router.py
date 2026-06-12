@@ -187,6 +187,9 @@ Skills (use ONLY the tools listed under "Available skills" in the context, if pr
   [SKILL_QUERY <skill_id> <tool> {<json args>}]  — read via an external skill tool
   [SKILL_CALL <skill_id> <tool> {<json args>}]   — send/mutate via a skill tool (the user is asked to approve)
 
+Personal documents:
+  [SEARCH_PERSONAL <query>]    — semantic search over the user's own notes/documents (read-only)
+
 Rules:
 - Think step by step before producing the plan
 - Be specific: exact file paths, exact commands, exact content
@@ -218,6 +221,7 @@ _PLAN_VERBS: list[str] = [
     "FETCH_URL", "SEARCH_WEB", "CLICK", "OPEN", "HOTKEY", "SCROLL", "TYPE",
     "EXPLAIN", "READ_SCREEN",
     "SKILL_QUERY", "SKILL_CALL",
+    "SEARCH_PERSONAL",
 ]
 
 # Ollama `format` JSON Schema constraining the plan response (gap: free-text

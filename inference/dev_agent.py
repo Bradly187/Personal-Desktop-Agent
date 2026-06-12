@@ -118,6 +118,8 @@ _PLAN_ACTIONS = {
     "FETCH_URL",
     # Skills — MCP-client tool calls (SKILL_QUERY=read, SKILL_CALL=send/mutate).
     "SKILL_QUERY", "SKILL_CALL",
+    # Personal knowledge base — semantic search over the user's own documents.
+    "SEARCH_PERSONAL",
 }
 
 _STEP_PATTERN = re.compile(
@@ -126,11 +128,16 @@ _STEP_PATTERN = re.compile(
     r"(WRITE_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
     r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE"
     r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL"
-    r"|SKILL_QUERY|SKILL_CALL)"
+    r"|SKILL_QUERY|SKILL_CALL|SEARCH_PERSONAL)"
     r"(?:\s+([^\]\n]+))?"                   # optional args (up to a closing ] or EOL)
     r"\s*\]?",                              # optional ]
     re.IGNORECASE,
 )
+
+# Personal-document query detection lives in storage.personal_kb so the
+# coordinator can share it (forcing such queries local) without importing this
+# heavier module.
+from storage.personal_kb import is_personal_query as _is_personal_query
 
 
 @dataclass
@@ -288,6 +295,7 @@ class DevAgent:
     # which opens a browser, and EXPLAIN, which is ordering-sensitive narration).
     _PARALLEL_VERBS: frozenset[str] = frozenset({
         "READ_FILE", "GREP", "FETCH_URL", "READ_SCREEN", "GIT_STATUS", "GIT_DIFF",
+        "SEARCH_PERSONAL",
     })
 
     # Verbs safe to run CONCURRENTLY within one DAG wave (gap A). Reads (above)
@@ -323,6 +331,7 @@ class DevAgent:
         self._cluster_health = None        # ClusterHealthMonitor | None
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
         self._skill_registry = None        # SkillRegistry | None (set via set_skill_registry)
+        self._personal_kb = None           # PersonalKB | None (set via set_personal_kb)
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -384,6 +393,11 @@ class DevAgent:
         planner can see available skills."""
         self._skill_registry = registry
 
+    def set_personal_kb(self, kb) -> None:
+        """Wire the PersonalKB so personal-document queries and SEARCH_PERSONAL
+        plan steps can run."""
+        self._personal_kb = kb
+
     def request_cancel(self) -> None:
         """Signal the running plan to stop after the current step completes."""
         self._cancel_event.set()
@@ -433,6 +447,12 @@ class DevAgent:
         if domain == "skill" and self._skill_registry is not None \
                 and self._skill_registry.match_intent(text):
             return await self._handle_skill(text)
+
+        # Personal-document questions ("what did I write in my notes about …")
+        # answer from the PersonalKB — never from model hallucination.
+        if self._personal_kb is not None and getattr(self._personal_kb, "available", False) \
+                and _is_personal_query(text):
+            return await self._handle_personal_query(text)
 
         if domain == "plan":
             return await self.plan_and_run(text)
@@ -1640,6 +1660,35 @@ class DevAgent:
         if action in ("SKILL_QUERY", "SKILL_CALL"):
             return await self._execute_skill_step(step)
 
+        if action == "SEARCH_PERSONAL":
+            # Read-only semantic search over the user's own documents. Results
+            # are fenced as retrieved DATA (same convention as RAG context).
+            if self._personal_kb is None or not getattr(self._personal_kb, "available", False):
+                return "Personal knowledge base is not available"
+            q = (step.args or step.body or "").strip()
+            if not q:
+                return "SEARCH_PERSONAL requires a query"
+            hits = await self._personal_kb.query(q, n=4)
+            if not hits:
+                return "No matches in the personal knowledge base"
+            lines = []
+            for h in hits:
+                lines.append(f"# {h['file']} — {h.get('name', '')} (score={h.get('score', 0):.2f})")
+                lines.append((h.get("text") or "")[:600])
+                lines.append("")
+            body = "\n".join(lines)
+            # Defense-depth parity with remote RAG: plan-loop observations steer
+            # replanning, and ~/Documents has weaker provenance than the repo
+            # (downloaded PDFs, web clippings). HIGH-risk injection → withhold.
+            try:
+                verdict = _get_trust_classifier().classify_sync("personal_kb", body)
+                if verdict.should_block:
+                    log.warning("SEARCH_PERSONAL result withheld (trust=HIGH)")
+                    return "[personal search result withheld — flagged as potentially unsafe]"
+            except Exception as exc:
+                log.debug("SEARCH_PERSONAL taint check failed: %s", exc)
+            return f"{_RAG_OPEN_FENCE}\n{body}\n{_RAG_CLOSE_FENCE}"
+
         # Fall through: accessibility verbs → CommandExecutor
         if self._coordinator:
             from core.command_executor import Command
@@ -1808,6 +1857,71 @@ class DevAgent:
             domain="skill",
             model_used=f"skill:{match['skill_id']}.{match['tool']}",
             response_text=result_text,
+            total_latency_ms=(time.monotonic() - t0) * 1000,
+        )
+        self._results_log.append(result)
+        return result
+
+    async def _handle_personal_query(self, text: str) -> "AgentResult":
+        """Answer a question about the user's OWN documents from the PersonalKB.
+
+        Retrieved chunks are fenced as DATA and synthesised by the LOCAL general
+        model (never cloud — personal documents stay on-device). When nothing
+        matches, says so honestly instead of falling through to a model that
+        would hallucinate the user's notes.
+        """
+        t0 = time.monotonic()
+        hits = await self._personal_kb.query(text, n=4)
+
+        if not hits:
+            answer = "I couldn't find anything about that in your documents."
+            spoken = answer
+            model_used = "personal_kb"
+        else:
+            lines = []
+            fnames: list[str] = []
+            for h in hits:
+                fname = Path(h["file"]).name
+                if fname not in fnames:
+                    fnames.append(fname)
+                lines.append(f"# {fname} — {h.get('name', '')}")
+                lines.append((h.get("text") or "")[:600])
+                lines.append("")
+            context = f"{_RAG_OPEN_FENCE}\n" + "\n".join(lines) + f"\n{_RAG_CLOSE_FENCE}"
+            model_used = "personal_kb"
+            answer = context
+            # Synthesis-failure fallback: the raw fenced excerpts stay in
+            # response_text for on-screen display, but are NEVER spoken — the
+            # default TTS is AWS Polly, and reading whole document chunks aloud
+            # would both egress personal content and read the fence sentinel.
+            spoken = (f"I found {len(hits)} matching passage"
+                      f"{'s' if len(hits) != 1 else ''} in "
+                      f"{', '.join(fnames[:3])}, but couldn't summarize them.")
+            try:
+                r = await self._router.infer(
+                    domain="general",
+                    user_text=(f"Answer the user's question using ONLY the retrieved "
+                               f"excerpts from their personal documents below. Quote "
+                               f"the source file names. Question: {text}\n\n{context}"),
+                )
+                if getattr(r, "ok", False) and getattr(r, "text", ""):
+                    answer = r.text
+                    spoken = r.text
+                    model_used = r.model
+            except Exception as exc:
+                log.debug("PersonalKB synthesis failed (%s) — returning raw excerpts", exc)
+
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            asyncio.create_task(_get_tts().speak(spoken))
+        except Exception as exc:
+            log.debug("PersonalKB TTS failed: %s", exc)
+
+        result = AgentResult(
+            goal=text,
+            domain="personal",
+            model_used=model_used,
+            response_text=answer,
             total_latency_ms=(time.monotonic() - t0) * 1000,
         )
         self._results_log.append(result)
