@@ -39,6 +39,12 @@ final class WebSocketManager: ObservableObject {
     @Published private(set) var state: ConnectionState = .disconnected
     @Published private(set) var latencyMs: Double = 0
 
+    /// Human-readable reason the last connection attempt failed, surfaced in
+    /// Settings → Connection. Set on an auth rejection (HTTP 401 — missing or
+    /// wrong pairing token); cleared on a successful connect. `nil` when the
+    /// last attempt did not fail on authentication.
+    @Published private(set) var lastConnectionError: String?
+
     /// Current microphone mute state, mirrored from the PC. Updated by the
     /// `mic_state` push (voice- or iPad-initiated) and the welcome `status`.
     /// Safety-critical: surfaced as a persistent toolbar indicator.
@@ -103,6 +109,7 @@ final class WebSocketManager: ObservableObject {
 
     func connect() {
         guard state == .disconnected else { return }
+        lastConnectionError = nil  // clear any prior auth-failure banner
         state = .connecting
         _connect()
     }
@@ -191,18 +198,39 @@ final class WebSocketManager: ObservableObject {
 
     /// Determines the WebSocket URL to connect to.
     /// Priority: mDNS discovered endpoint (if no manual override) > manual settings > fallback default.
+    /// The pairing token (C1) is appended as a `?token=` query param on whichever
+    /// base URL is chosen — the bridge rejects tokenless connections with HTTP 401.
     private func resolveConnectionURL() -> URL {
+        let base: URL
         // If mDNS discovered a host and user hasn't manually overridden, use discovered endpoint
         if let discovery = serviceDiscovery,
            !discovery.hasManualOverride,
            let host = discovery.discoveredHost,
-           let port = discovery.discoveredPort {
-            if let url = URL(string: "ws://\(host):\(port)/ws") {
-                return url
-            }
+           let port = discovery.discoveredPort,
+           let url = URL(string: "ws://\(host):\(port)/ws") {
+            base = url
+        } else {
+            // Fall back to manual settings or default
+            base = settings?.wsURLOrDefault ?? URL(string: "ws://192.168.18.2:8765/ws")!
         }
-        // Fall back to manual settings or default
-        return settings?.wsURLOrDefault ?? URL(string: "ws://192.168.18.2:8765/ws")!
+        return WebSocketManager.appendingToken(settings?.pairingToken ?? "", to: base)
+    }
+
+    /// Returns `url` with the pairing `token` added as a `?token=` query item.
+    /// Percent-encodes the value, replaces any existing `token` param, and
+    /// returns the URL unchanged when the token is empty. `nonisolated` so it
+    /// is a pure function testable without a live WebSocketManager.
+    nonisolated static func appendingToken(_ token: String, to url: URL) -> URL {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        var items = comps.queryItems ?? []
+        items.removeAll { $0.name == "token" }
+        items.append(URLQueryItem(name: "token", value: trimmed))
+        comps.queryItems = items
+        return comps.url ?? url
     }
 
     private func _connect() {
@@ -236,6 +264,7 @@ final class WebSocketManager: ObservableObject {
                 await MainActor.run {
                     self.connectionTimeoutTask?.cancel()
                     self.connectionTimeoutTask = nil
+                    self.lastConnectionError = nil  // handshake succeeded
                     self.state = .connected
                     self.reconnectAttempt = 0
                     self._startPingTimer()
@@ -244,11 +273,18 @@ final class WebSocketManager: ObservableObject {
                 self._handleReceived(message: firstMessage)
                 try await self._receiveLoop(task: wsTask)
             } catch {
-                AppLogger.shared.error("WebSocketManager", "Connection error: \(error.localizedDescription) — URL: \(url)")
+                // The token rides in the query string — never log it verbatim.
+                let safeURL = WebSocketManager._redactedURLString(url)
+                let httpStatus = (wsTask.response as? HTTPURLResponse)?.statusCode
+                AppLogger.shared.error("WebSocketManager", "Connection error: \(error.localizedDescription) — URL: \(safeURL) status: \(httpStatus.map(String.init) ?? "n/a")")
                 await MainActor.run {
                     self.connectionTimeoutTask?.cancel()
                     self.connectionTimeoutTask = nil
-                    self._handleDisconnect(error: error)
+                    if httpStatus == 401 {
+                        self._handleAuthFailure()
+                    } else {
+                        self._handleDisconnect(error: error)
+                    }
                 }
             }
         }
@@ -405,6 +441,39 @@ final class WebSocketManager: ObservableObject {
         }
         reconnectWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    /// Handle a pairing-token rejection (HTTP 401). Unlike a transport drop we
+    /// do NOT auto-reconnect: retrying with the same missing/wrong token just
+    /// fails identically and spins a hot loop. Surface a clear message, settle
+    /// to `.disconnected`, and let the user paste the token and tap Reconnect.
+    private func _handleAuthFailure() {
+        task = nil
+        receiveTask?.cancel()
+        receiveTask = nil
+        pingTask?.cancel()
+        pingTask = nil
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        reconnectAttempt = 0
+
+        let hasToken = !(settings?.pairingToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let message = hasToken
+            ? "Connection refused (401): the pairing token is incorrect. Check the token printed in the PC startup log (“iPad pairing token: …”) and re-enter it in Settings → Connection, then tap Reconnect."
+            : "Connection refused (401): a pairing token is required. Enter the token printed in the PC startup log (“iPad pairing token: …”) in Settings → Connection, then tap Reconnect."
+        lastConnectionError = message
+        errorFeed.send(message)
+        AppLogger.shared.warning("WebSocketManager", "Auth failure (401) — token \(hasToken ? "wrong" : "missing")")
+
+        state = .disconnected
+    }
+
+    /// Returns the URL's string with the query (which carries the pairing token)
+    /// stripped, for safe logging.
+    nonisolated static func _redactedURLString(_ url: URL) -> String {
+        var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        comps?.queryItems = nil
+        return comps?.url?.absoluteString ?? "ws://\(url.host ?? "?"):\(url.port.map(String.init) ?? "?")\(url.path)"
     }
 
     // MARK: — Latency Ping

@@ -321,6 +321,31 @@ private struct ConnectionStep: View {
             }
             .padding(.horizontal, DesignTokens.Spacing.xl)
 
+            // Pairing token (security fix C1) — the bridge rejects connections
+            // without it (HTTP 401). The PC prints it once at startup.
+            VStack(alignment: .leading, spacing: DesignTokens.Spacing.sm) {
+                Text("Pairing token")
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textSecondary)
+                TextField("paste the token from the PC startup log", text: $settings.pairingToken)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(.footnote, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .submitLabel(.done)
+                    .accessibilityLabel("Pairing token")
+                Text("The PC prints this once at startup (“iPad pairing token: …”). Required to connect.")
+                    .font(DesignTokens.Typography.caption)
+                    .foregroundStyle(theme.textSecondary)
+                if let authError = wsManager.lastConnectionError {
+                    Label(authError, systemImage: "lock.trianglebadge.exclamationmark")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("Connection failed: \(authError)")
+                }
+            }
+            .padding(.horizontal, DesignTokens.Spacing.xl)
+
             // G10: After 30 s without a connection, offer an offline path.
             // The user can still complete onboarding; PC-dependent calibrations
             // will be locked or skipped.

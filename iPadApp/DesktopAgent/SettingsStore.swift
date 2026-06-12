@@ -36,6 +36,15 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(serverPort, forKey: "serverPort") }
     }
 
+    /// Pairing token required by the PC bridge (security fix C1). The PC prints
+    /// this once in its startup log ("iPad pairing token: …"); the user pastes
+    /// it here. Sent as the `?token=` query param on the WebSocket URL. Empty
+    /// until entered — an empty/wrong token makes the bridge reject the
+    /// connection with HTTP 401.
+    @Published var pairingToken: String {
+        didSet { defaults.set(pairingToken, forKey: "pairingToken") }
+    }
+
     /// Returns a valid WebSocket URL or nil if host/port are invalid.
     /// Never force-unwraps user input.
     var wsURL: URL? {
@@ -347,6 +356,7 @@ final class SettingsStore: ObservableObject {
         self.defaults = defaults
         serverHost = defaults.string(forKey: "serverHost") ?? "192.168.18.2"
         serverPort = defaults.integer(forKey: "serverPort").nonZero ?? 8765
+        pairingToken = defaults.string(forKey: "pairingToken") ?? ""
         tiltSensitivity = defaults.double(forKey: "tiltSensitivity").nonZero ?? 1.0
         tiltDeadZone = defaults.double(forKey: "tiltDeadZone").nonZero ?? 1.5
         tiltEnabled = defaults.object(forKey: "tiltEnabled") as? Bool ?? true
