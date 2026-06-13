@@ -29,6 +29,16 @@
     Test hook: run this command line (via cmd /c) instead of the real target,
     and skip the already-running guard. Lets the restart/backoff logic be
     exercised without starting sensors or LLMs.
+
+.PARAMETER TestChild
+    Test hook: path to a Python script run IN PLACE of the real target, but
+    through the real venv python, real log redirection, and real cmd quoting —
+    unlike -TestCommand, this exercises the production launch path end-to-end.
+    Skips the already-running guard.
+
+.PARAMETER TestLogDir
+    Test hook: write all logs here instead of <repo>\logs (keeps test runs
+    from polluting the real agent logs).
 #>
 [CmdletBinding()]
 param(
@@ -37,6 +47,8 @@ param(
     [string]$Target,
 
     [string]$TestCommand = "",
+    [string]$TestChild = "",
+    [string]$TestLogDir = "",
 
     # Backoff bound: give up after $MaxRestarts crashes within $WindowSeconds.
     [int]$MaxRestarts = 3,
@@ -47,7 +59,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
-$LogDir = Join-Path $Root "logs"
+if ($TestLogDir) { $LogDir = $TestLogDir } else { $LogDir = Join-Path $Root "logs" }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 switch ($Target) {
@@ -83,6 +95,8 @@ if (-not $TestCommand) {
         Write-WatchLog "ERROR: venv python not found at $Py - run setup first. Exiting."
         exit 1
     }
+}
+if (-not $TestCommand -and -not $TestChild) {
     $alreadyUp = $false
     if ($listenPort -gt 0) {
         try {
@@ -100,6 +114,12 @@ if (-not $TestCommand) {
         Write-WatchLog "$Target already running - watchdog not needed, exiting."
         exit 0
     }
+}
+
+# Test hook: substitute the child but keep the real launch path (quoting,
+# redirection, exit-code propagation) intact.
+if ($TestChild) {
+    $childArgs = "`"$TestChild`""
 }
 
 # ── Supervision loop ─────────────────────────────────────────────────────────
@@ -128,9 +148,14 @@ while ($true) {
 
     Write-WatchLog "starting $Target (attempt $attempt): $cmdLine"
 
-    # cmd /c keeps stdout+stderr merged into one raw-byte log file (PowerShell
+    # cmd keeps stdout+stderr merged into one raw-byte log file (PowerShell
     # redirection would re-encode) and propagates the child's exit code.
-    $proc = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/d /c $cmdLine" `
+    # /s + outer quotes is load-bearing: $cmdLine contains 4 quote chars, and
+    # without /s cmd's strip-first-and-last-quote rule leaves the redirect
+    # inside a quoted span ("The filename, directory name, or volume label
+    # syntax is incorrect" - the child never starts). /s makes cmd strip
+    # exactly the outer pair, preserving the inner quoting as written.
+    $proc = Start-Process -FilePath "$env:ComSpec" -ArgumentList "/d /s /c `" $cmdLine `"" `
         -WorkingDirectory $Root -WindowStyle Hidden -PassThru
     $proc.WaitForExit()
     $code = $proc.ExitCode
