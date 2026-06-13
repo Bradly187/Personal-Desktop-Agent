@@ -73,6 +73,16 @@ _PATTERNS: list[_Pattern] = [
     _Pattern("github_token", re.compile(r'gh[pousr]_[A-Za-z0-9_]{36,}'), "critical"),
     _Pattern("github_fine_grained", re.compile(r'github_pat_[A-Za-z0-9_]{22,}'), "critical"),
 
+    # Google (#4 — the Gmail/Calendar skill egresses Google data; the prior
+    # pattern set had no Google coverage). OAuth refresh tokens start "1//",
+    # access tokens "ya29.", API keys "AIza".
+    _Pattern("google_api_key", re.compile(r'AIza[0-9A-Za-z\-_]{35}'), "critical"),
+    _Pattern("google_oauth_refresh", re.compile(r'1//[0-9A-Za-z\-_]{20,}'), "critical"),
+    _Pattern("google_oauth_access", re.compile(r'ya29\.[0-9A-Za-z\-_]{20,}'), "critical"),
+
+    # Generic bearer token in an Authorization header / JSON field.
+    _Pattern("bearer_token", re.compile(r'(?i)bearer\s+[A-Za-z0-9\-._~+/]{16,}=*'), "critical"),
+
     # Generic high-entropy secrets (env var assignments)
     _Pattern("env_secret", re.compile(r'(?i)(?:api[_\-]?key|secret|token|password|passwd)\s*[=:]\s*["\']?([A-Za-z0-9/+=\-_]{16,})["\']?'), "warning"),
 

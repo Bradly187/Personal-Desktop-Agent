@@ -103,19 +103,38 @@ _INTERPRETERS: frozenset[str] = frozenset({"python", "python3", "py", "node"})
 #   <( … ), >( … )  — process substitution: same.
 # Any of these → not allowlisted (require explicit approval). Detected on the
 # raw command, ignoring quoted spans so a literal '>' inside a string is fine.
-_DANGEROUS_SHELL_RE = re.compile(r"\$\(|`|<\(|>\(|(?<![0-9])>|>>|<>|\d+>")
+# Command substitution ($(…), backticks) IS expanded by bash inside DOUBLE
+# quotes (only single quotes suppress it) — so for these we strip only
+# single-quoted spans before scanning (#11: `echo "$(rm -rf x)"` must still be
+# caught; the previous code stripped double-quoted spans too and let it slip).
+_SUBST_DQ_RE = re.compile(r"\$\(|`")
+# Redirection and process substitution (<(…), >(…)) are literal/disabled inside
+# ANY quotes — strip both quote styles before scanning so a literal '>' inside a
+# string (`echo "a > b"`) is data, not an operator.
+_REDIR_PROC_RE = re.compile(r"<\(|>\(|(?<![0-9])>|>>|<>|\d+>")
 
 
-def _strip_quoted(command: str) -> str:
-    """Remove single/double-quoted spans so metacharacters inside string
-    literals (e.g. echo "a > b") don't trip the shell-operator check. Crude but
-    fail-safe: an unterminated quote leaves the tail in place (still scanned)."""
+def _strip_single_quoted(command: str) -> str:
+    """Remove single-quoted spans (bash expands nothing inside '…')."""
+    return re.sub(r"'[^']*'", "", command)
+
+
+def _strip_all_quoted(command: str) -> str:
+    """Remove single- and double-quoted spans. Crude but fail-safe: an
+    unterminated quote leaves the tail in place (still scanned)."""
     return re.sub(r"'[^']*'|\"[^\"]*\"", "", command)
 
 
 def _has_dangerous_shell_ops(command: str) -> bool:
-    """True if the command (outside quotes) uses redirection or substitution."""
-    return _DANGEROUS_SHELL_RE.search(_strip_quoted(command)) is not None
+    """True if the command uses redirection or command/process substitution the
+    per-segment exe check can't see. Quote handling mirrors bash: $()/backtick
+    expand inside double quotes (scan with only single quotes stripped);
+    redirection and <()/>() are literal in quotes (scan with both stripped)."""
+    if _SUBST_DQ_RE.search(_strip_single_quoted(command)):
+        return True
+    if _REDIR_PROC_RE.search(_strip_all_quoted(command)):
+        return True
+    return False
 
 
 def _bash_is_allowlisted(command: str) -> bool:
@@ -175,12 +194,15 @@ def _path_in_scope(path: str, scopes: list[str]) -> bool:
     if not path:
         return False
     try:
-        target = os.path.normcase(os.path.abspath(path))
+        # realpath (not abspath) resolves symlinks/junctions and Windows 8.3
+        # short names, so a junction planted inside the scope can't redirect a
+        # write outside it (#3). abspath only collapses '..' lexically.
+        target = os.path.normcase(os.path.realpath(path))
     except Exception:
         return False
     for scope in scopes:
         try:
-            root = os.path.normcase(os.path.abspath(scope))
+            root = os.path.normcase(os.path.realpath(scope))
         except Exception:
             continue
         if target == root or target.startswith(root + os.sep):

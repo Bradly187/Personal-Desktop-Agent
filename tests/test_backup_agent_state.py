@@ -223,7 +223,7 @@ class TestRestore:
         (env.project_root / "chroma_db" / "seg" / "data.bin").unlink()
         (env.claude_home / "ipad_bridge" / "paired_token").write_text("WRONG")
 
-        restored = restore_backup(archive)
+        restored = restore_backup(archive, env)
 
         assert _read_rows(env.project_root / "agent.db") == {"threshold": "0.42"}
         assert (env.project_root / "chroma_db" / "seg" / "data.bin").read_bytes() == b"\x00\x01"
@@ -233,7 +233,7 @@ class TestRestore:
     def test_safety_rename_preserves_existing(self, env: BackupConfig):
         archive = create_backup(env)
         (env.claude_home / "ipad_bridge" / "paired_token").write_text("current")
-        restore_backup(archive)
+        restore_backup(archive, env)
         asides = list((env.claude_home / "ipad_bridge").glob("paired_token.pre-restore-*"))
         assert len(asides) == 1
         assert asides[0].read_text() == "current"
@@ -244,7 +244,7 @@ class TestRestore:
         shm = env.project_root / "agent.db-shm"
         wal.write_bytes(b"stale-wal")
         shm.write_bytes(b"stale-shm")
-        restore_backup(archive)
+        restore_backup(archive, env)
         assert not wal.exists()
         assert not shm.exists()
         assert list(env.project_root.glob("agent.db-wal.pre-restore-*"))
@@ -254,7 +254,7 @@ class TestRestore:
         archive = create_backup(env)
         marker = env.project_root / "chroma_db" / "post-backup-file.txt"
         marker.write_text("added after backup")
-        restore_backup(archive)
+        restore_backup(archive, env)
         assert not marker.exists()  # dir was replaced wholesale
         asides = list(env.project_root.glob("chroma_db.pre-restore-*"))
         assert len(asides) == 1
@@ -263,7 +263,7 @@ class TestRestore:
     def test_restore_warns_about_credentials(self, env: BackupConfig, caplog):
         archive = create_backup(env)
         with caplog.at_level("WARNING"):
-            restore_backup(archive)
+            restore_backup(archive, env)
         assert any("re-run" in r.message for r in caplog.records)
 
     def test_find_latest(self, env: BackupConfig):
@@ -287,7 +287,7 @@ class TestRestore:
                 zf.writestr(name, data)
             zf.writestr(_MANIFEST_NAME, json.dumps(manifest))
         with pytest.raises(ValueError, match="Unsafe archive path"):
-            restore_backup(evil)
+            restore_backup(evil, env)
 
 
 # ===========================================================================
@@ -308,7 +308,7 @@ class TestDpapiCredentials:
         archive = create_backup(env)
         token = env.claude_home / "skills" / "credentials" / "google_pim" / "token.json"
         token.write_text("clobbered")
-        restore_backup(archive)
+        restore_backup(archive, env)
         assert json.loads(token.read_text()) == {"refresh_token": "SECRET"}
 
 
