@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -214,7 +215,12 @@ CREATE TABLE IF NOT EXISTS goal_queue (
     -- (claim_next_goal only sees 'queued', so the hot drain path is untouched).
     execute_at      REAL,                  -- NULL = run ASAP; else promote when now >= execute_at
     recurrence      TEXT,                  -- NULL = one-shot; else JSON rule (daily/interval)
-    source_trigger  TEXT                   -- provenance: manual | schedule | event_rule:<id>
+    source_trigger  TEXT,                  -- provenance: manual | schedule | event_rule:<id>
+    -- Claim lease (audit O #9): owner_pid + claimed_at stamp the process that
+    -- claimed a 'running' goal so requeue_stale_running can recover only goals
+    -- whose owner is dead/ours and never clobber a concurrent instance's claim.
+    owner_pid       INTEGER,
+    claimed_at      REAL
 );
 CREATE INDEX IF NOT EXISTS idx_goalq_status ON goal_queue(status, ts);
 CREATE INDEX IF NOT EXISTS idx_goalq_sched  ON goal_queue(execute_at);
@@ -724,7 +730,7 @@ CREATE INDEX IF NOT EXISTS idx_skillinv_ts ON skill_invocations(ts);
 # a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
 # append a row when introducing a new additive column; the batch is gated by
 # PRAGMA user_version so it runs at most once per database file.
-_AGENT_DB_SCHEMA_VERSION = 6
+_AGENT_DB_SCHEMA_VERSION = 7
 _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # v1→2
     ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
@@ -741,7 +747,34 @@ _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("goal_queue", "execute_at",     "REAL"),
     ("goal_queue", "recurrence",     "TEXT"),
     ("goal_queue", "source_trigger", "TEXT"),
+    # v6→7 (Sprint O #9: claim lease for crash-safe requeue)
+    ("goal_queue", "owner_pid",  "INTEGER"),
+    ("goal_queue", "claimed_at", "REAL"),
 )
+
+
+def _pid_alive(pid) -> bool:
+    """True if `pid` names a live process. Used by requeue_stale_running to tell
+    a previous-run crash (recover) from a concurrent instance (leave alone).
+    Fails closed (False) on a bad/None pid so a malformed lease is recoverable."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        return bool(psutil.pid_exists(pid))
+    except ImportError:
+        pass
+    try:
+        os.kill(pid, 0)            # POSIX existence probe (no signal sent)
+    except (OSError, ProcessLookupError):
+        return False
+    except Exception:
+        return True
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +865,7 @@ class AgentDB:
         version = row[0] if row else 0
         if version >= _AGENT_DB_SCHEMA_VERSION:
             return  # already migrated — skip the ALTER probing entirely
+        all_ok = True
         for table, column, ddl in _AGENT_DB_MIGRATIONS:
             try:
                 await self._conn.execute(
@@ -839,13 +873,23 @@ class AgentDB:
                 )
             except Exception as exc:
                 if "duplicate column name" not in str(exc).lower():
+                    all_ok = False     # a genuine DDL failure — do NOT finalize
                     log.warning(
                         "AgentDB migration ALTER %s.%s failed: %s", table, column, exc
                     )
                 # else: column already present (fresh/already-migrated DB) — fine
-        # PRAGMA user_version does not accept a bound parameter
-        await self._conn.execute(f"PRAGMA user_version = {_AGENT_DB_SCHEMA_VERSION}")
-        log.info("AgentDB schema migrated to version %d", _AGENT_DB_SCHEMA_VERSION)
+        # Only advance user_version when the whole batch applied (#8). Bumping it
+        # after a genuine failure would mark the schema "migrated" and the broken
+        # column would never retry; leaving it unbumped retries next boot.
+        if all_ok:
+            # PRAGMA user_version does not accept a bound parameter
+            await self._conn.execute(
+                f"PRAGMA user_version = {_AGENT_DB_SCHEMA_VERSION}")
+            log.info("AgentDB schema migrated to version %d", _AGENT_DB_SCHEMA_VERSION)
+        else:
+            log.warning(
+                "AgentDB migration incomplete — user_version left at %d, retry next boot",
+                version)
 
     async def _seed_config_tables(self) -> None:
         """INSERT OR IGNORE default rows into the three config tables.
@@ -1754,14 +1798,16 @@ class AgentDB:
     ) -> int:
         """Persist a goal to the durable backlog. Returns its row id, or -1.
 
-        idempotency_key is UNIQUE: re-enqueuing the same key (e.g. crash recovery)
-        is a no-op that returns the existing row id, so a goal can never be
-        double-queued.
+        idempotency_key is UNIQUE. While the keyed row is still active
+        (queued/scheduled/running) a re-enqueue is a no-op returning the existing
+        id — genuine dedup (e.g. crash recovery). But once the row reaches a
+        terminal state (done/failed/cancelled), a re-enqueue REVIVES it back to
+        'queued' (#1): a recurring/event goal that legitimately wants to run again
+        must not be silently swallowed by a stale terminal row.
         """
         if not self._conn:
             return -1
         try:
-            import time
             await self._conn.execute(
                 """INSERT OR IGNORE INTO goal_queue
                    (ts, goal, domain, status, idempotency_key, max_attempts)
@@ -1771,11 +1817,23 @@ class AgentDB:
             await self._conn.commit()
             if idempotency_key is not None:
                 cur = await self._conn.execute(
-                    "SELECT id FROM goal_queue WHERE idempotency_key=?",
+                    "SELECT id, status FROM goal_queue WHERE idempotency_key=?",
                     (idempotency_key,),
                 )
                 row = await cur.fetchone()
-                return int(row["id"]) if row else -1
+                if row is None:
+                    return -1
+                gid = int(row["id"])
+                if str(row["status"]) in ("done", "failed", "cancelled"):
+                    # INSERT was ignored (key still present) → revive the row.
+                    await self._conn.execute(
+                        "UPDATE goal_queue SET status='queued', goal=?, domain=?, "
+                        "attempts=0, last_error=NULL, owner_pid=NULL, "
+                        "claimed_at=NULL, ts=? WHERE id=?",
+                        (goal, domain, time.time(), gid),
+                    )
+                    await self._conn.commit()
+                return gid
             cur = await self._conn.execute("SELECT last_insert_rowid() AS id")
             row = await cur.fetchone()
             return int(row["id"]) if row else -1
@@ -1800,10 +1858,12 @@ class AgentDB:
             if row is None:
                 return None
             gid = int(row["id"])
+            now = time.time()
+            self_pid = os.getpid()
             upd = await self._conn.execute(
-                "UPDATE goal_queue SET status='running', attempts=attempts+1 "
-                "WHERE id=? AND status='queued'",
-                (gid,),
+                "UPDATE goal_queue SET status='running', attempts=attempts+1, "
+                "owner_pid=?, claimed_at=? WHERE id=? AND status='queued'",
+                (self_pid, now, gid),
             )
             await self._conn.commit()
             if (upd.rowcount or 0) == 0:
@@ -1811,6 +1871,8 @@ class AgentDB:
             d = dict(row)
             d["status"] = "running"
             d["attempts"] = int(d.get("attempts", 0)) + 1
+            d["owner_pid"] = self_pid
+            d["claimed_at"] = now
             return d
         except Exception as exc:
             log.warning("AgentDB.claim_next_goal failed: %s", exc)
@@ -1842,21 +1904,41 @@ class AgentDB:
         Requeue it (attempts already counted the failed try) when under
         max_attempts; otherwise mark it 'failed' so a poison goal can't loop
         forever. Returns the number requeued.
+
+        Lease guard (#9): a 'running' row whose owner_pid is a DIFFERENT, still
+        alive process belongs to a concurrent instance — never clobber its claim.
+        Our own pid, a dead owner, or no owner means the previous run died and the
+        goal is genuinely recoverable.
         """
         if not self._conn:
             return 0
         try:
-            await self._conn.execute(
-                "UPDATE goal_queue SET status='failed', "
-                "last_error='exceeded max_attempts after crash' "
-                "WHERE status='running' AND attempts >= max_attempts"
-            )
             cur = await self._conn.execute(
-                "UPDATE goal_queue SET status='queued' "
-                "WHERE status='running' AND attempts < max_attempts"
+                "SELECT id, attempts, max_attempts, owner_pid "
+                "FROM goal_queue WHERE status='running'"
             )
+            rows = await cur.fetchall()
+            self_pid = os.getpid()
+            requeued = 0
+            for r in rows:
+                pid = r["owner_pid"]
+                if pid is not None and int(pid) != self_pid and _pid_alive(pid):
+                    continue  # live concurrent instance owns this goal
+                if int(r["attempts"]) >= int(r["max_attempts"]):
+                    await self._conn.execute(
+                        "UPDATE goal_queue SET status='failed', "
+                        "last_error='exceeded max_attempts after crash' WHERE id=?",
+                        (int(r["id"]),),
+                    )
+                else:
+                    await self._conn.execute(
+                        "UPDATE goal_queue SET status='queued', owner_pid=NULL, "
+                        "claimed_at=NULL WHERE id=?",
+                        (int(r["id"]),),
+                    )
+                    requeued += 1
             await self._conn.commit()
-            return cur.rowcount if cur.rowcount is not None else 0
+            return requeued
         except Exception as exc:
             log.warning("AgentDB.requeue_stale_running failed: %s", exc)
             return 0

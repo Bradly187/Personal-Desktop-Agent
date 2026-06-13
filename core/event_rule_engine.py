@@ -21,13 +21,19 @@ from core.events import _topic_matches
 log = logging.getLogger(__name__)
 
 
+# Distinct from None so a field that is absent is not confused with a field
+# explicitly set to JSON null (#10): `exists` must fail on absent but pass on
+# present-null, and `eq null` must only match a field that is actually present.
+_MISSING = object()
+
+
 def _get_path(payload: dict, path: str):
     cur = payload
     for part in path.split("."):
         if isinstance(cur, dict) and part in cur:
             cur = cur[part]
         else:
-            return None
+            return _MISSING
     return cur
 
 
@@ -47,13 +53,13 @@ def _eval_predicate(predicate, payload: dict) -> bool:
         op = c.get("op", "eq")
         want = c.get("value")
         if op == "exists":
-            if val is None:
+            if val is _MISSING:
                 return False
         elif op == "eq":
-            if val != want:
+            if val is _MISSING or val != want:
                 return False
         elif op == "contains":
-            if val is None or str(want).lower() not in str(val).lower():
+            if val is _MISSING or val is None or str(want).lower() not in str(val).lower():
                 return False
         else:
             return False
@@ -76,6 +82,10 @@ class EventRuleEngine:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._bg: set = set()
+        # In-memory last-fired time per rule, updated BEFORE awaiting _fire so a
+        # same-tick burst of matching events is suppressed by cooldown even
+        # though last_fired_at hasn't been persisted yet (#16).
+        self._mem_fired: dict = {}
 
     def set_dev_agent(self, dev_agent) -> None:
         self._dev_agent = dev_agent
@@ -122,9 +132,15 @@ class EventRuleEngine:
                 continue
             if not _eval_predicate(rule.get("predicate"), payload):
                 continue
-            last = rule.get("last_fired_at") or 0
-            if rule.get("cooldown_s", 0) and (now - last) < rule["cooldown_s"]:
-                continue
+            cooldown = rule.get("cooldown_s", 0) or 0
+            if cooldown:
+                # Guard against both a persisted recent fire and a same-tick burst
+                # whose last_fired_at hasn't landed yet.
+                last = max(rule.get("last_fired_at") or 0,
+                           self._mem_fired.get(rule["id"], 0))
+                if (now - last) < cooldown:
+                    continue
+                self._mem_fired[rule["id"]] = now   # claim the slot before awaiting
             await self._fire(rule, payload, now)
             fired += 1
         return fired

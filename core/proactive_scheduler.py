@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -24,18 +25,33 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
-def next_occurrence(recurrence: dict, now: float) -> Optional[float]:
+def next_occurrence(recurrence: dict, now: float,
+                    prev_execute_at: Optional[float] = None) -> Optional[float]:
     """Next execute_at (epoch) strictly after `now` for a recurrence rule.
 
     Supported (MVP):
       {"kind": "interval", "every_s": <seconds>}
       {"kind": "daily", "at": "HH:MM"}   (local time)
     Returns None for an unknown / one-shot rule.
+
+    When `prev_execute_at` (the occurrence that just ran) is given, interval
+    recurrence advances from that intended time, not from `now`, so the phase
+    stays aligned to the original schedule and does not drift forward after a
+    delayed promotion or downtime (#3). Missed slots are skipped in one jump
+    (no catch-up storm) — the next slot is the first strictly after `now`.
     """
     kind = (recurrence or {}).get("kind")
     if kind == "interval":
         every = float(recurrence.get("every_s", 0) or 0)
-        return (now + every) if every > 0 else None
+        if every <= 0:
+            return None
+        if prev_execute_at is None:
+            return now + every
+        nxt = prev_execute_at + every
+        if nxt <= now:
+            missed = math.floor((now - prev_execute_at) / every)
+            nxt = prev_execute_at + (missed + 1) * every
+        return nxt
     if kind == "daily":
         at = str(recurrence.get("at", "08:00"))
         try:
@@ -110,12 +126,19 @@ class ProactiveScheduler:
             if not rec:
                 continue
             try:
-                nxt = next_occurrence(json.loads(rec), now)
+                nxt = next_occurrence(
+                    json.loads(rec), now, prev_execute_at=row.get("execute_at"))
                 if nxt is not None:
+                    trig = row.get("source_trigger") or "schedule"
+                    # Deterministic key so a duplicated promotion of the same
+                    # occurrence collapses to one 'scheduled' row instead of
+                    # accumulating duplicates (#2 — recurrence storm guard).
+                    key = f"{trig}:{row['goal']}:{int(nxt)}"
                     await self._db.enqueue_scheduled_goal(
                         row["goal"], execute_at=nxt, recurrence=rec,
                         domain=row.get("domain", "plan"),
-                        source_trigger=row.get("source_trigger", "schedule"),
+                        source_trigger=trig,
+                        idempotency_key=key,
                     )
             except Exception as exc:
                 log.debug("ProactiveScheduler recurrence re-lay failed: %s", exc)

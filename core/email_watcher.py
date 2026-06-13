@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Optional
 
 from core.events import TOPIC_EMAIL_ARRIVED
@@ -29,7 +31,8 @@ class EmailWatcher:
     _TOOL = "unread_messages"
     _MAX_SEEN = 1000
 
-    def __init__(self, skill_registry, event_bus, notifier=None) -> None:
+    def __init__(self, skill_registry, event_bus, notifier=None, *,
+                 state_path=None) -> None:
         self._skills = skill_registry
         self._bus = event_bus
         self._notifier = notifier
@@ -40,6 +43,13 @@ class EmailWatcher:
         # One-time expiry alert: set after notifying, cleared on the next
         # successful poll so a future expiry alerts again.
         self._auth_alerted = False
+        # Restart-durable dedup (#7): when a state_path is given, the seen-id set
+        # and baseline flag survive a restart, so mail that arrived while the
+        # agent was down still fires on the next poll instead of being absorbed
+        # into a fresh baseline. None (the default, and all unit tests) keeps the
+        # old in-memory-only behavior.
+        self._state_path = Path(state_path) if state_path else None
+        self._state_loaded = False
 
     def _available(self) -> bool:
         if self._skills is None or self._bus is None:
@@ -84,9 +94,38 @@ class EmailWatcher:
             except Exception as exc:
                 log.warning("EmailWatcher._poll_loop error: %s", exc)
 
+    # ── Durable dedup state (#7) ─────────────────────────────────────────────
+    def _load_state_sync(self) -> Optional[dict]:
+        if not self._state_path or not self._state_path.exists():
+            return None
+        try:
+            return json.loads(self._state_path.read_text("utf-8"))
+        except Exception as exc:
+            log.debug("EmailWatcher state load failed: %s", exc)
+            return None
+
+    def _save_state_sync(self) -> None:
+        if not self._state_path:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps({"seen": list(self._seen), "baselined": self._baselined}),
+                "utf-8")
+            os.replace(tmp, self._state_path)   # atomic on same volume
+        except Exception as exc:
+            log.debug("EmailWatcher state save failed: %s", exc)
+
     async def _tick(self) -> int:
         """Poll unread mail; publish email.arrived for new messages. Returns the
         number published (0 on the baseline poll). Public for tests."""
+        if not self._state_loaded:
+            self._state_loaded = True
+            data = await asyncio.to_thread(self._load_state_sync)
+            if data:
+                self._seen = set(data.get("seen", []))
+                self._baselined = bool(data.get("baselined", False))
         if not self._available():
             return 0   # skill not (yet) running — re-checked next tick
         res = await self._skills.call(self._SKILL_ID, self._TOOL, {})
@@ -116,11 +155,13 @@ class EmailWatcher:
         self._auth_alerted = False   # healthy again — re-arm the alert
 
         published = 0
+        changed = False
         for m in messages:
             mid = str(m.get("id", ""))
             if not mid or mid in self._seen:
                 continue
             self._seen.add(mid)
+            changed = True
             if self._baselined:
                 await self._bus.publish(
                     TOPIC_EMAIL_ARRIVED,
@@ -130,9 +171,14 @@ class EmailWatcher:
                     source="gmail_skill",
                 )
                 published += 1
-        self._baselined = True
+        if not self._baselined:
+            self._baselined = True
+            changed = True       # persist the initial baseline so a restart resumes
         if len(self._seen) > self._MAX_SEEN:
             self._seen = set(list(self._seen)[-self._MAX_SEEN:])
+            changed = True
+        if changed:
+            await asyncio.to_thread(self._save_state_sync)
         return published
 
     # ── Supervision ────────────────────────────────────────────────────────
