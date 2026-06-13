@@ -353,6 +353,10 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "status", "what's happening",
     "hey agent stop", "cancel task", "cancel agent", "stop agent",
     "stop the agent", "cancel the task",
+    # Crash recovery — advertised by the post-crash TTS notice in main.py;
+    # the resume itself is voice-confirm-gated inside resume_pending_plan()
+    "resume task", "resume the task", "hey agent resume",
+    "resume work", "resume interrupted task",
     "hey agent history", "what did you do", "agent history",
     "show history", "recent actions",
     "review queue", "show review queue", "what needs review",
@@ -989,6 +993,24 @@ class HybridCoordinator:
                     asyncio.create_task(self._tts_speak("Cancelling after current step."))
                     return {"status": "ok", "action": "AGENT_CANCEL"}
                 return {"status": "ok", "action": "AGENT_CANCEL", "note": "no active agent"}
+
+            # "resume task" — offer to resume the most recent interrupted plan
+            # (post-crash recovery; advertised by the crash-notice TTS in
+            # main.py). Safe to fire-and-forget: resume_pending_plan() is
+            # itself gated on an explicit spoken confirmation, so this phrase
+            # alone can never re-run a plan with destructive steps.
+            elif _lower in ("resume task", "resume the task", "hey agent resume",
+                            "resume work", "resume interrupted task"):
+                pending: list = []
+                if self._agent_db and self._agent_db.available:
+                    pending = await self._agent_db.get_interrupted_runs(limit=1)
+                if self._dev_agent is None or not pending:
+                    asyncio.create_task(self._tts_speak("No interrupted task to resume."))
+                    return {"status": "ok", "action": "AGENT_RESUME", "offered": False}
+                t = asyncio.create_task(self._dev_agent.resume_pending_plan())
+                t.add_done_callback(lambda t: self._on_task_done(t, "resume_pending_plan"))
+                return {"status": "ok", "action": "AGENT_RESUME", "offered": True,
+                        "goal": pending[0].get("goal", "")[:80]}
 
             # "hey agent authorize <goal>" — create a standalone goal session
             elif _lower.startswith("hey agent authorize ") or _lower.startswith("authorize "):
