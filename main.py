@@ -1079,7 +1079,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # is picked up without a restart; the notifier carries the one-time
     # token-expired alert.
     from core.email_watcher import EmailWatcher
-    email_watcher = EmailWatcher(skill_registry, event_bus, notifier=notifier)
+    email_watcher = EmailWatcher(
+        skill_registry, event_bus, notifier=notifier,
+        state_path=Path.home() / ".claude" / "email_watcher_seen.json")
     await email_watcher.start()
     shutdown.register(email_watcher)
 
