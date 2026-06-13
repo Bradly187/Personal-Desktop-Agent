@@ -54,6 +54,12 @@ class CircuitBreaker:
         self._opened_at: float = 0.0
         self._half_open_probe_inflight = False
         self._probe_started_at: float = 0.0
+        # Monotonic id incremented on every probe admission. A caller captures
+        # the generation when admitted (via `probe_gen`) and passes it back to
+        # record_success/failure; an outcome whose generation is no longer
+        # current (a lost probe that finally returns after a fresh probe was
+        # admitted) is ignored, so two probes' outcomes can't be conflated (#16).
+        self._probe_gen = 0
 
     # ── Query ────────────────────────────────────────────────────────────────
 
@@ -67,6 +73,7 @@ class CircuitBreaker:
                 self._state = "half_open"
                 self._half_open_probe_inflight = True
                 self._probe_started_at = self._now()
+                self._probe_gen += 1
                 log.info("CircuitBreaker[%s]: half-open — admitting one probe", self._name)
                 return True
             return False
@@ -81,26 +88,38 @@ class CircuitBreaker:
                             "in %.0fs) — admitting a fresh probe", self._name,
                             self._cooldown_s)
                 self._probe_started_at = self._now()
+                self._probe_gen += 1   # supersede the lost probe's outcome
                 return True
             return False
         self._half_open_probe_inflight = True
         self._probe_started_at = self._now()
+        self._probe_gen += 1
         return True
 
     @property
     def state(self) -> str:
         return self._state
 
+    @property
+    def probe_gen(self) -> int:
+        """Generation of the most recently admitted probe — capture right after a
+        successful allow() and pass to record_success/failure (#16)."""
+        return self._probe_gen
+
     # ── Outcome reporting ──────────────────────────────────────────────────────
 
-    def record_success(self) -> None:
+    def record_success(self, gen: int | None = None) -> None:
+        if gen is not None and gen != self._probe_gen:
+            return   # outcome from a superseded probe (#16) — ignore
         if self._state != "closed":
             log.info("CircuitBreaker[%s]: success — closing", self._name)
         self._state = "closed"
         self._consecutive_failures = 0
         self._half_open_probe_inflight = False
 
-    def record_failure(self) -> None:
+    def record_failure(self, gen: int | None = None) -> None:
+        if gen is not None and gen != self._probe_gen:
+            return   # outcome from a superseded probe (#16) — ignore
         self._half_open_probe_inflight = False
         if self._state == "half_open":
             # Probe failed → straight back to open for another cooldown.

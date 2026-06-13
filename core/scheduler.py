@@ -228,7 +228,7 @@ class AccessibilityScheduler:
         submit-and-await another DEV/BACKGROUND task on this scheduler.
         """
         self._seq += 1
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         if self._shed_if_full(Priority.DEV_AGENT, future, label):
             coro.close()   # shed → never enqueued; close it so it isn't leaked
@@ -253,7 +253,7 @@ class AccessibilityScheduler:
         Callers may await it or ignore it (fire-and-forget).
         """
         self._seq += 1
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         if self._shed_if_full(priority, future, label):
             coro.close()   # shed → never enqueued; close it so it isn't leaked
@@ -343,8 +343,12 @@ class AccessibilityScheduler:
         """
         while self._running:
             try:
-                (priority_val, _seq, coro, future, label,
-                 timeout_s, trace_id, enqueue_ts) = await self._queue.get()
+                item = await self._queue.get()
+            except asyncio.CancelledError:
+                break
+            (priority_val, _seq, coro, future, label,
+             timeout_s, trace_id, enqueue_ts) = item
+            try:
                 self._publish_gauges()   # depth dropped by one
                 priority = Priority(priority_val)
 
@@ -375,12 +379,30 @@ class AccessibilityScheduler:
                 # Track dispatched tasks so stop() can cancel any still in flight.
                 self._inflight_tasks.add(t)
                 t.add_done_callback(self._inflight_tasks.discard)
-                self._queue.task_done()
 
             except asyncio.CancelledError:
+                # Resolve + close the in-hand item so its awaiter never hangs and
+                # the coroutine isn't leaked (#21), then exit.
+                if not future.done():
+                    future.set_exception(asyncio.CancelledError())
+                coro.close()
+                self._queue.task_done()
                 break
             except Exception as exc:
-                log.warning("AccessibilityScheduler._worker error: %s", exc)
+                # Dispatch failed AFTER dequeue (e.g. create_task on a closing
+                # loop). Without this the future never resolves and the coro
+                # leaks "never awaited" (#21).
+                log.warning("AccessibilityScheduler._worker dispatch error: %s", exc)
+                if not future.done():
+                    future.set_exception(exc)
+                try:
+                    coro.close()
+                except Exception:
+                    pass
+                self._queue.task_done()
+                continue
+
+            self._queue.task_done()
 
     async def _run_task(
         self,

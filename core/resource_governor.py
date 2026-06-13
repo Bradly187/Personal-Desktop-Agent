@@ -87,6 +87,7 @@ class ResourceGovernor:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
+        self._loop: Optional[asyncio.AbstractEventLoop] = None  # captured at start()
 
     # ── Wiring ────────────────────────────────────────────────────────────────
 
@@ -130,6 +131,7 @@ class ResourceGovernor:
             log.warning("ResourceGovernor.start() called while already running — ignored")
             return
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(
             self._poll_loop(), name="resource_governor"
         )
@@ -170,17 +172,32 @@ class ResourceGovernor:
         if not self._running:
             return
         if not self._flare_active and score >= _ACTIVATE_THRESHOLD:
-            t = asyncio.create_task(
-                self._on_flare_start(score), name="governor_fast_flare_start"
-            )
-            self._bg_tasks.add(t)
-            t.add_done_callback(self._bg_tasks.discard)
+            self._spawn_bg(self._on_flare_start(score), "governor_fast_flare_start")
         elif self._flare_active and score < _DEACTIVATE_THRESHOLD:
-            t = asyncio.create_task(
-                self._on_flare_end(score), name="governor_fast_flare_end"
-            )
+            self._spawn_bg(self._on_flare_end(score), "governor_fast_flare_end")
+
+    def _spawn_bg(self, coro, name: str) -> None:
+        """Schedule a background coroutine on the governor's loop from ANY thread.
+
+        notify_pain_day_change is a sync method reachable from the voice/whisper
+        path, which may run in a worker thread; a bare create_task there raises
+        (no running loop) and the flare fast-path would silently die. Capturing
+        the loop at start() lets us hop onto it with call_soon_threadsafe (#19).
+        """
+        def _make() -> None:
+            t = asyncio.create_task(coro, name=name)
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and (self._loop is None or self._loop is running):
+            _make()                                  # already on the right loop
+        elif self._loop is not None:
+            self._loop.call_soon_threadsafe(_make)   # hop onto the governor's loop
+        else:
+            coro.close()   # no loop at all — avoid an un-awaited-coroutine warning
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
 
