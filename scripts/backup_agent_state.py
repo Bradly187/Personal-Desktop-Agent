@@ -168,15 +168,43 @@ def _unique_archive_path(backup_root: Path) -> Path:
 
 
 def create_backup(cfg: BackupConfig) -> Path:
-    """Take a full backup; returns the path of the created archive."""
+    """Take a full backup; returns the path of the created archive.
+
+    The zip is written under a ``.tmp`` name and renamed into place only after
+    every source (and the manifest, which is written last) landed. A failed
+    run leaves nothing behind — so ``--restore latest`` and rotation can never
+    pick up a partial archive.
+    """
     cfg.backup_root.mkdir(parents=True, exist_ok=True)
     sources = collect_sources(cfg)
     if not sources:
         raise RuntimeError("Nothing to back up — no sources found")
 
     archive = _unique_archive_path(cfg.backup_root)
+    # ".zip.tmp" does not match the "*.zip" glob, so rotation and
+    # find_latest_backup never see an in-progress or abandoned archive.
+    tmp_archive = archive.with_name(archive.name + ".tmp")
     entries: list[dict[str, str]] = []
 
+    try:
+        _write_archive(cfg, sources, tmp_archive, entries)
+        tmp_archive.rename(archive)
+    except BaseException:
+        tmp_archive.unlink(missing_ok=True)
+        raise
+
+    logger.info("Backup written: %s (%d sources)", archive, len(entries))
+    rotate_backups(cfg.backup_root, cfg.keep)
+    return archive
+
+
+def _write_archive(
+    cfg: BackupConfig,
+    sources: list[Source],
+    archive: Path,
+    entries: list[dict[str, str]],
+) -> None:
+    """Write all sources + manifest into *archive* (the .tmp staging name)."""
     with TemporaryDirectory(prefix="da-backup-") as tmp:
         tmpdir = Path(tmp)
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -208,10 +236,6 @@ def create_backup(cfg: BackupConfig) -> Path:
                 "entries": entries,
             }
             zf.writestr(_MANIFEST_NAME, json.dumps(manifest, indent=2))
-
-    logger.info("Backup written: %s (%d sources)", archive, len(entries))
-    rotate_backups(cfg.backup_root, cfg.keep)
-    return archive
 
 
 def rotate_backups(backup_root: Path, keep: int) -> list[Path]:

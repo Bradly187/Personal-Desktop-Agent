@@ -310,3 +310,36 @@ class TestDpapiCredentials:
         token.write_text("clobbered")
         restore_backup(archive)
         assert json.loads(token.read_text()) == {"refresh_token": "SECRET"}
+
+
+# ===========================================================================
+# Atomic archive creation — a failed backup must leave nothing behind
+# ===========================================================================
+
+class TestAtomicArchive:
+    def test_failed_backup_leaves_no_archive(self, env: BackupConfig, monkeypatch):
+        import scripts.backup_agent_state as bs
+
+        def boom(src, dst):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(bs, "snapshot_sqlite", boom)
+        with pytest.raises(RuntimeError, match="disk full"):
+            create_backup(env)
+        # Neither a partial .zip (would poison "latest"/rotation) nor an
+        # abandoned .tmp may survive a failed run.
+        assert list(env.backup_root.glob("*.zip")) == []
+        assert list(env.backup_root.glob("*.tmp")) == []
+
+    def test_failed_backup_does_not_poison_latest(self, env: BackupConfig, monkeypatch):
+        import scripts.backup_agent_state as bs
+
+        good = create_backup(env)
+
+        def boom(src, dst):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(bs, "snapshot_sqlite", boom)
+        with pytest.raises(RuntimeError):
+            create_backup(env)
+        assert find_latest_backup(env.backup_root) == good
