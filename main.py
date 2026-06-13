@@ -493,6 +493,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if args.safe_mode:
         os.environ["SAFE_MODE"] = "1"
 
+    # --- Crash marker: detect an unclean exit of the previous process ---
+    # Written now, removed only after graceful shutdown completes. If it's
+    # already present, the last run crashed/was killed — a brief TTS notice is
+    # spoken once the pipeline is up (the data side is already handled by
+    # mark_interrupted_runs + goal_queue requeue below).
+    from core import crash_marker
+    _unclean_exit = crash_marker.check_and_mark()
+
     # --- Resolve screen size for FusionEngine ---
     try:
         import pyautogui
@@ -1169,6 +1177,20 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from core.async_utils import fire_and_log
     fire_and_log(dev_agent.drain_goal_queue(), log, label="startup_goal_drain")
 
+    # Crash notice: the previous process exited uncleanly (marker survived).
+    # Tell the user briefly — they may have been away when it happened and
+    # should know that recovered state (requeued goals, interrupted plans)
+    # may apply. Fire-and-forget: TTS being down must not block startup.
+    if _unclean_exit:
+        async def _speak_crash_notice() -> None:
+            from tts.polly_stream import get_client as _get_tts
+            await asyncio.to_thread(
+                _get_tts().speak_sync,
+                "I restarted after a crash. Any in-progress work was recovered "
+                "where possible — say 'resume task' if something was interrupted.",
+            )
+        fire_and_log(_speak_crash_notice(), log, label="crash_notice_tts")
+
     # --- Run bridge + fusion + watchdog concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
     fusion_task = asyncio.create_task(fusion.run())
@@ -1231,6 +1253,11 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
     await audit.log_session_stop(reason="normal")
     await audit.close()
+
+    # Graceful shutdown completed — remove the crash marker so the next
+    # startup doesn't announce a crash. Last step on purpose: anything that
+    # dies before this point IS an unclean exit.
+    crash_marker.clear()
 
 
 # ---------------------------------------------------------------------------

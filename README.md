@@ -58,6 +58,27 @@ python main.py --backend vllm-server
 
 See `scripts/start_vllm_server.sh` for model and VRAM settings and `scripts/bench_vllm_server.py` for the latency/accuracy benchmark used to tune them.
 
+### Auto-start + crash recovery (recommended)
+
+The agent is an accessibility dependency — if `main.py` crashes mid-day on an unattended machine, the desktop is uncontrollable until someone restarts it. Two native Task Scheduler tasks close that gap (no services, no NSSM):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\Install-AgentService.ps1            # register + start now
+powershell -ExecutionPolicy Bypass -File scripts\Install-AgentService.ps1 -NoStart   # register only (starts at next logon)
+powershell -ExecutionPolicy Bypass -File scripts\Install-AgentService.ps1 -Uninstall # remove both tasks
+```
+
+This registers (current user, at logon, interactive session — required for pyautogui):
+
+| Task | Runs | Port |
+|------|------|------|
+| `PersonalDesktopAgent` | `main.py` via `scripts\agent_watchdog.ps1` | :8765 |
+| `PersonalDesktopAgent-Proxy` | `windows_action_proxy.py` (WSL-mode action proxy) | :8768 |
+
+The watchdog restarts its target on any non-zero exit with backoff (5 s / 10 s / 20 s), bounded at **3 crashes per rolling 10 minutes** — after that it gives up, logs loudly to `logs\watchdog_agent.log` / `logs\watchdog_proxy.log`, and stays down until `Start-ScheduledTask` or the next logon. Exit code 0 (graceful Ctrl-C/SIGTERM shutdown) is treated as intentional and is **not** restarted. Both watchdogs are no-ops if the target is already running (port/health check), so they coexist with `start_agent.bat` / `start_desktop.bat`.
+
+**Crash notice:** `main.py` writes `logs\agent.running` at startup and removes it only after a graceful shutdown. If the marker is still there on the next start, the agent says *"I restarted after a crash"* over TTS so you know recovered state may apply (interrupted plans are reconciled and queued goals requeued automatically). Note that `Stop-ScheduledTask` kills the process tree hard — the next start will announce a crash restart; that's expected.
+
 ## Architecture
 
 ```
