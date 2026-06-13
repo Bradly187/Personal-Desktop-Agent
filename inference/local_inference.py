@@ -386,6 +386,7 @@ class OllamaInference(LocalInference):
 
         if not self._breaker.allow():
             return "CLARIFY inference backend unavailable (circuit open)"
+        _probe_gen = self._breaker.probe_gen   # tag this probe's outcome (#16)
 
         prompt = _build_prompt(cmd, few_shot_examples, counterexamples)
         set_inference_capture(prompt)
@@ -427,11 +428,11 @@ class OllamaInference(LocalInference):
             return f"CLARIFY inference error: {exc}"
         finally:
             if succeeded:
-                self._breaker.record_success()
+                self._breaker.record_success(_probe_gen)
             else:
                 # Covers both `except Exception` returns and BaseException
                 # (CancelledError/timeout) propagation.
-                self._breaker.record_failure()
+                self._breaker.record_failure(_probe_gen)
 
     async def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """POST /api/chat and return the parsed JSON response.
@@ -480,6 +481,7 @@ class OllamaInference(LocalInference):
 
         if not self._breaker.allow():
             return "CLARIFY inference backend unavailable (circuit open)"
+        _probe_gen = self._breaker.probe_gen   # tag this probe's outcome (#16)
 
         messages = _build_chat_messages(cmd, few_shot_examples, counterexamples)
         prompt_json = json.dumps(messages)
@@ -498,9 +500,9 @@ class OllamaInference(LocalInference):
             return f"CLARIFY inference error: {exc}"
         finally:
             if succeeded:
-                self._breaker.record_success()
+                self._breaker.record_success(_probe_gen)
             else:
-                self._breaker.record_failure()
+                self._breaker.record_failure(_probe_gen)
 
         self._available = True
         set_inference_capture(

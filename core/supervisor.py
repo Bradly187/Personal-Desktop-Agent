@@ -86,11 +86,17 @@ class Supervisor:
         interval_s: float = 2.0,
         max_restarts: int = 5,
         window_s: float = 60.0,
+        max_total_restarts: int = 20,
         on_failed: Optional[Callable[[str], object]] = None,
     ) -> None:
         self._interval_s = interval_s
         self._max_restarts = max_restarts
         self._window_s = window_s
+        # Absolute lifetime ceiling: the sliding window alone lets a subsystem
+        # that re-dies just under the window edge crash-loop indefinitely. A
+        # total-restart cap latches FAILED once a persistent slow loop has racked
+        # up this many restarts over the whole session (#22).
+        self._max_total_restarts = max_total_restarts
         self._subsystems: dict[str, _SupervisedState] = {}
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -189,12 +195,13 @@ class Supervisor:
             # Subsystem is enabled but its task is dead → restart under budget.
             # Prune restart timestamps outside the sliding window first.
             state.restart_times = [t for t in state.restart_times if now - t < self._window_s]
-            if len(state.restart_times) >= self._max_restarts:
+            if (len(state.restart_times) >= self._max_restarts
+                    or state.total_restarts >= self._max_total_restarts):
                 state.failed = True
                 log.error(
-                    "Supervisor: %r exceeded restart budget (%d in %.0fs) — "
+                    "Supervisor: %r exceeded restart budget (%d in %.0fs, %d total) — "
                     "LATCHED FAILED, no further restarts",
-                    spec.name, self._max_restarts, self._window_s,
+                    spec.name, self._max_restarts, self._window_s, state.total_restarts,
                 )
                 self._bump(f"{spec.name}::failed", 1)
                 # Escalate (gap E): notify the user + degrade. Fires exactly once

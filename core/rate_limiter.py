@@ -50,6 +50,11 @@ class _TokenBucket:
 class RateLimiter:
     """Resource-scoped rate limiter. Loads config from AgentDB; fail-open if unavailable."""
 
+    # Hard liveness cap on how long a throttled call will wait before failing
+    # open (admitting it) rather than starving. The per-call cloud timeout
+    # bounds the real wait below this; this is just a backstop.
+    _MAX_WAIT_S = 15.0
+
     def __init__(self, db: "AgentDB") -> None:
         self._db = db
         self._buckets: dict[str, _TokenBucket] = {}
@@ -92,14 +97,24 @@ class RateLimiter:
             # returned a wait time WITHOUT taking a token; without re-consuming
             # here every throttled request would be admitted token-free, so the
             # effective rate would exceed max_rps under sustained load. Loop
-            # because N throttled callers can wake together and race for the
-            # one refilled token (bounded by burst_capacity tries).
-            for _ in range(self._buckets[resource].burst_capacity + 1):
-                await asyncio.sleep(wait_s)
+            # until a token is genuinely consumed, bounded by a wall-clock
+            # deadline (#17). A fixed retry count let losers of a contention race
+            # fall through and admit token-free; a deadline keeps enforcing the
+            # rate (re-waiting for the next token) up to the liveness cap.
+            deadline = time.monotonic() + self._MAX_WAIT_S
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                await asyncio.sleep(min(wait_s, remaining))
                 wait_s = bucket.consume()
                 if wait_s <= 0.0:
                     return True
-            return True   # fail-open after bounded retries (never starve a call)
+            # Hard cap exceeded — fail-open to avoid starving the call (the call's
+            # own timeout normally fires first under a saturated bucket).
+            log.warning("RateLimiter: %s exceeded %.0fs wait cap — admitting (fail-open)",
+                        resource, self._MAX_WAIT_S)
+            return True
         except Exception as exc:
             log.warning("RateLimiter.check failed (fail-open): %s", exc)
             return True  # fail-open

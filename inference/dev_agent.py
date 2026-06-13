@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -909,6 +910,25 @@ class DevAgent:
             safe = [i for i in ready if pending[i].action.upper() in self._FANOUT_SAFE_VERBS]
             barriers = [i for i in ready if i not in safe]
 
+            # De-collide same-path WRITE_FILE within the concurrent batch (#14).
+            # The planner's "distinct paths" independence claim is unverified; two
+            # concurrent writes to one path race (nondeterministic last-writer +
+            # racing saga snapshots). Keep the lowest-indexed writer per path in
+            # the fan-out; demote later same-path writers to serial barriers so
+            # they run one-at-a-time in plan order.
+            seen_write_paths: set[str] = set()
+            deduped_safe: list[int] = []
+            for i in sorted(safe):
+                s = pending[i]
+                if s.action.upper() == "WRITE_FILE":
+                    p = os.path.normcase(os.path.normpath((s.args or "").strip()))
+                    if p in seen_write_paths:
+                        barriers.append(i)
+                        continue
+                    seen_write_paths.add(p)
+                deduped_safe.append(i)
+            safe = deduped_safe
+
             # Fan-out-safe ready steps run concurrently (or inline if just one).
             if len(safe) >= 2 and self._scheduler is not None:
                 results = await self._scheduler.fan_out(
@@ -989,7 +1009,17 @@ class DevAgent:
         try:
             r = await self._router.infer(domain="plan", user_text=prompt, context=None)
             if r.ok and r.text:
-                return _parse_plan(r.text)
+                # Mirror the initial-plan path: prefer structured JSON (the plan
+                # profile's Ollama `format`), fall back to the regex parser. The
+                # previous regex-only parse yielded ZERO steps on a JSON recovery
+                # plan → a spurious halt/escalation even when recovery was offered (#5).
+                try:
+                    steps = _parse_plan_json(r.text)
+                except Exception:
+                    steps = []
+                if not steps:
+                    steps = _parse_plan(r.text)
+                return steps
         except Exception as exc:
             log.debug("DevAgent._replan failed: %s", exc)
         return []
@@ -2157,8 +2187,14 @@ class DevAgent:
 
     @staticmethod
     def _git_commit(message: str) -> str:
-        # Stage all tracked changes then commit
-        subprocess.run(["git", "add", "-u"], check=True, timeout=10)
+        # Stage all tracked changes then commit. Capture output and raise a
+        # RuntimeError with stderr (not a raw CalledProcessError) so a staging
+        # failure surfaces consistently with the commit path / saga (#30).
+        add = subprocess.run(
+            ["git", "add", "-u"], capture_output=True, text=True, timeout=10,
+        )
+        if add.returncode != 0:
+            raise RuntimeError(f"git add failed: {add.stderr.strip()[:200]}")
         result = subprocess.run(
             ["git", "commit", "-m", message],
             capture_output=True, text=True, timeout=30,

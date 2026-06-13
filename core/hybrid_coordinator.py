@@ -1495,7 +1495,7 @@ class HybridCoordinator:
             return await self._run_cloud(cmd), "gate2_complexity", "cloud"
 
         # Gate 3 — VRAM
-        if not self._gate3():
+        if not await self._gate3():
             log.debug("Gate 3 fail (VRAM)")
             return await self._run_cloud(cmd), "gate3_vram", "cloud"
 
@@ -1516,12 +1516,14 @@ class HybridCoordinator:
         token_count = len(cmd.text.split())
         return token_count <= self._cfg.max_local_tokens
 
-    def _gate3(self) -> bool:
+    async def _gate3(self) -> bool:
         """Gate 3 — VRAM. True = pass.
 
-        Caches the result for 2 seconds to avoid calling pynvml (synchronous
-        CUDA API) on every command. VRAM doesn't change fast enough to need
-        per-command granularity.
+        Caches the result for 2 seconds to avoid probing the GPU on every command.
+        The probe (pynvml: nvmlInit/GetMemoryInfo/nvmlShutdown) is a blocking CUDA
+        driver round-trip, so on a cache miss it runs in a thread — never on the
+        event loop, where it would stall every concurrent accessibility/voice
+        task for the duration of the probe (#6).
         """
         now = time.monotonic()
         if self._vram_cache is not None:
@@ -1530,16 +1532,14 @@ class HybridCoordinator:
                 return cached_result
 
         try:
-            import pynvml as nvml
-            nvml.nvmlInit()
-            handle = nvml.nvmlDeviceGetHandleByIndex(0)
-            info = nvml.nvmlDeviceGetMemoryInfo(handle)
-            free_gb = info.free / (1024 ** 3)
-            nvml.nvmlShutdown()
+            from core import vram
+            # vram.free_vram_gb returns UNKNOWN_FREE_GB (fail-open) if pynvml is
+            # unavailable, so an unmeasurable GPU still passes (don't penalise local).
+            free_gb = await asyncio.to_thread(vram.free_vram_gb)
             result = free_gb >= self._cfg.vram_free_min_gb
         except Exception as exc:
-            log.debug("Gate 3 NVML error (assuming pass): %s", exc)
-            result = True  # if we can't check, don't penalise local
+            log.debug("Gate 3 VRAM probe error (assuming pass): %s", exc)
+            result = True
 
         self._vram_cache = (result, now)
         return result
@@ -1632,12 +1632,6 @@ class HybridCoordinator:
         (network drop, service hiccup) the coroutine is cancelled and the
         pipeline degrades to a CLARIFY response rather than stalling indefinitely.
         """
-        # Throttle cloud egress (cost/abuse protection). Fail-open if no limiter
-        # is wired or the bucket is unconfigured; shares the 'anthropic' bucket
-        # with CloudDevAgent.
-        if self._rate_limiter is not None:
-            await self._rate_limiter.check("anthropic")
-
         # Scrub secrets before sending to external API — from BOTH the command
         # text AND the session_context the cloud prompt embeds. A sensitive
         # prior command that Gate 0 correctly forced local must not leak later
@@ -1667,6 +1661,12 @@ class HybridCoordinator:
         t0 = time.monotonic()
         try:
             async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
+                # Throttle cloud egress INSIDE the timeout (#18): a saturated
+                # 'anthropic' bucket otherwise stalled the command path past the
+                # advertised budget. Fail-open if no limiter/bucket is configured;
+                # shares the bucket with CloudDevAgent.
+                if self._rate_limiter is not None:
+                    await self._rate_limiter.check("anthropic")
                 with get_tracer().timed("inference", route="cloud"):
                     action_str = await self._cloud.infer(cmd)
         except TimeoutError:
