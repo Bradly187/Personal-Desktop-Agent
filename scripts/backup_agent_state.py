@@ -42,6 +42,7 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -273,12 +274,41 @@ def find_latest_backup(backup_root: Path) -> Path:
     return archives[-1]
 
 
-def restore_backup(archive: Path) -> list[Path]:
+def _dest_under_allowed_roots(dest: Path, roots: list[Path]) -> bool:
+    """True if `dest` resolves under one of the allowed roots (#12).
+
+    The manifest's absolute `dest` paths are attacker-controllable data in a
+    foreign/tampered archive; without this an archive could set dest to e.g.
+    C:\\Windows\\... or a Startup folder and restore would overwrite it. realpath
+    resolves symlinks/junctions before the prefix check.
+    """
+    try:
+        rp = os.path.normcase(os.path.realpath(dest))
+    except Exception:
+        return False
+    for root in roots:
+        try:
+            rroot = os.path.normcase(os.path.realpath(root))
+        except Exception:
+            continue
+        if rp == rroot or rp.startswith(rroot + os.sep):
+            return True
+    return False
+
+
+def restore_backup(archive: Path, cfg: "BackupConfig | None" = None) -> list[Path]:
     """Restore an archive into place; returns the list of restored dest paths.
 
     Every existing destination (and, for SQLite dbs, any sibling -wal/-shm
     files) is renamed to ``<name>.pre-restore-<timestamp>`` first.
+
+    Each manifest destination is validated to resolve under the backup's known
+    roots (project_root / claude_home / backup_root); an out-of-root dest from a
+    foreign or tampered archive is skipped with a warning rather than overwriting
+    an arbitrary absolute path (#12).
     """
+    cfg = cfg or BackupConfig()
+    allowed_roots = [cfg.project_root, cfg.claude_home, cfg.backup_root]
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     restored: list[Path] = []
 
@@ -294,6 +324,11 @@ def restore_backup(archive: Path) -> list[Path]:
             arc = entry["archive"]
             if ".." in Path(arc).parts:  # defence against a tampered manifest
                 raise ValueError(f"Unsafe archive path in manifest: {arc}")
+            if not _dest_under_allowed_roots(dest, allowed_roots):
+                logger.warning(
+                    "Skipping out-of-root restore destination (foreign/tampered "
+                    "archive?): %s", dest)
+                continue
 
             _safety_rename(dest, stamp)
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -399,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.restore == "latest"
                 else Path(args.restore)
             )
-            restore_backup(archive)
+            restore_backup(archive, cfg)
             return 0
         create_backup(cfg)
         return 0
