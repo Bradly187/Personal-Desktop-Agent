@@ -150,12 +150,18 @@ final class AudioStreamer: ObservableObject {
 
         guard !int16Data.isEmpty else { return }
 
-        // Send as base64 via WebSocket
-        let base64 = int16Data.base64EncodedString()
         let frames = int16Data.count / 2  // 2 bytes per int16 sample
 
+        // Prefer raw binary frames when the PC advertised support (no base64
+        // inflation, no JSON envelope); fall back to the legacy base64 path for
+        // older bridges that don't negotiate it.
         Task { @MainActor [weak self] in
-            self?.ws?.sendAudioStream(samplesBase64: base64, frames: frames)
+            guard let ws = self?.ws else { return }
+            if ws.peerSupportsBinaryAudio {
+                ws.sendAudioBinary(int16Data)
+            } else {
+                ws.sendAudioStream(samplesBase64: int16Data.base64EncodedString(), frames: frames)
+            }
         }
     }
 

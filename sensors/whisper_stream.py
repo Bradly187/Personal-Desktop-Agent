@@ -484,22 +484,41 @@ class WhisperStream:
         self._buffer_start_ts = None
         log.debug("WhisperStream: suppressing mic for %.1fs (post-TTS echo guard)", seconds)
 
-    def on_audio_chunk(self, samples_b64: str, frames: int) -> None:
-        """Decode a base64 PCM chunk and append it to the buffer.
+    def _accept_audio(self) -> bool:
+        """Shared admission guard for both the base64 and binary ingest paths.
 
-        Called synchronously from the asyncio event loop; must be fast.
-        Auto-detects float32 vs int16 from bytes-per-frame ratio.
-
-        Uses a list accumulator instead of np.concatenate per call to avoid
-        O(n) reallocation on every chunk (100ms intervals, up to 30s = 480k samples).
-        The list is concatenated once at transcription time.
+        Returns False (drop the chunk) when the stream isn't ready, the mic is
+        hard-muted, or we're inside the post-TTS echo-guard window.
         """
         if not self.available or not _NUMPY_AVAILABLE:
-            return
+            return False
         if self._muted:
-            return  # hard mute — iPad button unmutes
+            return False  # hard mute — iPad button unmutes
         if time.monotonic() < self._suppress_until:
-            return  # post-TTS echo guard — discard mic echo
+            return False  # post-TTS echo guard — discard mic echo
+        return True
+
+    def _append_pcm_chunk(self, chunk: "np.ndarray") -> None:
+        """Append a decoded float32 chunk to the buffer (O(1); concat deferred).
+
+        Uses a list accumulator instead of np.concatenate per call to avoid
+        O(n) reallocation on every chunk (100ms intervals, up to 30s = 480k
+        samples). The list is concatenated once at transcription time.
+        """
+        self._buffer_chunks.append(chunk)
+        if self._buffer_start_ts is None:
+            self._buffer_start_ts = time.monotonic()
+
+    def on_audio_chunk(self, samples_b64: str, frames: int) -> None:
+        """Decode a base64 PCM chunk (legacy `audio_stream` text frame) and buffer it.
+
+        Called synchronously from the asyncio event loop; must be fast.
+        Auto-detects float32 vs int16 from bytes-per-frame ratio. Retained for
+        backward compatibility with iPad builds that don't negotiate the binary
+        audio path (see on_audio_chunk_pcm).
+        """
+        if not self._accept_audio():
+            return
         try:
             raw = base64.b64decode(samples_b64)
             bytes_per_frame = len(raw) // max(frames, 1)
@@ -512,11 +531,25 @@ class WhisperStream:
                 # Unknown format — try float32 anyway
                 chunk = np.frombuffer(raw, dtype=np.float32)
 
-            self._buffer_chunks.append(chunk)
-            if self._buffer_start_ts is None:
-                self._buffer_start_ts = time.monotonic()
+            self._append_pcm_chunk(chunk)
         except Exception as exc:
             log.warning("WhisperStream.on_audio_chunk decode error: %s", exc)
+
+    def on_audio_chunk_pcm(self, raw: bytes, frames: int) -> None:
+        """Buffer a raw binary PCM chunk (new binary WebSocket frame path).
+
+        The binary transport carries little-endian int16 PCM by contract — no
+        base64, no JSON envelope — so there's no per-frame format detection. Same
+        admission guards and buffer as the legacy base64 path; produces an
+        identical float32 chunk so downstream segmentation is unchanged.
+        """
+        if not self._accept_audio():
+            return
+        try:
+            chunk = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            self._append_pcm_chunk(chunk)
+        except Exception as exc:
+            log.warning("WhisperStream.on_audio_chunk_pcm decode error: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Background transcription loop

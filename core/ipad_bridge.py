@@ -92,6 +92,16 @@ except ImportError:
 _BRIDGE_TOKEN_DIR = Path.home() / ".claude" / "ipad_bridge"
 _BRIDGE_TOKEN_PATH = _BRIDGE_TOKEN_DIR / "paired_token"
 
+# Binary audio transport: when enabled the bridge advertises `binary_audio` in
+# its welcome frame and accepts raw binary WebSocket frames for audio (no base64,
+# no JSON envelope). DA_BINARY_AUDIO=0 disables the advertisement → connected
+# iPads fall back to the legacy base64 `audio_stream` text path.
+_BINARY_AUDIO_ENABLED = os.environ.get("DA_BINARY_AUDIO", "1") != "0"
+
+# Binary frame message tags (byte 0). Only AUDIO_PCM16 is defined today; the
+# tag byte keeps the binary channel extensible without a JSON `type` field.
+_BIN_TAG_AUDIO_PCM16 = 0x01
+
 
 def _load_or_create_bridge_token() -> str:
     """Return the iPad pairing token, generating one on first run.
@@ -265,6 +275,10 @@ class IPadBridge:
                 "cursor": {"x": 0, "y": 0},
                 "active_dwell_action": self._active_dwell_action,
                 "muted": bool(self._whisper and self._whisper._muted),
+                # Capability advertisement: when present+true the iPad may stream
+                # audio as raw binary frames instead of base64-in-JSON. Old PCs
+                # omit it → iPad keeps the base64 path (backward compatible).
+                "binary_audio": _BINARY_AUDIO_ENABLED,
                 "ts": time.time(),
             })
         except Exception as exc:
@@ -274,6 +288,8 @@ class IPadBridge:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     await self._handle_message(ws, msg.data)
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    self._handle_binary(msg.data)
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     log.error("WS error from %s: %s", peer, ws.exception())
         finally:
@@ -287,6 +303,34 @@ class IPadBridge:
             log.info("Client disconnected: %s", peer)
 
         return ws
+
+    # ---------------------------------------------------------------------- #
+    # Binary frame routing (audio)
+    # ---------------------------------------------------------------------- #
+
+    def _handle_binary(self, data: bytes) -> None:
+        """Route a raw binary WebSocket frame by its 1-byte tag prefix.
+
+        Layout: ``byte[0]`` = message tag, ``byte[1:]`` = payload. For
+        ``_BIN_TAG_AUDIO_PCM16`` the payload is little-endian int16 PCM streamed
+        straight into WhisperStream (no base64/JSON). Mirrors the per-handler
+        try/except discipline of the text path — a malformed frame is logged and
+        dropped, never raised into the receive loop.
+        """
+        try:
+            if not data:
+                return
+            tag = data[0]
+            if tag == _BIN_TAG_AUDIO_PCM16:
+                if self._whisper and self._whisper.available:
+                    payload = data[1:]
+                    self._whisper.on_audio_chunk_pcm(payload, len(payload) // 2)
+                else:
+                    log.debug("binary audio received (WhisperStream not wired/available)")
+            else:
+                log.debug("Unknown binary tag 0x%02x (%d bytes) — dropped", tag, len(data))
+        except Exception as exc:
+            log.warning("ipad_bridge._handle_binary error: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Message routing
