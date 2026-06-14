@@ -59,6 +59,12 @@ final class WebSocketManager: ObservableObject {
     /// Safety-critical: surfaced as a persistent toolbar indicator.
     @Published private(set) var micMuted: Bool = false
 
+    /// Whether the connected PC advertised support for raw binary audio frames
+    /// (welcome `status` field `binary_audio`). Until a status frame confirms it,
+    /// AudioStreamer uses the legacy base64 `audio_stream` path — so an old PC
+    /// (no flag) keeps working unchanged.
+    @Published private(set) var peerSupportsBinaryAudio: Bool = false
+
     // Fix #3: PassthroughSubject delivers every message to every subscriber (no single-slot loss).
     // Keep @Published lastMessage for backward compat but add a subject that never drops.
     @Published private(set) var lastMessage: BridgeMessage?
@@ -114,6 +120,18 @@ final class WebSocketManager: ObservableObject {
     private static let _sensorFrameTypes: Set<String> = [
         "tilt", "tilt_position"
     ]
+    /// Binary audio frame tag (byte 0). Must match the PC bridge's
+    /// `_BIN_TAG_AUDIO_PCM16` (0x01) — payload is little-endian int16 PCM.
+    static let binTagAudioPCM16: UInt8 = 0x01
+
+    /// Builds a binary audio frame: the 1-byte tag prefix followed by the raw
+    /// PCM payload. `nonisolated` + `static` so it is a pure function testable
+    /// without a live WebSocketManager (mirrors `appendingToken`).
+    nonisolated static func frameBinaryAudio(_ pcm: Data) -> Data {
+        var framed = Data([binTagAudioPCM16])
+        framed.append(pcm)
+        return framed
+    }
 
     // G2: Pending gesture assessment — queued when not connected, flushed on reconnect.
     private var _pendingGestureAssessment: [String]? = nil
@@ -174,18 +192,48 @@ final class WebSocketManager: ObservableObject {
                 AppLogger.shared.warning("WebSocketManager", "Non-UTF8 payload dropped for type=\(msgType)")
                 return
             }
-            capturedTask.send(.string(text)) { error in
-                if let error {
-                    // E5: capture rich error info before triggering reconnect
-                    let nsErr = error as NSError
-                    AppLogger.shared.warning(
-                        "WebSocketManager",
-                        "send failed (domain=\(nsErr.domain) code=\(nsErr.code)): \(error.localizedDescription)"
-                    )
-                    Task { @MainActor [weak self] in
-                        self?._handleDisconnect(error: error)
-                    }
-                }
+            capturedTask.send(.string(text)) { [weak self] error in
+                self?._onSendComplete(error, label: msgType)
+            }
+        }
+    }
+
+    /// Shared send-completion handler for text and binary sends. Logs rich error
+    /// info and triggers reconnect on failure. `nonisolated` — called from the
+    /// URLSession completion thread.
+    nonisolated private func _onSendComplete(_ error: Error?, label: String) {
+        guard let error else { return }
+        // E5: capture rich error info before triggering reconnect
+        let nsErr = error as NSError
+        AppLogger.shared.warning(
+            "WebSocketManager",
+            "send failed (\(label)) (domain=\(nsErr.domain) code=\(nsErr.code)): \(error.localizedDescription)"
+        )
+        Task { @MainActor [weak self] in
+            self?._handleDisconnect(error: error)
+        }
+    }
+
+    /// Send a raw binary audio frame: a 1-byte `binTagAudioPCM16` prefix
+    /// followed by little-endian int16 PCM (no base64, no JSON). Reuses the
+    /// serial send queue and the same `_maxAudioQueueDepth` backpressure bound
+    /// as the base64 `audio_stream` path.
+    func sendAudioBinary(_ pcm: Data) {
+        guard let task, state == .connected else { return }
+        // M3: same backpressure cap as the base64 audio path.
+        if _sendQueueDepth > _maxAudioQueueDepth {
+            AppLogger.shared.warning("WebSocketManager",
+                "Audio stream backpressure — dropping binary chunk (depth=\(_sendQueueDepth))")
+            return
+        }
+        let framed = Self.frameBinaryAudio(pcm)
+
+        _sendQueueDepth += 1
+        let capturedTask = task
+        sendQueue.async { [weak self] in
+            defer { Task { @MainActor [weak self] in self?._sendQueueDepth -= 1 } }
+            capturedTask.send(.data(framed)) { [weak self] error in
+                self?._onSendComplete(error, label: "audio_binary")
             }
         }
     }
@@ -360,6 +408,11 @@ final class WebSocketManager: ObservableObject {
             // indicator is correct immediately on (re)connect.
             if let muted = json["muted"] as? Bool {
                 micMuted = muted
+            }
+            // Capability negotiation: the PC advertises binary audio support in
+            // its welcome frame. Absent (old PC) → stays false → base64 path.
+            if let binaryAudio = json["binary_audio"] as? Bool {
+                peerSupportsBinaryAudio = binaryAudio
             }
             parsed = .status(
                 activeWindow: json["active_window"] as? String,
