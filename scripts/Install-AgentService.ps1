@@ -40,6 +40,10 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Watchdog = Join-Path $Root "scripts\agent_watchdog.ps1"
+# Hidden launcher: an interactive scheduled task that runs powershell.exe shows a
+# console window even with -WindowStyle Hidden. Launching via wscript.exe + this
+# .vbs (WshShell.Run window-style 0) starts the watchdog with no visible window.
+$Launcher = Join-Path $Root "scripts\run_hidden.vbs"
 
 $Tasks = @(
     @{ Name = "PersonalDesktopAgent";       Target = "agent"
@@ -65,10 +69,15 @@ if ($Uninstall) {
 if (-not (Test-Path $Watchdog)) {
     throw "Watchdog script not found: $Watchdog"
 }
+if (-not (Test-Path $Launcher)) {
+    throw "Hidden launcher not found: $Launcher"
+}
 
 foreach ($t in $Tasks) {
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Watchdog`" -Target $($t.Target)" `
+    # Launch the watchdog through wscript.exe + run_hidden.vbs so no PowerShell
+    # console window appears at logon (the .vbs starts it with a hidden window).
+    $action = New-ScheduledTaskAction -Execute "wscript.exe" `
+        -Argument "`"$Launcher`" $($t.Target)" `
         -WorkingDirectory $Root
 
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
