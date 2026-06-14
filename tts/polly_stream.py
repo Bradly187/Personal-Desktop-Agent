@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 _TTS_PORT = int(os.environ.get("TTS_PORT", "8766"))
 _TTS_HOST = "127.0.0.1"
 _TTS_BASE = f"http://{_TTS_HOST}:{_TTS_PORT}"
-_SIDECAR_DIR = Path(__file__).parent / "tts_service"
+_SIDECAR_DIR = Path(__file__).parent.parent / "tts_service"  # repo root, not tts/
 
 # Regex that matches the end of a speakable sentence (., !, ?, — with trailing space or end)
 _SENTENCE_END = re.compile(r'(?<=[.!?])\s+|(?<=[.!?])$')
@@ -323,13 +323,20 @@ class PollyStreamClient:
 
 _default_client: Optional[PollyStreamClient] = None
 _chatterbox_client = None  # lazily created on first chatterbox request
+_sapi_client = None        # lazily created on first sapi request
 
 
 def _read_tts_config() -> dict:
-    """Return approval_config.json as a dict, or {} on any error."""
+    """Return approval_config.json as a dict, or {} on any error.
+
+    approval_config.json lives at the repo root, not under tts/. The previous
+    Path(__file__).parent path looked in tts/ and silently returned {} on every
+    read — so tts_backend was never honored and TTS always fell back to Polly.
+    """
     try:
         import json
-        cfg_path = Path(__file__).parent / "approval_config.json"
+        # repo root = tts/ -> parent
+        cfg_path = Path(__file__).parent.parent / "approval_config.json"
         return json.loads(cfg_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
@@ -341,10 +348,21 @@ def get_client(voice: str = "Danielle", backend: str | None = None):
     backend can be "polly" or "chatterbox".  If None, the value of
     tts_backend in approval_config.json is used (default "polly").
     """
-    global _default_client, _chatterbox_client
+    global _default_client, _chatterbox_client, _sapi_client
 
     if backend is None:
         backend = _read_tts_config().get("tts_backend", "polly")
+
+    if backend in ("sapi", "windows"):
+        # Fully-local Windows SAPI — no network/GPU/Node. See tts/sapi_tts.py.
+        if _sapi_client is None:
+            cfg = _read_tts_config()
+            from tts.sapi_tts import SapiClient
+            _sapi_client = SapiClient(
+                rate=int(cfg.get("sapi_rate", 0)),
+                voice_hint=cfg.get("sapi_voice") or None,
+            )
+        return _sapi_client
 
     if backend == "chatterbox":
         if _chatterbox_client is None:

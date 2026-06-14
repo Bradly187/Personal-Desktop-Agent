@@ -20,7 +20,9 @@
     "ToolSearch":  "silent"
   },
 
-  "tts_backend":              "chatterbox",
+  "tts_backend":              "sapi",
+  "sapi_voice":               "Zira",
+  "sapi_rate":                0,
   "chatterbox_exaggeration":  0.5,
   "chatterbox_cfg_weight":    0.5,
   "chatterbox_voice_ref":     null,
