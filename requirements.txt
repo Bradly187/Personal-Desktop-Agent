@@ -66,6 +66,14 @@ soundfile==0.13.1
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1
 
+# ── Streaming neural VAD (WhisperStream utterance segmentation) ──────────────
+# Drives the *segmentation* gate (when an utterance ends) ahead of buffer concat,
+# replacing the RMS-only trailing-silence check. faster-whisper's own silero
+# vad_filter still runs as a second-stage trim. Optional: WhisperStream degrades
+# to the RMS gate when this is missing. webrtcvad-wheels ships prebuilt Windows
+# wheels (no compiler); the import name is still `webrtcvad`.
+webrtcvad-wheels==2.0.14
+
 # ── Hand gesture recognition (GestureProcessor) ──────────────────────────────
 mediapipe==0.10.35
 
