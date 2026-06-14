@@ -34,8 +34,14 @@ final class AudioStreamer: ObservableObject {
     /// Serial queue for resampling — keeps converter state off the render thread.
     private let processQueue = DispatchQueue(label: "audio.streamer.process", qos: .userInteractive)
 
-    /// Converter for resampling to 16kHz mono int16 (accessed only from processQueue)
-    private var converter: AVAudioConverter?
+    /// Converter for resampling to 16kHz mono int16. Built lazily inside
+    /// `processBuffer` and rebuilt whenever the input format changes (e.g. AEC
+    /// switching the I/O unit to 48 kHz Float32, or a post-interruption format
+    /// change). Accessed only from processQueue.
+    nonisolated(unsafe) private var converter: AVAudioConverter?
+    /// Input format the current `converter` was built from — used to detect a
+    /// format change. Accessed only from processQueue.
+    nonisolated(unsafe) private var lastInputFormat: AVAudioFormat?
     /// Output format for the converter (16kHz mono Int16, immutable after start)
     private var outputFormat: AVAudioFormat?
 
@@ -68,15 +74,12 @@ final class AudioStreamer: ObservableObject {
         outputFormat = outFmt
         lastError = nil
         consecutiveErrors = 0
+        // Converter is built lazily on the first buffer (and rebuilt on any input
+        // format change) inside processBuffer — never captured here, because the
+        // input format can change after start() once AEC adjusts the I/O unit.
+        converter = nil
+        lastInputFormat = nil
 
-        // Create converter if sample rates differ from the shared engine's input format
-        let inputFormat = sharedAudioSession.inputFormat
-        if inputFormat.sampleRate != targetSampleRate || inputFormat.channelCount != 1 {
-            converter = AVAudioConverter(from: inputFormat, to: outFmt)
-        }
-
-        // Capture converter and format for the closure (avoids accessing self on render thread)
-        let capturedConverter = converter
         let capturedFormat = outFmt
 
         // Register with shared audio session and receive buffers via fan-out
@@ -84,7 +87,7 @@ final class AudioStreamer: ObservableObject {
             guard let self else { return }
             // Dispatch resampling off the audio render thread
             self.processQueue.async { [weak self] in
-                self?.processBuffer(buffer, converter: capturedConverter, outputFormat: capturedFormat)
+                self?.processBuffer(buffer, outputFormat: capturedFormat)
             }
         }
 
@@ -96,12 +99,39 @@ final class AudioStreamer: ObservableObject {
         sharedAudioSession.removeConsumer(Self.consumerID)
         isStreaming = false
         converter = nil
+        lastInputFormat = nil
         outputFormat = nil
     }
 
     // MARK: — Processing (runs on processQueue)
 
-    private func processBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter?, outputFormat: AVAudioFormat) {
+    private func processBuffer(_ buffer: AVAudioPCMBuffer, outputFormat: AVAudioFormat) {
+        // (Re)build the converter when the input format first appears or changes.
+        // The shared engine's input format can change after start() — most notably
+        // when AEC/Voice-Processing switches the I/O unit (typically to 48 kHz
+        // Float32), and again after an interruption resume. Keying the rebuild on
+        // the live buffer.format is more robust than capturing it once at start().
+        let inputFormat = buffer.format
+        let needsConvert = !inputFormat.isEqual(outputFormat)
+        if needsConvert {
+            if converter == nil || lastInputFormat == nil || !(lastInputFormat!.isEqual(inputFormat)) {
+                converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+                lastInputFormat = inputFormat
+                if converter == nil {
+                    AppLogger.shared.error("AudioStreamer",
+                        "Could not build converter for input format \(inputFormat)")
+                }
+            }
+        } else if converter != nil {
+            // Input already matches the target format — drop any stale converter.
+            converter = nil
+            lastInputFormat = inputFormat
+        }
+
+        // A conversion is required but no converter could be built — skip this
+        // buffer rather than reinterpret non-Int16 samples as Int16 (garbage).
+        if needsConvert && converter == nil { return }
+
         let int16Data: Data
 
         if let converter {

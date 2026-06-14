@@ -72,22 +72,60 @@ final class SharedAudioSession {
         }
     }
 
+    // MARK: - AEC / Voice Processing configuration
+
+    /// UserDefaults key for the AEC kill-switch. Default ON; set false to fall
+    /// back to the exact pre-AEC behaviour without an app update.
+    static let aecDefaultsKey = "DA_AEC_ENABLED"
+
+    /// Whether hardware Acoustic Echo Cancellation (Voice Processing I/O) is enabled.
+    /// Defaults to `true` when the key is unset.
+    static var isAECEnabled: Bool {
+        (UserDefaults.standard.object(forKey: aecDefaultsKey) as? Bool) ?? true
+    }
+
+    /// Pure mapping from the AEC flag to the AVAudioSession mode — `.voiceChat`
+    /// engages the Voice-Processing I/O unit (AEC/AGC/noise suppression).
+    /// `.default` leaves the input unprocessed. (Never `.measurement`, which
+    /// *disables* system signal processing including AEC.) Pure → unit-testable.
+    static func audioMode(aecEnabled: Bool) -> AVAudioSession.Mode {
+        aecEnabled ? .voiceChat : .default
+    }
+
     // MARK: - Public API
 
-    /// Configures AVAudioSession for `.playAndRecord` with `.mixWithOthers` and starts the engine.
+    /// Configures AVAudioSession for `.playAndRecord` (mode chosen by the AEC
+    /// flag) with `.mixWithOthers` and starts the engine.
     ///
     /// Call this before any sensor installs a tap. Safe to call multiple times —
     /// if the engine is already running, this is a no-op.
+    ///
+    /// When AEC is enabled, `setVoiceProcessingEnabled(_:)` is set on inputNode
+    /// while the engine is stopped (required by the API) and BEFORE the tap is
+    /// installed, so the fan-out tap reads the AEC-adjusted input format (the
+    /// Voice-Processing unit typically reports 48 kHz Float32). The interruption
+    /// handler re-runs `activate()`, so AEC re-applies after a resume.
     func activate() throws {
         let session = AVAudioSession.sharedInstance()
+        let aecEnabled = Self.isAECEnabled
         try session.setCategory(
             .playAndRecord,
-            mode: .default,
+            mode: Self.audioMode(aecEnabled: aecEnabled),
             options: [.mixWithOthers, .defaultToSpeaker]
         )
         try session.setActive(true, options: [])
 
         if !engine.isRunning {
+            // Must be set while the engine is stopped. A failure here is non-fatal:
+            // log and continue with the input unprocessed rather than killing audio.
+            do {
+                try engine.inputNode.setVoiceProcessingEnabled(aecEnabled)
+            } catch {
+                AppLogger.shared.warning(
+                    "SharedAudioSession",
+                    "setVoiceProcessingEnabled(\(aecEnabled)) failed, continuing without AEC: \(error)"
+                )
+            }
             _installSharedTapIfNeeded()
             try engine.start()
         }
