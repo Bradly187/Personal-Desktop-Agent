@@ -223,7 +223,11 @@ CREATE TABLE IF NOT EXISTS goal_queue (
     claimed_at      REAL
 );
 CREATE INDEX IF NOT EXISTS idx_goalq_status ON goal_queue(status, ts);
-CREATE INDEX IF NOT EXISTS idx_goalq_sched  ON goal_queue(execute_at);
+-- NOTE: the index on goal_queue(execute_at) is created in AgentDB.open() AFTER
+-- _migrate(), not here. execute_at is an additive migration column (v5→6); on a
+-- DB created before it existed this script's CREATE TABLE IF NOT EXISTS is a
+-- no-op, so building the index here would fail with "no such column: execute_at"
+-- before the migration can add it. See _DEFERRED_INDEXES.
 
 -- ── Event rules — event-triggered automation (N+2) ───────────────────────────
 -- "when <topic matches + predicate>, notify me / run a goal". Consumed by
@@ -752,6 +756,16 @@ _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("goal_queue", "claimed_at", "REAL"),
 )
 
+# Indexes on additive-migration columns. These CANNOT live in AGENT_DB_SCHEMA:
+# on a DB created before the column existed, CREATE TABLE IF NOT EXISTS is a no-op
+# so the column is absent when executescript runs, and the CREATE INDEX fails with
+# "no such column". They are created in AgentDB.open() AFTER _migrate() has added
+# the columns (fresh DBs already have them from CREATE TABLE). IF NOT EXISTS makes
+# this idempotent.
+_DEFERRED_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_goalq_sched ON goal_queue(execute_at)",
+)
+
 
 def _pid_alive(pid) -> bool:
     """True if `pid` names a live process. Used by requeue_stale_running to tell
@@ -843,6 +857,14 @@ class AgentDB:
             await self._migrate()
         except Exception as exc:
             log.warning("AgentDB migration error (continuing): %s", exc)
+        # Indexes on migrated columns must be built only after _migrate() has
+        # added those columns (see _DEFERRED_INDEXES) — otherwise a pre-migration
+        # DB fails the index build during executescript above.
+        for _idx_ddl in _DEFERRED_INDEXES:
+            try:
+                await self._conn.execute(_idx_ddl)
+            except Exception as exc:
+                log.warning("AgentDB deferred index error (continuing): %s", exc)
         try:
             await self._seed_config_tables()
         except Exception as exc:
