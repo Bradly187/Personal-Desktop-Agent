@@ -98,6 +98,14 @@ except ImportError:
     log.warning("faster-whisper not installed — WhisperStream disabled. "
                 "Install with: pip install faster-whisper")
 
+try:
+    import webrtcvad
+    _WEBRTCVAD_AVAILABLE = True
+except ImportError:
+    _WEBRTCVAD_AVAILABLE = False
+    log.warning("webrtcvad not installed — streaming VAD falls back to the RMS "
+                "energy gate. Install with: pip install webrtcvad-wheels")
+
 # C1: model size for the lazy local fallback used when a configured remote
 # (laptop) Whisper service fails. Small + int8 + CPU so it loads fast and adds
 # little memory; quality is lower than the laptop's large-v3 but keeps voice alive.
@@ -128,6 +136,59 @@ def _has_trailing_silence(
     if len(audio) < n:
         return False
     return _rms(audio[-n:]) < threshold
+
+
+class _StreamingVAD:
+    """Neural trailing-silence detector for utterance segmentation.
+
+    Wraps webrtcvad's GMM classifier. webrtcvad labels each fixed-size frame
+    (10/20/30 ms at 8/16/32/48 kHz) as speech/non-speech independently — cheap
+    enough (~tens of µs/frame, C, no allocation, no GPU) to run on the asyncio
+    event loop every poll tick. We use 30 ms frames at 16 kHz.
+
+    Per-frame labels flicker, so segmentation reads the *fraction* of voiced
+    frames over the trailing-silence window: the window is "silent" when the
+    voiced fraction is at or below ``end_ratio``. This is the neural analog of
+    the RMS ``_has_trailing_silence`` test and drives exactly the same
+    end-of-utterance decision — only the per-frame speech test changes.
+    """
+
+    FRAME_MS: int = 30
+
+    def __init__(self, aggressiveness: int, sample_rate: int) -> None:
+        # webrtcvad aggressiveness 0 (least) .. 3 (most aggressive at filtering
+        # out non-speech). Raises if out of range or sample_rate unsupported.
+        self._vad = webrtcvad.Vad(aggressiveness)
+        self._sr = sample_rate
+        self._frame_samples = int(sample_rate * self.FRAME_MS / 1000)
+
+    def trailing_silence(
+        self,
+        tail_int16: "np.ndarray",
+        silence_s: float,
+        end_ratio: float,
+    ) -> bool:
+        """True if the last ``silence_s`` of ``tail_int16`` is non-speech.
+
+        ``tail_int16`` is mono 16-bit PCM at ``self._sr``. Only the final
+        ``silence_s`` worth of whole 30 ms frames is examined. Returns False
+        when there isn't a full window of frames yet (utterance still open).
+        """
+        n_window = int(self._sr * silence_s)
+        if n_window <= 0 or len(tail_int16) < n_window:
+            return False
+        window = tail_int16[-n_window:]
+        fs = self._frame_samples
+        n_frames = len(window) // fs
+        if n_frames == 0:
+            return False
+        voiced = 0
+        for i in range(n_frames):
+            frame = window[i * fs:(i + 1) * fs]
+            # webrtcvad wants raw little-endian int16 bytes.
+            if self._vad.is_speech(frame.tobytes(), self._sr):
+                voiced += 1
+        return (voiced / n_frames) <= end_ratio
 
 
 def _log_future_exc(fut) -> None:
@@ -205,6 +266,11 @@ class WhisperStream:
         min_speech_s: float = 0.5,         # minimum duration worth transcribing
         max_buffer_s: float = 30.0,        # force-transcribe after this long
         poll_interval_s: float = 0.15,     # background loop cadence
+        # Streaming neural VAD — drives the end-of-utterance segmentation gate
+        # ahead of the RMS check (RMS stays as the fallback). See _StreamingVAD.
+        use_neural_vad: bool = True,
+        vad_aggressiveness: int = 2,       # webrtcvad mode 0 (lax) .. 3 (strict)
+        vad_speech_end_ratio: float = 0.10,  # voiced-frame fraction ≤ this = silent
         # Phase 6: preserve audio bytes so Gate 1 can re-transcribe via
         # Amazon Transcribe when whisper_logprob is below the Gate 1 threshold.
         preserve_audio: bool = True,
@@ -217,6 +283,22 @@ class WhisperStream:
         self._min_speech_s = min_speech_s
         self._max_buffer_s = max_buffer_s
         self._poll_s = poll_interval_s
+
+        # Streaming neural VAD — opt-in (default on), disabled if webrtcvad is
+        # missing or DA_NEURAL_VAD=0. Construction failure (bad aggressiveness /
+        # unsupported sample rate) degrades to the RMS gate rather than crashing.
+        self._vad_end_ratio = vad_speech_end_ratio
+        self._use_neural_vad = (
+            use_neural_vad and _WEBRTCVAD_AVAILABLE
+            and os.environ.get("DA_NEURAL_VAD", "1") != "0"
+        )
+        self._neural_vad: Optional["_StreamingVAD"] = None
+        if self._use_neural_vad:
+            try:
+                self._neural_vad = _StreamingVAD(vad_aggressiveness, self.SAMPLE_RATE)
+            except Exception as exc:
+                log.warning("WhisperStream: neural VAD init failed (%s) — using RMS gate", exc)
+                self._use_neural_vad = False
 
         self._preserve_audio = preserve_audio
         self._model: Optional[WhisperModel] = None
@@ -419,8 +501,8 @@ class WhisperStream:
             self.available = True
             self._running = True
             self._task = asyncio.create_task(self._loop())
-            log.info("WhisperStream: ready (REMOTE → %s, no local model loaded)",
-                     self._remote_url)
+            log.info("WhisperStream: ready (REMOTE → %s, no local model loaded, gate=%s)",
+                     self._remote_url, self._vad_gate_desc())
             return
 
         if not _WHISPER_AVAILABLE:
@@ -451,8 +533,8 @@ class WhisperStream:
         self.available = True
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        log.info("WhisperStream: ready (VAD threshold=%.3f silence=%.1fs)",
-                 self._silence_thresh, self._silence_s)
+        log.info("WhisperStream: ready (gate=%s, VAD threshold=%.3f silence=%.1fs)",
+                 self._vad_gate_desc(), self._silence_thresh, self._silence_s)
 
     async def stop(self) -> None:
         self._running = False
@@ -607,6 +689,41 @@ class WhisperStream:
         tail_audio = np.concatenate(list(reversed(tail)))
         return _rms(tail_audio[-n:]) < self._silence_thresh
 
+    def _trailing_silence_neural(self) -> Optional[bool]:
+        """Neural end-of-utterance gate over the trailing-silence window.
+
+        Mirrors ``_trailing_silence_from_chunks``'s O(window) tail-gather, then
+        hands the int16-converted tail to webrtcvad. Returns:
+          - True/False  — the neural silence verdict,
+          - None        — not enough audio buffered yet, or any failure,
+        so the caller falls back to the RMS gate on None. Never raises into the
+        background loop.
+        """
+        if self._neural_vad is None:
+            return None
+        n = int(self.SAMPLE_RATE * self._silence_s)
+        if n <= 0:
+            return None
+        tail: list = []
+        count = 0
+        for c in reversed(self._buffer_chunks):
+            tail.append(c)
+            count += len(c)
+            if count >= n:
+                break
+        if count < n:
+            return None  # window not full yet — let RMS path return "not silent"
+        try:
+            tail_audio = np.concatenate(list(reversed(tail)))[-n:]
+            # Float32 [-1,1] → int16 LE, matching webrtcvad's expected encoding.
+            tail_int16 = (tail_audio * 32768.0).clip(-32768, 32767).astype(np.int16)
+            return self._neural_vad.trailing_silence(
+                tail_int16, self._silence_s, self._vad_end_ratio
+            )
+        except Exception as exc:
+            log.debug("WhisperStream: neural VAD probe failed (%s) — RMS fallback", exc)
+            return None
+
     async def _maybe_transcribe(self) -> None:
         # Flush the TTS echo of the approval prompt before it can be transcribed.
         self._check_approval_echo_guard()
@@ -627,8 +744,17 @@ class WhisperStream:
 
         force = duration >= self._max_buffer_s
 
-        if not force and not self._trailing_silence_from_chunks():
-            return
+        if not force:
+            # Streaming neural VAD drives the end-of-utterance decision; the RMS
+            # gate is the fallback when the VAD is disabled/missing, the window
+            # isn't full yet, or the probe errors (neural returns None then).
+            silent: Optional[bool] = None
+            if self._use_neural_vad and self._neural_vad is not None:
+                silent = self._trailing_silence_neural()
+            if silent is None:
+                silent = self._trailing_silence_from_chunks()
+            if not silent:
+                return
 
         # Claim the buffer — clear before awaiting so new chunks go into a
         # fresh buffer while transcription runs on the old one. The single full
@@ -996,6 +1122,12 @@ class WhisperStream:
     # Status
     # ---------------------------------------------------------------------- #
 
+    def _vad_gate_desc(self) -> str:
+        """Human-readable label for the active end-of-utterance gate."""
+        if self._use_neural_vad and self._neural_vad is not None:
+            return f"neural(end_ratio={self._vad_end_ratio:.2f})"
+        return "rms"
+
     def get_status(self) -> dict:
         buf_samples = sum(len(c) for c in self._buffer_chunks)
         buf_s = buf_samples / self.SAMPLE_RATE if buf_samples > 0 else 0.0
@@ -1006,4 +1138,5 @@ class WhisperStream:
             "buffer_s": round(buf_s, 2),
             "hotwords": len(self._hotwords),
             "muted": self._muted,
+            "vad_gate": self._vad_gate_desc(),
         }
