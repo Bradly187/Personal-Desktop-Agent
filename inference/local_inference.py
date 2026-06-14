@@ -60,6 +60,94 @@ def get_inference_capture() -> tuple[Optional[str], Optional[int], Optional[int]
     """Return (prompt, tokens_in, tokens_out) set by the current task's last infer()."""
     return _INFERENCE_CAPTURE.get()
 
+
+# ---------------------------------------------------------------------------
+# Local Ollama bootstrap — ensure the server is up before inference starts
+# ---------------------------------------------------------------------------
+
+_OLLAMA_DEFAULT_HOST = "http://localhost:11434"
+
+
+def _ollama_alive(host: str = _OLLAMA_DEFAULT_HOST, timeout: float = 2.0) -> bool:
+    """True if an Ollama server answers /api/version at `host`."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{host}/api/version", timeout=timeout) as r:
+            return getattr(r, "status", 200) == 200
+    except Exception:
+        return False
+
+
+def _find_ollama_exe() -> Optional[str]:
+    """Locate the ollama executable: PATH first, then the standard install dirs."""
+    import os
+    import shutil
+    exe = shutil.which("ollama")
+    if exe:
+        return exe
+    candidates = [
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Ollama\ollama.exe"),
+        "/usr/local/bin/ollama",
+        "/usr/bin/ollama",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def ensure_ollama_running(host: str = _OLLAMA_DEFAULT_HOST, wait_s: float = 25.0) -> bool:
+    """Best-effort: make sure a local Ollama server is listening, starting one if not.
+
+    The command model (default backend) and the ModelRouter specialists both run
+    on Ollama, so the agent depends on a live server. This starts ``ollama serve``
+    **detached** when the port is dead so the server outlives agent restarts (the
+    process group is independent — restarting the agent won't kill it and evict
+    resident models). Idempotent: a no-op when Ollama already answers.
+
+    Returns True if Ollama is reachable afterwards. Degrades gracefully — logs a
+    warning and returns False if Ollama isn't installed or won't come up, leaving
+    the agent to fall back to the cloud path rather than crashing.
+    """
+    if _ollama_alive(host):
+        log.info("Ollama already running at %s", host)
+        return True
+
+    exe = _find_ollama_exe()
+    if not exe:
+        log.warning(
+            "Ollama not found on PATH or in the default install location — local "
+            "inference unavailable; the agent will rely on cloud fallback. "
+            "Install from https://ollama.com"
+        )
+        return False
+
+    import subprocess
+    import sys
+    try:
+        kwargs: dict = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if sys.platform == "win32":
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — independent of the agent.
+            kwargs["creationflags"] = 0x00000008 | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([exe, "serve"], **kwargs)
+        log.info("Ollama not running — launched 'ollama serve' (%s)", exe)
+    except Exception as exc:
+        log.warning("Failed to start Ollama (%s) — local inference may be unavailable", exc)
+        return False
+
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if _ollama_alive(host):
+            log.info("Ollama is up at %s", host)
+            return True
+        time.sleep(0.5)
+    log.warning("Ollama did not become ready within %.0fs at %s", wait_s, host)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Action vocabulary prompt fragment (shared by all backends)
 # ---------------------------------------------------------------------------

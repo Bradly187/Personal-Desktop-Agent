@@ -593,6 +593,17 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # Backend selection (--backend flag)
     _backend = args.backend.lower() if hasattr(args, "backend") else "ollama"
+
+    # Ensure a local Ollama server is up before building any Ollama-backed engine.
+    # The command model (default backend) and the ModelRouter specialists both run
+    # on Ollama, so start the server here if it isn't already listening — covers
+    # every launch path (start_agent.bat, watchdog, scheduled task, direct). No-op
+    # when Ollama is already up; degrades to cloud fallback if it can't be started.
+    _uses_ollama = (_backend == "ollama") or (not getattr(args, "no_local_specialists", False))
+    if _uses_ollama:
+        from inference.local_inference import ensure_ollama_running
+        await asyncio.to_thread(ensure_ollama_running)
+
     if _backend == "llamacpp":
         local = LlamaCppInference(
             model=getattr(args, "llamacpp_model", "local-model"),
