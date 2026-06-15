@@ -1,0 +1,13 @@
+{
+  "suite": "dev_execution",
+  "mode": "execution",
+  "recorded_at": "2026-06-15T08:29:12",
+  "model": "default",
+  "tolerance": 0.1,
+  "n": 5,
+  "exact_acc": 1.0,
+  "mean_score": 0.5,
+  "safe_acc": 1.0,
+  "p50_latency_ms": 5375.7,
+  "errors": 0
+}

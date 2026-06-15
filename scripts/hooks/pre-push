@@ -1,0 +1,36 @@
+#!/bin/sh
+# Pre-push behavioral-eval gate. Opt-in: enable with
+#   pwsh -File scripts/Install-GitHooks.ps1
+# (sets core.hooksPath to scripts/hooks). Disable with -Uninstall.
+#
+# Runs scripts/run_evals.ps1 — Tier-1 (model-free) ALWAYS blocks on regression;
+# Tier-2 (model-backed) is skipped automatically when Ollama is down (exit 2 →
+# treated as pass), so this never blocks a push just because the GPU box is off.
+#
+# Git invokes hooks through sh even on Windows, so this shim just locates a
+# PowerShell and delegates. Set DA_SKIP_EVAL_HOOK=1 to bypass for one push.
+
+if [ "${DA_SKIP_EVAL_HOOK:-0}" != "0" ]; then
+    echo "pre-push: eval gate skipped (DA_SKIP_EVAL_HOOK set)"
+    exit 0
+fi
+
+root=$(git rev-parse --show-toplevel)
+script="$root/scripts/run_evals.ps1"
+
+if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -File "$script"
+elif command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$script"
+else
+    echo "pre-push: no PowerShell found (pwsh/powershell) — skipping eval gate" >&2
+    exit 0
+fi
+
+code=$?
+if [ "$code" -ne 0 ]; then
+    echo "pre-push: eval gate FAILED (a behavioral baseline regressed). Push aborted." >&2
+    echo "         Re-run: pwsh -File scripts/run_evals.ps1   (or DA_SKIP_EVAL_HOOK=1 git push to bypass)" >&2
+    exit 1
+fi
+exit 0

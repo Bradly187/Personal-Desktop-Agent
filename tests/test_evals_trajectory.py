@@ -197,3 +197,88 @@ def test_shipped_trajectory_suite_valid():
             assert v in _PLAN_ACTIONS, f"{c.id}: unknown verb {v}"
         for a, b in c.precedence:
             assert a in _PLAN_ACTIONS and b in _PLAN_ACTIONS
+
+
+# --------------------------------------------------------------------------- #
+# run_execution_suite — live-DevAgent trajectory (stubbed, no model)
+# --------------------------------------------------------------------------- #
+
+class _FakeStep:
+    def __init__(self, action):
+        self.action = action
+
+
+class _FakeResult:
+    def __init__(self, verbs, success=True, error=None):
+        self.steps = [_FakeStep(v) for v in verbs]
+        self.response_text = "ok"
+        self.success = success
+        self.error = error
+
+
+class _FakeDevAgent:
+    """Stub with the surface run_execution_suite touches: _context (list),
+    a settable _approve_plan_upfront, and an async plan_and_run that echoes a
+    scripted verb sequence keyed by goal."""
+    def __init__(self, scripted):
+        self._scripted = scripted
+        self._context: list[str] = []
+        self._approve_plan_upfront = None  # run_execution_suite overwrites this
+
+    async def plan_and_run(self, goal):
+        return self._scripted[goal]
+
+
+def test_run_execution_suite_scores_executed_verbs():
+    from evals.runner import run_execution_suite
+    cases = [_case(id="e1", goal="read it", expected_verbs=["READ_FILE"],
+                   required=["READ_FILE"], forbidden=["WRITE_FILE"]),
+             _case(id="e2", goal="grep it", expected_verbs=["GREP"],
+                   required=["GREP"], forbidden=["WRITE_FILE"])]
+    scripted = {"read it": _FakeResult(["READ_FILE", "EXPLAIN"]),
+                "grep it": _FakeResult(["GREP"])}
+    rep = run_execution_suite(cases, lambda: _FakeDevAgent(scripted), timeout_s=5)
+    assert rep.n == 2 and rep.exact_acc == 1.0 and rep.errors == 0
+
+
+def test_run_execution_suite_flags_forbidden_executed_verb():
+    from evals.runner import run_execution_suite
+    # The agent actually executed WRITE_FILE on a read-only goal -> safety fail.
+    cases = [_case(id="e3", goal="read it", expected_verbs=["READ_FILE"],
+                   required=["READ_FILE"], forbidden=["WRITE_FILE"])]
+    scripted = {"read it": _FakeResult(["READ_FILE", "WRITE_FILE"])}
+    rep = run_execution_suite(cases, lambda: _FakeDevAgent(scripted), timeout_s=5)
+    assert rep.safe_acc == 0.0 and rep.exact_acc == 0.0
+
+
+def test_run_execution_suite_no_steps_is_error():
+    from evals.runner import run_execution_suite
+    cases = [_case(id="e4", goal="read it", expected_verbs=["READ_FILE"],
+                   required=["READ_FILE"])]
+    scripted = {"read it": _FakeResult([], success=False, error="planner failed")}
+    rep = run_execution_suite(cases, lambda: _FakeDevAgent(scripted), timeout_s=5)
+    assert rep.errors == 1 and rep.n == 1
+
+
+def test_run_execution_suite_overrides_approval_gate():
+    from evals.runner import run_execution_suite
+    agent = _FakeDevAgent({"read it": _FakeResult(["READ_FILE"])})
+    run_execution_suite([_case(id="e5", goal="read it", expected_verbs=["READ_FILE"],
+                               required=["READ_FILE"])],
+                        lambda: agent, timeout_s=5)
+    # run_execution_suite must have installed the auto-grant on the instance.
+    assert agent._approve_plan_upfront is not None
+
+
+def test_shipped_execution_suite_valid():
+    from evals.trajectory import _PLAN_ACTIONS
+    cases = load_trajectory_suite("dev_execution")
+    assert len(cases) >= 3
+    mutating = {"WRITE_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT",
+                "GITHUB_PR", "SEARCH_WEB", "FETCH_URL"}
+    for c in cases:
+        assert c.goal
+        for v in c.required + c.forbidden + c.expected_verbs:
+            assert v in _PLAN_ACTIONS, f"{c.id}: unknown verb {v}"
+        # every case must forbid the mutating/network verbs (read-only safety)
+        assert mutating.issubset(set(c.forbidden)), f"{c.id}: missing forbidden verbs"

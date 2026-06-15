@@ -222,6 +222,61 @@ def run_trajectory_suite(cases: list, plan_fn) -> TrajReport:
     return aggregate_traj(results)
 
 
+def run_execution_suite(cases: list, build_dev_agent, *, timeout_s: float = 120.0) -> TrajReport:
+    """Score trajectory cases by running the goal through the LIVE DevAgent.
+
+    Unlike `plan_predictor` (which only scores the planner *prompt's* output),
+    this builds a real `DevAgent` and runs `plan_and_run(goal)`, scoring the verb
+    sequence that was *actually executed* (`AgentResult.steps`). This closes the
+    verify loop — it catches planner→executor drift the prompt-only eval can't.
+
+    Single event loop by design: `DevAgent` holds asyncio primitives created in
+    `__init__`, which bind to the first loop they touch. One `DevAgent` on one
+    `asyncio.run` keeps them on a single loop; a per-case `asyncio.run` would
+    rebind and raise. `build_dev_agent` is a zero-arg factory (constructed on the
+    eval loop so its locks bind here).
+
+    Safety: this is for STRICTLY READ-ONLY suites (each case forbids mutating
+    verbs; `score_trajectory.safe_ok` fails the case if any forbidden verb runs).
+    The interactive plan-approval gate (TTS + a 7s wait) is replaced with the
+    read-only "auto" grant so the suite runs unattended and silent.
+    """
+    async def _run_all() -> TrajReport:
+        dev = build_dev_agent()
+
+        async def _auto_approve(goal: str, steps) -> str:  # read-only convenience grant
+            return "auto"
+        dev._approve_plan_upfront = _auto_approve   # type: ignore[attr-defined]
+
+        results = []
+        for case in cases:
+            try:
+                dev._context.clear()                 # isolate cases from each other
+            except Exception:
+                pass
+            t0 = time.monotonic()
+            try:
+                res = await asyncio.wait_for(dev.plan_and_run(case.goal), timeout_s)
+                lat = (time.monotonic() - t0) * 1000
+                verbs = [s.action.upper() for s in (getattr(res, "steps", None) or [])]
+                if verbs:
+                    # Score the executed trajectory regardless of overall success:
+                    # a "failed" plan that still ran the right read-only steps is a
+                    # pass for trajectory purposes; only a no-step run is an error.
+                    pred = TrajPrediction(verbs=verbs, raw=getattr(res, "response_text", "") or "",
+                                          latency_ms=lat)
+                else:
+                    pred = TrajPrediction(error=(getattr(res, "error", None) or "no steps executed"),
+                                          latency_ms=lat)
+            except Exception as exc:
+                pred = TrajPrediction(error=f"{type(exc).__name__}: {exc}",
+                                      latency_ms=(time.monotonic() - t0) * 1000)
+            results.append(score_trajectory(case, pred))
+        return aggregate_traj(results)
+
+    return asyncio.run(_run_all())
+
+
 def plan_predictor(infer_text: TextFn, *, timeout_s: float = 30.0):
     """Build a plan_fn: ask the model to plan the goal, extract the verb sequence
     exactly as dev_agent would parse it."""
