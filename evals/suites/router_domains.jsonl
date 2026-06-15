@@ -1,0 +1,21 @@
+# router_domains — utterance -> expected DomainClassifier domain. MODEL-FREE.
+# expected_verb holds the DOMAIN (command/code/math/vision/plan/general/skill); the
+# router predictor registers ALL shipped skills' intent keywords, so skill-domain
+# cases are gated on the classification LOGIC regardless of runtime enablement.
+# Run: python -m evals.run --suite router_domains --predictor router
+{"id": "rt-cmd-click", "suite": "router_domains", "utterance": "click the save button", "expected_verb": "command", "tags": ["command"]}
+{"id": "rt-cmd-scroll", "suite": "router_domains", "utterance": "scroll down", "expected_verb": "command", "tags": ["command"]}
+{"id": "rt-code-train", "suite": "router_domains", "utterance": "write a pytorch training loop for a CNN on CIFAR-10", "expected_verb": "code", "tags": ["code"]}
+{"id": "rt-code-refactor", "suite": "router_domains", "utterance": "refactor the dataloader to use async batching", "expected_verb": "code", "tags": ["code"]}
+{"id": "rt-math-proof", "suite": "router_domains", "utterance": "prove that the sum of two even integers is even", "expected_verb": "math", "tags": ["math"]}
+{"id": "rt-math-derive", "suite": "router_domains", "utterance": "derive the gradient of the softmax cross entropy loss", "expected_verb": "math", "tags": ["math"]}
+{"id": "rt-vision-screen", "suite": "router_domains", "utterance": "what is on my screen right now", "expected_verb": "vision", "tags": ["vision"]}
+{"id": "rt-vision-diagram", "suite": "router_domains", "utterance": "read the diagram on screen and describe what it shows", "expected_verb": "vision", "tags": ["vision"]}
+{"id": "rt-plan-scaffold", "suite": "router_domains", "utterance": "set up a new project from scratch with tests and CI step by step", "expected_verb": "plan", "tags": ["plan"]}
+{"id": "rt-general-explain", "suite": "router_domains", "utterance": "explain the difference between TCP and UDP in a paragraph", "expected_verb": "general", "tags": ["general"]}
+{"id": "rt-skill-calendar", "suite": "router_domains", "utterance": "what's on my calendar tomorrow", "expected_verb": "skill", "tags": ["skill", "google_pim"]}
+{"id": "rt-skill-inbox", "suite": "router_domains", "utterance": "summarize my inbox please", "expected_verb": "skill", "tags": ["skill", "google_pim"]}
+{"id": "rt-skill-weather", "suite": "router_domains", "utterance": "what's the weather today", "expected_verb": "skill", "tags": ["skill", "weather"]}
+{"id": "rt-skill-note", "suite": "router_domains", "utterance": "add a note to remember the dosage change", "expected_verb": "skill", "tags": ["skill", "notes"]}
+{"id": "rt-skill-papers", "suite": "router_domains", "utterance": "find papers on hand tracking with lidar", "expected_verb": "skill", "tags": ["skill", "arxiv"]}
+{"id": "rt-skill-pain", "suite": "router_domains", "utterance": "log my pain it's an eight in my wrists", "expected_verb": "skill", "tags": ["skill", "pain_journal"]}

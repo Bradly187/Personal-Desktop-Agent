@@ -1,0 +1,18 @@
+# command_verbs — NL utterance -> accessibility verb + target. One JSON object per line.
+# 'target' slots are matched fuzzily (containment); verb is the primary signal.
+{"id": "cv-click-basic", "suite": "command_verbs", "utterance": "click the save button", "expected_verb": "CLICK", "expected_slots": {"target": "save button"}, "tags": ["click"]}
+{"id": "cv-click-descriptive", "suite": "command_verbs", "utterance": "click the blue submit button at the top", "expected_verb": "CLICK", "expected_slots": {"target": "submit"}, "tags": ["click", "descriptive"]}
+{"id": "cv-scroll-amount", "suite": "command_verbs", "utterance": "scroll down three times", "expected_verb": "SCROLL", "expected_slots": {"target": "down"}, "tags": ["scroll"]}
+{"id": "cv-scroll-by", "suite": "command_verbs", "utterance": "scroll down by 3", "expected_verb": "SCROLL", "expected_slots": {"target": "down"}, "tags": ["scroll", "edge"]}
+{"id": "cv-type", "suite": "command_verbs", "utterance": "type hello world", "expected_verb": "TYPE", "expected_slots": {"target": "hello world"}, "tags": ["type"]}
+{"id": "cv-open", "suite": "command_verbs", "utterance": "open Chrome browser", "expected_verb": "OPEN", "expected_slots": {"target": "chrome"}, "tags": ["open"]}
+{"id": "cv-open-punct", "suite": "command_verbs", "utterance": "Open—Chrome.", "expected_verb": "OPEN", "expected_slots": {"target": "chrome"}, "tags": ["open", "punctuation", "edge"]}
+{"id": "cv-close", "suite": "command_verbs", "utterance": "close this window", "expected_verb": "CLOSE", "expected_slots": {}, "tags": ["close"]}
+{"id": "cv-hotkey", "suite": "command_verbs", "utterance": "press control c", "expected_verb": "HOTKEY", "expected_slots": {"target": "control"}, "tags": ["hotkey"]}
+{"id": "cv-screenshot", "suite": "command_verbs", "utterance": "take a screenshot", "expected_verb": "SCREENSHOT", "expected_slots": {}, "tags": ["screenshot"]}
+{"id": "cv-screenshot-2", "suite": "command_verbs", "utterance": "capture the screen", "expected_verb": "SCREENSHOT", "expected_slots": {}, "tags": ["screenshot"]}
+{"id": "cv-ambiguous", "suite": "command_verbs", "utterance": "do the thing", "expected_verb": "CLARIFY", "expected_slots": {}, "tags": ["ambiguous", "edge"]}
+{"id": "cv-empty-intent", "suite": "command_verbs", "utterance": "uhh hold on", "expected_verb": "CLARIFY", "expected_slots": {}, "tags": ["ambiguous", "edge"]}
+{"id": "cv-dictate", "suite": "command_verbs", "utterance": "dictate the quadratic formula is x equals negative b", "expected_verb": "DICTATE", "expected_slots": {"target": "quadratic"}, "tags": ["dictate"]}
+{"id": "cv-click-context", "suite": "command_verbs", "utterance": "click the next one", "expected_verb": "CLICK", "expected_slots": {"target": "next"}, "context": ["Last action: CLICK Save button (done)"], "tags": ["click", "context"]}
+{"id": "cv-scroll-up", "suite": "command_verbs", "utterance": "scroll back up", "expected_verb": "SCROLL", "expected_slots": {"target": "up"}, "tags": ["scroll"]}

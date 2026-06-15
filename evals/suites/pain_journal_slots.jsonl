@@ -1,0 +1,12 @@
+# pain_journal_slots — NL pain note -> structured slots (area, severity 0-10).
+# Evaluates the slot-extraction judgment behind pain_journal's "plan": true logging.
+{"id": "pj-hands-6", "suite": "pain_journal_slots", "utterance": "log a flare, hands, six out of ten", "expected_verb": "log_symptom", "expected_slots": {"area": "hands", "severity": 6}, "domain": "skill", "tags": ["slots"]}
+{"id": "pj-knees-4", "suite": "pain_journal_slots", "utterance": "my knees are at a four today", "expected_verb": "log_symptom", "expected_slots": {"area": "knees", "severity": 4}, "domain": "skill", "tags": ["slots"]}
+{"id": "pj-wrists-8", "suite": "pain_journal_slots", "utterance": "log severe pain in my wrists, like an eight", "expected_verb": "log_symptom", "expected_slots": {"area": "wrists", "severity": 8}, "domain": "skill", "tags": ["slots", "wordnum"]}
+{"id": "pj-shoulder-3", "suite": "pain_journal_slots", "utterance": "record my shoulder pain, three out of ten", "expected_verb": "log_symptom", "expected_slots": {"area": "shoulder", "severity": 3}, "domain": "skill", "tags": ["slots"]}
+{"id": "pj-hands-9", "suite": "pain_journal_slots", "utterance": "my hands hurt a lot today, I'd say a nine", "expected_verb": "log_symptom", "expected_slots": {"area": "hands", "severity": 9}, "domain": "skill", "tags": ["slots"]}
+{"id": "pj-feet-2", "suite": "pain_journal_slots", "utterance": "log a mild flare in my feet, two", "expected_verb": "log_symptom", "expected_slots": {"area": "feet", "severity": 2}, "domain": "skill", "tags": ["slots"]}
+{"id": "pj-elbow-5", "suite": "pain_journal_slots", "utterance": "elbow pain, five", "expected_verb": "log_symptom", "expected_slots": {"area": "elbow", "severity": 5}, "domain": "skill", "tags": ["slots", "terse"]}
+{"id": "pj-ankle-7", "suite": "pain_journal_slots", "utterance": "log seven out of ten in my left ankle", "expected_verb": "log_symptom", "expected_slots": {"area": "ankle", "severity": 7}, "domain": "skill", "tags": ["slots"]}
+{"id": "pj-neck-10", "suite": "pain_journal_slots", "utterance": "my neck is killing me, ten out of ten", "expected_verb": "log_symptom", "expected_slots": {"area": "neck", "severity": 10}, "domain": "skill", "tags": ["slots", "max"]}
+{"id": "pj-back-1", "suite": "pain_journal_slots", "utterance": "lower back is barely sore, maybe a one", "expected_verb": "log_symptom", "expected_slots": {"area": "back", "severity": 1}, "domain": "skill", "tags": ["slots"]}

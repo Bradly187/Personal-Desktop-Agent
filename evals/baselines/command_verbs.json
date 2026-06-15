@@ -1,0 +1,12 @@
+{
+  "suite": "command_verbs",
+  "mode": "single",
+  "recorded_at": "2026-06-14T18:29:45",
+  "model": "default",
+  "tolerance": 0.05,
+  "n": 16,
+  "verb_acc": 1.0,
+  "exact_acc": 1.0,
+  "p50_latency_ms": 434.4,
+  "errors": 0
+}

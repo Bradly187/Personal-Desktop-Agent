@@ -1,0 +1,13 @@
+{
+  "suite": "explain_quality",
+  "mode": "judge",
+  "recorded_at": "2026-06-14T18:57:12",
+  "model": "gemma4:12b",
+  "tolerance": 0.1,
+  "n": 6,
+  "exact_acc": 0.8333,
+  "pass_rate": 0.8333,
+  "mean_overall": 0.8333,
+  "p50_latency_ms": 1714.8,
+  "errors": 1
+}
