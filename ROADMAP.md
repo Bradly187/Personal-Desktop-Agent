@@ -1,5 +1,9 @@
 # Personal Desktop Agent — Development Roadmap
 
+> **⚠️ Stale (last updated 2026-05-25).** Predates Sprints N/O/P/Q, the audit hash-chain, Gmail
+> OAuth, the skill model/breadth, proactivity, the audio/voice pipeline, and the eval harness.
+> For the current backlog see `CLAUDE.md` and `docs/audits/2026-06-14-audit-and-sprint-plan.md`.
+
 *Last updated: 2026-05-25*
 
 This roadmap covers the next wave of improvements identified from a hardware resource analysis

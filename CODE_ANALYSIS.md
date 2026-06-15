@@ -1,5 +1,10 @@
 # Code Analysis — Personal Desktop Agent
 
+> **⚠️ Historical snapshot (2026-06-07) — superseded.** This is a point-in-time analysis; the
+> codebase has since shipped Sprints N/O/P/Q, the audit hash-chain, Gmail OAuth, the skill model,
+> proactivity, the audio/voice pipeline, and the eval harness. Counts and capability claims here
+> are dated (e.g. `agent.db` is now **42 tables at v7**, not 30). For current state see `CLAUDE.md`.
+
 > **Scope:** Documents what exists as of 2026-06-07 (master tip `657bb2c`, all five feature branches merged).
 > Section 6 maps the codebase against a standard agentic-orchestration framework to identify solid,
 > partial, and absent capabilities. No implementation changes are proposed here.

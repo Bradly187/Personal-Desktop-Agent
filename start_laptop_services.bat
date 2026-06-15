@@ -2,6 +2,12 @@
 REM ============================================================================
 REM  start_laptop_services.bat - launch the laptop compute-node services
 REM
+REM  *** CLUSTER OFFLOAD IS CURRENTLY DISABLED (2026-06-14). ***
+REM  The desktop runs fully local; `cluster_config.json` was renamed to
+REM  `cluster_config.json.disabled`, so the desktop will NOT route to these
+REM  services even if they are running. To re-enable: rename the config back to
+REM  `cluster_config.json`, set the laptop endpoints, then run this script.
+REM
 REM  Starts the Whisper offload (:8888) and Indexer offload (:9000) services
 REM  using the laptop venv. Ollama (:11434) is assumed already running via the
 REM  Ollama tray app (OLLAMA_HOST=0.0.0.0 is persisted, so it binds the LAN).
