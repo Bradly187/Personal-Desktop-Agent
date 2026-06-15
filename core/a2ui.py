@@ -277,6 +277,50 @@ TEMPLATES = {
 
 
 # --------------------------------------------------------------------------- #
+# Click-target palette (Phase 3, prototype) — "what would you like to click?"
+# is not enumerable from text, but the live UI tree IS: the coordinator ranks
+# clickable elements from target_cache and we render them as a tappable list.
+# Each button carries the element's pixel center as "x,y"; the bridge dispatches
+# a coordinate-precise CLICK (no re-grounding), so it's still token-free.
+# --------------------------------------------------------------------------- #
+
+_CLICK_TARGET_PATTERNS = (
+    "click on", "target for the click", "target of the click", "which input field",
+)
+
+_MAX_CLICK_TARGETS = 8
+
+
+def is_click_target_clarify(message: str) -> bool:
+    """True when a CLARIFY is asking the user which on-screen element to click."""
+    if not message:
+        return False
+    low = message.lower()
+    return any(p in low for p in _CLICK_TARGET_PATTERNS)
+
+
+def click_target_surface(targets: list[tuple[str, int, int]], *, surface_id: Optional[str] = None) -> dict:
+    """Render ranked clickable elements as buttons.
+
+    ``targets`` is a list of ``(label, x, y)``; a tap fires ``event="click_target"``
+    with ``value="x,y"`` which the bridge turns into a direct CLICK at that point.
+    """
+    items = [(str(lbl), int(x), int(y)) for (lbl, x, y) in targets[:_MAX_CLICK_TARGETS] if lbl]
+    if not items:
+        raise ValueError("click_target_surface requires at least one target")
+    sid = surface_id or _gen_surface_id("clicktgt")
+    b = A2UIBuilder()
+    b.text("q", "Which element?", "headline")
+    btn_ids: list[str] = []
+    for i, (lbl, x, y) in enumerate(items):
+        bid = b.button(f"t{i}", lbl[:40], f"{x},{y}", event="click_target")
+        btn_ids.append(bid)
+    b.column("choices", btn_ids)
+    b.card("root", ["q", "choices"])
+    return b.surface("root", surface_id=sid, dismissible=True, timeout_s=30.0)
+
+
+# --------------------------------------------------------------------------- #
 # Validation — run before send so the renderer never sees a malformed payload
 # --------------------------------------------------------------------------- #
 

@@ -15,6 +15,7 @@
 | Bridge send / clear / event handler | `core/ipad_bridge.py` (`send_a2ui_surface`, `clear_a2ui_surface`, `register_a2ui_surface`, `_handle_a2ui_event`) | ✅ done |
 | Approval gate-open trigger | `approval_hook.py` (persist prompt) + `sensors/whisper_stream.py` (`on_approval_gate_open`) + `main.py` | ✅ done |
 | **CLARIFY emit/clear + tap→voice routing** | `core/hybrid_coordinator.py` (`_maybe_emit_clarify_surface`/`_clear_clarify_surface`) + bridge tap-routing | ✅ done |
+| **Click-target palette (Phase 3, prototype)** | `core/a2ui.py` (`is_click_target_clarify`, `click_target_surface`) + coordinator (`_rank_click_targets`, `_build_click_target_surface`, `set_target_cache`) + bridge `click_target` dispatch | 🧪 flag-gated `DA_A2UI_CLICK_TARGETS=1` |
 | Swift models / renderer / overlay | `iPadApp/.../Network/A2UIModels.swift`, `UI/A2UIRenderer.swift`, `UI/A2UIOverlay.swift`, `WebSocketManager.swift`, `ContentView.swift` | ✅ scaffolded (generic — handles approval AND clarify with no per-type code) |
 | End-to-end on device | — | ⏳ needs one iPad build |
 
@@ -22,7 +23,11 @@ PC subset green: **239 passed** (`-k "coordinator or clarif or bridge or whisper
 
 **Token economics.** Rendering is on-device (free). Generation is token-free for both shipped paths: approval is a fixed template; enumerable CLARIFY reuses options the model *already* emitted as text, mapped to a template by string match — the LLM is never asked to author UI. Only the (unimplemented) free-form "LLM-generates-UI" pattern would spend tokens, and the 31% free-form CLARIFYs deliberately stay voice-only.
 
-**CLARIFY audit result** (sized Phase 2): of 65 real CLARIFY events in `agent.db`, **42% enumerable / 28% semi / 31% free-form**. Shipped: the 42% enumerable (direction, type, post-open action) **and** the 28% semi — "what would you like to open?" now renders the user's recent apps as buttons, fed by a rolling `_recent_open_targets` buffer in the coordinator (updated on each successful OPEN; falls back to voice until the user has opened something). The remaining 31% free-form stays voice-only by design. Net: **~70% of clarifications are now tappable**.
+**CLARIFY audit result** (sized Phase 2): of 65 real CLARIFY events in `agent.db`, **42% enumerable / 28% semi / 31% free-form**. Shipped: the 42% enumerable (direction, type, post-open action) **and** the 28% semi — "what would you like to open?" now renders the user's recent apps as buttons, fed by a rolling `_recent_open_targets` buffer in the coordinator (updated on each successful OPEN; falls back to voice until the user has opened something). Net: **~70% of clarifications are now tappable**.
+
+**The 31% free-form, dissected** (Phase 3): ~58% of it is **click-target** ("what would you like me to click on?") — *not* truly free-form, because the live UI tree enumerates every clickable element. The prototype ranks `target_cache.snapshot()` by cursor proximity (dedup, filter unnamed/tiny/oversized, cap 8) and renders them as a tappable palette; a tap fires a coordinate-precise CLICK via the touch-bypass path (no LLM, no re-grounding). The remaining ~42% (genuinely conversational) stays voice-only by design.
+
+**Evaluating the click-target prototype.** Gated `DA_A2UI_CLICK_TARGETS=1` (off by default). When a click-target CLARIFY fires, the ranked element names are logged at INFO (`a2ui: click-target palette (N): [...]`) — eyeball those lists to judge whether the names are legible enough to beat voice before promoting it. If names prove cryptic, the fallback is a numbered screenshot-overlay render mode (more iPad work). Potential reach if promoted: ~70% → ~88% tappable.
 
 ---
 

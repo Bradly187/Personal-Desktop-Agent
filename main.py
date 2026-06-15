@@ -937,6 +937,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     bridge.set_coordinator(coordinator)  # needed for pain_day_override message
     bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
     coordinator.set_bridge(bridge)  # trace_id correlation: coordinator → bridge on command executed
+    coordinator.set_target_cache(target_cache)  # A2UI click-target palette (DA_A2UI_CLICK_TARGETS)
     fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
     await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
     await profiler.load_rom_bounds(agent_db)       # D4: ROM → initial VAD bounds

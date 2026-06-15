@@ -189,6 +189,66 @@ def test_template_events_are_clarify_so_taps_route_as_commands():
                for c in s["components"] if c.get("action"))
 
 
+# --------------------------------------------------------------------------- #
+# Click-target palette (Phase 3 prototype)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_click_target_clarify():
+    assert a2ui.is_click_target_clarify("What would you like me to click on?")
+    assert a2ui.is_click_target_clarify("What is the target for the click?")
+    assert a2ui.is_click_target_clarify("Which input field would you like me to click on?")
+    assert not a2ui.is_click_target_clarify("In which direction would you like to scroll: up, down?")
+    assert not a2ui.is_click_target_clarify("")
+
+
+def test_click_target_surface_encodes_coords_and_event():
+    s = a2ui.click_target_surface([("Submit", 100, 200), ("Search box", 50, 60)])
+    assert a2ui.validate_surface(s) == []
+    buttons = [c for c in s["components"] if c["component"] == "Button"]
+    assert buttons[0]["label"] == "Submit"
+    assert buttons[0]["action"] == {"event": "click_target", "value": "100,200"}
+
+
+def test_click_target_surface_caps_and_requires_one():
+    s = a2ui.click_target_surface([(f"el{i}", i, i) for i in range(20)])
+    assert len([c for c in s["components"] if c["component"] == "Button"]) == 8
+    with pytest.raises(ValueError):
+        a2ui.click_target_surface([])
+
+
+class _FakeTarget:
+    def __init__(self, name, bounds):
+        self.name = name
+        self.bounds = bounds
+
+
+def test_rank_click_targets_filters_dedups_and_orders():
+    from core.hybrid_coordinator import HybridCoordinator
+    snap = [
+        _FakeTarget("", (0, 0, 50, 20)),            # unnamed → dropped
+        _FakeTarget("Tiny", (0, 0, 4, 4)),          # too small → dropped
+        _FakeTarget("Huge", (0, 0, 1600, 1200)),    # oversized → dropped
+        _FakeTarget("Near", (100, 100, 140, 120)),  # center (120,110)
+        _FakeTarget("Far", (900, 900, 940, 920)),   # center (920,910)
+        _FakeTarget("Near", (100, 100, 140, 120)),  # dup name → dropped
+    ]
+    ranked = HybridCoordinator._rank_click_targets(snap, cursor=(120, 110))
+    names = [r[0] for r in ranked]
+    assert names == ["Near", "Far"]          # nearest first, deduped, filtered
+    assert ranked[0][1:] == (120, 110)       # center coords
+
+
+def test_rank_click_targets_reading_order_without_cursor():
+    from core.hybrid_coordinator import HybridCoordinator
+    snap = [
+        _FakeTarget("Bottom", (10, 500, 60, 520)),
+        _FakeTarget("Top", (10, 10, 60, 30)),
+    ]
+    ranked = HybridCoordinator._rank_click_targets(snap, cursor=None)
+    assert [r[0] for r in ranked] == ["Top", "Bottom"]
+
+
 def test_record_open_target_dedup_recency_and_cap():
     """Coordinator's recent-OPEN buffer: most-recent-first, deduped, capped."""
     from core.hybrid_coordinator import HybridCoordinator
@@ -283,6 +343,46 @@ async def test_a2ui_event_for_unknown_surface_is_noop(tmp_path):
     # No future registered, no approval — must not raise, just ack.
     await bridge._handle_a2ui_event(
         ws, {"surface_id": "ghost", "event": "choice", "value": "x"}
+    )
+    assert ws.sent and ws.sent[-1].get("status") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a2ui_click_target_tap_dispatches_click_at_coords(tmp_path):
+    """A click_target tap dispatches a coordinate-precise CLICK via the
+    touch-bypass path (source=touch, gaze_coords set), not a voice re-route."""
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+    routed = []
+
+    class _FakeCoordinator:
+        async def route(self, cmd):
+            routed.append(cmd)
+
+    bridge._coordinator = _FakeCoordinator()
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "clicktgt-1", "event": "click_target", "value": "640,480"}
+    )
+    await asyncio.sleep(0)
+    assert len(routed) == 1
+    cmd = routed[0]
+    assert cmd.action == "CLICK"
+    assert cmd.source == "touch"
+    assert cmd.gaze_coords == (640, 480)
+
+
+@pytest.mark.asyncio
+async def test_a2ui_click_target_bad_value_is_safe(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+
+    class _FakeCoordinator:
+        async def route(self, cmd):
+            raise AssertionError("should not route on bad coords")
+
+    bridge._coordinator = _FakeCoordinator()
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "x", "event": "click_target", "value": "not-coords"}
     )
     assert ws.sent and ws.sent[-1].get("status") == "ok"
 

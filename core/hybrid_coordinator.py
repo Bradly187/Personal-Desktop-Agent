@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -446,6 +447,9 @@ class HybridCoordinator:
         # Rolling list of recently-opened app/file targets (most-recent first),
         # used to populate the "what would you like to open?" CLARIFY card.
         self._recent_open_targets: list[str] = []
+        # Live clickable-element snapshot source for the click-target palette
+        # (Phase 3 prototype, flag-gated by DA_A2UI_CLICK_TARGETS).
+        self._target_cache = None
         self._conversation = ConversationState()  # voice anaphora + last-action hint
         self._lecture_mode: bool = False
         self._profiler = None    # set via set_profiler()
@@ -610,6 +614,11 @@ class HybridCoordinator:
         """Wire IPadBridge for trace_id correlation on iPad log entries."""
         self._bridge = bridge
 
+    def set_target_cache(self, cache) -> None:
+        """Wire the ClickableTargetCache so click-target CLARIFYs can render a
+        palette of on-screen elements (Phase 3 prototype)."""
+        self._target_cache = cache
+
     def _maybe_emit_clarify_surface(self, message: Optional[str]) -> None:
         """Push a tappable A2UI choice card for enumerable CLARIFYs (token-free).
 
@@ -621,12 +630,88 @@ class HybridCoordinator:
         try:
             from core import a2ui
             surface = a2ui.template_for_clarify(message, recent_apps=self._recent_open_targets)
+            if surface is None and a2ui.is_click_target_clarify(message):
+                surface = self._build_click_target_surface()
             if surface is None:
                 return
             self._active_clarify_surface_id = surface["surface_id"]
             asyncio.create_task(self._bridge.send_a2ui_surface(surface))
         except Exception as exc:
             log.debug("a2ui: clarify surface emit failed: %s", exc)
+
+    @staticmethod
+    def _rank_click_targets(snapshot, cursor, limit: int = 8) -> list[tuple[str, int, int]]:
+        """Filter + rank clickable targets into (name, cx, cy), nearest-first.
+
+        Drops unnamed / tiny / oversized elements, dedups by name (keeping the
+        nearest), and ranks by squared distance to the cursor (or reading order
+        when no cursor is available). Pure + cursor-injectable for testing.
+        """
+        scored: list[tuple[int, str, int, int]] = []
+        for t in snapshot:
+            name = (getattr(t, "name", "") or "").strip()
+            if not name:
+                continue
+            try:
+                left, top, right, bottom = t.bounds
+            except Exception:
+                continue
+            w, h = right - left, bottom - top
+            if w < 8 or h < 8 or w > 1400 or h > 1000:
+                continue
+            cx, cy = (left + right) // 2, (top + bottom) // 2
+            if cursor is not None:
+                d = (cx - cursor[0]) ** 2 + (cy - cursor[1]) ** 2
+            else:
+                d = cy * 100000 + cx          # top-to-bottom, left-to-right
+            scored.append((d, name, cx, cy))
+        scored.sort(key=lambda z: z[0])
+        seen: set[str] = set()
+        ranked: list[tuple[str, int, int]] = []
+        for _d, name, cx, cy in scored:
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ranked.append((name, cx, cy))
+            if len(ranked) >= limit:
+                break
+        return ranked
+
+    def _build_click_target_surface(self) -> Optional[dict]:
+        """Build a tappable element palette from the live UI tree, or None.
+
+        Flag-gated (DA_A2UI_CLICK_TARGETS=1) while we evaluate whether a ranked
+        list beats voice. Logs the ranked names at INFO so they can be eyeballed.
+        """
+        if self._target_cache is None:
+            return None
+        if os.environ.get("DA_A2UI_CLICK_TARGETS", "0") != "1":
+            return None
+        try:
+            snapshot = self._target_cache.snapshot()
+        except Exception as exc:
+            log.debug("a2ui: target_cache.snapshot failed: %s", exc)
+            return None
+        if not snapshot:
+            return None
+        cursor = None
+        try:
+            import pyautogui
+            cursor = pyautogui.position()
+        except Exception:
+            cursor = None
+        ranked = self._rank_click_targets(snapshot, cursor)
+        if not ranked:
+            return None
+        log.info("a2ui: click-target palette (%d): %s",
+                 len(ranked), [r[0] for r in ranked])
+        try:
+            from core import a2ui
+            return a2ui.click_target_surface(ranked)
+        except Exception as exc:
+            log.debug("a2ui: click_target_surface build failed: %s", exc)
+            return None
 
     def _record_open_target(self, target: str) -> None:
         """Push an opened app/file to the front of the recent-targets buffer

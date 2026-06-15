@@ -1076,6 +1076,21 @@ class IPadBridge:
             await self._ack(ws, msg.get("id"), "ok")
             return
 
+        if event == "click_target" and value and self._coordinator is not None:
+            # The tapped element's pixel center ("x,y") → a coordinate-precise
+            # CLICK via the touch-bypass path (no LLM, no re-grounding). Routing
+            # through the coordinator also clears the pending clarification.
+            try:
+                xs, ys = str(value).split(",", 1)
+                x, y = int(float(xs)), int(float(ys))
+                cmd = Command(text="click element", action="CLICK",
+                              source="touch", gaze_coords=(x, y))
+                asyncio.create_task(self._coordinator.route(cmd))
+            except Exception as exc:
+                log.debug("a2ui_event: bad click_target value %r: %s", value, exc)
+            await self._ack(ws, msg.get("id"), "ok")
+            return
+
         fut = self._a2ui_pending.pop(surface_id, None)
         if fut is not None and not fut.done():
             fut.set_result({"event": event, "value": value, "values": values})
