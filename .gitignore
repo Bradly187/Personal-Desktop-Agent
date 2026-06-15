@@ -3,6 +3,8 @@
 *.db-shm
 *.db-wal
 *.duckdb
+*.db.bak*
+*.bak-pre-*
 chroma_db/
 .codebase_index_state.json
 
