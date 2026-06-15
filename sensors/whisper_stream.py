@@ -209,6 +209,66 @@ def _log_future_exc(fut) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bypass-gate sanity filter
+# ---------------------------------------------------------------------------
+# The wake-armed and awaiting-clarification paths accept an utterance WITHOUT a
+# wake phrase, so a Whisper misrecognition can pose as a command there
+# ("agent compose note" misheard as "are you taking us now?"). These reject text
+# that is clearly not a command/answer: an interrogative, or text sharing no token
+# with the command surface. Erring toward rejection is safe in a bypass gate — a
+# dropped utterance just means the user repeats it; a false-accept fires an action.
+
+_QUESTION_OPENERS: frozenset = frozenset({
+    "are", "is", "was", "were", "am", "do", "does", "did", "can", "could",
+    "would", "should", "will", "shall", "may", "might", "have", "has", "had",
+    "what", "whats", "why", "how", "when", "where", "who", "whom", "whose", "which",
+})
+
+_COMMAND_VOCAB: frozenset = frozenset({
+    # desktop / accessibility actions
+    "click", "scroll", "open", "close", "type", "press", "copy", "paste", "save",
+    "undo", "redo", "select", "focus", "minimize", "maximize", "screenshot",
+    "dictate", "hotkey", "drag", "move", "resize", "switch", "tab", "window", "up",
+    "down", "left", "right", "enter", "escape", "delete", "back", "forward", "next",
+    "previous", "play", "pause", "stop", "mute", "unmute", "volume", "page",
+    # confirmation / short clarification answers
+    "yes", "no", "yeah", "nope", "yep", "cancel", "approve", "confirm", "ok",
+    "okay", "sure", "the", "that", "this", "it", "one", "first", "second", "third",
+    "top", "bottom", "here",
+    # dev / general verbs
+    "fix", "write", "explain", "find", "show", "search", "read", "run", "commit",
+    "test", "build", "make", "create", "add", "remove", "update", "refactor",
+    "review", "check", "summarize", "summarise", "plan", "implement", "debug",
+    "compose", "note", "notes",
+    # skill nouns / triggers
+    "journal", "weather", "forecast", "calendar", "meeting", "event", "email",
+    "inbox", "reply", "paper", "papers", "arxiv", "diagram", "file", "files",
+    "reminder", "remind", "pain", "log", "medication", "dose", "brief", "schedule",
+})
+
+
+def bypass_reject_reason(text: str, extra_vocab: frozenset | set = frozenset()) -> Optional[str]:
+    """Why a bypass-gate utterance is NOT a plausible command/answer, else None.
+
+    Rejects: empty text, interrogatives (trailing '?' or a question-word opener),
+    and text sharing no token with the command vocabulary (+ live hotwords passed
+    as extra_vocab). Pure/stdlib so it is unit-tested without a model.
+    """
+    import re as _re
+    t = (text or "").strip()
+    if not t:
+        return "empty"
+    if t.endswith("?"):
+        return "interrogative (ends with '?')"
+    words = _re.findall(r"[a-z0-9']+", t.lower())
+    if words and words[0] in _QUESTION_OPENERS:
+        return f"interrogative (opens with {words[0]!r})"
+    if not (set(words) & (_COMMAND_VOCAB | set(extra_vocab))):
+        return "no overlap with command vocabulary"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # WhisperStream
 # ---------------------------------------------------------------------------
 
@@ -311,6 +371,9 @@ class WhisperStream:
         # phrase filter to pass lecture / ambient audio as commands.
         self._static_hotwords: list[str] = [
             "Kiro IDE", "Kiro", "Slack", "Discord", "Claude",
+            # Bias toward the real note phrasing so it isn't misheard as ambient
+            # speech (e.g. "compose a note" -> "are you taking us now").
+            "compose a note", "take a note", "add a note",
         ]
         self._hotwords: list[str] = []
 
@@ -475,6 +538,17 @@ class WhisperStream:
         """
         self._calibration_capture = callback
         log.info("WhisperStream: calibration capture %s", "SET" if callback else "CLEARED")
+
+    def _bypass_reject_reason(self, text: str) -> Optional[str]:
+        """Bypass-gate filter with live hotwords folded into the command vocab.
+        Returns a reason to reject the utterance (it can't pose as a command in a
+        wake-armed / awaiting-clarification gate), or None if it looks plausible."""
+        import re as _re
+        hotword_tokens = {
+            w for hw in (self._static_hotwords + self._hotwords)
+            for w in _re.findall(r"[a-z0-9']+", hw.lower())
+        }
+        return bypass_reject_reason(text, hotword_tokens)
 
     def set_awaiting_clarification(self, active: bool) -> None:
         """Called by HybridCoordinator to bypass wake-phrase check during Q&A."""
@@ -1034,6 +1108,14 @@ class WhisperStream:
                         "response (logprob=%.2f): %r", avg_logprob, text
                     )
                     return
+                # Reject interrogatives / text with no command-vocab overlap: a
+                # misrecognition (e.g. "are you taking us now?") must not pose as
+                # the user's clarification answer.
+                reason = self._bypass_reject_reason(text)
+                if reason:
+                    log.debug("WhisperStream: discarding clarification response "
+                              "(%s): %r", reason, text)
+                    return
 
         if not awaiting:
             import re as _re
@@ -1059,6 +1141,13 @@ class WhisperStream:
                     if len(text.split()) > 8:
                         log.debug("WhisperStream: wake-armed window — ignoring long "
                                   "utterance (%d words): %r", len(text.split()), text)
+                        return
+                    # Reject interrogatives / no-vocab-overlap text so a
+                    # misrecognition can't ride the armed window in as a command.
+                    reason = self._bypass_reject_reason(text)
+                    if reason:
+                        log.debug("WhisperStream: wake-armed window — ignoring "
+                                  "non-command (%s): %r", reason, text)
                         return
                     log.info("WhisperStream: wake-armed command: %r", text)
                 elif self._lecture_mode and self._agent_db and self._agent_db.available \
