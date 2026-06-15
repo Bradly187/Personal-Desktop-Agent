@@ -727,6 +727,19 @@ CREATE TABLE IF NOT EXISTS skill_invocations (
     result_summary  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_skillinv_ts ON skill_invocations(ts);
+
+-- Learned per-domain keyword overlay (E2). A small, bounded additive nudge on top
+-- of the static DomainClassifier keyword sets, populated by ContinuousTrainer from
+-- confirmed-correct per-domain vocabulary and applied only when DA_DOMAIN_LEARN is
+-- on. Plain CREATE TABLE IF NOT EXISTS (appears on existing DBs too) — no
+-- migration bump needed, same as skill_invocations.
+CREATE TABLE IF NOT EXISTS domain_keyword_weights (
+    domain   TEXT NOT NULL,
+    keyword  TEXT NOT NULL,
+    weight   REAL NOT NULL DEFAULT 0.0,
+    ts       REAL NOT NULL,
+    PRIMARY KEY (domain, keyword)
+);
 """
 
 
@@ -3388,6 +3401,109 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.get_command_stats_last_n_days failed: %s", exc)
             return []
+
+    async def get_domain_misroutes(self, limit: int = 1000) -> list[dict]:
+        """Per-domain routed vs corrected counts → a misroute rate signal (E1).
+
+        Joins each inference's chosen `domain` to its command and counts how many
+        of those commands the user later corrected (`corrected_to IS NOT NULL`).
+        A high rate means that domain's routing/handling is error-prone. Returns
+        [{domain, routed, corrected, rate}], busiest domains first. Read-only —
+        the misroute analyzer logs from this; it does not itself change routing.
+        """
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT i.domain AS domain,
+                          COUNT(*) AS routed,
+                          SUM(CASE WHEN c.corrected_to IS NOT NULL THEN 1 ELSE 0 END)
+                              AS corrected
+                   FROM inferences i
+                   JOIN commands c ON c.id = i.command_id
+                   WHERE i.command_id IS NOT NULL
+                   GROUP BY i.domain
+                   ORDER BY routed DESC
+                   LIMIT ?""",
+                (limit,),
+            ) as cur:
+                out = []
+                for r in await cur.fetchall():
+                    d = dict(r)
+                    routed = d.get("routed") or 0
+                    corrected = d.get("corrected") or 0
+                    d["rate"] = (corrected / routed) if routed else 0.0
+                    out.append(d)
+                return out
+        except Exception as exc:
+            log.warning("AgentDB.get_domain_misroutes failed: %s", exc)
+            return []
+
+    # E2 — learned per-domain keyword overlay (bounded; weights clamp to [0, MAX]
+    # so the nudge can never dominate the static keyword scores).
+    _DOMAIN_OVERLAY_MAX = 5.0
+
+    async def upsert_domain_keyword_weight(self, domain: str, keyword: str,
+                                           weight: float) -> None:
+        if not self._conn or not domain or not keyword:
+            return
+        w = max(0.0, min(self._DOMAIN_OVERLAY_MAX, float(weight)))
+        try:
+            await self._conn.execute(
+                """INSERT INTO domain_keyword_weights (domain, keyword, weight, ts)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(domain, keyword) DO UPDATE
+                     SET weight = excluded.weight, ts = excluded.ts""",
+                (domain, keyword.lower(), w, time.time()),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.upsert_domain_keyword_weight failed: %s", exc)
+
+    async def get_domain_keyword_weights(self) -> dict:
+        """Return {domain: {keyword: weight}} — the full learned overlay."""
+        if not self._conn:
+            return {}
+        try:
+            async with self._conn.execute(
+                "SELECT domain, keyword, weight FROM domain_keyword_weights"
+            ) as cur:
+                out: dict = {}
+                for r in await cur.fetchall():
+                    out.setdefault(r["domain"], {})[r["keyword"]] = r["weight"]
+                return out
+        except Exception as exc:
+            log.warning("AgentDB.get_domain_keyword_weights failed: %s", exc)
+            return {}
+
+    async def clear_domain_keyword_overlay(self, domain: str) -> None:
+        """Drop a domain's learned overlay (rollback path)."""
+        if not self._conn or not domain:
+            return
+        try:
+            await self._conn.execute(
+                "DELETE FROM domain_keyword_weights WHERE domain = ?", (domain,))
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.clear_domain_keyword_overlay failed: %s", exc)
+
+    async def get_few_shot_texts_by_domain(self, limit: int = 2000) -> dict:
+        """Return {domain: [text, …]} from few_shot_examples — the confirmed-correct
+        per-domain vocabulary the overlay learner samples (E2)."""
+        if not self._conn:
+            return {}
+        try:
+            async with self._conn.execute(
+                "SELECT domain, text FROM few_shot_examples ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            ) as cur:
+                out: dict = {}
+                for r in await cur.fetchall():
+                    out.setdefault(r["domain"], []).append(r["text"])
+                return out
+        except Exception as exc:
+            log.warning("AgentDB.get_few_shot_texts_by_domain failed: %s", exc)
+            return {}
 
     async def get_source_stats_last_n_days(self, days: int = 7) -> list[dict]:
         """Return per-source success/total counts for the last N days."""

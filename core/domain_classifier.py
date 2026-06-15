@@ -17,9 +17,19 @@ Scoring weights multiple evidence signals so domain boundaries are soft.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+# E2 — learned per-domain keyword overlay. OFF by default: with DA_DOMAIN_LEARN
+# unset the classifier is exactly the static-keyword classifier (zero behaviour
+# change, the router_domains eval baseline holds). When on, a small bounded nudge
+# (capped at _MAX_OVERLAY_NUDGE) is added per domain from learned vocabulary — it
+# can break ties but never override the static scores (command boost 40, skill 30+).
+_DOMAIN_LEARN = os.environ.get("DA_DOMAIN_LEARN", "0").strip().lower() in (
+    "1", "true", "on", "yes",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +168,31 @@ class DomainClassifier:
         SkillRegistry.start() with the union of all manifest intent phrases)."""
         cls._SKILL_KEYWORDS = {k.lower() for k in (keywords or ())}
 
+    # E2 — learned per-domain keyword overlay {domain: {keyword: weight}}. Class
+    # level so coordinator + DevAgent classifiers share ONE overlay. Applied only
+    # when DA_DOMAIN_LEARN is on; empty → no nudge.
+    _KEYWORD_OVERLAY: "dict[str, dict[str, float]]" = {}
+    _MAX_OVERLAY_NUDGE = 15.0
+
+    @classmethod
+    def register_keyword_overlay(cls, overlay) -> None:
+        """Install the learned per-domain keyword overlay (ContinuousTrainer loads
+        it from AgentDB.get_domain_keyword_weights). Replaces any prior overlay."""
+        cls._KEYWORD_OVERLAY = {
+            d: {k.lower(): float(w) for k, w in (kw or {}).items()}
+            for d, kw in (overlay or {}).items()
+        }
+
+    def _overlay_nudge(self, domain: str, tokens: "list[str]") -> float:
+        """Bounded additive nudge for a domain from the learned overlay (0 when off)."""
+        if not _DOMAIN_LEARN:
+            return 0.0
+        weights = self._KEYWORD_OVERLAY.get(domain)
+        if not weights:
+            return 0.0
+        total = sum(weights.get(t, 0.0) for t in tokens)
+        return min(self._MAX_OVERLAY_NUDGE, total)
+
     def classify(self, text: str) -> str:
         """Return the most likely domain string."""
         return self.score(text)[0].domain
@@ -211,6 +246,12 @@ class DomainClassifier:
 
         # General is the fallback — always present but lowest priority
         scores.append(DomainScore("general", 0.5, []))
+
+        # E2 — apply the bounded learned overlay nudge (no-op when DA_DOMAIN_LEARN
+        # is off or the overlay is empty). Tie-breaker only: capped per domain.
+        if _DOMAIN_LEARN and self._KEYWORD_OVERLAY:
+            for ds in scores:
+                ds.score += self._overlay_nudge(ds.domain, tokens)
 
         scores.sort(key=lambda s: s.score, reverse=True)
         return scores
