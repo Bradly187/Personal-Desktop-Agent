@@ -1,0 +1,41 @@
+name: Behavioral Evals (Tier-1)
+
+# Model-free regression gate for the behavioral eval harness. Mirrors the Tier-1
+# block of scripts/run_evals.ps1 — the eval-harness logic tests plus the
+# deterministic DomainClassifier router gate. No GPU / no Ollama, so it runs on a
+# stock CPU runner in well under a minute. Model-backed suites (command /
+# trajectory / judge) stay local via the pre-push hook (they need Ollama).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  evals-tier1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install minimal deps
+        # The eval package is pure-stdlib; the only heavy imports are pulled in by
+        # tests/conftest.py (numpy + cv2). opencv-python-headless avoids GUI libs
+        # on the runner. asyncio_mode=auto (pytest.ini) needs pytest-asyncio.
+        run: pip install pytest pytest-asyncio numpy opencv-python-headless
+
+      - name: Eval-harness logic tests
+        # `python -m pytest` puts the repo root on sys.path so `evals`/`core`
+        # resolve without an editable install.
+        run: |
+          python -m pytest tests/test_evals.py tests/test_evals_trajectory.py \
+                           tests/test_evals_judge.py tests/test_evals_router.py -q
+
+      - name: Router gate (deterministic DomainClassifier)
+        run: python -m evals.run --suite router_domains --predictor router --check
