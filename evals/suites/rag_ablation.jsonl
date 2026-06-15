@@ -1,0 +1,12 @@
+# rag_ablation — does the codebase indexer actually ground the dev agent?
+# Each goal asks the LIVE DevAgent to explain a real repo file. `anchor_terms` are
+# real identifiers/terms from that file. --mode ablation runs every goal WITH the
+# CodebaseIndexer wired and WITHOUT it, and scores anchor-term recall for each; the
+# headline is mean Δ (with − without). A grounded answer surfaces these symbols; a
+# hallucinated one ("quantum circuit execution jobs" for the scheduler) does not.
+# Read-only goals only; the run executes real plans, so it's Tier-2 / on-demand.
+{"id": "ab-scheduler", "suite": "rag_ablation", "goal": "explain what core/scheduler.py does", "anchor_terms": ["AccessibilityScheduler", "fan_out", "semaphore", "priority", "DEV_AGENT"], "tags": ["explain", "rag"]}
+{"id": "ab-sandbox", "suite": "rag_ablation", "goal": "explain how inference/sandbox.py builds the WSL jail", "anchor_terms": ["bubblewrap", "firejail", "unshare", "RLIMIT", "sandbox"], "tags": ["explain", "rag"]}
+{"id": "ab-circuit", "suite": "rag_ablation", "goal": "explain how core/circuit_breaker.py decides to open and recover", "anchor_terms": ["half-open", "cooldown", "latched", "consecutive", "probe"], "tags": ["explain", "rag"]}
+{"id": "ab-supervisor", "suite": "rag_ablation", "goal": "explain what core/supervisor.py does", "anchor_terms": ["one-for-one", "is_healthy", "restart", "watchdog", "FAILED"], "tags": ["explain", "rag"]}
+{"id": "ab-governor", "suite": "rag_ablation", "goal": "explain what core/resource_governor.py does on a flare", "anchor_terms": ["flare", "hysteresis", "evict", "pain_day", "governor"], "tags": ["explain", "rag"]}
