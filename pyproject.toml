@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "personal-desktop-agent"
+version = "0.1.0"
+description = "Multimodal accessibility desktop control — an iPad sensor hub driving Windows desktop actions via local LLM inference."
+readme = "README.md"
+requires-python = ">=3.10"
+# Dependencies are sourced from requirements.txt (single source of truth) — see
+# [tool.setuptools.dynamic] below. Install the package editable so the domain
+# packages (core, sensors, inference, …) import without sys.path hacks:
+#     pip install -e .            # installs deps too
+#     pip install -e . --no-deps  # if deps are already in the venv
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# Flat application layout: the importable packages live at the repo root. List
+# them explicitly so non-package trees (tests, docs, scripts, iPadApp, the Node
+# sidecar, kiro, _archive) are never picked up as installable packages.
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "core*",
+    "sensors*",
+    "inference*",
+    "tts*",
+    "storage*",
+    "calibration*",
+    "desktop*",
+    "adaptive*",
+    "monitoring*",
+    "mcp_server*",
+    "skills*",
+]
+exclude = [
+    "tests*",
+    "_archive*",
+    "docs*",
+    "scripts*",
+    "iPadApp*",
+    "tts_service*",
+    "kiro*",
+]
+
+# NOTE: pytest configuration intentionally stays in pytest.ini (which takes
+# precedence over pyproject). The root entry points (main.py, approval_hook.py,
+# windows_action_proxy.py) remain run-directly scripts, not installed modules.
