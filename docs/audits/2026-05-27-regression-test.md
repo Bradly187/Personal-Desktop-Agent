@@ -1,5 +1,11 @@
 # Regression Test — 2026-05-27
 
+> **⚠️ Historical snapshot — superseded.** Point-in-time review of the 2026-05-25 commits.
+> Several premises are already stale (e.g. `websockets` is now pinned `16.0`, not `14.2`).
+> Do not treat findings here as current. For live state see `CLAUDE.md` and the later
+> audits in this folder (`2026-06-12-gap-security-analysis.md`, `2026-06-14-audit-and-sprint-plan.md`).
+> Archived from the repo root to `docs/audits/` on 2026-06-15.
+
 Automated review of the most recent day of commits (2026-05-25; there were no
 commits dated 2026-05-26). Scope: regressions, logic errors, concurrency,
 dependency problems, and security. Logs reviewed: `logs/agent_startup.log`.
