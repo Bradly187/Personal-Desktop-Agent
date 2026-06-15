@@ -104,6 +104,30 @@ def _run_judge(args):
     )
 
 
+def _build_dev_agent(model: str | None):
+    """Construct a minimal real DevAgent for the execution eval.
+
+    DevAgent only *requires* a ModelRouter; coordinator / indexer / scheduler /
+    memory are optional (None → guarded no-ops). The plan domain is routed to the
+    plan specialist by ModelRouter, so --model is informational here (the router
+    decides the planner model). Built lazily so --help never imports the model stack.
+    """
+    from inference.dev_agent import DevAgent
+    from inference.model_router import ModelRouter
+    return DevAgent(router=ModelRouter())
+
+
+def _run_execution(args):
+    from evals.trajectory import load_trajectory_suite
+    from evals.runner import run_execution_suite
+    cases = load_trajectory_suite(args.suite)
+    if not cases:
+        print("no cases to run", file=sys.stderr)
+        return None
+    return run_execution_suite(
+        cases, lambda: _build_dev_agent(args.model), timeout_s=args.timeout)
+
+
 def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
     print(report.summary())
     by_verb = getattr(report, "by_verb", None)
@@ -120,7 +144,7 @@ def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
     if report.failures:
         print(f"\nfailures (first {show_failures}):")
         for r in report.failures[:show_failures]:
-            if mode == "trajectory":
+            if mode in ("trajectory", "execution"):
                 why = r.error or r.detail or f"got {r.predicted_verbs}"
             elif mode == "judge":
                 why = r.error or f"overall={r.overall:.2f} :: {r.rationale}"
@@ -132,7 +156,10 @@ def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run a behavioral eval suite.")
     ap.add_argument("--suite", required=True, help="suite name (evals/suites/<name>.jsonl)")
-    ap.add_argument("--mode", choices=["single", "trajectory", "judge"], default="single")
+    ap.add_argument("--mode", choices=["single", "trajectory", "judge", "execution"],
+                    default="single",
+                    help="execution = run the goal through the LIVE DevAgent and "
+                         "score the executed trajectory (read-only suites only)")
     ap.add_argument("--predictor", choices=["command", "slots", "router"],
                     default="command",
                     help="single mode only (router = model-free DomainClassifier eval)")
@@ -151,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     runner = {"single": _run_single, "trajectory": _run_trajectory,
-              "judge": _run_judge}[args.mode]
+              "judge": _run_judge, "execution": _run_execution}[args.mode]
     report = runner(args)
     if report is None:
         return 2

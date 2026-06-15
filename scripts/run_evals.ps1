@@ -17,11 +17,17 @@
 .PARAMETER SkipModel
   Run only the model-free tier (logic tests + router gate).
 
+.PARAMETER Execution
+  Also run the live-DevAgent execution gate (dev_execution suite, --mode
+  execution). Off by default because it runs real plans end-to-end (slow): it is
+  NOT part of the pre-push hook. Run it by hand or on a schedule.
+
 .EXAMPLE
   pwsh -File scripts/run_evals.ps1
   pwsh -File scripts/run_evals.ps1 -SkipModel
+  pwsh -File scripts/run_evals.ps1 -Execution
 #>
-param([switch]$SkipModel)
+param([switch]$SkipModel, [switch]$Execution)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -63,6 +69,10 @@ if (-not $SkipModel) {
     # too short and a single timed-out case drops accuracy and flakes the gate.
     Invoke-Gate "trajectory gate" @("--suite", "dev_trajectory", "--mode", "trajectory", "--model", "qwen3-coder:30b", "--timeout", "180", "--check") $true
     Invoke-Gate "judge gate" @("--suite", "explain_quality", "--mode", "judge", "--model", "gemma4:12b", "--judge-model", "gemma3:27b", "--timeout", "90", "--check") $true
+    # Live-DevAgent execution gate — opt-in (slow: real plans run end-to-end).
+    if ($Execution) {
+        Invoke-Gate "execution gate" @("--suite", "dev_execution", "--mode", "execution", "--timeout", "200", "--check") $true
+    }
 } else {
     Write-Host ""
     Write-Host "(model-backed gates skipped: -SkipModel)" -ForegroundColor Yellow
