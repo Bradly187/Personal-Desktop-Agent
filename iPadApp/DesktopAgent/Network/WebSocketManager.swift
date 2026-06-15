@@ -88,6 +88,13 @@ final class WebSocketManager: ObservableObject {
     /// Feed of voice calibration events from the PC (phrase prompts, results, completion).
     let calibrationEventPublisher = PassthroughSubject<CalibrationEvent, Never>()
 
+    /// Feed of agent-pushed A2UI surfaces (approval prompts, enumerable CLARIFY).
+    /// Rendered by A2UIOverlay; taps reply via `sendA2UIEvent`.
+    let a2uiFeed = PassthroughSubject<A2UISurface, Never>()
+
+    /// Feed of A2UI dismiss requests, keyed by surface_id.
+    let a2uiClearFeed = PassthroughSubject<String, Never>()
+
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
 
@@ -253,6 +260,23 @@ final class WebSocketManager: ObservableObject {
         send(payload)
         commandFeed.send(text ?? action)
         return id
+    }
+
+    /// Reply to an agent-pushed A2UI surface. `value` is the activated control's
+    /// value; `values` carries form-field state keyed by field_id.
+    func sendA2UIEvent(surfaceId: String,
+                       event: String,
+                       value: String?,
+                       values: [String: String]) {
+        var payload: [String: Any] = [
+            "type": "a2ui_event",
+            "surface_id": surfaceId,
+            "event": event,
+            "ts": CACurrentMediaTime(),
+        ]
+        if let value { payload["value"] = value }
+        if !values.isEmpty { payload["values"] = values }
+        send(payload)
     }
 
     // MARK: — Connection internals
@@ -445,6 +469,23 @@ final class WebSocketManager: ObservableObject {
             let title = json["title"] as? String ?? "Notification"
             let body  = json["body"]  as? String ?? ""
             proactiveFeed.send(ProactiveNotification(title: title, body: body))
+            parsed = .unknown(type: type, raw: json)
+
+        case "a2ui_surface":
+            // Re-serialize the raw dict and decode into the typed surface model;
+            // a decode failure is logged and dropped (renderer never sees junk).
+            if let data = try? JSONSerialization.data(withJSONObject: json),
+               let surface = try? JSONDecoder().decode(A2UISurface.self, from: data) {
+                a2uiFeed.send(surface)
+            } else {
+                AppLogger.shared.warning("a2ui", "failed to decode a2ui_surface")
+            }
+            parsed = .unknown(type: type, raw: json)
+
+        case "a2ui_clear":
+            if let surfaceId = json["surface_id"] as? String {
+                a2uiClearFeed.send(surfaceId)
+            }
             parsed = .unknown(type: type, raw: json)
 
         case "calibration_phrase":

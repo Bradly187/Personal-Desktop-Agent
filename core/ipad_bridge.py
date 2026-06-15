@@ -196,6 +196,12 @@ class IPadBridge:
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
 
+        # A2UI: surfaces awaiting a tap reply, keyed by surface_id → Future.
+        # Phase 1 (approval) writes the response file directly; Phase 2+ awaits
+        # these futures for enumerable CLARIFY answers.
+        self._a2ui_pending: dict[str, "asyncio.Future"] = {}
+        self._approval_dir = Path.home() / ".claude" / "approval"
+
     # ---------------------------------------------------------------------- #
     # Wiring (called by main.py before run())
     # ---------------------------------------------------------------------- #
@@ -566,6 +572,10 @@ class IPadBridge:
         if msg_type == "ipad_log":
             await self._handle_ipad_log(msg)
             return  # fire-and-forget, no ack
+
+        if msg_type == "a2ui_event":
+            await self._handle_a2ui_event(ws, msg)
+            return
 
         log.warning("Unknown message type: %s", msg_type)
         await self._ack(ws, msg_id, "error", f"unknown type: {msg_type}")
@@ -1000,6 +1010,100 @@ class IPadBridge:
     async def broadcast_mic_state(self, muted: bool) -> None:
         """Push the current mic mute state to all connected iPad clients."""
         await self.broadcast_json({"type": "mic_state", "muted": bool(muted)})
+
+    # ---------------------------------------------------------------------- #
+    # A2UI — agent-generated declarative touch surfaces (see core/a2ui.py)
+    # ---------------------------------------------------------------------- #
+
+    async def send_a2ui_surface(self, surface: dict) -> bool:
+        """Validate and broadcast an A2UI surface to connected iPads.
+
+        Returns False (and sends nothing) if the payload fails schema
+        validation — the caller should then fall back to voice, so the renderer
+        never receives a malformed surface (whitepaper best practice).
+        """
+        from core import a2ui
+
+        errs = a2ui.validate_surface(surface)
+        if errs:
+            log.warning("a2ui: refusing to send invalid surface: %s", "; ".join(errs))
+            return False
+        log.info("a2ui: sending surface %s (%d components)",
+                 surface.get("surface_id"), len(surface.get("components", [])))
+        await self.broadcast_json(surface)
+        return True
+
+    async def clear_a2ui_surface(self, surface_id: str) -> None:
+        """Dismiss a live surface on the iPad (agent resolved it another way)."""
+        await self.broadcast_json({"type": "a2ui_clear", "surface_id": surface_id})
+
+    def register_a2ui_surface(self, surface_id: str) -> "asyncio.Future":
+        """Create a Future resolved when the user taps on ``surface_id``.
+
+        Used by the CLARIFY path (Phase 2) to await an enumerable answer; the
+        approval gate (Phase 1) does not use this — it writes the response file.
+        """
+        loop = asyncio.get_event_loop()
+        fut: "asyncio.Future" = loop.create_future()
+        self._a2ui_pending[surface_id] = fut
+        return fut
+
+    async def _handle_a2ui_event(self, ws: web.WebSocketResponse, msg: dict) -> None:
+        """iPad → PC: the user tapped a control on an A2UI surface.
+
+        Two resolution paths, both reusing EXISTING decision plumbing:
+          * event == "approval"  → write the canonical token to the shared
+            ``~/.claude/approval/response`` file (identical to a voice verdict).
+          * otherwise            → resolve a pending surface Future if one is
+            registered (enumerable CLARIFY).
+        """
+        surface_id = msg.get("surface_id", "")
+        event = msg.get("event", "")
+        value = msg.get("value")
+        values = msg.get("values") or {}
+        log.info("a2ui_event: surface=%s event=%s value=%r", surface_id, event, value)
+
+        if event == "approval":
+            # Parallel input to the voice approval gate. Deny on anything that
+            # isn't an explicit "approve" — fail safe, matching the voice path.
+            verdict = "approve" if value == "approve" else "deny"
+            try:
+                self._approval_dir.mkdir(parents=True, exist_ok=True)
+                (self._approval_dir / "response").write_text(verdict, encoding="utf-8")
+                log.info("a2ui_event: approval response %s ← tap", verdict)
+            except Exception as exc:
+                log.warning("a2ui_event: could not write approval response: %s", exc)
+            await self._ack(ws, msg.get("id"), "ok")
+            return
+
+        if event == "click_target" and value and self._coordinator is not None:
+            # The tapped element's pixel center ("x,y") → a coordinate-precise
+            # CLICK via the touch-bypass path (no LLM, no re-grounding). Routing
+            # through the coordinator also clears the pending clarification.
+            try:
+                xs, ys = str(value).split(",", 1)
+                x, y = int(float(xs)), int(float(ys))
+                cmd = Command(text="click element", action="CLICK",
+                              source="touch", gaze_coords=(x, y))
+                asyncio.create_task(self._coordinator.route(cmd))
+            except Exception as exc:
+                log.debug("a2ui_event: bad click_target value %r: %s", value, exc)
+            await self._ack(ws, msg.get("id"), "ok")
+            return
+
+        fut = self._a2ui_pending.pop(surface_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result({"event": event, "value": value, "values": values})
+        elif value and self._coordinator is not None:
+            # CLARIFY answer: re-enter the pipeline as a voice-equivalent command
+            # so the existing pending-clarification context resolves it exactly
+            # like a spoken reply (action is a placeholder; the LLM reclassifies).
+            try:
+                answer = Command(text=str(value), action="DICTATE", source="voice")
+                asyncio.create_task(self._coordinator.route(answer))
+            except Exception as exc:
+                log.debug("a2ui_event: could not route clarify answer: %s", exc)
+        await self._ack(ws, msg.get("id"), "ok")
 
     async def send_recalibration_request(
         self, reason: str = "voice_clarity", degradation_pct: float = 0.0

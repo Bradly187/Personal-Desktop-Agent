@@ -161,6 +161,47 @@ def test_echo_guard_suppresses_on_gate_open(approval_dir):
     assert ws._suppress_until > time.monotonic()  # mic suppressed
 
 
+def test_gate_open_fires_a2ui_callback_with_prompt(approval_dir):
+    """A2UI: the gate-open transition fires on_approval_gate_open with the
+    persisted prompt description (parallel to the voice question)."""
+    ws = _stream()
+    seen = []
+    ws.on_approval_gate_open = lambda desc: seen.append(desc)
+
+    (approval_dir / "prompt").write_text("Approve write to config?", encoding="utf-8")
+    (approval_dir / "pending").write_text(str(time.time()))
+    ws._check_approval_echo_guard()
+
+    assert seen == ["Approve write to config?"]
+    # Idempotent: a second poll while still open must not re-fire.
+    ws._check_approval_echo_guard()
+    assert len(seen) == 1
+
+
+def test_gate_open_callback_falls_back_when_prompt_missing(approval_dir):
+    """Missing prompt file → callback still fires with a safe default, never
+    crashing the gate."""
+    ws = _stream()
+    seen = []
+    ws.on_approval_gate_open = lambda desc: seen.append(desc)
+
+    (approval_dir / "pending").write_text(str(time.time()))
+    ws._check_approval_echo_guard()
+
+    assert seen == ["Approve this action?"]
+
+
+def test_gate_open_callback_failure_does_not_break_gate(approval_dir):
+    """A throwing A2UI callback must not prevent the voice gate from opening."""
+    ws = _stream()
+    ws.on_approval_gate_open = lambda desc: (_ for _ in ()).throw(RuntimeError("boom"))
+
+    (approval_dir / "pending").write_text(str(time.time()))
+    ws._check_approval_echo_guard()   # must not raise
+
+    assert ws._approval_pending_active is True
+
+
 def test_echo_guard_fires_once_per_gate(approval_dir):
     """The flush happens once on open, not on every poll tick — so the user's
     actual reply (buffered after the gate opened) is not discarded."""

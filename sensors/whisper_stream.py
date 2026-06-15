@@ -411,6 +411,10 @@ class WhisperStream:
         # Fired whenever the mute state changes (voice- or iPad-initiated) so the
         # bridge can push a `mic_state` message and keep the iPad indicator in sync.
         self.on_mute_change: Optional[Callable[[bool], None]] = None
+        # Fired once when the approval gate opens (not-open → open), carrying the
+        # spoken action description. main.py wires this to push an A2UI Approve/
+        # Deny surface to the iPad — a parallel input to the voice gate.
+        self.on_approval_gate_open: Optional[Callable[[str], None]] = None
         # D8: correction detection state — tracks last command outcome
         self._last_command_status: str = ""   # "ok" | "CLARIFY" | "failed"
         self._last_command_text: str = ""     # text of previous command
@@ -743,6 +747,18 @@ class WhisperStream:
             self.suppress(_APPROVAL_ECHO_GUARD_S)   # flush buffer + drop echo tail
             log.debug("WhisperStream: approval gate opened — TTS echo guard %.1fs",
                       _APPROVAL_ECHO_GUARD_S)
+            # Push an A2UI Approve/Deny surface to the iPad in parallel with the
+            # spoken question. Best-effort: a failure here never blocks the voice
+            # gate, which remains the authoritative path.
+            if self.on_approval_gate_open is not None:
+                try:
+                    prompt = (_APPROVAL_DIR / "prompt").read_text(encoding="utf-8").strip()
+                except Exception:
+                    prompt = ""
+                try:
+                    self.on_approval_gate_open(prompt or "Approve this action?")
+                except Exception as exc:
+                    log.debug("on_approval_gate_open callback failed: %s", exc)
         elif not pending and self._approval_pending_active:
             self._approval_pending_active = False
 
