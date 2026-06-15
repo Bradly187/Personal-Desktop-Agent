@@ -1,0 +1,17 @@
+{
+  "suite": "rag_ablation",
+  "mode": "ablation",
+  "recorded_at": "2026-06-15",
+  "model": "default",
+  "tolerance": 0.15,
+  "note": "Single-sample reference under live-agent VRAM contention (planner often falls back to llama3.1:8b). Wide tolerance: the gate exists to catch RAG silently dropping toward ~0 grounding delta (the 2026-06-07 embedder-bug class), NOT minor run-to-run noise. exact_acc == mean_delta.",
+  "n": 5,
+  "mean_with": 0.32,
+  "mean_no": 0.12,
+  "mean_delta": 0.2,
+  "exact_acc": 0.2,
+  "improved": 2,
+  "regressed": 0,
+  "p50_latency_ms": 4802.7,
+  "errors": 0
+}
