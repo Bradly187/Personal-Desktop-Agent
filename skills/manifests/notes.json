@@ -13,7 +13,7 @@
   },
   "intents": {
     "add_note": {
-      "keywords": ["add a note", "take a note", "note this down", "make a note", "save a note"],
+      "keywords": ["add a note", "take a note", "note this down", "make a note", "save a note", "compose a note", "compose note", "write a note"],
       "tool": "add_note",
       "send": false
     },
