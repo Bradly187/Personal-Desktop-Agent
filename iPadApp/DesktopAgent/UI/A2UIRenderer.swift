@@ -37,47 +37,47 @@ struct A2UIRenderer: View {
         }
     }
 
-    @ViewBuilder
-    private func render(_ node: A2UINode, _ nodes: [String: A2UINode]) -> some View {
+    // Returns AnyView (not opaque `some View`) because the component tree is
+    // recursive — an opaque return type cannot be inferred in terms of itself.
+    private func render(_ node: A2UINode, _ nodes: [String: A2UINode]) -> AnyView {
         switch node.component {
         case "Column":
-            VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
+            return AnyView(VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
                 childViews(node, nodes)
-            }
+            })
         case "Row":
-            HStack(spacing: DesignTokens.Spacing.md) {
+            return AnyView(HStack(spacing: DesignTokens.Spacing.md) {
                 childViews(node, nodes)
-            }
+            })
         case "Card":
-            DACard {
+            return AnyView(DACard {
                 VStack(alignment: .leading, spacing: DesignTokens.Spacing.md) {
                     childViews(node, nodes)
                 }
-            }
+            })
         case "Text":
-            textView(node)
+            return AnyView(textView(node))
         case "Button":
-            buttonView(node)
+            return AnyView(buttonView(node))
         case "ChoicePicker":
-            choicePickerView(node)
+            return AnyView(choicePickerView(node))
         case "TextField":
-            textFieldView(node)
+            return AnyView(textFieldView(node))
         case "Divider":
-            Divider()
+            return AnyView(Divider())
         default:
             // Unknown / future component — skip safely.
-            EmptyView()
-                .onAppear { AppLogger.shared.warning("a2ui", "unknown component: \(node.component)") }
+            return AnyView(EmptyView()
+                .onAppear { AppLogger.shared.warning("a2ui", "unknown component: \(node.component)") })
         }
     }
 
-    @ViewBuilder
-    private func childViews(_ node: A2UINode, _ nodes: [String: A2UINode]) -> some View {
-        ForEach(node.children ?? [], id: \.self) { childId in
+    private func childViews(_ node: A2UINode, _ nodes: [String: A2UINode]) -> AnyView {
+        AnyView(ForEach(node.children ?? [], id: \.self) { childId in
             if let child = nodes[childId] {
                 render(child, nodes)
             }
-        }
+        })
     }
 
     @ViewBuilder
