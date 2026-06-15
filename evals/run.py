@@ -128,6 +128,50 @@ def _run_execution(args):
         cases, lambda: _build_dev_agent(args.model), timeout_s=args.timeout)
 
 
+async def _build_dev_agent_with_rag():
+    """A real DevAgent with the live CodebaseIndexer wired (queries the persisted
+    chroma_db as-is — no re-index, so the ablation is fast and deterministic)."""
+    from pathlib import Path as _P
+    from inference.dev_agent import DevAgent
+    from inference.model_router import ModelRouter
+    from inference.codebase_indexer import CodebaseIndexer
+    agent = DevAgent(router=ModelRouter())
+    root = str(_P(__file__).resolve().parents[1])
+    idx = CodebaseIndexer(project_root=root, embedder=None)
+    if await idx.start():
+        agent.set_indexer(idx)
+    else:
+        print("WARNING: CodebaseIndexer unavailable — with-RAG arm has no index",
+              file=sys.stderr)
+    return agent
+
+
+def _run_ablation(args):
+    from evals.ablation import load_ablation_suite
+    from evals.runner import run_ablation_suite
+    cases = load_ablation_suite(args.suite)
+    if not cases:
+        print("no cases to run", file=sys.stderr)
+        return None
+    return run_ablation_suite(
+        cases,
+        build_no_rag=lambda: _build_dev_agent(args.model),
+        build_with_rag=_build_dev_agent_with_rag,
+        timeout_s=args.timeout)
+
+
+def _print_ablation(report, *, show: int = 20) -> None:
+    print(report.summary())
+    print("\nper case (anchor recall  with -> without):")
+    for r in report.results:
+        flag = "ERR " if r.error else ("+   " if r.delta > 0 else ("-   " if r.delta < 0 else "=   "))
+        line = (f"  {flag}[{r.case_id}] {r.with_score:.0%} -> {r.no_score:.0%} "
+                f"(d{r.delta:+.0%}; {r.with_hits}/{r.n_anchors} vs {r.no_hits}/{r.n_anchors})")
+        if r.error:
+            line += f"  {r.error[:60]}"
+        print(line)
+
+
 def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
     print(report.summary())
     by_verb = getattr(report, "by_verb", None)
@@ -156,10 +200,13 @@ def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run a behavioral eval suite.")
     ap.add_argument("--suite", required=True, help="suite name (evals/suites/<name>.jsonl)")
-    ap.add_argument("--mode", choices=["single", "trajectory", "judge", "execution"],
+    ap.add_argument("--mode",
+                    choices=["single", "trajectory", "judge", "execution", "ablation"],
                     default="single",
                     help="execution = run the goal through the LIVE DevAgent and "
-                         "score the executed trajectory (read-only suites only)")
+                         "score the executed trajectory (read-only suites only); "
+                         "ablation = run each goal WITH vs WITHOUT the codebase "
+                         "indexer and score grounding (anchor recall) delta")
     ap.add_argument("--predictor", choices=["command", "slots", "router"],
                     default="command",
                     help="single mode only (router = model-free DomainClassifier eval)")
@@ -178,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     runner = {"single": _run_single, "trajectory": _run_trajectory,
-              "judge": _run_judge, "execution": _run_execution}[args.mode]
+              "judge": _run_judge, "execution": _run_execution,
+              "ablation": _run_ablation}[args.mode]
     report = runner(args)
     if report is None:
         return 2
@@ -193,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps({"suite": args.suite, "mode": args.mode, **report.metrics()},
                          indent=2))
+    elif args.mode == "ablation":
+        _print_ablation(report)
     else:
         _print_report(report, args.mode)
 

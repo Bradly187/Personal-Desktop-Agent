@@ -277,6 +277,63 @@ def run_execution_suite(cases: list, build_dev_agent, *, timeout_s: float = 120.
     return asyncio.run(_run_all())
 
 
+async def _capture_executed_text(dev, goal: str, timeout_s: float):
+    """Run a goal through the live DevAgent and return (text, latency_ms), where
+    text is everything the user effectively sees — every executed step's result
+    plus the final reflection. On failure/timeout the text is an __ERROR__ sentinel
+    so the ablation scorer can mark the case errored rather than scoring noise."""
+    try:
+        dev._context.clear()
+    except Exception:
+        pass
+    t0 = time.monotonic()
+    try:
+        res = await asyncio.wait_for(dev.plan_and_run(goal), timeout_s)
+        lat = (time.monotonic() - t0) * 1000
+        parts = [(s.result or "") for s in (getattr(res, "steps", None) or [])]
+        parts.append(getattr(res, "response_text", "") or "")
+        return "\n".join(p for p in parts if p), lat
+    except Exception as exc:
+        return f"__ERROR__ {type(exc).__name__}: {exc}", (time.monotonic() - t0) * 1000
+
+
+def run_ablation_suite(cases: list, build_no_rag, build_with_rag, *,
+                       timeout_s: float = 150.0):
+    """RAG ablation: run each goal through the live DevAgent WITH vs WITHOUT the
+    codebase indexer and score grounding (anchor-term recall) for each.
+
+    build_no_rag / build_with_rag are zero-arg factories (sync or async) that each
+    return a ready DevAgent — built on the eval loop so their asyncio primitives
+    bind here (one loop, two agents). The interactive plan-approval gate is replaced
+    with the read-only 'auto' grant so the suite runs unattended. Returns an
+    AblationReport whose headline is mean Δ (with − without grounding).
+    """
+    from evals.ablation import score_ablation, aggregate_ablation
+
+    async def _maybe(x):
+        return await x if asyncio.iscoroutine(x) else x
+
+    async def _run_all():
+        dev_no = await _maybe(build_no_rag())
+        dev_with = await _maybe(build_with_rag())
+        for dev in (dev_no, dev_with):
+            try:
+                async def _auto(goal, steps):
+                    return "auto"
+                dev._approve_plan_upfront = _auto   # type: ignore[attr-defined]
+            except Exception:
+                pass
+        results = []
+        for case in cases:
+            with_text, wl = await _capture_executed_text(dev_with, case.goal, timeout_s)
+            no_text, nl = await _capture_executed_text(dev_no, case.goal, timeout_s)
+            results.append(score_ablation(case, with_text, no_text,
+                                          with_latency_ms=wl, no_latency_ms=nl))
+        return aggregate_ablation(results)
+
+    return asyncio.run(_run_all())
+
+
 def plan_predictor(infer_text: TextFn, *, timeout_s: float = 30.0):
     """Build a plan_fn: ask the model to plan the goal, extract the verb sequence
     exactly as dev_agent would parse it."""
