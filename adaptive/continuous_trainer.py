@@ -73,6 +73,7 @@ class ContinuousTrainer:
         self._task: Optional[asyncio.Task] = None
         self._memory = None   # MemoryManager — wired via set_memory()
         self.slo_status: dict[str, str] = {}   # gap H: latest per-domain SLO verdicts
+        self.misroute_status: dict[str, float] = {}   # E1: latest per-domain misroute rates
         # D9: intra-session velocity calibration trigger
         self._velocity_sample_counter: int = 0
         self._velocity_intra_session_threshold: int = 20
@@ -332,6 +333,7 @@ class ContinuousTrainer:
         await self._update_gesture_calibration(pain_day_active=snapshot.pain_day_active)
         await self._update_gesture_velocity_calibration(pain_day_active=snapshot.pain_day_active)
         await self._adapt_per_domain_slo()
+        await self._adapt_domain_misroutes()
 
     async def _adapt_per_domain_slo(self) -> None:
         """Evaluate rolling per-domain inference stats against per-domain SLOs (gap H).
@@ -376,6 +378,47 @@ class ContinuousTrainer:
                     domain=domain,
                 )
         self.slo_status = status
+
+    # Min routed commands in a domain before its misroute rate is trustworthy.
+    _MISROUTE_MIN_ROUTED = 10
+    # Correction rate at/above which a domain is flagged as misroute-prone.
+    _MISROUTE_RATE_FLAG = 0.30
+
+    async def _adapt_domain_misroutes(self) -> None:
+        """E1 — domain misroute analyzer (logged-first, no behaviour change).
+
+        Reads per-domain routed-vs-corrected counts (AgentDB.get_domain_misroutes)
+        and LOGS domains whose user-correction rate is high enough to be a routing
+        smell — surfaced via `self.misroute_status` for the operator/UI and the
+        `adaptation_log` (component=`misroute:<domain>`). It does NOT change the
+        classifier; the bounded keyword-overlay learning is gated separately
+        behind DA_DOMAIN_LEARN (E2). Conservative because the correction→domain
+        signal is indirect (a correction is about the action, not provably the
+        domain), so we observe before we act.
+        """
+        try:
+            rows = await self._db.get_domain_misroutes(limit=1000)
+        except Exception as exc:
+            log.debug("ContinuousTrainer._adapt_domain_misroutes failed: %s", exc)
+            return
+        status: dict[str, float] = {}
+        for r in rows:
+            domain = r.get("domain") or ""
+            routed = r.get("routed") or 0
+            if not domain or routed < self._MISROUTE_MIN_ROUTED:
+                continue   # not enough data to judge this domain yet
+            rate = r.get("rate") or 0.0
+            status[domain] = rate
+            if rate >= self._MISROUTE_RATE_FLAG:
+                log.info("Domain misroute smell: domain=%s rate=%.2f (%d/%d corrected)",
+                         domain, rate, r.get("corrected") or 0, routed)
+                await self._db.log_adaptation(
+                    component=f"misroute:{domain}",
+                    metric_before=float(routed),
+                    metric_after=float(r.get("corrected") or 0),
+                    domain=domain,
+                )
+        self.misroute_status = status
 
     async def _adapt_gate1_threshold(self, entries: list[dict], pain_day_active: bool = False) -> None:
         """Requirement 14.3 — relax Gate 1 when cloud escalation is high."""

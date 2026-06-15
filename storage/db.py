@@ -3389,6 +3389,43 @@ class AgentDB:
             log.warning("AgentDB.get_command_stats_last_n_days failed: %s", exc)
             return []
 
+    async def get_domain_misroutes(self, limit: int = 1000) -> list[dict]:
+        """Per-domain routed vs corrected counts → a misroute rate signal (E1).
+
+        Joins each inference's chosen `domain` to its command and counts how many
+        of those commands the user later corrected (`corrected_to IS NOT NULL`).
+        A high rate means that domain's routing/handling is error-prone. Returns
+        [{domain, routed, corrected, rate}], busiest domains first. Read-only —
+        the misroute analyzer logs from this; it does not itself change routing.
+        """
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT i.domain AS domain,
+                          COUNT(*) AS routed,
+                          SUM(CASE WHEN c.corrected_to IS NOT NULL THEN 1 ELSE 0 END)
+                              AS corrected
+                   FROM inferences i
+                   JOIN commands c ON c.id = i.command_id
+                   WHERE i.command_id IS NOT NULL
+                   GROUP BY i.domain
+                   ORDER BY routed DESC
+                   LIMIT ?""",
+                (limit,),
+            ) as cur:
+                out = []
+                for r in await cur.fetchall():
+                    d = dict(r)
+                    routed = d.get("routed") or 0
+                    corrected = d.get("corrected") or 0
+                    d["rate"] = (corrected / routed) if routed else 0.0
+                    out.append(d)
+                return out
+        except Exception as exc:
+            log.warning("AgentDB.get_domain_misroutes failed: %s", exc)
+            return []
+
     async def get_source_stats_last_n_days(self, days: int = 7) -> list[dict]:
         """Return per-source success/total counts for the last N days."""
         if not self._conn:
