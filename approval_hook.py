@@ -34,6 +34,9 @@ from pathlib import Path
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 _PENDING_FILE  = _APPROVAL_DIR / "pending"
 _RESPONSE_FILE = _APPROVAL_DIR / "response"
+# Spoken action description, persisted alongside "pending" so the running agent
+# can render an A2UI Approve/Deny surface on the iPad (parallel to voice).
+_PROMPT_FILE   = _APPROVAL_DIR / "prompt"
 
 import logging
 import numpy as np
@@ -179,7 +182,7 @@ def _transcribe(audio: "np.ndarray") -> str:
         return ""
 
 
-def _request_ipad_approval(timeout_s: float = 7.0) -> str | None:
+def _request_ipad_approval(timeout_s: float = 7.0, prompt: str = "") -> str | None:
     """Signal WhisperStream to intercept the next iPad utterance for approval.
 
     Writes a pending marker so _transcribe() reroutes the next voice segment
@@ -188,6 +191,12 @@ def _request_ipad_approval(timeout_s: float = 7.0) -> str | None:
     """
     _APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
     _RESPONSE_FILE.unlink(missing_ok=True)          # clear any stale response
+    # Write the prompt BEFORE pending, so the agent sees a complete description
+    # the instant it detects the not-open → open transition.
+    try:
+        _PROMPT_FILE.write_text(prompt or "", encoding="utf-8")
+    except Exception:
+        pass
     _PENDING_FILE.write_text(str(time.time()), encoding="utf-8")
 
     deadline = time.monotonic() + timeout_s
@@ -204,6 +213,7 @@ def _request_ipad_approval(timeout_s: float = 7.0) -> str | None:
         # Always clean up so a stale pending file doesn't block future commands
         _PENDING_FILE.unlink(missing_ok=True)
         _RESPONSE_FILE.unlink(missing_ok=True)
+        _PROMPT_FILE.unlink(missing_ok=True)
 
 
 def _parse_response(transcript: str, default: str = "reject") -> bool:
@@ -278,7 +288,7 @@ def main() -> None:
     # --- Prefer iPad mic via WhisperStream (bridge must be running) -----------
     # Signal the bridge; if it responds within 7s the iPad utterance is used
     # and not forwarded to FusionEngine (so "yes"/"no" won't trigger a command).
-    transcript = _request_ipad_approval(timeout_s=7.0)
+    transcript = _request_ipad_approval(timeout_s=7.0, prompt=message)
 
     if transcript is None:
         # Bridge not running or no speech — fall back to PC microphone

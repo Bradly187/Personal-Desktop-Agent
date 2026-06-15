@@ -1,0 +1,311 @@
+"""Tests for core/a2ui.py — A2UI surface builder + validation, and the bridge
+a2ui_event resolution paths (approval response file + pending-surface Future)."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from core import a2ui
+
+
+# --------------------------------------------------------------------------- #
+# Builder + template surfaces
+# --------------------------------------------------------------------------- #
+
+
+def test_approval_surface_is_valid_and_not_dismissible():
+    s = a2ui.approval_surface("Write to config.json")
+    assert a2ui.validate_surface(s) == []
+    assert s["type"] == "a2ui_surface"
+    assert s["dismissible"] is False  # a security gate must not tap-away resolve
+    assert s["surface_id"].startswith("approval-")
+    # both Approve and Deny carry an approval action
+    actions = {c["action"]["value"] for c in s["components"] if c.get("action")}
+    assert actions == {"approve", "deny"}
+    assert all(
+        c["action"]["event"] == "approval"
+        for c in s["components"]
+        if c.get("action")
+    )
+
+
+def test_choice_surface_direction_is_valid_four_buttons():
+    opts = [("Up", "up"), ("Down", "down"), ("Left", "left"), ("Right", "right")]
+    s = a2ui.choice_surface("Which direction?", opts)
+    assert a2ui.validate_surface(s) == []
+    buttons = [c for c in s["components"] if c["component"] == "Button"]
+    assert len(buttons) == 4
+    assert [b["action"]["value"] for b in buttons] == ["up", "down", "left", "right"]
+    assert s["dismissible"] is True
+
+
+def test_choice_surface_requires_options():
+    with pytest.raises(ValueError):
+        a2ui.choice_surface("Pick", [])
+
+
+def test_explicit_surface_id_is_preserved():
+    s = a2ui.approval_surface("x", surface_id="approval-fixed")
+    assert s["surface_id"] == "approval-fixed"
+
+
+def test_builder_rejects_duplicate_ids():
+    b = a2ui.A2UIBuilder()
+    b.text("q", "hi")
+    with pytest.raises(ValueError):
+        b.text("q", "again")
+
+
+def test_builder_rejects_unknown_text_variant():
+    b = a2ui.A2UIBuilder()
+    with pytest.raises(ValueError):
+        b.text("q", "hi", variant="gigantic")
+
+
+def test_surface_rejects_unbuilt_root():
+    b = a2ui.A2UIBuilder()
+    b.text("q", "hi")
+    with pytest.raises(ValueError):
+        b.surface("nonexistent", surface_id="s1")
+
+
+# --------------------------------------------------------------------------- #
+# Validation
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_flags_unknown_component():
+    bad = {
+        "type": "a2ui_surface",
+        "root": "root",
+        "components": [
+            {"id": "root", "component": "Column", "children": ["x"]},
+            {"id": "x", "component": "WebView"},  # not in catalog
+        ],
+    }
+    errs = a2ui.validate_surface(bad)
+    assert any("unknown component" in e for e in errs)
+
+
+def test_validate_flags_missing_child_reference():
+    bad = {
+        "type": "a2ui_surface",
+        "root": "root",
+        "components": [{"id": "root", "component": "Column", "children": ["ghost"]}],
+    }
+    errs = a2ui.validate_surface(bad)
+    assert any("missing child" in e for e in errs)
+
+
+def test_validate_flags_button_without_action():
+    bad = {
+        "type": "a2ui_surface",
+        "root": "b",
+        "components": [{"id": "b", "component": "Button", "label": "Go"}],
+    }
+    errs = a2ui.validate_surface(bad)
+    assert any("missing action" in e for e in errs)
+
+
+def test_validate_flags_bad_root():
+    bad = {
+        "type": "a2ui_surface",
+        "root": "nope",
+        "components": [{"id": "t", "component": "Text", "text": "hi", "variant": "body"}],
+    }
+    errs = a2ui.validate_surface(bad)
+    assert any("root" in e for e in errs)
+
+
+def test_validate_requires_components():
+    assert a2ui.validate_surface({"type": "a2ui_surface", "components": []})
+
+
+# --------------------------------------------------------------------------- #
+# CLARIFY template library (Phase 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_template_matches_scroll_direction():
+    s = a2ui.template_for_clarify(
+        "In which direction would you like to scroll: up, down, left, or right?")
+    assert s is not None and a2ui.validate_surface(s) == []
+    values = [c["action"]["value"] for c in s["components"] if c.get("action")]
+    assert values == ["up", "down", "left", "right"]
+
+
+def test_template_matches_open_type_and_extracts_name():
+    s = a2ui.template_for_clarify(
+        'What is "Kiro"? Is it an application name, a file, or something else?')
+    assert s is not None
+    title = next(c["text"] for c in s["components"] if c["id"] == "q")
+    assert "Kiro" in title
+    values = [c["action"]["value"] for c in s["components"] if c.get("action")]
+    assert values == ["application", "file", "other"]
+
+
+def test_template_matches_post_open_action():
+    s = a2ui.template_for_clarify(
+        "What specific action would you like me to perform after opening Kiro? "
+        "Should I click, drag, or interact with a particular element?")
+    assert s is not None
+    values = [c["action"]["value"] for c in s["components"] if c.get("action")]
+    assert values == ["click", "drag", "dwell"]
+
+
+def test_template_returns_none_for_free_form():
+    assert a2ui.template_for_clarify("What would you like me to click on?") is None
+    assert a2ui.template_for_clarify("What is the target for the click?") is None
+    assert a2ui.template_for_clarify("") is None
+
+
+def test_open_target_template_uses_recent_apps():
+    s = a2ui.template_for_clarify(
+        "What would you like to open? (an application, file, or folder name)",
+        recent_apps=["Kiro", "Chrome", "Slack"])
+    assert s is not None and a2ui.validate_surface(s) == []
+    values = [c["action"]["value"] for c in s["components"] if c.get("action")]
+    assert values == ["Kiro", "Chrome", "Slack"]
+
+
+def test_open_target_template_falls_back_to_voice_without_recent_apps():
+    # No recent apps → no enumerable card → voice fallback.
+    assert a2ui.template_for_clarify("What would you like to open?") is None
+    assert a2ui.template_for_clarify("What would you like to open?", recent_apps=[]) is None
+
+
+def test_open_target_surface_caps_at_five():
+    s = a2ui.open_target_surface(["a", "b", "c", "d", "e", "f", "g"])
+    buttons = [c for c in s["components"] if c["component"] == "Button"]
+    assert len(buttons) == 5
+
+
+def test_template_events_are_clarify_so_taps_route_as_commands():
+    s = a2ui.direction_surface()
+    assert all(c["action"]["event"] == "clarify"
+               for c in s["components"] if c.get("action"))
+
+
+def test_record_open_target_dedup_recency_and_cap():
+    """Coordinator's recent-OPEN buffer: most-recent-first, deduped, capped."""
+    from core.hybrid_coordinator import HybridCoordinator
+
+    # Bypass the heavy __init__ — exercise only the buffer logic.
+    coord = object.__new__(HybridCoordinator)
+    coord._recent_open_targets = []
+
+    for app in ["Chrome", "Kiro", "Slack"]:
+        coord._record_open_target(app)
+    assert coord._recent_open_targets == ["Slack", "Kiro", "Chrome"]
+
+    # Re-open Kiro → moves to front, no duplicate (case-insensitive).
+    coord._record_open_target("kiro")
+    assert coord._recent_open_targets == ["kiro", "Slack", "Chrome"]
+
+    # Blank target is ignored.
+    coord._record_open_target("   ")
+    assert coord._recent_open_targets == ["kiro", "Slack", "Chrome"]
+
+    # Cap at 8.
+    for i in range(10):
+        coord._record_open_target(f"App{i}")
+    assert len(coord._recent_open_targets) == 8
+    assert coord._recent_open_targets[0] == "App9"
+
+
+# --------------------------------------------------------------------------- #
+# Bridge a2ui_event resolution
+# --------------------------------------------------------------------------- #
+
+
+class _FakeWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send_json(self, payload):
+        self.sent.append(payload)
+
+
+def _make_bridge(tmp_path: Path):
+    from core.ipad_bridge import IPadBridge
+
+    # Inject a token so construction never touches ~/.claude/ipad_bridge/.
+    bridge = IPadBridge(port=0, host="127.0.0.1", token="test-token")
+    # Redirect approval dir into the tmp sandbox.
+    bridge._approval_dir = tmp_path / "approval"
+    return bridge
+
+
+@pytest.mark.asyncio
+async def test_a2ui_approval_event_writes_response_file(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+    await bridge._handle_a2ui_event(
+        ws, {"type": "a2ui_event", "surface_id": "approval-1",
+             "event": "approval", "value": "approve"}
+    )
+    resp = (tmp_path / "approval" / "response").read_text(encoding="utf-8")
+    assert resp == "approve"
+
+
+@pytest.mark.asyncio
+async def test_a2ui_approval_unknown_value_fails_safe_to_deny(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "approval-2", "event": "approval", "value": "garbage"}
+    )
+    resp = (tmp_path / "approval" / "response").read_text(encoding="utf-8")
+    assert resp == "deny"
+
+
+@pytest.mark.asyncio
+async def test_a2ui_choice_event_resolves_pending_future(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+    fut = bridge.register_a2ui_surface("clarify-9")
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "clarify-9", "event": "choice", "value": "down"}
+    )
+    assert fut.done()
+    result = await fut
+    assert result["value"] == "down"
+
+
+@pytest.mark.asyncio
+async def test_a2ui_event_for_unknown_surface_is_noop(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+    bridge._coordinator = None  # no coordinator, no future → pure no-op
+    # No future registered, no approval — must not raise, just ack.
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "ghost", "event": "choice", "value": "x"}
+    )
+    assert ws.sent and ws.sent[-1].get("status") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a2ui_clarify_tap_routes_voice_command(tmp_path):
+    """A CLARIFY tap with no registered Future re-enters the pipeline as a
+    voice-equivalent command so the pending-clarification context resolves it."""
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+
+    routed = []
+
+    class _FakeCoordinator:
+        async def route(self, cmd):
+            routed.append(cmd)
+
+    bridge._coordinator = _FakeCoordinator()
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "clarify-x", "event": "clarify", "value": "up"}
+    )
+    # route() is scheduled via create_task — let it run.
+    await asyncio.sleep(0)
+    assert len(routed) == 1
+    assert routed[0].text == "up"
+    assert routed[0].source == "voice"
