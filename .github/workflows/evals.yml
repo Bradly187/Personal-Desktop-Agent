@@ -12,6 +12,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: this gate only checks out the repo and runs tests (CodeQL
+# actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   evals-tier1:
     runs-on: ubuntu-latest
