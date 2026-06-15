@@ -192,12 +192,21 @@ Personal documents:
 
 Rules:
 - Think step by step before producing the plan
+- SCOPE THE PLAN TO THE REQUEST:
+  - If the goal asks to create, write, change, fix, add, refactor, build, or run
+    something, plan those actions fully and end to end — include running the tests,
+    and commit / push / open a PR WHEN the goal asks for that (e.g. "commit the fix",
+    "open a pull request"). Do not omit an action the goal explicitly requested.
+  - If the goal ONLY asks to explain, describe, show, find, read, search, or
+    summarize, plan read-only verbs (READ_FILE, GREP, SEARCH_PERSONAL, READ_SCREEN,
+    FETCH_URL) and do NOT write files, run commands, or commit on such a goal.
+- For the user's OWN notes / documents / personal information, use SEARCH_PERSONAL
+  (local, private) — never SEARCH_WEB.
 - Be specific: exact file paths, exact commands, exact content
 - One action per step; multi-line content (file body, PR description) goes in `body`
-- Cover the full task end to end, including tests and git commit when appropriate
 - Python environment: Windows, .venv, pytest, pyproject.toml or requirements.txt
 - For ML tasks: default to PyTorch unless JAX/Qiskit/PennyLane is explicitly needed
-- For git tasks: run GIT_STATUS first, commit at the end
+- For git tasks: run GIT_STATUS first; commit at the end when the goal asks to commit
 - PARALLELISM: by default steps run in order. If a step depends ONLY on specific
   earlier steps, list their 1-based positions in `after` — independent steps with
   an empty `after` may then run concurrently. Reads and writes to DISTINCT files

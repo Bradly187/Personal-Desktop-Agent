@@ -1,0 +1,12 @@
+{
+  "suite": "pain_journal_slots",
+  "mode": "single",
+  "recorded_at": "2026-06-14T18:37:11",
+  "model": "default",
+  "tolerance": 0.05,
+  "n": 10,
+  "verb_acc": 1.0,
+  "exact_acc": 0.9,
+  "p50_latency_ms": 429.1,
+  "errors": 0
+}

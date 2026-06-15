@@ -1,0 +1,24 @@
+#!/bin/sh
+# Behavioral-eval gate (runs alongside the test suite before every push).
+#
+# Enable once with:   git config core.hooksPath .githooks
+#
+# Delegates to scripts/run_evals.ps1, which runs the model-free gates always and
+# the model-backed gates only when Ollama is up (fail-safe skip otherwise). A real
+# baseline regression blocks the push; an unreachable backend does not.
+#
+# Bypass in a pinch with:   git push --no-verify
+
+root="$(git rev-parse --show-toplevel)"
+
+if command -v pwsh >/dev/null 2>&1; then
+    ps=pwsh
+elif command -v powershell >/dev/null 2>&1; then
+    ps=powershell
+else
+    echo "pre-push: PowerShell not found; skipping eval gate." >&2
+    exit 0
+fi
+
+"$ps" -NoProfile -ExecutionPolicy Bypass -File "$root/scripts/run_evals.ps1"
+exit $?
