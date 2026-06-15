@@ -1,0 +1,33 @@
+flowchart LR
+    subgraph IPAD["iPad Pro — Swift / SwiftUI (sensor hub)"]
+      direction TB
+      S1["Core Motion<br/>tilt / tap"]
+      S2["Speech<br/>keywords"]
+      S3["Camera<br/>gesture frames"]
+      S4["Touch UI<br/>command pad / trackpad"]
+      S5["LiDAR<br/>depth"]
+    end
+
+    IPAD -->|"WebSocket :8765<br/>(pairing token)"| BR["ipad_bridge<br/>25 message types"]
+    BR --> FE["FusionEngine<br/>60 Hz · 6-level priority"]
+    MIC["Whisper large-v3<br/>(PC mic / iPad audio)"] --> FE
+    FE --> HC["HybridCoordinator<br/>Gate 0-4 routing"]
+    HC --> DC{"DomainClassifier"}
+    DC -->|"command"| L8["llama3.1:8b<br/>verb-first"]
+    DC -->|"code / math / vision / plan"| DA["DevAgent<br/>ModelRouter -> specialist LLM"]
+    HC -. "escalate (10s breaker)" .-> CLOUD["Anthropic API<br/>claude-haiku-4-5 / opus-4-8"]
+    L8 --> CE["CommandExecutor<br/>16 verbs"]
+    DA --> CE
+    CLOUD --> CE
+    CE --> EX["pyautogui · Win32 · MCP tools"]
+    EX --> DESK["Windows desktop"]
+    CE -->|"status / ack / screenshot"| BR
+
+    KERNEL["Agent kernel:<br/>Scheduler · ResourceGovernor · Supervisor<br/>MemoryManager · CircuitBreaker"] -.governs.- FE
+    KERNEL -.governs.- HC
+    KERNEL -.governs.- DA
+
+    style IPAD fill:#e8f0fe,stroke:#2d6cdf
+    style KERNEL fill:#f3e8ff,stroke:#7c3aed
+    style CLOUD fill:#fff4e6,stroke:#d9730d
+    style DESK fill:#e7f5ec,stroke:#2e7d46

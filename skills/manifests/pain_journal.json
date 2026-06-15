@@ -1,0 +1,43 @@
+{
+  "skill_id": "pain_journal",
+  "display_name": "Pain Journal",
+  "enabled": true,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.pain_journal_server"]
+  },
+  "tools": {
+    "allow": ["log_symptom", "log_med", "recent_symptoms", "flare_summary", "appointment_brief"],
+    "send_tools": []
+  },
+  "intents": {
+    "log_symptom": {
+      "keywords": ["log a flare", "log my pain", "record my pain", "log a symptom", "my pain is", "i'm flaring", "log pain"],
+      "tool": "log_symptom",
+      "send": false,
+      "plan": true
+    },
+    "log_med": {
+      "keywords": ["i took my", "log my medication", "took my meds", "record my dose", "log my dose"],
+      "tool": "log_med",
+      "send": false,
+      "plan": true
+    },
+    "recent": {
+      "keywords": ["how's my pain been", "recent symptoms", "my pain history", "pain this week"],
+      "tool": "recent_symptoms",
+      "send": false
+    },
+    "summary": {
+      "keywords": ["flare summary", "summarize my pain", "pain summary"],
+      "tool": "flare_summary",
+      "send": false
+    },
+    "brief": {
+      "keywords": ["summary for my doctor", "appointment summary", "doctor brief"],
+      "tool": "appointment_brief",
+      "send": false
+    }
+  }
+}

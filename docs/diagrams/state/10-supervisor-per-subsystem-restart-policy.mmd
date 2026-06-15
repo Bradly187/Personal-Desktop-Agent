@@ -1,0 +1,29 @@
+stateDiagram-v2
+    [*] --> HEALTHY
+
+    HEALTHY --> HEALTHY : is_alive() && enabled()\n(2s poll — nothing to do)
+
+    HEALTHY --> DISABLED : enabled() == False\n(deliberate teardown)
+    DISABLED --> HEALTHY : Re-enabled
+
+    HEALTHY --> RESTARTING : Dead but enabled\n(task died unexpectedly)
+
+    RESTARTING --> HEALTHY : restart() succeeded\n(within budget)
+
+    RESTARTING --> FAILED : Exceeded budget\n(5 / 60s OR 20 total)
+
+    FAILED --> [*] : Latched — no further restarts
+
+    note right of RESTARTING
+        Restart timestamps pruned to a
+        sliding 60s window before the
+        budget check.
+    end note
+
+    note right of FAILED
+        Fires on_failed(name) ONCE → main.py
+        speaks a TTS warning and degrades
+        (e.g. scheduler FAILED →
+        fusion.set_scheduler(None), direct
+        dispatch; accessibility unaffected).
+    end note

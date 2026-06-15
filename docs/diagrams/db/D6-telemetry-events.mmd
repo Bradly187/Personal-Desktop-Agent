@@ -1,0 +1,60 @@
+erDiagram
+    sessions ||--o{ sensor_telemetry : "1 Hz snapshot"
+    sessions ||--o{ ambient_transcripts : "lecture mode"
+    sessions ||--o{ ipad_logs : "forwarded logs"
+    commands ||--o{ event_log : "emits"
+    commands ||--o{ rate_limit_events : "throttled"
+
+    sensor_telemetry {
+        int id PK
+        int session_id FK
+        real tilt_rx
+        int cursor_x
+        int pain_day_active
+        text active_source
+    }
+    ambient_transcripts {
+        int id PK
+        int session_id FK
+        text text
+        real logprob
+    }
+    ipad_logs {
+        int id PK
+        int session_id FK
+        text level
+        text subsystem
+        text msg
+    }
+    event_log {
+        int id PK
+        text topic
+        text trace_id
+        text source
+        text payload
+    }
+    event_consumers {
+        int id PK
+        text consumer_name UK
+        text topic_pattern
+        int last_event_id
+    }
+    rate_limit_events {
+        int id PK
+        text resource
+        real wait_ms
+        int was_dropped
+    }
+    rate_limit_config {
+        text resource PK
+        real max_rps
+        int burst_capacity
+    }
+    tool_timeout_config {
+        text tool_name PK
+        int timeout_ms
+    }
+    tool_cache_config {
+        text tool_name PK
+        real ttl_s
+    }

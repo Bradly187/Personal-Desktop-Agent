@@ -1,0 +1,40 @@
+stateDiagram-v2
+    [*] --> LAUNCHING
+
+    LAUNCHING --> SEARCHING : App finished launching\nStart Bonjour/mDNS discovery
+
+    SEARCHING --> CONNECTING : PC service found\nor manual IP entered
+
+    CONNECTING --> PAIRING : WebSocket handshake (101)\nsend X-Agent-Token / ?token=
+
+    CONNECTING --> SEARCHING : Timeout (10s)\nretry with backoff
+
+    PAIRING --> CONNECTED : Token accepted by bridge
+    PAIRING --> BLOCKED : 401 / token rejected
+
+    BLOCKED --> CONNECTING : User sets pairing token\nin Settings, retry
+
+    CONNECTED --> SENSOR_INIT : Receive ack/status\nfrom PC
+
+    SENSOR_INIT --> ACTIVE : Available sensors\nstarted successfully
+
+    ACTIVE --> ACTIVE : Normal operation\n(sensor streaming, touch events)
+
+    ACTIVE --> RECONNECTING : WebSocket drops
+
+    RECONNECTING --> CONNECTING : Exponential backoff\n(1s, 2s, 4s, 8s…)
+
+    ACTIVE --> [*] : App background / terminate\nstop all sensors
+
+    note right of PAIRING
+        Bridge requires a pairing token
+        (hmac.compare_digest before ws.prepare).
+        Token stored in SettingsStore.pairingToken;
+        redacted from logs. No hot-loop on 401.
+    end note
+
+    note right of RECONNECTING
+        Visual indicator shown to user.
+        Sensors keep running locally;
+        output is buffered.
+    end note

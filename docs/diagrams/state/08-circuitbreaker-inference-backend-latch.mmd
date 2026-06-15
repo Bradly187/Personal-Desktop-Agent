@@ -1,0 +1,33 @@
+stateDiagram-v2
+    direction LR
+
+    state "Normal Operation" as Normal {
+        closed
+    }
+    
+    state "Degraded Operation" as Degraded {
+        open
+        half_open
+    }
+
+    closed --> open : fail_threshold (3)\nconsecutive failures
+    open --> half_open : allow() after cooldown (30s)\nadmit ONE probe (probe_gen++)
+
+    half_open --> closed : probe record_success()
+    half_open --> open : probe record_failure()
+
+    half_open --> half_open : Probe lost (no outcome\nin cooldown) → admit fresh probe
+
+    closed --> closed : record_success()\n(reset failure count)
+
+    note right of open
+        allow() returns False → caller
+        fast-fails to the fallback path,
+        no network attempt, no wait.
+    end note
+
+    note right of half_open
+        Outcomes carry a probe generation;
+        a superseded (lost) probe's late
+        success/failure is ignored (#16).
+    end note

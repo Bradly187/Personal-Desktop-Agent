@@ -18,17 +18,9 @@ Wire into main.py:
         dev_agent.set_kiro(kiro)
 
 Usage:
-    ctx = await kiro.get_editor_context()
-    # ctx = {file, language, cursor, selection, context_above, context_below,
-    #         diagnostics_at_cursor, total_lines, is_dirty}
-
     git = await kiro.get_git_context()
     # git = {branch, commit, ahead, behind, staged, unstaged}
 
-    await kiro.apply_edit(file="path/to/foo.py",
-                          start=(10, 0), end=(10, 20), text="new_value()")
-
-    await kiro.run_terminal("pytest tests/ -x")
     await kiro.open_file("path/to/foo.py", line=42)
     diags = await kiro.get_diagnostics()
 """
@@ -69,15 +61,6 @@ class KiroClient:
     # Public API
     # ---------------------------------------------------------------------- #
 
-    async def get_editor_context(self) -> Optional[dict]:
-        """Return the active editor state.
-
-        Returns dict with keys: file, language, cursor, selection,
-        context_above, context_below, diagnostics_at_cursor, total_lines, is_dirty.
-        Returns None if the extension is not running.
-        """
-        return await self._request("get_editor_context")
-
     async def get_git_context(self) -> Optional[dict]:
         """Return the current git repository state.
 
@@ -85,39 +68,6 @@ class KiroClient:
         Returns None if the extension is not running or no repo is open.
         """
         return await self._request("get_git_context")
-
-    async def apply_edit(
-        self,
-        file: str,
-        start: tuple[int, int],   # (line, char) 0-indexed
-        end: tuple[int, int],
-        text: str,
-    ) -> bool:
-        """Replace a range in a file via the editor (adds to undo history, triggers LSP).
-
-        Returns True on success, False if the extension is not running.
-        Raises RuntimeError if the extension rejects the edit.
-        """
-        result = await self._request("apply_edit", {
-            "file": file,
-            "range": {
-                "start": {"line": start[0], "char": start[1]},
-                "end": {"line": end[0], "char": end[1]},
-            },
-            "text": text,
-        })
-        return result is not None and result.get("applied", False)
-
-    async def run_terminal(self, command: str, cwd: Optional[str] = None) -> bool:
-        """Send a command to the integrated terminal.
-
-        Returns True if the command was sent, False if extension is unavailable.
-        """
-        payload: dict = {"command": command}
-        if cwd:
-            payload["cwd"] = cwd
-        result = await self._request("run_terminal", payload)
-        return result is not None and result.get("sent", False)
 
     async def open_file(self, file: str, line: int = 0) -> bool:
         """Open a file in the editor and jump to the given line.
@@ -168,35 +118,6 @@ class KiroClient:
                 lines.append(f"  {f['status']} {f['path']}")
         if git.get("merge_conflicts"):
             lines.append(f"MERGE CONFLICTS: {git['merge_conflicts']} file(s)")
-        lines.append("```")
-        return "\n".join(lines)
-
-    def format_editor_context_for_prompt(self, ctx: dict) -> str:
-        """Format editor state as a fenced block for LLM prompt injection."""
-        if not ctx:
-            return ""
-        file = ctx.get("file", "")
-        lang = ctx.get("language", "")
-        cursor = ctx.get("cursor", {})
-        sel = ctx.get("selection")
-        diags = ctx.get("diagnostics_at_cursor", [])
-
-        lines = [f"```editor-context  file={file}  lang={lang}"]
-        lines.append(f"Cursor: line {cursor.get('line', 0)}, col {cursor.get('char', 0)}")
-        if sel:
-            lines.append(f"Selection: {sel[:200]}")
-        above = ctx.get("context_above", "")
-        if above.strip():
-            lines.append("--- context above cursor ---")
-            lines.append(above[-800:].strip())   # last 800 chars
-        below = ctx.get("context_below", "")
-        if below.strip():
-            lines.append("--- context below cursor ---")
-            lines.append(below[:800].strip())
-        if diags:
-            lines.append("--- diagnostics at cursor ---")
-            for d in diags[:5]:
-                lines.append(f"  [{d.get('severity','?').upper()}] {d.get('message','')}")
         lines.append("```")
         return "\n".join(lines)
 

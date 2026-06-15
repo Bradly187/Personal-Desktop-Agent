@@ -1,0 +1,46 @@
+erDiagram
+    sessions ||--o{ commands : "anchors"
+    sessions ||--o| session_summaries : "summarized by"
+    commands ||--o{ inferences : "triggers"
+    commands ||--o{ sensor_events : "logs"
+    commands ||--o{ agent_runs : "may launch"
+
+    sessions {
+        int id PK
+        real started_at
+        text mode
+        text git_hash
+    }
+    commands {
+        int id PK
+        int session_id FK
+        text source
+        text action
+        text route
+        text gate_that_decided
+        real latency_ms
+        int success
+        text trace_id
+    }
+    inferences {
+        int id PK
+        int command_id FK
+        text model
+        text domain
+        real latency_ms
+        text backend
+    }
+    sensor_events {
+        int id PK
+        int command_id FK
+        text event_type
+        real confidence
+    }
+    session_summaries {
+        int id PK
+        int session_id FK
+        int total_commands
+        real success_rate
+        real cloud_escalation_rate
+        real latency_p50_ms
+    }

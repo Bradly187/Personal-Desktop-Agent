@@ -1,0 +1,15 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant I as iPad Pro
+    participant F as FusionEngine (PC)
+    participant L as llama3.1:8b (PC)
+    participant W as Windows Desktop
+
+    U->>I: Tilts device forward + says "Scroll"
+    I->>F: WebSocket (60Hz): {tilt_y: 0.15, text: "scroll"}
+    F->>F: Fuse signals, clear Gates 0-4
+    F->>L: Request action intent
+    L-->>F: Emit verb: [SCROLL] + direction: [DOWN]
+    F->>W: PyAutoGUI: scroll(-500)
+    W-->>U: Screen scrolls down (Sub-200ms latency)

@@ -1,0 +1,25 @@
+stateDiagram-v2
+    [*] --> running : start_run()\n(insert status='running')
+
+    running --> completed : finish_run(succeeded=True)
+    running --> failed : finish_run(succeeded=False)
+    running --> cancelled : finish_run(cancelled=True)
+
+    running --> interrupted : startup reconciliation\n(process crashed mid-run)
+
+    interrupted --> running : resume_pending_plan()\n(voice-gated "resume task")
+    interrupted --> [*] : Left for human review
+
+    note right of interrupted
+        mark_interrupted_runs() flips every
+        stale status='running' row to
+        'interrupted' at startup, so a crash
+        never leaves a run falsely "running".
+    end note
+
+    note right of failed
+        A max_replans / max_steps halt rolls
+        back (saga), then _record_escalation
+        persists the goal to dev_escalations
+        for human review ("review queue").
+    end note

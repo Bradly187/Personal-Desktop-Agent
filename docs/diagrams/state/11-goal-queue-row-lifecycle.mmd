@@ -1,0 +1,30 @@
+stateDiagram-v2
+    [*] --> scheduled : enqueue_scheduled_goal()\n(execute_at in future)
+    [*] --> queued : enqueue_goal()\n(run ASAP)
+
+    scheduled --> queued : ProactiveScheduler promotes\nwhen now ≥ execute_at
+    scheduled --> cancelled : cancel_scheduled_goal()
+
+    queued --> running : claim_next_goal()\n(owner_pid, claimed_at, attempts++)
+
+    running --> done : complete_goal('done')
+    running --> failed : complete_goal('failed')
+    running --> cancelled : complete_goal('cancelled')
+
+    running --> queued : requeue_stale_running()\n(owner_pid dead, attempts < max)
+    running --> failed : requeue_stale_running()\n(attempts ≥ max — poison guard)
+
+    done --> scheduled : recurrence re-lay\n(daily/interval next occurrence)
+
+    note right of running
+        owner_pid lets requeue_stale_running
+        recover only goals whose claiming
+        process is no longer alive (pid check).
+    end note
+
+    note right of queued
+        Hot drain path sees ONLY 'queued'
+        rows — scheduled/running are invisible
+        to claim_next_goal, so promotion is
+        the single entry into the drain.
+    end note

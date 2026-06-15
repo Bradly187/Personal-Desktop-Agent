@@ -1,0 +1,40 @@
+stateDiagram-v2
+    [*] --> WAITING
+
+    WAITING --> TICK : 60Hz timer fires
+
+    state TICK {
+        [*] --> CHECK_TOUCH
+        CHECK_TOUCH --> EMIT_TOUCH : Touch command pending
+        CHECK_TOUCH --> CHECK_VOICE_CLICK : No touch
+
+        CHECK_VOICE_CLICK --> EMIT_VOICE_CLICK : Voice "click" keyword\n(click at cursor)
+        CHECK_VOICE_CLICK --> CHECK_TILT : No voice-click
+
+        CHECK_TILT --> EMIT_TILT : Tilt active\n(3a position / 3b velocity)
+        CHECK_TILT --> CHECK_GESTURE : Inside dead zone
+
+        CHECK_GESTURE --> EMIT_GESTURE : Gesture command pending
+        CHECK_GESTURE --> CHECK_VOICE_LOCAL : No gesture
+
+        CHECK_VOICE_LOCAL --> EMIT_VOICE_LOCAL : On-device keyword pending
+        CHECK_VOICE_LOCAL --> CHECK_VOICE_PC : No local keyword
+
+        CHECK_VOICE_PC --> EMIT_VOICE_PC : Whisper transcript pending
+        CHECK_VOICE_PC --> EMIT_NONE : Nothing pending
+    }
+
+    TICK --> WAITING : Emitted (or nothing)
+
+    note right of EMIT_TILT
+        Tilt emits directly to pyautogui —
+        cursor movement, not a Command.
+        Cursor gravity (_apply_gravity) is
+        applied at end of a position tick.
+    end note
+
+    note right of EMIT_VOICE_PC
+        PC-transcribed voice → HybridCoordinator
+        → 4-gate routing → CommandExecutor.
+        Magnetic snap reads the target cache.
+    end note

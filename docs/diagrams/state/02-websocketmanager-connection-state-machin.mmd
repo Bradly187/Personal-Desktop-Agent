@@ -1,0 +1,28 @@
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> DISCOVERING : App enters foreground\nBonjour/mDNS scan starts
+
+    DISCOVERING --> CONNECTING : PC found on network\nor manual IP set
+
+    CONNECTING --> CONNECTED : 101 Switching Protocols\n+ token accepted
+
+    CONNECTING --> BACKING_OFF : Timeout (10s),\nrefused, or token rejected
+
+    BACKING_OFF --> CONNECTING : Backoff delay elapsed\n(1s → 2s → 4s → 8s → 30s max)
+
+    CONNECTED --> SENDING : send(SensorMessage) called
+    SENDING --> CONNECTED : Frame sent
+
+    CONNECTED --> BACKING_OFF : Connection error\nor server closed
+
+    CONNECTED --> IDLE : User disconnects manually
+
+    IDLE --> [*] : App terminates
+
+    note right of CONNECTED
+        Status indicator:
+        green = connected
+        yellow = reconnecting
+        red = disconnected / blocked
+    end note

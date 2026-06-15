@@ -60,6 +60,7 @@ from inference.local_inference import (
     set_inference_capture,
 )
 from desktop.vision_grounder import VisionGrounder
+from core.conversation_state import ConversationState
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
 from contextvars import ContextVar
@@ -439,6 +440,7 @@ class HybridCoordinator:
         self._whisper = whisper_stream
         self._fusion = None   # set via set_fusion_engine() after FusionEngine is created
         self._pending_clarification: Optional[str] = None
+        self._conversation = ConversationState()  # voice anaphora + last-action hint
         self._lecture_mode: bool = False
         self._profiler = None    # set via set_profiler()
         self._calibrator = None  # set via set_calibrator()
@@ -1187,6 +1189,22 @@ class HybridCoordinator:
             if self._twin and self._twin.is_ready:
                 cmd = _dc_replace(cmd, session_context=self._twin.get_session_context("accessibility"))
 
+            # Conversational continuity (voice only): deterministically resolve
+            # anaphora ("do that again", "click it") against the previous resolved
+            # turn BEFORE inference — the local 8B model is poor at this — and
+            # append one structured last-action line so both the local and cloud
+            # prompts see what actually happened, not just what was said.
+            if cmd.source in ("voice", "voice_local", "voice_correction"):
+                resolved_text, changed = self._conversation.resolve_anaphora(cmd.text)
+                if changed:
+                    log.debug("Anaphora resolved: %r → %r", cmd.text, resolved_text)
+                    cmd = _dc_replace(cmd, text=resolved_text)
+            hint = self._conversation.prompt_hint()
+            if hint:
+                cmd = _dc_replace(
+                    cmd, session_context=list(cmd.session_context or []) + [hint]
+                )
+
             # Inject pending clarification so the LLM knows what "up" or "yes"
             # is answering.  Prepended so it appears closest to the user turn.
             if self._pending_clarification and cmd.source in ("voice", "voice_local"):
@@ -1789,6 +1807,20 @@ class HybridCoordinator:
                 if result.get("status") == "ok":
                     self._whisper.suppress(0.8)
                     log.debug("Post-action mic cooldown 0.8s (verb=%s)", verb)
+
+        # Record the resolved turn so the NEXT utterance can resolve anaphora
+        # ("do that again", "click it") and the prompt can carry a last-action
+        # hint. Best-effort — never let bookkeeping fail a command.
+        try:
+            self._conversation.record(
+                command_text=cmd.text,
+                verb=verb,
+                target=target or "",
+                coords=grounded_coords,
+                success=result.get("status") == "ok",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("ConversationState.record failed: %s", exc)
 
         return result
 

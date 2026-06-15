@@ -1,0 +1,28 @@
+erDiagram
+    goal_queue }o--o| agent_runs : "claimed -> run"
+    agent_runs ||--o{ agent_steps : "executes"
+
+    goal_queue {
+        int id PK
+        text goal
+        text status
+        text idempotency_key UK
+        real execute_at
+        text recurrence
+        int owner_pid
+        int run_id FK
+    }
+    agent_runs {
+        int id PK
+        text goal
+        text domain
+        text status
+        int step_count
+    }
+    agent_steps {
+        int id PK
+        int run_id FK
+        int step_num
+        text action
+        int success
+    }

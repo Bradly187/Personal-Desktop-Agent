@@ -1,0 +1,18 @@
+flowchart TD
+    PIPE["Hot-path pipeline<br/>(every routed command)"]
+    TRAIN["ContinuousTrainer<br/>(reads every 5 min)"]
+    ANA["SessionAnalyzer / dashboards"]
+    SEC["MCP tools · approval gate"]
+    SEM["SemanticMemory · RAG"]
+
+    PIPE -->|"async writes (aiosqlite)"| ADB[("agent.db — SQLite<br/>42 tables · operational store")]
+    TRAIN --> ADB
+    ADB -. "ATTACH (sqlite ext, zero ETL)" .-> DDB[("analytics.duckdb — DuckDB<br/>3 benchmark tables · OLAP")]
+    ANA --> DDB
+    SEC -->|"append-only (WAL + triggers)"| AUD[("audit.db — SQLite<br/>tool calls · hash-chained")]
+    SEM --> CHR[("ChromaDB (cosine)<br/>codebase · documents · behavioral_memory<br/>personal_kb (outside repo)")]
+
+    style ADB fill:#e8f0fe,stroke:#2d6cdf
+    style DDB fill:#fff4e6,stroke:#d9730d
+    style AUD fill:#fde8e8,stroke:#c0392b
+    style CHR fill:#e7f5ec,stroke:#2e7d46
