@@ -200,8 +200,13 @@ Rules:
   - If the goal ONLY asks to explain, describe, show, find, read, search, or
     summarize, plan read-only verbs (READ_FILE, GREP, SEARCH_PERSONAL, READ_SCREEN,
     FETCH_URL) and do NOT write files, run commands, or commit on such a goal.
-- For the user's OWN notes / documents / personal information, use SEARCH_PERSONAL
-  (local, private) — never SEARCH_WEB.
+- TOOL SELECTION for finding/understanding information:
+  - To find or understand anything in THIS codebase or project (functions, files,
+    how something works, where something is defined), use GREP and READ_FILE — never
+    SEARCH_WEB or SEARCH_PERSONAL.
+  - Use SEARCH_WEB / FETCH_URL only for external, public, internet information.
+  - Use SEARCH_PERSONAL only for the user's OWN notes / documents / personal info
+    (local, private) — never SEARCH_WEB for those.
 - Be specific: exact file paths, exact commands, exact content
 - One action per step; multi-line content (file body, PR description) goes in `body`
 - Python environment: Windows, .venv, pytest, pyproject.toml or requirements.txt
