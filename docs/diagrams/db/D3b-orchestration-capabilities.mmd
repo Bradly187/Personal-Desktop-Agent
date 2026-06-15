@@ -1,0 +1,48 @@
+erDiagram
+    agent_runs ||--o{ saga_compensations : "rolls back"
+    agent_steps ||--o{ saga_compensations : "reverses"
+    agent_runs ||--o{ dev_escalations : "escalates"
+    agent_runs ||--o{ tool_calls : "invokes"
+    agent_steps ||--o{ tool_calls : "invokes"
+
+    agent_runs {
+        int id PK
+    }
+    agent_steps {
+        int id PK
+        int run_id FK
+    }
+    saga_compensations {
+        int id PK
+        int run_id FK
+        int step_id FK
+        text compensation_action
+        text status
+        text triggered_by
+    }
+    dev_escalations {
+        int id PK
+        int run_id FK
+        text reason
+        text status
+    }
+    tool_calls {
+        int id PK
+        int run_id FK
+        int step_id FK
+        text tool_name
+        text idempotency_key
+        text status
+    }
+    event_rules {
+        int id PK
+        text topic_pattern
+        text action_kind
+        real cooldown_s
+    }
+    skill_invocations {
+        int id PK
+        text skill_id
+        text tool_name
+        int blocked
+    }

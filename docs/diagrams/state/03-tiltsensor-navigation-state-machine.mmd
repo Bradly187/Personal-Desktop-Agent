@@ -1,0 +1,34 @@
+stateDiagram-v2
+    [*] --> STOPPED
+
+    STOPPED --> MONITORING : start() called\nCMMotionManager at 60Hz
+
+    MONITORING --> IN_DEAD_ZONE : |rx| < dead_zone\nAND |ry| < dead_zone
+
+    MONITORING --> TILTING : |rx| or |ry|\nexceeds dead_zone
+
+    IN_DEAD_ZONE --> TILTING : Tilt exceeds dead_zone
+
+    TILTING --> IN_DEAD_ZONE : Returns inside dead_zone\n(stop sending tilt messages)
+
+    TILTING --> TILTING : Send tilt vector\nevery 16ms (60Hz)
+
+    MONITORING --> TAP_DETECTED : Accelerometer detects\nsharp impulse (table tap)
+
+    TAP_DETECTED --> MONITORING : Send tilt_tap event\nto WebSocket
+
+    MONITORING --> STOPPED : stop() called
+
+    note right of IN_DEAD_ZONE
+        No messages sent to PC.
+        Cursor stops moving.
+        Prevents drift from slight tremor.
+        Gyro bias subtracted upstream
+        (see §7 GyroBiasCalibrator).
+    end note
+
+    note right of TAP_DETECTED
+        Sends {"type":"tilt_tap"}.
+        PC clicks at the current cursor
+        position (magnetic snap applied).
+    end note

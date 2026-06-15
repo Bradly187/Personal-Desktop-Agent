@@ -1,0 +1,66 @@
+erDiagram
+    commands ||--o{ few_shot_examples : "becomes"
+    commands ||--o{ few_shot_counterexamples : "becomes"
+    commands ||--o{ gesture_samples : "records"
+
+    few_shot_examples {
+        int id PK
+        int command_id FK
+        text text
+        text action
+        text domain
+        blob embedding
+    }
+    few_shot_counterexamples {
+        int id PK
+        int command_id FK
+        text text
+        text wrong_action
+        text reason
+    }
+    gesture_samples {
+        int id PK
+        int command_id FK
+        text gesture
+        real confidence
+        real lidar_depth_m
+    }
+    gesture_calibration {
+        int id PK
+        text gesture
+        real confidence_floor
+        real p10
+    }
+    gesture_velocity_samples {
+        int id PK
+        text gesture
+        real velocity
+        int pain_day
+    }
+    gesture_velocity_calibration {
+        int id PK
+        text gesture
+        real velocity_floor
+    }
+    settings_versions {
+        int id PK
+        text component
+        text key
+        text new_value
+        text changed_by
+    }
+    adaptation_log {
+        int id PK
+        text component
+        real metric_before
+        real metric_after
+        int rolled_back
+    }
+    word_counts {
+        text word PK
+        int count
+    }
+    hotwords {
+        text word PK
+        real added
+    }

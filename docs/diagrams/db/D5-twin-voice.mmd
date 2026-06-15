@@ -1,0 +1,68 @@
+erDiagram
+    sessions ||--o{ twin_session_history : "history"
+    sessions ||--o{ twin_pain_day_log : "pain-day"
+    sessions ||--o{ voice_calibration : "samples"
+    voice_calibration_sessions ||--o{ voice_pronunciations : "phrases"
+
+    twin_session_history {
+        int id PK
+        int session_id FK
+        text cmd_text
+        text action
+        int seq
+    }
+    twin_pain_day_log {
+        int id PK
+        int session_id FK
+        real pain_day_score
+        int pain_day_active
+        real fail_ratio
+    }
+    voice_calibration {
+        int id PK
+        int session_id FK
+        text phrase
+        real rms_amplitude
+        real avg_logprob
+        int is_flare_day
+    }
+    voice_profile {
+        int id PK
+        real baseline_rms
+        real vad_threshold
+        real logprob_floor
+    }
+    voice_phrases {
+        int id PK
+        text phrase
+        text category
+    }
+    voice_calibration_sessions {
+        int id PK
+        text condition
+    }
+    voice_pronunciations {
+        int id PK
+        int session_id FK
+        text expected
+        text heard
+        int accepted
+    }
+    voice_profiles {
+        int id PK
+        text condition UK
+        real vad_threshold
+        real logprob_floor
+    }
+    sensor_rom {
+        int id PK
+        text sensor
+        real max_value
+        real comfortable_value
+    }
+    flare_profile {
+        int id PK
+        int voice_degrades
+        real flare_vad_scale
+        int manual_pain_day
+    }

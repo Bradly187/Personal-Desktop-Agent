@@ -1,0 +1,31 @@
+stateDiagram-v2
+    [*] --> STOPPED
+
+    STOPPED --> LISTENING : start() called\nSFSpeechRecognizer ready
+
+    LISTENING --> RECOGNIZING : Speech detected\n(audio above threshold)
+
+    RECOGNIZING --> KEYWORD_FIRED : New transcript content\nmatches keyword & cooldown elapsed
+
+    RECOGNIZING --> KEYWORD_SUPPRESSED : Keyword found but\ncooldown (0.5s) still active
+
+    RECOGNIZING --> NO_MATCH : Recognition completes,\nno keyword matched
+
+    KEYWORD_FIRED --> RECOGNIZING : Send keyword event\n(no restart — keep recognizing)
+
+    KEYWORD_SUPPRESSED --> RECOGNIZING : Skip duplicate\nwithin 0.5s
+
+    RECOGNIZING --> LISTENING : Recognition ends\n(timeout/error) → auto-restart
+
+    NO_MATCH --> STREAMING_AUDIO : Buffer audio,\nstream to PC for Whisper
+
+    STREAMING_AUDIO --> LISTENING : audio_stream sent\nvia WebSocket
+
+    LISTENING --> STOPPED : stop() called
+
+    note right of KEYWORD_FIRED
+        Fast path — no PC round-trip.
+        Incremental scan: only new
+        transcript content is evaluated,
+        so partial results don't re-fire.
+    end note

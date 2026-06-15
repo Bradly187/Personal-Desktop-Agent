@@ -1,0 +1,34 @@
+stateDiagram-v2
+    [*] --> COMMAND_PAD
+
+    COMMAND_PAD --> FULL_TRACKPAD : Edge swipe\nor mode button
+    FULL_TRACKPAD --> COMMAND_PAD : Edge swipe\nor mode button
+
+    COMMAND_PAD --> WRITE : Tab → Write\n(Math / Text)
+    WRITE --> COMMAND_PAD : Tab back
+
+    COMMAND_PAD --> SETTINGS : Settings button
+    FULL_TRACKPAD --> SETTINGS : Settings button
+    SETTINGS --> COMMAND_PAD : Done / back
+
+    state COMMAND_PAD {
+        [*] --> NORMAL
+        NORMAL --> DWELL_COUNTDOWN : Finger rests on button\n(dwell enabled)
+        DWELL_COUNTDOWN --> NORMAL : Finger lifted\nbefore timer
+        DWELL_COUNTDOWN --> TRIGGERED : Timer expires
+        TRIGGERED --> NORMAL : Command sent
+    }
+
+    state FULL_TRACKPAD {
+        [*] --> IDLE_PAD
+        IDLE_PAD --> DRAGGING : Touch down
+        DRAGGING --> IDLE_PAD : Touch up
+        IDLE_PAD --> TAPPED : Single tap
+        TAPPED --> IDLE_PAD : Left click sent
+    }
+
+    note right of FULL_TRACKPAD
+        Full screen = mouse.
+        Palm rejection active.
+        iPad flat on desk use case.
+    end note

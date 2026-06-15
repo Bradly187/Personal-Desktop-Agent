@@ -1,0 +1,25 @@
+stateDiagram-v2
+    [*] --> UNCALIBRATED
+
+    UNCALIBRATED --> COLLECTING : Stationary ≥ 1.0s\n(|rx|,|ry| < 0.02 rad/s)
+
+    COLLECTING --> CALIBRATED : ≥ max_samples (200)\nOR motion after ≥ min_samples (50)
+
+    COLLECTING --> UNCALIBRATED : Motion before min_samples\n(discard, restart)
+
+    CALIBRATED --> FROZEN : Motion detected\n(stop adjusting bias)
+
+    FROZEN --> COLLECTING : New stationary ≥ 1.0s\n(recalibrate)
+
+    note right of UNCALIBRATED
+        should_suppress() zeroes small
+        velocities (< 0.05 rad/s) so an
+        unknown bias can't drift the cursor.
+    end note
+
+    note right of CALIBRATED
+        On finalize: if |Δbias| > 0.005,
+        lerp old→new over 0.5s; else apply
+        immediately. get_current_bias()
+        interpolates during the lerp.
+    end note

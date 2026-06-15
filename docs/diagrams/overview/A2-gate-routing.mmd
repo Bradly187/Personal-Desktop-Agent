@@ -1,0 +1,41 @@
+flowchart LR
+    CMD(["Command from FusionEngine"])
+    G0{"Gate 0 — Privacy<br/>sensitive pattern?"}
+    BYP{"Bypass source?<br/>touch · voice-click"}
+    G1{"Gate 1 — Confidence<br/>whisper_logprob >= -1.0<br/>gesture_conf >= 0.6<br/>(Budget: 20ms)"}
+    RT["phonetic re-transcription<br/>(low-conf voice)"]
+    DISC["discard silently<br/>(low-conf gesture)"]
+    G2{"Gate 2 — Complexity<br/>tokens <= 40<br/>no chain keywords<br/>(Budget: 10ms)"}
+    G3{"Gate 3 — VRAM<br/>free >= 8 GB<br/>(Budget: 0ms)"}
+    G4{"Gate 4 — Latency SLO<br/>p50 <= domain budget<br/>(command 600 ms)<br/>(Budget: 5ms)"}
+    LOCAL["Local inference<br/>llama3.1:8b / specialist"]
+    CLOUD["Cloud — claude-haiku-4-5<br/>(10s timeout breaker)"]
+    CLAR["CLARIFY — ask user<br/>(timeout / malformed)"]
+    EXEC(["CommandExecutor"])
+    LOG[("agent.db<br/>commands.gate_that_decided")]
+
+    CMD --> G0
+    G0 -->|"sensitive"| LOCAL
+    G0 -->|"clean"| BYP
+    BYP -->|"yes"| LOCAL
+    BYP -->|"no"| G1
+    G1 -->|"gesture low"| DISC
+    G1 -->|"voice low"| RT --> G2
+    G1 -->|"pass"| G2
+    G2 -->|"too complex"| CLOUD
+    G2 -->|"pass"| G3
+    G3 -->|"low VRAM"| CLOUD
+    G3 -->|"pass"| G4
+    G4 -->|"over budget"| CLOUD
+    G4 -->|"pass"| LOCAL
+    CLOUD -->|"timeout"| CLAR
+    LOCAL --> EXEC
+    CLOUD --> EXEC
+    CLAR --> EXEC
+    EXEC --> LOG
+
+    style G0 fill:#1a472a,color:#fff
+    style LOCAL fill:#155263,color:#fff
+    style CLOUD fill:#7b2d00,color:#fff
+    style CLAR fill:#4a0000,color:#fff
+    style LOG fill:#2d3561,color:#fff

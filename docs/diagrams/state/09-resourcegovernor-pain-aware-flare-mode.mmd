@@ -1,0 +1,27 @@
+stateDiagram-v2
+    [*] --> NORMAL
+
+    NORMAL --> FLARE : pain_day_score ≥ 0.6\n(_on_flare_start)
+
+    FLARE --> NORMAL : pain_day_score < 0.4\n(_on_flare_end, hysteresis)
+
+    NORMAL --> NORMAL : 0.4 ≤ score < 0.6\n(no change — dead band)
+    FLARE --> FLARE : 0.4 ≤ score < 0.6\n(stay in flare)
+
+    note right of FLARE
+        - Relax sensor thresholds
+        - Pause codebase indexer
+        - Raise Whisper VAD thread priority
+        - Evict heavy specialist models
+          (router-derived set, keep_alive=0)
+        - scheduler.pause_dev() — gate new
+          dev/background admission
+        Accessibility path is NEVER gated.
+    end note
+
+    note right of NORMAL
+        On recovery: restore thresholds,
+        resume indexer, scheduler.resume_dev().
+        Manual flare toggle fires start/end
+        in <100ms via call_soon_threadsafe.
+    end note

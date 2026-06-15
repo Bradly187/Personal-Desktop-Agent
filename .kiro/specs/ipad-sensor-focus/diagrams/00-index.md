@@ -12,9 +12,9 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 | 01 | [01-system-architecture.md](01-system-architecture.md) | High-level system architecture, iPad↔PC split, WebSocket protocol |
 | 02 | [02-class-diagram.md](02-class-diagram.md) | Class diagram for both iPad-side (Swift) and PC-side (Python) |
 | 03 | [03-sequence-diagrams.md](03-sequence-diagrams.md) | Interaction flows for all 8 input modalities (gaze/head removed 2026-05-30) |
-| 04 | [04-state-machines.md](04-state-machines.md) | State machines for iPad app, sensor modes, fusion engine, debouncing |
+| 04 | [04-state-machines.md](04-state-machines.md) | State machines: iPad app/sensors + backend agent kernel (circuit breaker, gyro calibrator, resource governor, supervisor, goal/run lifecycles) |
 | 05 | [05-data-flow.md](05-data-flow.md) | iPad sensor data flows, WebSocket message schema, persistent storage |
-| 06 | [06-fusion-routing.md](06-fusion-routing.md) | 10-level fusion priority, 4-gate routing, action execution |
+| 06 | [06-fusion-routing.md](06-fusion-routing.md) | 6-level fusion priority, 4-gate routing, action execution |
 | 07 | [07-bridge-architecture.md](07-bridge-architecture.md) | iPad↔Bridge↔MCP↔pyautogui stack overview |
 | 08 | [08-bridge-message-routing.md](08-bridge-message-routing.md) | Full message routing flowchart (14 types, 11 action verbs) |
 | 09 | [09-bridge-sequence.md](09-bridge-sequence.md) | Sequence diagram: touch_command and trackpad end-to-end |
@@ -34,7 +34,7 @@ iPad Pro (Swift/SwiftUI)          PC (Python asyncio)
 ─────────────────────────         ────────────────────────────────
 Core Motion (tilt)         ──┐
 ARKit (LiDAR)              ──┤    IPadBridge (15 message types)
-Speech Framework (keywords)──┼──► FusionEngine (10-level @ 60Hz)
+Speech Framework (keywords)──┼──► FusionEngine (6-level @ 60Hz)
 AVFoundation (sound)       ──┤    BehavioralTwinState (ChromaDB)
 Touch UI (command pad)     ──┤    HybridCoordinator (Gate 0 + 1–4)
 Camera (gesture frames)    ──┘    CommandExecutor (16 verbs)
@@ -43,17 +43,16 @@ Camera (gesture frames)    ──┘    CommandExecutor (16 verbs)
                                   GestureProcessor (HandLandmarker)
 ```
 
-### Sensor Priority (FusionEngine — 7 levels)
+### Sensor Priority (FusionEngine — 6 levels)
 ```
 1. iPad touch command       → immediate, bypasses LLM
-2. Sound action             → mapped mouth sounds
-3. Voice "click" keyword    → click at current cursor position
-4. Tilt navigation          → cursor movement from iPad tilt
-5. Gesture alone            → gesture command
-6. On-device voice keyword  → local Speech framework match
-7. PC-transcribed voice     → full Whisper pipeline
+2. Voice "click" keyword    → click at current cursor position
+3. Tilt navigation          → cursor movement from iPad tilt
+4. Gesture alone            → gesture command
+5. On-device voice keyword  → local Speech framework match
+6. PC-transcribed voice     → full Whisper pipeline
 ```
-*(Gaze dwell and head tracking removed 2026-05-30 — standard iPad has no TrueDepth sensor)*
+*(Gaze dwell + head tracking removed 2026-05-30 — no TrueDepth sensor; mouth-sound action removed 2026-06-05 — unreliable surface)*
 
 ### WebSocket Message Format
 ```json
