@@ -290,3 +290,86 @@ class TestFix4PainDayFusionConfig:
 
         # Tilt gated by flare_tilt_degrades (True by default).
         mock_fusion.apply_pain_day.assert_called_with(tilt=True)
+
+
+# ===========================================================================
+# Voice single-flight — collapse duplicate dispatches from parallel recognizers
+# ===========================================================================
+
+class TestVoiceSingleFlight:
+    """One spoken phrase must produce one action, even though the iPad on-device
+    recognizer (voice_local) and the PC Whisper stream (voice) both transcribe
+    the same audio and the Whisper wake-armed window can re-fire it.
+
+    Regression for the 'one "open chrome" opened three Chrome windows' bug.
+    """
+
+    def test_parallel_recognizers_collapse_to_one(self, engine):
+        """voice_local + voice for the same utterance → a single route()."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        run(fe._emit(Command(text="open", action="DICTATE", source="voice_local")))
+        # PC Whisper lands a moment later with the full command.
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+
+        assert fe._coordinator.route.call_count == 1
+        first = fe._coordinator.route.call_args_list[0][0][0]
+        assert first.source == "voice_local"
+
+    def test_wake_armed_refire_suppressed(self, engine):
+        """A VAD-split utterance re-firing the same voice command is dropped."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+
+        assert fe._coordinator.route.call_count == 1
+
+    def test_window_expiry_allows_next_command(self, engine):
+        """After the window elapses, the next voice command dispatches normally."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+        # Simulate the single-flight window having elapsed.
+        fe._last_voice_emit_mono -= (fe._effective_cfg.voice_single_flight_s + 0.1)
+        run(fe._emit(Command(text="open kiro", action="OPEN", source="voice")))
+
+        assert fe._coordinator.route.call_count == 2
+
+    def test_non_voice_sources_never_throttled(self, engine):
+        """Touch/gesture commands are never affected by the voice window."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        # A voice command opens the window …
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+        # … but a touch command issued immediately after must still dispatch.
+        run(fe._emit(Command(text="click", action="CLICK", source="touch")))
+        run(fe._emit(Command(text="swipe", action="SCROLL", source="gesture")))
+
+        assert fe._coordinator.route.call_count == 3
+
+    def test_voice_click_bypass_not_throttled(self, engine):
+        """The voice-click bypass (multimodal) stays instant — clicks may repeat."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        run(fe._emit(Command(text="voice click", action="CLICK", source="multimodal")))
+        run(fe._emit(Command(text="voice click", action="CLICK", source="multimodal")))
+
+        assert fe._coordinator.route.call_count == 2
+
+    def test_window_disabled_passes_all_through(self, engine):
+        """voice_single_flight_s <= 0 disables suppression entirely."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        fe._effective_cfg.voice_single_flight_s = 0.0
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+        run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
+
+        assert fe._coordinator.route.call_count == 2

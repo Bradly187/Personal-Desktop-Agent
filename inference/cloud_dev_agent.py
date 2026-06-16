@@ -55,7 +55,9 @@ log = logging.getLogger(__name__)
 
 # Default model — Claude Opus 4.8 ($5/$25 per MTok): most capable model for
 # free-form dev generation and long-horizon agentic reasoning.  Override via the
-# constructor.  Adaptive thinking only (no budget_tokens); sampling params removed.
+# constructor.  Supports adaptive thinking (math/plan domains).
+# (On Amazon Bedrock this needs per-model access granted on the account; a fresh
+# grant can lag the runtime a few minutes — the dev path CLARIFYs until it lands.)
 _DEFAULT_MODEL = "claude-opus-4-8"
 
 # Domains whose answer benefits from reasoning.  Adaptive thinking is enabled
@@ -177,6 +179,8 @@ class CloudDevAgent:
         timeout: float = 60.0,
     ) -> None:
         self.model = model
+        self._base_model = model          # backend-mapped at client-build time
+        self._backend = "anthropic_cloud"
         self._max_tokens = max_tokens
         self._timeout = timeout
         # Resolve the key now so get_status() can report availability without a
@@ -196,15 +200,24 @@ class CloudDevAgent:
     # ---------------------------------------------------------------------- #
 
     def _get_client(self):
-        """Lazily construct the async Anthropic client (raises if unavailable)."""
+        """Lazily construct the async client (raises with an actionable message).
+
+        Routes through core.cloud_backend so the dev path shares the command
+        path's backend choice (direct Anthropic vs Amazon Bedrock). An explicit
+        api_key passed to the constructor still takes the direct Anthropic path,
+        unless Bedrock is selected (then the Bedrock API key from the environment
+        is the credential).
+        """
         if self._client is None:
             if not _HAS_ANTHROPIC:
                 raise RuntimeError("anthropic SDK not installed (pip install anthropic)")
-            if not self._api_key:
-                raise RuntimeError("ANTHROPIC_API_KEY not set")
-            self._client = anthropic.AsyncAnthropic(
-                api_key=self._api_key, timeout=self._timeout
-            )
+            from core.cloud_backend import resolve_backend
+            # An explicit constructor key takes the direct Anthropic path; it is
+            # ignored when Bedrock is selected (the env bearer token wins).
+            backend = resolve_backend(api_key=self._api_key)
+            self._client = backend.make_client(async_=True, timeout=self._timeout)
+            self._backend = backend.name
+            self.model = backend.map_model(self._base_model)
         return self._client
 
     # ---------------------------------------------------------------------- #
@@ -318,9 +331,19 @@ class CloudDevAgent:
     # ---------------------------------------------------------------------- #
 
     def get_status(self) -> dict:
+        # Available if the SDK is present AND a credential is configured for the
+        # active backend (an explicit constructor key, ANTHROPIC_API_KEY, or an
+        # Amazon Bedrock API key).
+        available = _HAS_ANTHROPIC and bool(self._api_key)
+        if not available and _HAS_ANTHROPIC:
+            try:
+                from core.cloud_backend import credential_available
+                available = credential_available()
+            except Exception:
+                pass
         return {
-            "available": bool(_HAS_ANTHROPIC and self._api_key),
+            "available": available,
             "model": self.model,
             "domain_count": len(_SYSTEM_PROMPTS),
-            "backend": "anthropic_cloud",
+            "backend": self._backend,
         }
