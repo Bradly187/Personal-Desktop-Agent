@@ -1,5 +1,10 @@
 # Personal Desktop Agent
 
+@AGENTS.md
+
+<!-- ^ Shared cross-tool behavior rules (also read natively by Antigravity).
+     Keep behavioral rules in AGENTS.md, not here, so both IDEs stay in sync. -->
+
 Multimodal accessibility desktop control for a single user with rheumatoid arthritis. An iPad Pro (2020+) is the sensor hub and primary touch surface; a Windows PC with RTX 5090 runs inference and executes desktop actions.
 
 ## What This Is

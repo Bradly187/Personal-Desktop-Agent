@@ -1,0 +1,42 @@
+# AI Agent Behavior Rules
+
+These rules apply to **every** AI assistant working in this repository — Google
+Antigravity (reads this file natively) and Claude Code (pulls it in via the
+`@AGENTS.md` import at the top of `CLAUDE.md`). This is the single source of
+truth for cross-tool behavior; do not duplicate these rules elsewhere.
+
+- **`AGENTS.md`** (this file) — concise behavioral rules, obeyed by both IDEs.
+- **`CLAUDE.md`** — deep project context (architecture, file map, status, gotchas).
+  It imports this file, so the rules below apply in Claude Code too.
+
+## 1. 🗄️ Database Schema Source of Truth
+- **Rule:** Always read `storage/db.py` to determine the current `agent.db` SQLite schema, table structures, and `PRAGMA user_version`.
+- **Context:** Historical documentation (including older sections of `CLAUDE.md`) frequently has stale table counts. The Python schema definition is the ONLY source of truth. All migrations must be explicitly defined and backwards compatible.
+
+## 2. ⚡ 60Hz Tick Loop Protection
+- **Rule:** Never introduce synchronous I/O, heavy computation, or blocking LLM inference inside `core/fusion_engine.py` or the `AccessibilityScheduler`.
+- **Context:** The sensor pipeline must maintain a strict 60 Hz loop for smooth cursor gravity, swipe recognition, and tilt responsiveness. Offload DB writes to `async_utils.fire_and_log` and keep model routing asynchronous.
+
+## 3. 🌉 Cross-Platform Protocol Synchronization
+- **Rule:** Any changes to JSON payloads or message types in `core/ipad_bridge.py` MUST be mirrored in the Swift codebase (e.g., `iPadApp/DesktopAgent/WebSocketManager.swift` and related files).
+- **Context:** The iPad and Windows PC communicate strictly over WebSocket. Do not break serialization/deserialization logic by modifying one side without the other.
+
+## 4. 🛡️ Safe-by-Default Fallbacks
+- **Rule:** When modifying `command_executor.py` or adding dev-agent verbs, ensure destructive actions fail safely on ambiguity.
+- **Context:** The project uses a "fail-safe to DENY on silence" policy. Any new UI automation paths, shell executions, or file edits must route through voice-approved or explicitly gated pathways (like `goal_session.py`).
+
+## 5. 🤕 Pain-Day Awareness
+- **Rule:** When modifying sensor input thresholds, computer vision grounding, or voice processing (e.g., `whisper_stream.py`), you must account for `PainDayEngine` signals.
+- **Context:** This is a core accessibility feature. Never hardcode interaction thresholds. Always wire threshold logic through `BehavioralTwinState.apply_pain_day()` so the system adapts during an RA flare-up.
+
+## 6. 🧹 LLM Model VRAM Hygiene
+- **Rule:** Strictly respect the `ResourceGovernor` when modifying `inference/model_router.py` or adding new specialist domains.
+- **Context:** VRAM on the RTX 5090 is carefully orchestrated. Models are evicted (`keep_alive=0`) on flares to prioritize Whisper. Do not load new large models into the VLLM/Ollama pool without hooking into this eviction lifecycle.
+
+## 7. 🔒 Strict Path Boundaries
+- **Rule:** File editing or terminal execution logic must respect the `writable_roots` allowlist (e.g., via `goal_session._path_in_scope`).
+- **Context:** Do not use absolute paths or behaviors that circumvent the Windows PC sandbox. Maintain the security posture of the dev-escalation queue.
+
+## 8. 📝 Collaboration & History Check
+- **Rule:** At the start of a session, check the most recent work in the project's git history (and open PRs) to ensure your work does not conflict with or duplicate effort from other LLM sessions. Provide a brief summary of previous work.
+- **Context:** This repo is worked by multiple AI assistants (Antigravity + Claude Code) and across git worktrees. A quick `git log`/`gh pr list` scan up front prevents duplicated or conflicting changes.
