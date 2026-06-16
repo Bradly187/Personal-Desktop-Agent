@@ -364,6 +364,12 @@ class BehavioralTwinState:
         self._last_gesture_conf_delta: float = 0.0
         self._last_cmd_rate_delta: float = 0.0
         self._acoustic_profiler = None   # set via set_acoustic_profiler()
+        # R-1: a bounded fatigue contribution from the FatigueMonitor observer.
+        # It nudges the computed pain-day score but never owns activation (the
+        # hysteresis below does). Stale values are ignored so a dead monitor
+        # can't pin the score; zero when no fatigue (eval baselines unchanged).
+        self._fatigue_signal: float = 0.0
+        self._fatigue_signal_ts: float = 0.0
         self._manual_pain_day: bool = False  # user override via "hey agent pain day on"
         self._resource_governor = None   # set via set_resource_governor()
         self._gesture = None             # set via set_gesture_processor()
@@ -552,6 +558,35 @@ class BehavioralTwinState:
                 self._gesture.apply_pain_day(active and self._flare_gesture_degrades)
             except Exception as exc:
                 log.warning("BehavioralTwinState: gesture.apply_pain_day failed: %s", exc)
+
+    # Bounded fatigue contribution: at most this much is added to the computed
+    # pain-day score, and only while the signal is fresh. Small by design — the
+    # observer advises, the hysteresis decides.
+    _FATIGUE_NUDGE_WEIGHT: float = 0.10
+    _FATIGUE_SIGNAL_TTL_S: float = 300.0
+
+    def record_fatigue_signal(self, value: float) -> None:
+        """R-1: the FatigueMonitor observer contributes a fatigue level in [0,1].
+
+        This only nudges the computed pain-day score (see _recompute_pain_day_score)
+        — PainDayEngine's hysteresis still owns activation. Call with 0.0 when
+        fatigue subsides; stale values (> _FATIGUE_SIGNAL_TTL_S) are ignored.
+        """
+        self._fatigue_signal = max(0.0, min(1.0, float(value)))
+        self._fatigue_signal_ts = time.monotonic()
+
+    def _fresh_fatigue_signal(self) -> float:
+        """Fatigue signal if recent enough, else 0.0 (dead-monitor guard).
+
+        Reads defensively (getattr) so the score math is safe even for instances
+        built via __new__ that skip __init__ (e.g. the pain-day property tests)."""
+        signal = getattr(self, "_fatigue_signal", 0.0)
+        if signal <= 0.0:
+            return 0.0
+        ts = getattr(self, "_fatigue_signal_ts", 0.0)
+        if (time.monotonic() - ts) > self._FATIGUE_SIGNAL_TTL_S:
+            return 0.0
+        return signal
 
     def set_manual_pain_day(self, active: bool) -> None:
         """User override — immediately force pain_day_active state."""
@@ -821,6 +856,11 @@ class BehavioralTwinState:
             0.20 * signal_4 +   # command rate drop
             0.15 * signal_5     # voice clarity drop  ← new
         )
+        # R-1: bounded additive fatigue nudge from the FatigueMonitor observer.
+        # Zero when no (fresh) fatigue signal, so the historical 5-signal score is
+        # unchanged and eval baselines hold; otherwise a small push toward the
+        # activation threshold that the hysteresis below still owns.
+        score += self._FATIGUE_NUDGE_WEIGHT * self._fresh_fatigue_signal()
         return max(0.0, min(1.0, score))
 
     async def _pain_day_loop(self) -> None:

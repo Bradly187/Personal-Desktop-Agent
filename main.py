@@ -1118,6 +1118,15 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await email_watcher.start()
     shutdown.register(email_watcher)
 
+    # --- Observer agents (R-1): event-bus choreography ---
+    # FatigueMonitor watches command latency + voice drift and, when both rise,
+    # advises switching to touch control (Notifier) + contributes a bounded signal
+    # to PainDayEngine. Advisory only — it never forces the pain-day score.
+    from agents.fatigue_monitor import FatigueMonitorAgent
+    fatigue_monitor = FatigueMonitorAgent(event_bus, notifier=notifier, twin_state=twin_state)
+    await fatigue_monitor.start()
+    shutdown.register(fatigue_monitor)
+
     # --- Supervisor — liveness watchdog for the critical background loops ---
     # (gap #2) Restarts the scheduler worker / governor poll loop if either dies
     # unexpectedly. Registered LAST so reversed-order shutdown stops it FIRST —
@@ -1153,6 +1162,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         is_alive=email_watcher.is_healthy,
         restart=email_watcher.restart,
         enabled=lambda: email_watcher._running,
+    ))
+    supervisor.supervise(SupervisedSpec(
+        name="fatigue_monitor",
+        is_alive=fatigue_monitor.is_healthy,
+        restart=fatigue_monitor.restart,
+        enabled=lambda: fatigue_monitor._running,
     ))
 
     # Escalation (gap E): when a subsystem can't be restarted, TELL the user
