@@ -2727,6 +2727,23 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.set_evolution_candidate_status failed: %s", exc)
 
+    async def get_recent_corrections(self, limit: int = 200) -> list[dict]:
+        """User corrections (commands.corrected_to set) — the cleanest, domain-correct
+        self-evolution signal (R-3). Returns {id, text, action, corrected_to}."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT id, text, action, corrected_to FROM commands
+                   WHERE corrected_to IS NOT NULL AND TRIM(corrected_to) != ''
+                   ORDER BY ts DESC LIMIT ?""",
+                (limit,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_recent_corrections failed: %s", exc)
+            return []
+
     # ---------------------------------------------------------------------- #
     # Hotwords
     # ---------------------------------------------------------------------- #
