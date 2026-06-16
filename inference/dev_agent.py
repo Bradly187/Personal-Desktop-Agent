@@ -1098,6 +1098,19 @@ class DevAgent:
         return None, None
 
     async def _persist_step(self, run_id: int, step_num: int, step: "AgentStep") -> None:
+        # Publish step.failed (best-effort, independent of DB persistence) so
+        # observer agents (R-1) and event rules react even if the DB is down.
+        # Single chokepoint for both the sequential and DAG execution paths.
+        if step.success is False and run_id >= 0 and self._event_bus is not None:
+            try:
+                await self._event_bus.publish(
+                    TOPIC_STEP_FAILED,
+                    {"run_id": run_id, "step_num": step_num,
+                     "action": step.action, "error": (step.result or "")[:200]},
+                    source="dev_agent",
+                )
+            except Exception as _pub_exc:
+                log.debug("DevAgent: step.failed publish failed: %s", _pub_exc)
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
             return
