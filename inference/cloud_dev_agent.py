@@ -173,13 +173,18 @@ class CloudDevAgent:
 
     def __init__(
         self,
-        model: str = _DEFAULT_MODEL,
+        model: Optional[str] = None,
         api_key: Optional[str] = None,
         max_tokens: int = 2048,      # dev answers need room (vs the command path's 64)
         timeout: float = 60.0,
     ) -> None:
-        self.model = model
-        self._base_model = model          # backend-mapped at client-build time
+        # Model resolution: explicit arg → DA_CLOUD_DEV_MODEL env override → default.
+        # The env override is a no-code-change knob to flip the dev model at runtime
+        # — e.g. temporarily fall back to Sonnet 4.6 while a fresh Opus 4.8 Bedrock
+        # grant propagates to the inference layer, then unset it to return to Opus.
+        resolved = model or os.environ.get("DA_CLOUD_DEV_MODEL") or _DEFAULT_MODEL
+        self.model = resolved
+        self._base_model = resolved       # backend-mapped at client-build time
         self._backend = "anthropic_cloud"
         self._max_tokens = max_tokens
         self._timeout = timeout

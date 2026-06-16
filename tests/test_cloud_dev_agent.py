@@ -72,8 +72,10 @@ class _FakeClient:
         self.messages = _FakeMessages(message, raise_exc)
 
 
-def _agent_with_text(text: str) -> tuple[CloudDevAgent, _FakeClient]:
-    agent = CloudDevAgent(api_key="test-key")
+def _agent_with_text(text: str, model: str = "claude-opus-4-8") -> tuple[CloudDevAgent, _FakeClient]:
+    # Pin the model explicitly so the test is independent of the DA_CLOUD_DEV_MODEL
+    # env override that may be set in the developer's environment.
+    agent = CloudDevAgent(api_key="test-key", model=model)
     client = _FakeClient(message=_FakeMessage([_FakeBlock("text", text)]))
     agent._client = client  # inject — bypasses _get_client's SDK/key checks
     return agent, client
@@ -107,6 +109,24 @@ def test_extract_paths_empty():
 # ---------------------------------------------------------------------------
 # get_status
 # ---------------------------------------------------------------------------
+
+def test_env_override_sets_model(monkeypatch):
+    monkeypatch.setenv("DA_CLOUD_DEV_MODEL", "claude-sonnet-4-6")
+    agent = CloudDevAgent()
+    assert agent.model == "claude-sonnet-4-6"
+    assert agent._base_model == "claude-sonnet-4-6"
+
+
+def test_explicit_model_beats_env_override(monkeypatch):
+    monkeypatch.setenv("DA_CLOUD_DEV_MODEL", "claude-sonnet-4-6")
+    agent = CloudDevAgent(model="claude-opus-4-8")
+    assert agent.model == "claude-opus-4-8"
+
+
+def test_default_model_when_no_override(monkeypatch):
+    monkeypatch.delenv("DA_CLOUD_DEV_MODEL", raising=False)
+    assert CloudDevAgent().model == "claude-opus-4-8"
+
 
 def test_get_status_shape():
     agent = CloudDevAgent(api_key="k", model="claude-opus-4-8")
