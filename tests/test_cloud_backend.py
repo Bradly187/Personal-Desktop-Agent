@@ -132,17 +132,17 @@ def test_cloud_inference_uses_anthropic_when_no_bedrock(clean_env):
 
 # --- CloudDevAgent wiring (dev path) ---------------------------------------
 
-def test_cloud_dev_agent_default_maps_to_sonnet_on_bedrock(clean_env):
+def test_cloud_dev_agent_default_maps_to_opus_on_bedrock(clean_env):
     clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
     from inference.cloud_dev_agent import CloudDevAgent
-    agent = CloudDevAgent()   # default model — Sonnet 4.6
+    agent = CloudDevAgent()   # default model — Opus 4.8
     with patch("anthropic.AsyncAnthropicBedrock", return_value=object()) as ctor:
         agent._get_client()
     _, kwargs = ctor.call_args
     assert kwargs["aws_region"] == "us-east-1"
     assert kwargs["api_key"] == "bedrock-key"
     assert kwargs["timeout"] == agent._timeout
-    assert agent.model == "us.anthropic.claude-sonnet-4-6"
+    assert agent.model == _OPUS_BEDROCK
     assert agent._backend == "bedrock:us-east-1"
 
 
