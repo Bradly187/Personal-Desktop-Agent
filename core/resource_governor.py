@@ -392,12 +392,21 @@ class ResourceGovernor:
         Per-model failures are non-fatal (a model that isn't loaded is a no-op).
         """
         models = self._heavy_models()
+        evicted = []
         for model in models:
             try:
                 self._post_keepalive(model, "0")
+                evicted.append(model)
             except Exception as exc:
-                log.debug("ResourceGovernor: evict %s failed: %s", model, exc)
-        log.info("ResourceGovernor: heavy-model VRAM eviction requested (flare): %s", models)
+                # E8: if one POST fails, Ollama is down/hung — the remaining
+                # models would each pay the full 5 s timeout for nothing. Stop
+                # the batch so a flare response isn't held up by 5 s × N during a
+                # backend outage (the next flare retries from scratch).
+                log.debug("ResourceGovernor: evict %s failed (%s) — skipping the "
+                          "rest of the batch this flare", model, exc)
+                break
+        log.info("ResourceGovernor: heavy-model VRAM eviction requested (flare): "
+                 "%s of %s", evicted, models)
 
     def _restore_heavy_models(self) -> None:
         """Intentionally a NO-OP (audit fix 2026-06-09).

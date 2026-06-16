@@ -87,6 +87,7 @@ class _SupervisedState:
     restart_times: list = field(default_factory=list)  # monotonic timestamps
     total_restarts: int = 0
     failed: bool = False           # latched after exceeding the restart budget
+    disabled_logged: bool = False  # E21 — one-shot log on enabled()→False flip
 
 
 class Supervisor:
@@ -196,7 +197,19 @@ class Supervisor:
             # Respect deliberate teardown: don't supervise a disabled subsystem.
             try:
                 if not spec.enabled():
+                    # E21: surface the transition once. A subsystem silently going
+                    # disabled (its _running flag cleared by something other than a
+                    # clean shutdown) would otherwise mask a crash — the supervisor
+                    # just stops watching it with no trace.
+                    if not state.disabled_logged:
+                        log.warning(
+                            "Supervisor: %r is no longer enabled — pausing "
+                            "supervision (no restarts until it re-enables)",
+                            spec.name,
+                        )
+                        state.disabled_logged = True
                     continue
+                state.disabled_logged = False  # re-enabled → re-arm the one-shot
                 alive = spec.is_alive()
                 stale = self._is_stale(spec, now)
                 if alive and not stale:
