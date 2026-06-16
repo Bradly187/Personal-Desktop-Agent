@@ -45,6 +45,10 @@ class EmailWatcher:
         # One-time expiry alert: set after notifying, cleared on the next
         # successful poll so a future expiry alerts again.
         self._auth_alerted = False
+        # One-time "skill went away" alert (E14): a watcher that WAS working
+        # (baselined) and then loses the google_pim skill goes blind silently.
+        # Notify once; re-armed when the skill returns.
+        self._skill_alerted = False
         # Restart-durable dedup (#7): when a state_path is given, the seen-id set
         # and baseline flag survive a restart, so mail that arrived while the
         # agent was down still fires on the next poll instead of being absorbed
@@ -131,7 +135,21 @@ class EmailWatcher:
                 self._seen = set(data.get("seen", []))
                 self._baselined = bool(data.get("baselined", False))
         if not self._available():
+            # E14: if the watcher had been working and the skill has since gone
+            # away (disabled/crashed), the user is now blind to new mail. Say so
+            # once. Stay quiet when the skill was simply never set up (not
+            # baselined) — that's an expected idle state, not a regression.
+            if self._baselined and not self._skill_alerted and self._notifier is not None:
+                self._skill_alerted = True
+                try:
+                    await self._notifier.notify(
+                        "Email alerts paused",
+                        "The Gmail connection went offline. Say 'reconnect Google' "
+                        "to restore email alerts.")
+                except Exception as exc:
+                    log.debug("EmailWatcher skill-offline notify failed: %s", exc)
             return 0   # skill not (yet) running — re-checked next tick
+        self._skill_alerted = False   # skill present again — re-arm the alert
         res = await self._skills.call(self._SKILL_ID, self._TOOL, {})
         if not isinstance(res, dict) or res.get("status") != "ok":
             return 0

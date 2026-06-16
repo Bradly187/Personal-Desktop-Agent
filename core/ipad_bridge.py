@@ -195,6 +195,9 @@ class IPadBridge:
 
         self._clients: set[web.WebSocketResponse] = set()
         self._zeroconf: Any = None
+        # Callbacks fired (fire-and-forget) when a client connects — used by the
+        # Notifier to flush store-and-forward notifications on (re)connect (E12).
+        self._connect_handlers: list = []
 
         # A2UI: surfaces awaiting a tap reply, keyed by surface_id → Future.
         # Phase 1 (approval) writes the response file directly; Phase 2+ awaits
@@ -300,6 +303,10 @@ class IPadBridge:
                 await ws.send_json(canvas)
         except Exception as exc:
             log.debug("Failed to send initial dashboard: %s", exc)
+
+        # Flush any store-and-forward notifications that piled up while the iPad
+        # was offline (E12) — fire-and-forget so a slow flush never delays setup.
+        self._fire_connect_handlers()
 
         try:
             async for msg in ws:
@@ -1004,6 +1011,27 @@ class IPadBridge:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    def has_clients(self) -> bool:
+        """True if at least one iPad client is currently connected."""
+        return bool(self._clients)
+
+    def register_connect_handler(self, cb) -> None:
+        """Register an async callback fired (fire-and-forget) on each client
+        connect. Used by the Notifier to flush queued notifications (E12)."""
+        self._connect_handlers.append(cb)
+
+    def _fire_connect_handlers(self) -> None:
+        """Schedule the connect callbacks. Best-effort — a slow/raising handler
+        never blocks or breaks the connection path."""
+        for cb in list(self._connect_handlers):
+            try:
+                result = cb()
+                if asyncio.iscoroutine(result):
+                    from core.async_utils import fire_and_log
+                    fire_and_log(result)
+            except Exception as exc:
+                log.debug("connect handler failed: %s", exc)
 
     def _notify_mic_state(self, muted: bool) -> None:
         """Sync callback from WhisperStream.set_muted — schedule a broadcast.
