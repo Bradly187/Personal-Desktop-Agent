@@ -155,6 +155,15 @@ class FusionConfig:
     # ~98 px/frame, well under the cap. Set <= 0 to disable.
     tilt_max_px_per_frame: float = 150.0
 
+    # Voice single-flight window (s). The iPad on-device recognizer (voice_local)
+    # and the PC Whisper stream (voice) both listen to the same mic and dispatch
+    # independently; the Whisper wake-armed window can also re-fire a VAD-split
+    # utterance. Once ANY voice-family command is dispatched, further voice-family
+    # commands are suppressed for this long so one spoken phrase = one action.
+    # Scoped to voice sources only — touch/tilt/gesture are never affected.
+    # Set <= 0 to disable.
+    voice_single_flight_s: float = 2.5
+
 
 # ---------------------------------------------------------------------------
 # FusionEngine
@@ -192,6 +201,10 @@ class FusionEngine:
         self._gesture: Optional[Command] = None
         self._voice_local: Optional[str] = None                  # keyword text
         self._voice: Optional[Command] = None
+        # Cross-source voice single-flight: monotonic ts of the last voice-family
+        # command dispatched through _emit(). Suppresses the parallel-recognizer
+        # double-fire (voice_local + voice) and the wake-armed re-fire.
+        self._last_voice_emit_mono: float = 0.0
         self._tilt: Optional[tuple[float, float]] = None          # (rx, ry) rad/s
         # D2: last-known sensor values for throttled DB sampling (~1 Hz)
         self._last_tilt_sample: Optional[tuple[float, float]] = None
@@ -843,7 +856,32 @@ class FusionEngine:
                     log, "sensor_event write",
                 )
 
+    # The two full-command voice recognizers share one logical channel for
+    # single-flight purposes. Deliberately EXCLUDES "multimodal" (the voice-click
+    # bypass, Rule 2): clicks must stay instant and may legitimately repeat in
+    # quick succession, so they are never throttled here.
+    _VOICE_SOURCES = frozenset({"voice", "voice_local"})
+
     async def _emit(self, cmd: Command) -> None:
+        # Cross-source voice single-flight. The iPad on-device recognizer and the
+        # PC Whisper stream both transcribe the same utterance and dispatch
+        # independently; the Whisper wake-armed window can also re-fire a
+        # VAD-split phrase. Without this, one spoken "open chrome" launched three
+        # Chrome windows. Collapse redundant voice dispatches inside a short
+        # window to one action. Scoped strictly to voice sources so touch, tilt,
+        # and gesture are never throttled.
+        window = self._effective_cfg.voice_single_flight_s
+        if window > 0 and cmd.source in self._VOICE_SOURCES:
+            now_mono = time.monotonic()
+            if now_mono - self._last_voice_emit_mono < window:
+                log.info(
+                    "FusionEngine: suppressing duplicate voice command "
+                    "(source=%s, within %.1fs single-flight): %r",
+                    cmd.source, window, cmd.text,
+                )
+                return
+            self._last_voice_emit_mono = now_mono
+
         # Track last active source for telemetry and metrics
         self._last_active_source = cmd.source
         if cmd.source == "gesture" and cmd.gesture_confidence is not None:
