@@ -1107,6 +1107,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from core.proactive_scheduler import ProactiveScheduler
     from core.event_rule_engine import EventRuleEngine
     notifier = Notifier(bridge=bridge)
+    # Flush store-and-forward notifications when an iPad (re)connects (E12).
+    if bridge is not None:
+        bridge.register_connect_handler(notifier.flush_pending)
     proactive = ProactiveScheduler(agent_db, dev_agent=dev_agent, scheduler=scheduler,
                                    notifier=notifier)
     event_rules = EventRuleEngine(agent_db, event_bus, notifier=notifier, dev_agent=dev_agent)

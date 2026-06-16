@@ -26,11 +26,12 @@ async def test_notify_pushes_to_bridge(monkeypatch):
     assert payload["title"] == "Morning brief" and payload["body"] == "It is sunny."
 
 
-async def test_notify_no_bridge_still_speaks(monkeypatch):
+async def test_notify_no_bridge_still_speaks(monkeypatch, tmp_path):
     import tts.polly_stream as _ps
     spoke = AsyncMock()
     monkeypatch.setattr(_ps, "get_client", lambda *a, **k: MagicMock(speak=spoke))
-    await Notifier(bridge=None).notify("hi", "there")   # must not raise
+    # tmp queue_path so the offline-enqueue doesn't touch the real ~/.claude.
+    await Notifier(bridge=None, queue_path=tmp_path / "q.json").notify("hi", "there")
     spoke.assert_awaited()
 
 

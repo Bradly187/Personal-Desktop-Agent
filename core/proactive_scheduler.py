@@ -78,6 +78,7 @@ class ProactiveScheduler:
         self._running = False
         self._last_beat: float = 0.0   # monotonic ts of last poll iteration (#2)
         self._bg: set = set()          # keep fire-and-forget drain tasks alive
+        self._nudged_escalations = False  # E13 — one-shot review-queue nudge
 
     def set_dev_agent(self, dev_agent) -> None:
         self._dev_agent = dev_agent
@@ -127,6 +128,11 @@ class ProactiveScheduler:
         except Exception as exc:
             log.debug("ProactiveScheduler lease reap failed: %s", exc)
 
+        # E13: surface the dev-escalation backlog once per session. A plan that
+        # exhausted its replan/step budget lands in dev_escalations and otherwise
+        # sits there until the user happens to ask "review queue" — nudge them.
+        await self._maybe_nudge_escalations()
+
         # Flare gate: while dev admission is paused, defer (re-ticks in 30 s).
         if self._scheduler is not None and getattr(self._scheduler, "dev_paused", False):
             return 0
@@ -160,6 +166,30 @@ class ProactiveScheduler:
             t.add_done_callback(self._bg.discard)
         log.info("ProactiveScheduler: promoted %d due goal(s)", len(promoted))
         return len(promoted)
+
+    async def _maybe_nudge_escalations(self) -> None:
+        """Fire a one-shot notification (per session) the first tick that finds a
+        non-empty dev-escalation backlog (E13). Best-effort — never breaks a tick.
+        """
+        if self._notifier is None or self._nudged_escalations:
+            return
+        try:
+            count = await self._db.count_pending_escalations()
+        except Exception as exc:
+            log.debug("escalation count failed: %s", exc)
+            return
+        if count <= 0:
+            return
+        self._nudged_escalations = True   # one-shot — only after a real backlog
+        plural = "s" if count != 1 else ""
+        try:
+            await self._notifier.notify(
+                "Plans need review",
+                f"{count} automated task{plural} stopped and need your review. "
+                "Say 'review queue' to hear them.",
+            )
+        except Exception as exc:
+            log.debug("escalation nudge failed: %s", exc)
 
     # ── Supervision ────────────────────────────────────────────────────────
     def is_healthy(self) -> bool:
