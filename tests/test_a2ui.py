@@ -409,3 +409,152 @@ async def test_a2ui_clarify_tap_routes_voice_command(tmp_path):
     assert len(routed) == 1
     assert routed[0].text == "up"
     assert routed[0].source == "voice"
+
+
+# --------------------------------------------------------------------------- #
+# Persistent dashboard canvas
+# --------------------------------------------------------------------------- #
+
+
+def test_canvas_builder_has_canvas_type_and_no_timeout():
+    b = a2ui.A2UIBuilder()
+    b.text("t", "Agent", "headline")
+    b.column("root", ["t"])
+    c = b.canvas("root")
+    assert c["type"] == "a2ui_canvas"
+    assert c["surface_id"] == a2ui.CANVAS_ID
+    assert "timeout_s" not in c and "dismissible" not in c   # persistent, not transient
+    assert a2ui.validate_surface(c) == []
+
+
+def test_status_dashboard_valid_and_renders_rows():
+    c = a2ui.status_dashboard(
+        "Agent Status",
+        [("Connection", "online"), ("Pain day", "no")],
+        actions=[("Pause", "pause")],
+    )
+    assert c["type"] == "a2ui_canvas"
+    assert a2ui.validate_surface(c) == []
+    texts = [n["text"] for n in c["components"] if n["component"] == "Text"]
+    assert "Connection: online" in texts
+    btns = [n for n in c["components"] if n["component"] == "Button"]
+    assert btns and btns[0]["action"] == {"event": "canvas", "value": "pause"}
+
+
+def test_validate_accepts_canvas_type():
+    c = a2ui.status_dashboard("X", [("a", "b")])
+    assert a2ui.validate_surface(c) == []
+
+
+def test_canvas_update_and_clear_message_shapes():
+    upd = a2ui.canvas_update_message(
+        [{"id": "row0", "component": "Text", "text": "x", "variant": "body"}]
+    )
+    assert upd["type"] == "a2ui_canvas_update" and upd["surface_id"] == "dashboard"
+    assert upd["components"][0]["id"] == "row0"
+    clr = a2ui.canvas_clear_message()
+    assert clr == {"type": "a2ui_canvas_clear", "surface_id": "dashboard"}
+
+
+@pytest.mark.asyncio
+async def test_bridge_send_canvas_validates(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    sent = []
+
+    async def _capture(payload):
+        sent.append(payload)
+
+    bridge.broadcast_json = _capture
+
+    ok = await bridge.send_a2ui_canvas(a2ui.status_dashboard("X", [("a", "b")]))
+    assert ok is True and sent and sent[-1]["type"] == "a2ui_canvas"
+
+    bad = await bridge.send_a2ui_canvas({"type": "a2ui_canvas", "components": []})
+    assert bad is False   # invalid → not sent
+
+
+@pytest.mark.asyncio
+async def test_canvas_tap_routes_value_as_command(tmp_path):
+    """A dashboard button tap with no registered Future routes its value as a
+    voice-equivalent command through the coordinator."""
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+    routed = []
+
+    class _FakeCoordinator:
+        async def route(self, cmd):
+            routed.append(cmd)
+
+    bridge._coordinator = _FakeCoordinator()
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "dashboard", "event": "canvas", "value": "open kiro"}
+    )
+    await asyncio.sleep(0)
+    assert len(routed) == 1
+    assert routed[0].text == "open kiro"
+    assert routed[0].source == "voice"
+
+
+@pytest.mark.asyncio
+async def test_canvas_tap_resolves_registered_future(tmp_path):
+    """If the agent registered a Future for the canvas (awaiting an interaction),
+    a tap resolves it instead of routing a command."""
+    bridge = _make_bridge(tmp_path)
+    ws = _FakeWS()
+    routed = []
+
+    class _FakeCoordinator:
+        async def route(self, cmd):
+            routed.append(cmd)
+
+    bridge._coordinator = _FakeCoordinator()
+    fut = bridge.register_a2ui_surface("dashboard")
+    await bridge._handle_a2ui_event(
+        ws, {"surface_id": "dashboard", "event": "canvas", "value": "pause"}
+    )
+    await asyncio.sleep(0)
+    assert fut.done()
+    assert (await fut)["value"] == "pause"
+    assert routed == []   # future path wins; no command routed
+
+
+def test_build_status_dashboard_is_valid_canvas(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    # No coordinator/whisper wired — must still build a valid dashboard.
+    c = bridge._build_status_dashboard()
+    assert c["type"] == "a2ui_canvas"
+    assert a2ui.validate_surface(c) == []
+    texts = [n["text"] for n in c["components"] if n["component"] == "Text"]
+    assert any("Status" in t for t in texts)
+    # The action button routes as a canvas command.
+    btns = [n for n in c["components"] if n["component"] == "Button"]
+    assert btns and btns[0]["action"]["event"] == "canvas"
+
+
+def test_build_status_dashboard_reads_pain_day(tmp_path):
+    bridge = _make_bridge(tmp_path)
+
+    class _Mem:
+        def get_pain_day_active(self):
+            return True
+
+    class _Coord:
+        _memory = _Mem()
+
+    bridge._coordinator = _Coord()
+    c = bridge._build_status_dashboard()
+    texts = [n["text"] for n in c["components"] if n["component"] == "Text"]
+    assert "Pain day: Yes" in texts
+
+
+@pytest.mark.asyncio
+async def test_push_status_dashboard_broadcasts(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    sent = []
+
+    async def _capture(payload):
+        sent.append(payload)
+
+    bridge.broadcast_json = _capture
+    await bridge.push_status_dashboard()
+    assert sent and sent[-1]["type"] == "a2ui_canvas"

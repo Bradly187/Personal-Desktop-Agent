@@ -17,6 +17,7 @@
 | **CLARIFY emit/clear + tap→voice routing** | `core/hybrid_coordinator.py` (`_maybe_emit_clarify_surface`/`_clear_clarify_surface`) + bridge tap-routing | ✅ done |
 | **Click-target palette (Phase 3, prototype)** | `core/a2ui.py` (`is_click_target_clarify`, `click_target_surface`) + coordinator (`_rank_click_targets`, `_build_click_target_surface`, `set_target_cache`) + bridge `click_target` dispatch | 🧪 flag-gated `DA_A2UI_CLICK_TARGETS=1` |
 | Swift models / renderer / overlay | `iPadApp/.../Network/A2UIModels.swift`, `UI/A2UIRenderer.swift`, `UI/A2UIOverlay.swift`, `WebSocketManager.swift`, `ContentView.swift` | ✅ scaffolded (generic — handles approval AND clarify with no per-type code) |
+| **Persistent dashboard canvas (Agent tab)** — see §7b | PC: `core/a2ui.py` (`canvas`, `status_dashboard`, `canvas_update_message`, `canvas_clear_message`) + bridge (`send/update/clear_a2ui_canvas`). iPad: `UI/A2UICanvasStore.swift` (app-scoped, cached to UserDefaults), `UI/AgentDashboardView.swift` (tab 3), canvas decode + feeds in `WebSocketManager.swift`, `Codable`+`merging` in `A2UIModels.swift`, tab wiring in `ContentView.swift`, store injection in `DesktopAgentApp.swift` | ✅ built (PC tested); ⏳ iPad build |
 | End-to-end on device | — | ⏳ needs one iPad build |
 
 PC subset green: **239 passed** (`-k "coordinator or clarif or bridge or whisper or approval or a2ui or gate"`). The Swift side compiles against the existing design system but is unverified until an Xcode build.
@@ -180,6 +181,42 @@ At `command_executor.py:664`, when CLARIFY carries discrete candidates (e.g., ap
 
 ### Phase 3 (optional, later) — schedule/goal confirmations, pain-journal quick-entry
 Once the renderer is proven, route `schedule_parser` confirmations and a pain-journal quick-entry form through the same path. These are deterministic templates.
+
+---
+
+## 7b. Persistent dashboard canvas (Agent tab) — built 2026-06-15
+
+Distinct from the transient overlay (§5): a **persistent** agent-authored surface that lives on its own tab and survives tab switches + app restart. This is the whitepaper's *Canvas* concept. Chosen shape: **agent-authored canvas, hybrid (native status + A2UI region), cached on-device.**
+
+**Lifecycle is separate from the overlay** — three new PC→iPad message types so the two never collide:
+
+| Message | Effect |
+|---|---|
+| `a2ui_canvas` | set/replace the whole dashboard (no timeout, never auto-dismissed) |
+| `a2ui_canvas_update` | merge components by id (partial refresh, no full re-render) |
+| `a2ui_canvas_clear` | reset to the empty state |
+
+**PC side** (`core/a2ui.py`, `core/ipad_bridge.py`):
+- `A2UIBuilder.canvas(root, surface_id="dashboard")` — builds a canvas-typed surface (no `dismissible`/`timeout_s`).
+- `status_dashboard(title, rows, actions=…)` — example agent-status canvas; `canvas_update_message()` / `canvas_clear_message()` patch/clear helpers.
+- Bridge `send_a2ui_canvas()` (validates first), `update_a2ui_canvas()`, `clear_a2ui_canvas()`.
+- `validate_surface()` now accepts both `a2ui_surface` and `a2ui_canvas`.
+
+**iPad side**:
+- `UI/A2UICanvasStore.swift` — app-scoped `ObservableObject` (injected in `DesktopAgentApp`), bound to the WS canvas feeds. Holds the current canvas, applies `merging(_:)` patches, and **caches the last canvas to `UserDefaults`** so it renders instantly on cold start. Lives at app scope because the tab view is created/destroyed on switch — the state must not.
+- `UI/AgentDashboardView.swift` — the **Agent tab** (`ContentView` tab index 3; Settings→4, Sensors→5). Hybrid: a native status `DACard` (connection, mic, last command, last alert from local state) above the agent-authored A2UI region rendered by the existing `A2UIRenderer`. Empty-state card when no canvas pushed.
+- `Network/WebSocketManager.swift` — decodes the three canvas messages → `a2uiCanvasFeed` / `a2uiCanvasUpdateFeed` / `a2uiCanvasClearFeed`. Canvas control taps reply via the existing `sendA2UIEvent` tagged `event="canvas"`.
+- `Network/A2UIModels.swift` — `A2UISurface` made `Codable` with defaulted `dismissible`/`timeoutS` (canvas omits them) + a memberwise init + `merging(_:)`.
+
+**Why hybrid + cache**: the native section guarantees the tab is never blank (glanceable on a flare day even before the PC connects); the cached canvas means a cold start shows the last dashboard immediately, then refreshes on reconnect.
+
+**Note**: unlike the transient overlay, a canvas is **not** dismissible/timed — it persists until the agent replaces or clears it. That's the whole point of a dashboard, and it's why it gets a tab rather than the centered overlay.
+
+**Canvas tap handling** (`_handle_a2ui_event`, `event=="canvas"`): two paths — if the agent registered a Future for the canvas it's resolved (agent awaiting an interaction); otherwise the button's `value` is routed as a voice-equivalent command through the coordinator (so a button valued `"open kiro"` runs that command, gated like any other). The canvas persists through the tap.
+
+**Seed-on-connect**: `IPadBridge._build_status_dashboard()` composes an agent-status canvas (Status / Pain day / Voice + a "What can you do?" action button) from cheaply-available state, defensively (missing subsystems degrade, never block). It's pushed to each client on connect (`ws_handler`) so the Agent tab is populated immediately.
+
+**Live refresh (wired)**: `ResourceGovernor.set_flare_change_callback()` fires on each pain-day (flare) on/off transition; `main.py` wires it to `bridge.push_status_dashboard()`, so the dashboard's "Pain day" row updates in real time without waiting for a reconnect. Callback is sync-or-async tolerant and fire-and-forget (a slow push never delays flare handling). Mic state needs no canvas refresh — the native dashboard section reads it live on the iPad.
 
 ---
 

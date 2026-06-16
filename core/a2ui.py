@@ -35,6 +35,12 @@ from typing import Any, Optional
 
 VERSION = "v0.9"
 
+# Default id for the single persistent dashboard canvas on the iPad Agent tab.
+CANVAS_ID = "dashboard"
+
+# Message types the iPad accepts as a renderable surface payload.
+_SURFACE_TYPES = frozenset({"a2ui_surface", "a2ui_canvas"})
+
 # Closed v1 catalog. The renderer enforces the same set by exhaustive switch;
 # this mirror lets us validate before sending (and in tests) so the iPad never
 # receives an unknown component type.
@@ -128,6 +134,25 @@ class A2UIBuilder:
             "root": root,
             "dismissible": bool(dismissible),
             "timeout_s": float(timeout_s),
+            "components": list(self._nodes),
+        }
+
+    def canvas(self, root: str, *, surface_id: str = CANVAS_ID) -> dict:
+        """Build a *persistent* canvas surface for the iPad Agent tab.
+
+        Unlike :meth:`surface` (the transient centered overlay), a canvas has no
+        timeout and is never auto-dismissed — it stays on the dashboard until the
+        agent replaces it (``a2ui_canvas``), patches it (``a2ui_canvas_update``),
+        or clears it (``a2ui_canvas_clear``). The iPad caches the last canvas so
+        it renders instantly on launch.
+        """
+        if root not in self._ids:
+            raise ValueError(f"root id {root!r} not among built components")
+        return {
+            "type": "a2ui_canvas",
+            "surface_id": surface_id,
+            "version": VERSION,
+            "root": root,
             "components": list(self._nodes),
         }
 
@@ -277,6 +302,49 @@ TEMPLATES = {
 
 
 # --------------------------------------------------------------------------- #
+# Persistent dashboard canvas (Agent tab) — agent-authored, hybrid with the
+# iPad's native status; cached on-device so it survives restart.
+# --------------------------------------------------------------------------- #
+
+
+def status_dashboard(
+    title: str,
+    rows: list[tuple[str, str]],
+    *,
+    actions: Optional[list[tuple[str, str]]] = None,
+    surface_id: str = CANVAS_ID,
+) -> dict:
+    """Build a simple agent-status canvas: a titled card of label/value rows and
+    optional action buttons. A convenience example of the agent-authored canvas —
+    callers can compose any layout via :class:`A2UIBuilder` + :meth:`canvas`.
+
+    ``actions`` buttons fire ``event="canvas"`` with their value; the PC decides
+    what each means (resolve a registered surface Future, or route as a command).
+    """
+    b = A2UIBuilder()
+    children = [b.text("title", title, "headline")]
+    for i, (label, value) in enumerate(rows):
+        children.append(b.text(f"row{i}", f"{label}: {value}", "body"))
+    if actions:
+        btn_ids = [b.button(f"act{i}", lbl, val, event="canvas") for i, (lbl, val) in enumerate(actions)]
+        children.append(b.row("actions", btn_ids))
+    b.column("root", children)
+    return b.canvas("root", surface_id=surface_id)
+
+
+def canvas_update_message(components: list[dict], *, surface_id: str = CANVAS_ID) -> dict:
+    """Patch a live canvas: merge/replace the given components by id (no full
+    re-render). Each entry is a node dict as produced by ``A2UIBuilder._add``.
+    """
+    return {"type": "a2ui_canvas_update", "surface_id": surface_id, "components": list(components)}
+
+
+def canvas_clear_message(*, surface_id: str = CANVAS_ID) -> dict:
+    """Clear the dashboard canvas back to its empty state."""
+    return {"type": "a2ui_canvas_clear", "surface_id": surface_id}
+
+
+# --------------------------------------------------------------------------- #
 # Click-target palette (Phase 3, prototype) — "what would you like to click?"
 # is not enumerable from text, but the live UI tree IS: the coordinator ranks
 # clickable elements from target_cache and we render them as a tappable list.
@@ -334,8 +402,8 @@ def validate_surface(payload: dict) -> list[str]:
     authoritative (whitepaper best practice: validate, then fall back to voice).
     """
     errs: list[str] = []
-    if payload.get("type") != "a2ui_surface":
-        errs.append("type must be 'a2ui_surface'")
+    if payload.get("type") not in _SURFACE_TYPES:
+        errs.append(f"type must be one of {sorted(_SURFACE_TYPES)}")
     comps = payload.get("components")
     if not isinstance(comps, list) or not comps:
         errs.append("components must be a non-empty list")

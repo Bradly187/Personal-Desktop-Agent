@@ -122,9 +122,10 @@ struct ContentView: View {
             // Non-swipeable utility tabs — shown on top when active
             if selectedTab >= swipeableTabCount {
                 switch selectedTab {
-                case 3: SettingsView()
-                case 4: SensorDashboardView()
-                default: SettingsView()
+                case 3: AgentDashboardView()
+                case 4: SettingsView()
+                case 5: SensorDashboardView()
+                default: AgentDashboardView()
                 }
             }
         }
@@ -146,8 +147,9 @@ struct ContentView: View {
             tabButton(0, "Commands", "square.grid.3x3.fill")
             tabButton(1, "Trackpad", "hand.point.up")
             tabButton(2, "Write",    "pencil.and.scribble")
-            tabButton(3, "Settings", "gearshape.fill")
-            tabButton(4, "Sensors",  "sensor.tag.radiowaves.forward")
+            tabButton(3, "Agent",    "sparkles")
+            tabButton(4, "Settings", "gearshape.fill")
+            tabButton(5, "Sensors",  "sensor.tag.radiowaves.forward")
         }
         .frame(height: tabBarHeight)
         .background(
@@ -173,7 +175,7 @@ struct ContentView: View {
                 tabBarDragOffset = value.translation.width
             }
             .onEnded { value in
-                let totalTabs = 5
+                let totalTabs = 6
                 // Only advance from the tab we started on (prevents double-advance)
                 if value.translation.width < -dragThreshold {
                     let next = min(tabAtDragStart + 1, totalTabs - 1)

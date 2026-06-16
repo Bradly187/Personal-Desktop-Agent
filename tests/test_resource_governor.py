@@ -648,3 +648,38 @@ class TestCloudCircuitBreaker:
         """_CLOUD_TIMEOUT_S must be exactly 10 seconds."""
         from core.hybrid_coordinator import HybridCoordinator
         assert HybridCoordinator._CLOUD_TIMEOUT_S == 10.0
+
+
+class TestFlareChangeCallback:
+    """The flare-change callback fires on each transition so observers (e.g. the
+    iPad Agent dashboard) can refresh."""
+
+    def test_sync_callback_fires_with_state(self):
+        gov, _ = _make_governor()
+        seen = []
+        gov.set_flare_change_callback(lambda active: seen.append(active))
+        gov._notify_flare_change(True)
+        gov._notify_flare_change(False)
+        assert seen == [True, False]
+
+    def test_no_callback_is_noop(self):
+        gov, _ = _make_governor()
+        gov._notify_flare_change(True)   # must not raise
+
+    def test_callback_exception_is_swallowed(self):
+        gov, _ = _make_governor()
+        gov.set_flare_change_callback(lambda active: (_ for _ in ()).throw(RuntimeError("x")))
+        gov._notify_flare_change(True)   # must not raise
+
+    @pytest.mark.asyncio
+    async def test_coroutine_callback_is_scheduled(self):
+        gov, _ = _make_governor()
+        seen = []
+
+        async def _cb(active):
+            seen.append(active)
+
+        gov.set_flare_change_callback(_cb)
+        gov._notify_flare_change(True)
+        await asyncio.sleep(0)   # let the scheduled task run
+        assert seen == [True]

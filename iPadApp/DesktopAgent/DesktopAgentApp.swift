@@ -7,6 +7,7 @@ struct DesktopAgentApp: App {
     @StateObject private var sensorManager: SensorManager
     @StateObject private var screenshotStore = ScreenshotStore()
     @StateObject private var serviceDiscovery = ServiceDiscovery()
+    @StateObject private var canvasStore: A2UICanvasStore
 
     // Fix #5: Track scene phase for proper background/foreground lifecycle
     @Environment(\.scenePhase) private var scenePhase
@@ -25,6 +26,11 @@ struct DesktopAgentApp: App {
         _sensorManager = StateObject(wrappedValue: SensorManager(ws: ws, settings: s))
         featureToggleSyncer = FeatureToggleSyncer(settings: s, ws: ws)
         dwellActionSyncer = DwellActionSyncer(settings: s, ws: ws)
+        // Persistent dashboard canvas — bound to the WS canvas feeds. Created here
+        // (not in a view) so it survives Agent-tab create/destroy and app restart.
+        let cs = A2UICanvasStore()
+        cs.bind(to: ws)
+        _canvasStore = StateObject(wrappedValue: cs)
         // Wire AppLogger transport so sensor logs are forwarded to the PC bridge.
         AppLogger.shared.setTransport(ws)
     }
@@ -38,6 +44,7 @@ struct DesktopAgentApp: App {
                 .environmentObject(sensorManager)
                 .environmentObject(screenshotStore)
                 .environmentObject(serviceDiscovery)
+                .environmentObject(canvasStore)
         }
         // Fix #5: Reliable lifecycle handling via scenePhase.
         // .onDisappear is unreliable on iPad — scenePhase catches background/termination.
