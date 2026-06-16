@@ -373,15 +373,18 @@ async def test_restore_file_existed_but_no_backup_leaves_file(tmp_path):
     )
     cid = await db.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
 
-    await agent._run_compensations(run_id, triggered_by="user_cancel")
+    incomplete = await agent._run_compensations(run_id, triggered_by="user_cancel")
 
-    # Can't restore, but must NOT delete (deleting would lose data).
+    # Can't restore, but must NOT delete (deleting would lose data). The status
+    # is 'skipped' — a truthful record that the rollback did NOT complete (E5),
+    # not a misleading 'done'. And it's counted as an incomplete compensation.
     assert target.exists()
+    assert incomplete == 1
     async with db._conn.execute(
         "SELECT status FROM saga_compensations WHERE id = ?", (cid,)
     ) as cur:
         row = await cur.fetchone()
-    assert row["status"] == "done"
+    assert row["status"] == "skipped"
     await db.close()
 
 

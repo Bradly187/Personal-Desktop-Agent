@@ -156,19 +156,28 @@ async def test_record_escalation_writes_row_and_sets_flag(tmp_path):
     await db.close()
 
 
-async def test_record_escalation_db_unavailable_noop():
+async def test_record_escalation_db_unavailable_falls_back_to_sidecar(tmp_path):
+    # E4: a DB-down halt must NOT silently lose the escalation. It is written to
+    # the durable sidecar and the flag is set (it WAS persisted, durably).
     agent = _make_agent(None)
+    agent._escalation_sidecar_path = tmp_path / "esc.jsonl"
     await agent._record_escalation(1, "goal", "max_steps", None, 0)  # no crash
-    assert agent._escalated_this_run is False
+    assert agent._escalated_this_run is True
+    assert agent._escalation_sidecar_path.exists()
+    assert len(agent._escalation_sidecar_path.read_text("utf-8").splitlines()) == 1
 
 
-async def test_record_escalation_insert_failure_swallowed():
+async def test_record_escalation_insert_failure_falls_back_to_sidecar(tmp_path):
+    # insert_escalation swallows its own error and returns None — E4 detects the
+    # non-persist (None) and falls back to the sidecar rather than lying.
     db = MagicMock()
     db.available = True
     db.insert_escalation = AsyncMock(side_effect=RuntimeError("disk full"))
     agent = _make_agent(db)
+    agent._escalation_sidecar_path = tmp_path / "esc.jsonl"
     await agent._record_escalation(1, "goal", "max_replans", None, 2)  # no raise
-    assert agent._escalated_this_run is False
+    assert agent._escalated_this_run is True
+    assert agent._escalation_sidecar_path.exists()
 
 
 # ---------------------------------------------------------------------------

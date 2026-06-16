@@ -356,6 +356,11 @@ class DevAgent:
         self._plan_authorized: bool = False
         self._approved_verbs: frozenset[str] = frozenset()
         self._escalated_this_run: bool = False  # halted plan landed in review queue
+        # Durable fallback store for escalations the DB can't accept (E4).
+        # Instance attr so tests can redirect it off the real home dir.
+        self._escalation_sidecar_path: Path = (
+            Path.home() / ".claude" / "escalations_pending.jsonl"
+        )
         self._confirm_lock: asyncio.Lock = asyncio.Lock()
         # Concurrency guards: plan state (_plan_authorized/_cancel_event/
         # _current_goal/…) is per-plan instance state, so plans must never
@@ -694,8 +699,9 @@ class DevAgent:
                 log.warning("DevAgent: %s", halted_reason)
                 # Roll back completed side effects — a partial plan halted by the
                 # step cap should not leave half-done destructive work.
-                await self._run_compensations(run_id, triggered_by="max_steps")
-                await self._record_escalation(run_id, goal, "max_steps", None, replans)
+                _incomplete = await self._run_compensations(run_id, triggered_by="max_steps")
+                await self._record_escalation(run_id, goal, "max_steps", None, replans,
+                                              incomplete=_incomplete)
                 compensated = True
                 break
             if self._cancel_event.is_set():
@@ -1154,7 +1160,15 @@ class DevAgent:
             )
             # Register a saga compensation row for every successful step that
             # has a defined reverse action, so they can be unwound on failure.
-            if step.success and comp_action and step_id is not None:
+            # E6: a WRITE_FILE that FAILED may still have PARTIALLY modified the
+            # file (truncated/half-written then errored). If a pre-write snapshot
+            # was captured, register its RESTORE too so the partial write is
+            # rolled back — restoring is a safe no-op if the file was untouched.
+            register = bool(step.success)
+            if (not step.success and step.action.upper() == "WRITE_FILE"
+                    and step.comp_args):
+                register = True
+            if register and comp_action and step_id is not None:
                 await db.insert_saga_compensation(
                     run_id=run_id, step_id=step_id,
                     compensation_action=comp_action,
@@ -1205,55 +1219,166 @@ class DevAgent:
                 )
             except Exception as _pub_exc:
                 log.debug("DevAgent: event publish failed: %s", _pub_exc)
-        await self._run_compensations(run_id, triggered_by="max_replans")
-        await self._record_escalation(run_id, goal, "max_replans", failed_action, replans)
+        incomplete = await self._run_compensations(run_id, triggered_by="max_replans")
+        await self._record_escalation(run_id, goal, "max_replans", failed_action, replans,
+                                      incomplete=incomplete)
+
+    def _escalation_sidecar(self) -> Path:
+        """Durable fallback store for escalations the DB couldn't accept (E4)."""
+        return self._escalation_sidecar_path
 
     async def _record_escalation(
         self, run_id: int, goal: str, reason: str,
-        failed_action: Optional[str], replans: int,
+        failed_action: Optional[str], replans: int, *, incomplete: int = 0,
     ) -> None:
         """Persist a halted plan to the human-review escalation queue.
 
         Called only on budget-exhaustion halts (max_replans / max_steps) — a
-        user cancel is deliberate and never escalates. Best-effort: the rollback
-        already ran, so a DB failure here must not raise. Sets
-        _escalated_this_run so the completion TTS can mention the review queue.
+        user cancel is deliberate and never escalates. The rollback already ran,
+        so this must not raise.
+
+        E4: the escalation must NOT be silently lost when the DB is down or the
+        INSERT fails (insert_escalation swallows its own error and returns None).
+        On any non-persist, the row is appended to a durable JSONL sidecar and
+        reconciled into dev_escalations on the next healthy boot. ``incomplete``
+        is the number of saga compensations that did not roll back cleanly (E5);
+        it rides along in detail so the reviewer sees a partial rollback.
+        _escalated_this_run is set ONLY when the row was actually persisted
+        somewhere — so the completion TTS never claims "saved" when it wasn't.
         """
+        detail = json.dumps({"current_step": self._current_step,
+                             "total_steps": self._total_steps,
+                             "incomplete_compensations": incomplete})
+        persisted = False
         db = self._db()
-        if not db or not getattr(db, "available", False):
-            return
-        try:
-            detail = json.dumps({"current_step": self._current_step,
-                                 "total_steps": self._total_steps})
-            await db.insert_escalation(
-                run_id, goal, reason,
-                failed_action=failed_action, replans=replans, detail=detail,
+        if db and getattr(db, "available", False):
+            try:
+                row_id = await db.insert_escalation(
+                    run_id, goal, reason,
+                    failed_action=failed_action, replans=replans, detail=detail,
+                )
+                persisted = row_id is not None   # insert_escalation returns None on failure
+            except Exception as exc:
+                log.warning("DevAgent._record_escalation DB insert failed: %s", exc)
+        if not persisted:
+            persisted = await asyncio.to_thread(
+                self._append_escalation_sidecar, self._escalation_sidecar(),
+                {"run_id": run_id, "goal": goal, "reason": reason,
+                 "failed_action": failed_action, "replans": replans, "detail": detail,
+                 "ts": time.time()},
             )
+            if persisted:
+                log.warning("DevAgent: DB unavailable — escalation saved to sidecar "
+                            "for reconcile on next boot (%s): %.60s", reason, goal)
+        if persisted:
             self._escalated_this_run = True
             log.info("DevAgent: escalated halted plan to review queue (%s): %.60s",
                      reason, goal)
+        else:
+            log.error("DevAgent: FAILED to persist escalation anywhere (%s): %.60s",
+                      reason, goal)
+
+    @staticmethod
+    def _append_escalation_sidecar(path: Path, row: dict) -> bool:
+        """Append one escalation row to the JSONL sidecar. Returns success."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+            return True
         except Exception as exc:
-            log.warning("DevAgent._record_escalation failed: %s", exc)
+            log.error("DevAgent: escalation sidecar append failed: %s", exc)
+            return False
+
+    async def reconcile_pending_escalations(self) -> int:
+        """Drain the escalation sidecar (E4) into dev_escalations at startup.
+
+        Each line that inserts cleanly is dropped; anything that still fails is
+        kept for the next attempt. Returns the number reconciled. Safe no-op when
+        the sidecar is absent or the DB is unavailable.
+        """
+        db = self._db()
+        if not db or not getattr(db, "available", False):
+            return 0
+        path = self._escalation_sidecar()
+        rows = await asyncio.to_thread(self._read_escalation_sidecar, path)
+        if not rows:
+            return 0
+        reconciled = 0
+        leftover: list[dict] = []
+        for row in rows:
+            try:
+                rid = await db.insert_escalation(
+                    int(row.get("run_id", -1)), row.get("goal", ""), row.get("reason", ""),
+                    failed_action=row.get("failed_action"),
+                    replans=int(row.get("replans", 0)), detail=row.get("detail"),
+                )
+                if rid is not None:
+                    reconciled += 1
+                else:
+                    leftover.append(row)
+            except Exception:
+                leftover.append(row)
+        await asyncio.to_thread(self._rewrite_escalation_sidecar, path, leftover)
+        if reconciled:
+            log.info("DevAgent: reconciled %d sidecar escalation(s) into the review queue",
+                     reconciled)
+        return reconciled
+
+    @staticmethod
+    def _read_escalation_sidecar(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        rows: list[dict] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:
+                        continue
+        except Exception as exc:
+            log.debug("DevAgent: escalation sidecar read failed: %s", exc)
+        return rows
+
+    @staticmethod
+    def _rewrite_escalation_sidecar(path: Path, rows: list[dict]) -> None:
+        try:
+            if not rows:
+                if path.exists():
+                    path.unlink()
+                return
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as exc:
+            log.debug("DevAgent: escalation sidecar rewrite failed: %s", exc)
 
     async def _run_compensations(
         self, run_id: int, triggered_by: str = "step_failure"
-    ) -> None:
+    ) -> int:
         """Execute pending saga compensations for run_id in reverse step order.
 
         Called on EVERY non-success terminal path — replan exhaustion
         (triggered_by="max_replans"), MAX_STEPS halt ("max_steps"), user/cancel
-        ("user_cancel"). Each compensation is marked running → done (or failed)
-        so the audit trail is complete; failures are logged but never raise — we
-        always attempt every pending compensation.
+        ("user_cancel"). Each compensation is marked running → done / skipped /
+        failed so the audit trail is truthful; failures are logged but never
+        raise — we always attempt every pending compensation.
+
+        Returns the number of compensations that did NOT complete cleanly
+        (skipped + failed + manual-review) so the caller can surface a partial
+        rollback to the user instead of silently reporting a clean unwind.
         """
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
-            return
+            return 0
         compensations = await db.get_pending_compensations(run_id)
         if not compensations:
-            return
+            return 0
         log.info("DevAgent: running %d saga compensation(s) for run %d (%s)",
                  len(compensations), run_id, triggered_by)
+        incomplete = 0
         for comp in compensations:
             cid = comp["id"]
             caction = comp.get("compensation_action", "")
@@ -1261,7 +1386,16 @@ class DevAgent:
             await db.update_saga_compensation(cid, "running", triggered_by=triggered_by)
             try:
                 if caction == "RESTORE_FILE" and cargs:
-                    await asyncio.to_thread(self._restore_file, cargs)
+                    restored = await asyncio.to_thread(self._restore_file, cargs)
+                    if restored is False:
+                        # An overwritten file with no backup was left in place —
+                        # record the truth (E5), not a misleading "done".
+                        incomplete += 1
+                        await db.update_saga_compensation(
+                            cid, "skipped",
+                            error="no backup — overwritten file left in place",
+                            finished=True)
+                        continue
                 elif caction == "DELETE_FILE" and cargs:
                     # Legacy/back-compat (no pre-write snapshot was captured).
                     path = Path(cargs.strip())
@@ -1274,16 +1408,25 @@ class DevAgent:
                     )
                 await db.update_saga_compensation(cid, "done", finished=True)
             except Exception as exc:
+                incomplete += 1
                 log.error("DevAgent: saga compensation %s failed: %s", caction, exc)
                 await db.update_saga_compensation(cid, "failed", error=str(exc), finished=True)
+        if incomplete:
+            log.warning("DevAgent: %d compensation(s) did not roll back cleanly for run %d",
+                        incomplete, run_id)
+        return incomplete
 
     @staticmethod
-    def _restore_file(comp_args: str) -> None:
+    def _restore_file(comp_args: str) -> bool:
         """Roll back a WRITE_FILE step from its pre-write snapshot.
 
         existed + backup → restore the original bytes; existed + no backup →
         leave the overwritten file in place (deleting would lose data we
         couldn't snapshot); not-existed → delete the file the plan created.
+
+        Returns True when the rollback completed cleanly, False when it could NOT
+        be completed (an overwritten file with no backup is left in place) — the
+        caller records that as `skipped`, not a misleading `done` (E5).
         """
         info = json.loads(comp_args)
         path = Path(info["path"])
@@ -1292,15 +1435,16 @@ class DevAgent:
             if backup and Path(backup).exists():
                 shutil.copy2(backup, path)
                 log.info("DevAgent: saga RESTORE_FILE restored %s from backup", path)
-            else:
-                log.warning(
-                    "DevAgent: saga RESTORE_FILE %s existed but no backup — "
-                    "leaving the overwritten file in place", path,
-                )
-        else:
-            if path.exists():
-                path.unlink()
-                log.info("DevAgent: saga RESTORE_FILE deleted %s (created by plan)", path)
+                return True
+            log.warning(
+                "DevAgent: saga RESTORE_FILE %s existed but no backup — "
+                "leaving the overwritten file in place", path,
+            )
+            return False
+        if path.exists():
+            path.unlink()
+            log.info("DevAgent: saga RESTORE_FILE deleted %s (created by plan)", path)
+        return True
 
     async def _finalize_run(self, run_id: int, result: AgentResult, status: str) -> None:
         db = self._db()

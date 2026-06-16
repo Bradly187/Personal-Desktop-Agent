@@ -828,6 +828,15 @@ _DEFERRED_INDEXES: tuple[str, ...] = (
 )
 
 
+# Goal-queue claim lease TTL (E15). A 'running' row whose claimed_at is older
+# than this is treated as wedged and recoverable even if its owner pid is alive
+# — the worker may have hung in-process (the supervisor restarts the loop but
+# the claimed row stays 'running'). Set well above the dev-agent's own runtime
+# ceiling (per-step 180 s × bounded replans) so a healthy long goal is never
+# clobbered, which would double-execute it.
+_GOAL_LEASE_TTL_S: float = 1800.0  # 30 minutes
+
+
 def _pid_alive(pid) -> bool:
     """True if `pid` names a live process. Used by requeue_stale_running to tell
     a previous-run crash (recover) from a concurrent instance (leave alone).
@@ -1997,16 +2006,26 @@ class AgentDB:
             return 0
         try:
             cur = await self._conn.execute(
-                "SELECT id, attempts, max_attempts, owner_pid "
+                "SELECT id, attempts, max_attempts, owner_pid, claimed_at "
                 "FROM goal_queue WHERE status='running'"
             )
             rows = await cur.fetchall()
             self_pid = os.getpid()
+            now = time.time()
             requeued = 0
             for r in rows:
                 pid = r["owner_pid"]
-                if pid is not None and int(pid) != self_pid and _pid_alive(pid):
-                    continue  # live concurrent instance owns this goal
+                # E15: a different live owner whose lease is still within the TTL
+                # is a healthy concurrent instance — leave it. But a lease that
+                # outlived the TTL means that owner wedged, so recover it too.
+                claimed_at = r["claimed_at"]
+                lease_expired = (
+                    claimed_at is not None
+                    and (now - float(claimed_at)) > _GOAL_LEASE_TTL_S
+                )
+                if (pid is not None and int(pid) != self_pid
+                        and _pid_alive(pid) and not lease_expired):
+                    continue  # live concurrent instance, lease still valid
                 if int(r["attempts"]) >= int(r["max_attempts"]):
                     await self._conn.execute(
                         "UPDATE goal_queue SET status='failed', "
@@ -2024,6 +2043,53 @@ class AgentDB:
             return requeued
         except Exception as exc:
             log.warning("AgentDB.requeue_stale_running failed: %s", exc)
+            return 0
+
+    async def reap_expired_leases(self, lease_ttl_s: float = _GOAL_LEASE_TTL_S) -> int:
+        """Runtime recovery (E15): requeue 'running' goals whose claim lease has
+        outlived ``lease_ttl_s``.
+
+        Unlike :meth:`requeue_stale_running` (a startup sweep that recovers any
+        dead/own/no-owner row), this is safe to call periodically WHILE a drainer
+        is executing goals in this same process: it touches ONLY rows whose
+        ``claimed_at`` is older than the TTL, so an actively-executing goal — even
+        one owned by this pid — with a fresh claim is never clobbered. That
+        recovers a goal whose worker wedged in-process (the supervisor restarts
+        the loop but the claimed row stays 'running' forever). Returns the count
+        requeued/failed.
+        """
+        if not self._conn:
+            return 0
+        try:
+            cutoff = time.time() - float(lease_ttl_s)
+            cur = await self._conn.execute(
+                "SELECT id, attempts, max_attempts FROM goal_queue "
+                "WHERE status='running' AND claimed_at IS NOT NULL AND claimed_at < ?",
+                (cutoff,),
+            )
+            rows = await cur.fetchall()
+            requeued = 0
+            for r in rows:
+                if int(r["attempts"]) >= int(r["max_attempts"]):
+                    await self._conn.execute(
+                        "UPDATE goal_queue SET status='failed', "
+                        "last_error='claim lease expired (worker wedged)' WHERE id=?",
+                        (int(r["id"]),),
+                    )
+                else:
+                    await self._conn.execute(
+                        "UPDATE goal_queue SET status='queued', owner_pid=NULL, "
+                        "claimed_at=NULL WHERE id=?",
+                        (int(r["id"]),),
+                    )
+                    requeued += 1
+            await self._conn.commit()
+            if requeued:
+                log.warning("AgentDB.reap_expired_leases requeued %d wedged goal(s)",
+                            requeued)
+            return requeued
+        except Exception as exc:
+            log.warning("AgentDB.reap_expired_leases failed: %s", exc)
             return 0
 
     # ------------------------------------------------------------------ #

@@ -119,6 +119,15 @@ class ProactiveScheduler:
     async def _tick(self, now: float) -> int:
         """Promote due scheduled goals; re-lay recurrences; kick the drainer.
         Returns the number promoted. Public for tests (the loop calls it)."""
+        # E15: reap goal claims whose lease outlived the TTL (a worker that
+        # wedged in-process leaves its row 'running' forever). Runs before the
+        # flare gate so a stale lease is recovered even while dev is paused. Only
+        # touches leases older than the TTL — never an actively-executing goal.
+        try:
+            await self._db.reap_expired_leases()
+        except Exception as exc:
+            log.debug("ProactiveScheduler lease reap failed: %s", exc)
+
         # E13: surface the dev-escalation backlog once per session. A plan that
         # exhausted its replan/step budget lands in dev_escalations and otherwise
         # sits there until the user happens to ask "review queue" — nudge them.

@@ -724,6 +724,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         agent_db=agent_db,
     )
     coordinator.set_dev_agent(dev_agent)
+    # E4: drain any escalations the DB couldn't accept on a prior run (DB-down at
+    # halt time) back into the review queue now that the DB is healthy.
+    try:
+        await dev_agent.reconcile_pending_escalations()
+    except Exception as _esc_exc:
+        log.debug("escalation reconcile failed: %s", _esc_exc)
 
     # ── Skill model (N+1): MCP-client SkillRegistry ────────────────────────
     # Connecting an MCP server via a manifest (skills/manifests/*.json) adds
