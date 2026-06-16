@@ -26,7 +26,7 @@ _OPUS_BEDROCK = "us.anthropic.claude-opus-4-8"
 def clean_env(monkeypatch):
     for v in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
               "DA_CLOUD_BACKEND", "DA_BEDROCK_REGION", "AWS_REGION",
-              "DA_BEDROCK_PROFILE_PREFIX"):
+              "DA_BEDROCK_PROFILE_PREFIX", "DA_CLOUD_DEV_MODEL"):
         monkeypatch.delenv(v, raising=False)
     return monkeypatch
 
