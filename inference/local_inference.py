@@ -1058,6 +1058,14 @@ class VLLMServerInference(LocalInference):
         self.model = model
         self.timeout = timeout
         self._available: bool | None = None  # None = not yet checked
+        # Latched breaker (E7): a hung `vllm serve` otherwise costs the full
+        # timeout on every request. Mirrors OllamaInference — fail fast after a
+        # few failures, slow-call-aware so a degrading server trips early.
+        from core.circuit_breaker import CircuitBreaker
+        self._breaker = CircuitBreaker(
+            name="vllm-server", fail_threshold=3, cooldown_s=30.0,
+            slow_call_s=max(1.0, timeout * 0.8),
+        )
 
     # ---------------------------------------------------------------------- #
     # Message construction — identical shape to VLLMInference.infer()
@@ -1103,6 +1111,10 @@ class VLLMServerInference(LocalInference):
         except ImportError:
             return "CLARIFY aiohttp not installed"
 
+        if not self._breaker.allow():
+            return "CLARIFY inference backend unavailable (circuit open)"
+        _probe_gen = self._breaker.probe_gen   # tag this probe's outcome (#16)
+
         payload = {
             "model": self.model,
             "messages": self._build_messages(cmd, few_shot_examples, counterexamples),
@@ -1116,6 +1128,9 @@ class VLLMServerInference(LocalInference):
         prompt_json = json.dumps(payload["messages"])
         set_inference_capture(prompt_json)
         t0 = time.monotonic()
+        # Report the breaker outcome in `finally` so a CancelledError still
+        # clears the half-open probe flag (mirrors OllamaInference).
+        succeeded = False
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -1139,6 +1154,7 @@ class VLLMServerInference(LocalInference):
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("VLLMServerInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
+                    succeeded = True
                     return action
         except aiohttp.ClientConnectorError as exc:
             self._available = False
@@ -1151,6 +1167,11 @@ class VLLMServerInference(LocalInference):
             self._available = False
             log.error("VLLMServerInference failed: %s", exc)
             return f"CLARIFY vLLM server error: {exc}"
+        finally:
+            if succeeded:
+                self._breaker.record_success(_probe_gen, latency_s=time.monotonic() - t0)
+            else:
+                self._breaker.record_failure(_probe_gen)
 
     async def infer_stream(
         self,
@@ -1392,6 +1413,13 @@ class LlamaCppInference(LocalInference):
         self.host = host.rstrip("/")
         self.timeout = timeout
         self._available: bool | None = None
+        # Latched breaker (E7): a hung llama-server otherwise costs the full
+        # timeout on every request. Mirrors OllamaInference.
+        from core.circuit_breaker import CircuitBreaker
+        self._breaker = CircuitBreaker(
+            name="llamacpp", fail_threshold=3, cooldown_s=30.0,
+            slow_call_s=max(1.0, timeout * 0.8),
+        )
 
     async def infer(
         self,
@@ -1403,6 +1431,10 @@ class LlamaCppInference(LocalInference):
             import aiohttp
         except ImportError:
             return "CLARIFY aiohttp not installed"
+
+        if not self._breaker.allow():
+            return "CLARIFY inference backend unavailable (circuit open)"
+        _probe_gen = self._breaker.probe_gen   # tag this probe's outcome (#16)
 
         # Build OpenAI-compatible chat messages from the shared prompt builder
         system_prompt = _SYSTEM_PROMPT
@@ -1427,6 +1459,9 @@ class LlamaCppInference(LocalInference):
         prompt_json = json.dumps(payload["messages"])
         set_inference_capture(prompt_json)
         t0 = time.monotonic()
+        # Report the breaker outcome in `finally` so a CancelledError still
+        # clears the half-open probe flag (mirrors OllamaInference).
+        succeeded = False
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -1451,11 +1486,18 @@ class LlamaCppInference(LocalInference):
                     latency_ms = (time.monotonic() - t0) * 1000
                     log.info("LlamaCppInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
                     self._available = True
+                    succeeded = True
                     return action
         except Exception as exc:
             self._available = False
+            # Raw transport error stays in the log; user-facing CLARIFY is stable.
             log.error("LlamaCppInference failed: %s", exc)
-            return f"CLARIFY inference error: {exc}"
+            return "CLARIFY the local model is unavailable right now. Please try again."
+        finally:
+            if succeeded:
+                self._breaker.record_success(_probe_gen, latency_s=time.monotonic() - t0)
+            else:
+                self._breaker.record_failure(_probe_gen)
 
     async def infer_stream(
         self,

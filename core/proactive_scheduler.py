@@ -118,6 +118,15 @@ class ProactiveScheduler:
     async def _tick(self, now: float) -> int:
         """Promote due scheduled goals; re-lay recurrences; kick the drainer.
         Returns the number promoted. Public for tests (the loop calls it)."""
+        # E15: reap goal claims whose lease outlived the TTL (a worker that
+        # wedged in-process leaves its row 'running' forever). Runs before the
+        # flare gate so a stale lease is recovered even while dev is paused. Only
+        # touches leases older than the TTL — never an actively-executing goal.
+        try:
+            await self._db.reap_expired_leases()
+        except Exception as exc:
+            log.debug("ProactiveScheduler lease reap failed: %s", exc)
+
         # Flare gate: while dev admission is paused, defer (re-ticks in 30 s).
         if self._scheduler is not None and getattr(self._scheduler, "dev_paused", False):
             return 0

@@ -490,6 +490,9 @@ class HybridCoordinator:
         # Gate 3 VRAM cache — avoid calling pynvml on every command
         self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
         self._vram_cache_ttl: float = 2.0  # seconds
+        # Hard bound on the NVML probe await (E9): a wedged driver must not stall
+        # the command path. Generous vs. a healthy probe (~ms), tight vs. a hang.
+        self._vram_probe_timeout_s: float = 1.0
         self._metrics = None   # set via set_metrics()
 
         self._memory = None   # MemoryManager — wired via set_memory()
@@ -1744,8 +1747,19 @@ class HybridCoordinator:
             from core import vram
             # vram.free_vram_gb returns UNKNOWN_FREE_GB (fail-open) if pynvml is
             # unavailable, so an unmeasurable GPU still passes (don't penalise local).
-            free_gb = await asyncio.to_thread(vram.free_vram_gb)
+            # Bound the await (E9): a wedged NVML/CUDA driver can hang the worker
+            # thread, and asyncio.to_thread is not cancellable — without the
+            # wait_for, this route() task would block indefinitely. On timeout the
+            # orphaned thread keeps running but we fail-open and move on.
+            probe_timeout = getattr(self, "_vram_probe_timeout_s", 1.0)
+            free_gb = await asyncio.wait_for(
+                asyncio.to_thread(vram.free_vram_gb), timeout=probe_timeout
+            )
             result = free_gb >= self._cfg.vram_free_min_gb
+        except TimeoutError:
+            log.warning("Gate 3 VRAM probe timed out after %.1fs — assuming pass",
+                        getattr(self, "_vram_probe_timeout_s", 1.0))
+            result = True
         except Exception as exc:
             log.debug("Gate 3 VRAM probe error (assuming pass): %s", exc)
             result = True
