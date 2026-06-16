@@ -192,6 +192,72 @@ async def test_on_failed_handler_exception_does_not_crash_pass():
 
 
 # ---------------------------------------------------------------------------
+# Heartbeat staleness — alive-but-wedged detection (#2)
+# ---------------------------------------------------------------------------
+
+def _beat_spec(fake, hb_fn, stale_after_s, name="hb"):
+    return SupervisedSpec(name=name, is_alive=fake.is_alive, restart=fake.restart,
+                          enabled=fake.enabled, last_heartbeat=hb_fn,
+                          stale_after_s=stale_after_s)
+
+
+async def test_stale_heartbeat_restarts_alive_loop(monkeypatch):
+    """A loop whose task is alive but whose heartbeat has gone stale (wedged on a
+    hung await) is restarted — is_alive() alone would miss it."""
+    import core.supervisor as sup_mod
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(sup_mod.time, "monotonic", lambda: clock["t"])
+
+    f = _Fake(alive=True, enabled=True)        # task is alive…
+    beat = {"t": 1000.0}                        # …but its heartbeat is frozen
+    sup = Supervisor()
+    sup.supervise(_beat_spec(f, lambda: beat["t"], stale_after_s=60.0))
+
+    clock["t"] = 1030.0                         # 30s < 60s → still fresh
+    await sup._check_once()
+    assert f.restarts == 0
+
+    clock["t"] = 1100.0                         # 100s since last beat > 60s → stale
+    await sup._check_once()
+    assert f.restarts == 1
+
+
+async def test_fresh_heartbeat_not_restarted(monkeypatch):
+    import core.supervisor as sup_mod
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(sup_mod.time, "monotonic", lambda: clock["t"])
+    f = _Fake(alive=True, enabled=True)
+    sup = Supervisor()
+    # Heartbeat tracks the clock (loop is cycling normally).
+    sup.supervise(_beat_spec(f, lambda: clock["t"], stale_after_s=60.0))
+    for dt in (10, 200, 5000):
+        clock["t"] += dt
+        await sup._check_once()
+    assert f.restarts == 0
+
+
+async def test_unseeded_heartbeat_not_stale(monkeypatch):
+    """A 0.0 heartbeat means 'never beaten yet' (pre-start) — must not false-trip."""
+    import core.supervisor as sup_mod
+    clock = {"t": 9_000.0}
+    monkeypatch.setattr(sup_mod.time, "monotonic", lambda: clock["t"])
+    f = _Fake(alive=True, enabled=True)
+    sup = Supervisor()
+    sup.supervise(_beat_spec(f, lambda: 0.0, stale_after_s=1.0))
+    await sup._check_once()
+    assert f.restarts == 0
+
+
+async def test_no_heartbeat_spec_behaves_as_before():
+    """A spec without a heartbeat (event-driven loop) uses only is_alive()."""
+    sup = Supervisor()
+    f = _Fake(alive=True, enabled=True)
+    sup.supervise(_spec(f))             # no last_heartbeat / stale_after_s
+    await sup._check_once()
+    assert f.restarts == 0
+
+
+# ---------------------------------------------------------------------------
 # Scheduler integration
 # ---------------------------------------------------------------------------
 
@@ -267,5 +333,42 @@ async def test_governor_restart_relaunches_without_reflaring():
         assert gov.is_healthy() is True
         # Restart preserves flare state — it does NOT re-run the eviction sequence.
         assert gov._flare_active is True
+    finally:
+        await gov.stop()
+
+
+async def test_governor_restart_cancels_wedged_alive_loop():
+    """The staleness path calls restart() while the task is still ALIVE (wedged).
+    restart() must cancel the old task before relaunching — no leaked duplicate."""
+    from core.resource_governor import ResourceGovernor
+    gov = ResourceGovernor(memory=_FakeMemory(score=0.0))
+    gov._post_keepalive = lambda *a, **k: None
+    await gov.start()
+    try:
+        old_task = gov._task
+        assert old_task is not None and not old_task.done()
+
+        await gov.restart()             # called while alive (simulated staleness)
+
+        assert gov._task is not old_task          # a fresh task replaced it
+        assert old_task.cancelled() or old_task.done()  # the wedged one was reaped
+        assert gov.is_healthy() is True
+    finally:
+        await gov.stop()
+
+
+async def test_governor_heartbeat_advances():
+    """The poll loop records a heartbeat each iteration so the Supervisor can see
+    progress (POLL_INTERVAL is short enough to observe within the test)."""
+    from core.resource_governor import ResourceGovernor
+    gov = ResourceGovernor(memory=_FakeMemory(score=0.0))
+    gov._post_keepalive = lambda *a, **k: None
+    gov.POLL_INTERVAL_S = 0.01
+    await gov.start()
+    try:
+        first = gov.last_heartbeat()
+        assert first > 0
+        await asyncio.sleep(0.05)        # let the loop cycle a few times
+        assert gov.last_heartbeat() >= first
     finally:
         await gov.stop()

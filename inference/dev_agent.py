@@ -271,6 +271,21 @@ class DevAgent:
     # before giving up (bounds the observe→act→replan loop).
     MAX_REPLANS = 2
 
+    # Wall-clock backstop for a SINGLE step's execution. Deliberately larger than
+    # any verb's own internal timeout (RUN_TERMINAL sandbox 60s, git 30s,
+    # FETCH_URL 10s) plus the ~10s voice-approval gate, so it never pre-empts a
+    # legitimately slow-but-bounded step — it only catches a step with NO internal
+    # bound (READ_SCREEN vision inference, a wedged file read on a stalled mount)
+    # that would otherwise hold the single dev permit for the scheduler's full
+    # 300s plan ceiling, starving every queued dev command. On timeout the step is
+    # recorded as a failure and the loop replans instead of wedging.
+    STEP_TIMEOUT_S = 180
+
+    # Tighter bound for skill (MCP stdio) calls specifically — the registry has no
+    # internal timeout, so an unresponsive skill server would otherwise hang the
+    # step for the full STEP_TIMEOUT_S.
+    SKILL_CALL_TIMEOUT_S = 30
+
     # Read-only / idempotent verbs that are safe to retry once on a transient
     # failure. Destructive verbs are NEVER retried (re-running a commit / write /
     # shell command could double-apply) — they go straight to replan-or-halt.
@@ -768,10 +783,24 @@ class DevAgent:
         for attempt in range(attempts):
             step_t0 = time.monotonic()
             try:
-                step.result = await self._execute_step(step)
+                # Wall-clock backstop: a step with no internal timeout (vision,
+                # stalled I/O) can't hold the dev permit until the 300s plan
+                # ceiling — it fails here and the loop replans (CancelledError
+                # from a real plan cancel is BaseException and propagates).
+                step.result = await asyncio.wait_for(
+                    self._execute_step(step), timeout=self.STEP_TIMEOUT_S
+                )
                 step.success = True
                 step.latency_ms = (time.monotonic() - step_t0) * 1000
                 return True
+            except asyncio.TimeoutError:
+                step.result = f"ERROR: step timed out after {self.STEP_TIMEOUT_S}s"
+                step.success = False
+                step.latency_ms = (time.monotonic() - step_t0) * 1000
+                log.error(
+                    "DevAgent: step %s timed out after %ds (attempt %d/%d)",
+                    step.action, self.STEP_TIMEOUT_S, attempt + 1, attempts,
+                )
             except Exception as exc:
                 step.result = f"ERROR: {exc}"
                 step.success = False
@@ -1819,7 +1848,15 @@ class DevAgent:
             ):
                 return f"SKILL_CALL {skill_id}.{tool} cancelled by user"
 
-        result = await self._skill_registry.call(skill_id, tool, args)
+        try:
+            result = await asyncio.wait_for(
+                self._skill_registry.call(skill_id, tool, args),
+                timeout=self.SKILL_CALL_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.warning("Skill %s.%s timed out after %ds",
+                        skill_id, tool, self.SKILL_CALL_TIMEOUT_S)
+            return f"Skill {skill_id}.{tool} timed out after {self.SKILL_CALL_TIMEOUT_S}s"
         text = result.get("text", "") if isinstance(result, dict) else str(result)
 
         # Inbound taint: read results are untrusted external data — never let a

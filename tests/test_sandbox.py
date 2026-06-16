@@ -149,15 +149,16 @@ def test_run_sandboxed_uses_jail_when_tool_present(monkeypatch):
     monkeypatch.setattr(sb, "sandbox_tool", lambda: "bwrap")
     captured = {}
 
-    class _Proc:
-        stdout, stderr, returncode = "out", "", 0
+    import subprocess as _sp
 
     def _fake_run(argv, **kw):
         captured["argv"] = argv
         captured["kw"] = kw
-        return _Proc()
+        return _sp.CompletedProcess(argv, 0, "out", "")
 
-    monkeypatch.setattr(sb.subprocess, "run", _fake_run)
+    # run_sandboxed now dispatches through proc_utils.run_capped (tree-kill on
+    # timeout) rather than subprocess.run directly — patch where it's used.
+    monkeypatch.setattr(sb, "run_capped", _fake_run)
     r = run_sandboxed("echo hi", project_dir="/proj", timeout=10)
     assert r.sandboxed is True
     assert captured["argv"][0] == "bwrap"

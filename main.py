@@ -1133,17 +1133,26 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         restart=scheduler.restart,
         enabled=lambda: scheduler._running,
     ))
+    # Periodic loops also expose a heartbeat + stale_after_s so the Supervisor
+    # catches an ALIVE-BUT-WEDGED loop (stuck on a hung await), not just a crashed
+    # one. stale_after_s is sized well above each loop's period + slowest legit
+    # iteration so a healthy-but-slow tick is never killed. Event-driven loops
+    # (scheduler worker, event_rule_engine) block idle by design — no heartbeat.
     supervisor.supervise(SupervisedSpec(
         name="resource_governor",
         is_alive=governor.is_healthy,
         restart=governor.restart,
         enabled=lambda: governor._running,
+        last_heartbeat=governor.last_heartbeat,
+        stale_after_s=60.0,    # poll=5s
     ))
     supervisor.supervise(SupervisedSpec(
         name="proactive_scheduler",
         is_alive=proactive.is_healthy,
         restart=proactive.restart,
         enabled=lambda: proactive._running,
+        last_heartbeat=proactive.last_heartbeat,
+        stale_after_s=180.0,   # poll=30s
     ))
     supervisor.supervise(SupervisedSpec(
         name="event_rule_engine",
@@ -1156,6 +1165,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         is_alive=email_watcher.is_healthy,
         restart=email_watcher.restart,
         enabled=lambda: email_watcher._running,
+        last_heartbeat=email_watcher.last_heartbeat,
+        stale_after_s=360.0,   # poll=120s; a wedged skill stdio call stalls here
     ))
 
     # Escalation (gap E): when a subsystem can't be restarted, TELL the user

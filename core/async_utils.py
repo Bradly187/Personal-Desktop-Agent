@@ -55,3 +55,34 @@ def fire_and_log(
 
     task.add_done_callback(_done)
     return task
+
+
+async def cancel_if_alive(
+    task: Optional[asyncio.Task],
+    label: str = "task",
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    """Cancel `task` and await its teardown if it is still running.
+
+    Used by supervised loops' restart(): the Supervisor restarts a loop that is
+    either dead OR heartbeat-stale (alive but wedged). In the stale case the task
+    is still running, so it must be cancelled before a replacement is launched or
+    the wedged loop leaks as a duplicate. No-op for a None / already-done task; a
+    crashed task's exception is surfaced (logged) rather than swallowed.
+    """
+    lg = logger or _log
+    if task is None:
+        return
+    if task.done():
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                lg.error("%s had died with %r — relaunching", label, exc)
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        lg.debug("%s raised during cancel: %s", label, exc)

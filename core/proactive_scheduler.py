@@ -76,6 +76,7 @@ class ProactiveScheduler:
         self._notifier = notifier
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._last_beat: float = 0.0   # monotonic ts of last poll iteration (#2)
         self._bg: set = set()          # keep fire-and-forget drain tasks alive
 
     def set_dev_agent(self, dev_agent) -> None:
@@ -89,6 +90,7 @@ class ProactiveScheduler:
         if self._running:
             return
         self._running = True
+        self._last_beat = time.monotonic()   # seed heartbeat baseline (#2)
         self._task = asyncio.create_task(self._poll_loop(), name="proactive_scheduler")
         log.info("ProactiveScheduler started (poll=%.0fs)", self.POLL_INTERVAL_S)
 
@@ -105,6 +107,7 @@ class ProactiveScheduler:
     async def _poll_loop(self) -> None:
         while self._running:
             try:
+                self._last_beat = time.monotonic()   # heartbeat (#2)
                 await asyncio.sleep(self.POLL_INTERVAL_S)
                 await self._tick(time.time())
             except asyncio.CancelledError:
@@ -153,10 +156,17 @@ class ProactiveScheduler:
     def is_healthy(self) -> bool:
         return self._running and self._task is not None and not self._task.done()
 
+    def last_heartbeat(self) -> float:
+        """Monotonic ts of the last poll iteration (#2) — Supervisor staleness check."""
+        return self._last_beat
+
     async def restart(self) -> None:
+        """Relaunch a dead OR wedged poll loop (Supervisor-driven). A stale loop is
+        still alive, so cancel it before relaunching to avoid a duplicate."""
         if not self._running:
             return
-        if self._task is not None and not self._task.done():
-            return
+        from core.async_utils import cancel_if_alive
+        await cancel_if_alive(self._task, "ProactiveScheduler poll loop", log)
+        self._last_beat = time.monotonic()
         self._task = asyncio.create_task(self._poll_loop(), name="proactive_scheduler")
         log.warning("ProactiveScheduler: poll loop relaunched by supervisor")

@@ -63,11 +63,22 @@ class SupervisedSpec:
     enabled:  True while the subsystem is *supposed* to be running. When False
               (e.g. shutdown set its _running flag), the Supervisor leaves it
               alone. Defaults to always-enabled.
+    last_heartbeat: optional — returns the monotonic timestamp of the loop's last
+              iteration. Lets the Supervisor catch a loop that is ALIVE BUT STUCK
+              (wedged on a hung await / livelocked) — `is_alive()` alone only
+              catches a crashed/exited task. Only meaningful for PERIODIC loops; an
+              event-driven loop that legitimately blocks idle (scheduler worker,
+              event_rule_engine) must leave this None or it would false-trip.
+    stale_after_s: optional — paired with last_heartbeat. If `now - last_heartbeat()`
+              exceeds this, the loop is treated as dead and restarted. Size it well
+              above the loop's natural period + its slowest legitimate iteration.
     """
     name: str
     is_alive: Callable[[], bool]
     restart: Callable[[], Awaitable[None]]
     enabled: Callable[[], bool] = field(default=lambda: True)
+    last_heartbeat: Optional[Callable[[], float]] = None
+    stale_after_s: Optional[float] = None
 
 
 @dataclass
@@ -186,13 +197,16 @@ class Supervisor:
             try:
                 if not spec.enabled():
                     continue
-                if spec.is_alive():
+                alive = spec.is_alive()
+                stale = self._is_stale(spec, now)
+                if alive and not stale:
                     continue
             except Exception as exc:
                 log.warning("Supervisor: %r is_alive/enabled raised: %s", spec.name, exc)
                 continue
 
-            # Subsystem is enabled but its task is dead → restart under budget.
+            # Subsystem is enabled but its task is dead OR alive-but-wedged
+            # (heartbeat stale) → restart under budget.
             # Prune restart timestamps outside the sliding window first.
             state.restart_times = [t for t in state.restart_times if now - t < self._window_s]
             if (len(state.restart_times) >= self._max_restarts
@@ -211,9 +225,10 @@ class Supervisor:
 
             state.restart_times.append(now)
             state.total_restarts += 1
+            reason = "stale (heartbeat stuck)" if (alive and stale) else "down"
             log.warning(
-                "Supervisor: %r is down — restarting (attempt %d in window, %d total)",
-                spec.name, len(state.restart_times), state.total_restarts,
+                "Supervisor: %r is %s — restarting (attempt %d in window, %d total)",
+                spec.name, reason, len(state.restart_times), state.total_restarts,
             )
             try:
                 await spec.restart()
@@ -221,9 +236,28 @@ class Supervisor:
             except Exception as exc:
                 log.error("Supervisor: restart of %r raised: %s", spec.name, exc)
 
+    def _is_stale(self, spec: SupervisedSpec, now: float) -> bool:
+        """True when a periodic loop has gone too long without a heartbeat.
+
+        Catches the alive-but-wedged case `is_alive()` misses. No-op for specs
+        without a heartbeat (event-driven loops that idle legitimately).
+        """
+        if spec.last_heartbeat is None or spec.stale_after_s is None:
+            return False
+        try:
+            hb = spec.last_heartbeat()
+        except Exception:
+            return False
+        # 0.0 = never beaten (pre-start); start() seeds a real monotonic value, so
+        # a 0 here only happens before launch — don't false-trip on it.
+        if not hb:
+            return False
+        return (now - hb) > spec.stale_after_s
+
     # ── Status ───────────────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
+        now = time.monotonic()
         return {
             "running": self._running,
             "supervised": {
@@ -232,10 +266,22 @@ class Supervisor:
                     "failed": st.failed,
                     "alive": _safe_call(st.spec.is_alive),
                     "enabled": _safe_call(st.spec.enabled),
+                    "heartbeat_age_s": _heartbeat_age(st.spec, now),
                 }
                 for name, st in self._subsystems.items()
             },
         }
+
+
+def _heartbeat_age(spec: SupervisedSpec, now: float) -> Optional[float]:
+    """Seconds since the spec's last heartbeat, or None if it has none / unseeded."""
+    if spec.last_heartbeat is None:
+        return None
+    try:
+        hb = spec.last_heartbeat()
+    except Exception:
+        return None
+    return round(now - hb, 1) if hb else None
 
 
 def _safe_call(fn: Callable[[], bool]) -> Optional[bool]:
