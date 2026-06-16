@@ -177,6 +177,8 @@ class CloudDevAgent:
         timeout: float = 60.0,
     ) -> None:
         self.model = model
+        self._base_model = model          # backend-mapped at client-build time
+        self._backend = "anthropic_cloud"
         self._max_tokens = max_tokens
         self._timeout = timeout
         # Resolve the key now so get_status() can report availability without a
@@ -196,15 +198,32 @@ class CloudDevAgent:
     # ---------------------------------------------------------------------- #
 
     def _get_client(self):
-        """Lazily construct the async Anthropic client (raises if unavailable)."""
+        """Lazily construct the async client (raises with an actionable message).
+
+        Routes through core.cloud_backend so the dev path shares the command
+        path's backend choice (direct Anthropic vs Amazon Bedrock). An explicit
+        api_key passed to the constructor still takes the direct Anthropic path,
+        unless Bedrock is selected (then the Bedrock API key from the environment
+        is the credential).
+        """
         if self._client is None:
             if not _HAS_ANTHROPIC:
                 raise RuntimeError("anthropic SDK not installed (pip install anthropic)")
-            if not self._api_key:
-                raise RuntimeError("ANTHROPIC_API_KEY not set")
-            self._client = anthropic.AsyncAnthropic(
-                api_key=self._api_key, timeout=self._timeout
-            )
+            from core.cloud_backend import resolve_backend, bedrock_selected
+            if self._api_key and not bedrock_selected():
+                # Explicit constructor key → direct Anthropic API.
+                self._client = anthropic.AsyncAnthropic(
+                    api_key=self._api_key, timeout=self._timeout
+                )
+                self._backend = "anthropic"
+                self.model = self._base_model
+            else:
+                backend = resolve_backend()   # raises actionable RuntimeError if no credential
+                self._client = anthropic.AsyncAnthropic(
+                    timeout=self._timeout, **backend.client_kwargs
+                )
+                self._backend = backend.name
+                self.model = backend.map_model(self._base_model)
         return self._client
 
     # ---------------------------------------------------------------------- #
@@ -318,9 +337,19 @@ class CloudDevAgent:
     # ---------------------------------------------------------------------- #
 
     def get_status(self) -> dict:
+        # Available if the SDK is present AND a credential is configured for the
+        # active backend (an explicit constructor key, ANTHROPIC_API_KEY, or an
+        # Amazon Bedrock API key).
+        available = _HAS_ANTHROPIC and bool(self._api_key)
+        if not available and _HAS_ANTHROPIC:
+            try:
+                from core.cloud_backend import credential_available
+                available = credential_available()
+            except Exception:
+                pass
         return {
-            "available": bool(_HAS_ANTHROPIC and self._api_key),
+            "available": available,
             "model": self.model,
             "domain_count": len(_SYSTEM_PROMPTS),
-            "backend": "anthropic_cloud",
+            "backend": self._backend,
         }

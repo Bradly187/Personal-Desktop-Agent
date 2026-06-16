@@ -177,6 +177,8 @@ class _CloudInference:
     def __init__(self, model: str) -> None:
         self._model = model
         self._client = None
+        self._effective_model = model   # backend-mapped at client-build time
+        self._backend = "anthropic"
 
     def _get_client(self):
         if self._client is None:
@@ -184,17 +186,15 @@ class _CloudInference:
                 import anthropic
             except ImportError:
                 raise RuntimeError("anthropic not installed — run: pip install anthropic")
-            # Proactively check for a credential before constructing the client, so
-            # a missing key produces a clear, actionable message instead of the raw
-            # SDK "Could not resolve authentication method" traceback at request time.
-            if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-                raise RuntimeError(
-                    "ANTHROPIC_API_KEY not set — the cloud fallback is disabled. "
-                    "Set it (User scope) with: setx ANTHROPIC_API_KEY \"sk-ant-...\" then "
-                    "restart the agent. Note: this is a separate pay-as-you-go API key "
-                    "from console.anthropic.com, not your Claude Max subscription."
-                )
-            self._client = anthropic.Anthropic()
+            # Resolve the backend (direct Anthropic vs Amazon Bedrock) and the
+            # credential in one place. resolve_backend() raises a clear, actionable
+            # message when the needed key is missing, instead of the raw SDK "Could
+            # not resolve authentication method" traceback at request time.
+            from core.cloud_backend import resolve_backend
+            backend = resolve_backend()
+            self._client = anthropic.Anthropic(**backend.client_kwargs)
+            self._backend = backend.name
+            self._effective_model = backend.map_model(self._model)
         return self._client
 
     async def infer(self, cmd: Command) -> str:
@@ -222,7 +222,7 @@ class _CloudInference:
         try:
             response = await asyncio.to_thread(
                 client.messages.create,
-                model=self._model,
+                model=self._effective_model,
                 max_tokens=64,
                 temperature=0.0,
                 system=_CLOUD_SYSTEM_PROMPT,
@@ -235,7 +235,8 @@ class _CloudInference:
                     response.usage.input_tokens, response.usage.output_tokens,
                 )
             latency_ms = (time.monotonic() - t0) * 1000
-            log.info("CloudInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
+            log.info("CloudInference[%s]: %r → %r (%.0f ms)",
+                     self._backend, cmd.text, action, latency_ms)
             return action
         except Exception as exc:
             # Surface authentication problems (invalid/expired/empty key, 401) with

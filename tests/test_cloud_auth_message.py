@@ -31,6 +31,9 @@ def _run(coro):
 def no_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    # Ensure the direct-Anthropic path is the one under test (no Bedrock backend).
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.delenv("DA_CLOUD_BACKEND", raising=False)
 
 
 def test_missing_key_get_client_raises_clear_message(no_key):
