@@ -1084,6 +1084,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     governor.set_scheduler(scheduler)   # gap #3: flare pauses new dev/background admission
     if indexer is not None:
         governor.set_indexer(indexer)
+    # Live-refresh the iPad Agent dashboard on each pain-day (flare) transition so
+    # its "Pain day" row reflects current state without waiting for a reconnect.
+    governor.set_flare_change_callback(lambda active: bridge.push_status_dashboard())
     await governor.start()
     twin_state.set_resource_governor(governor)   # flare fast-path: <100ms flare response
     shutdown.register(governor)

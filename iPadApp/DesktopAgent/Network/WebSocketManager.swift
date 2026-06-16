@@ -95,6 +95,15 @@ final class WebSocketManager: ObservableObject {
     /// Feed of A2UI dismiss requests, keyed by surface_id.
     let a2uiClearFeed = PassthroughSubject<String, Never>()
 
+    /// Feed of persistent dashboard canvases (Agent tab). Full set/replace.
+    let a2uiCanvasFeed = PassthroughSubject<A2UISurface, Never>()
+
+    /// Feed of canvas patches — components to merge by id (no full re-render).
+    let a2uiCanvasUpdateFeed = PassthroughSubject<[A2UINode], Never>()
+
+    /// Feed of canvas clear requests (reset the dashboard to empty).
+    let a2uiCanvasClearFeed = PassthroughSubject<Void, Never>()
+
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
 
@@ -486,6 +495,32 @@ final class WebSocketManager: ObservableObject {
             if let surfaceId = json["surface_id"] as? String {
                 a2uiClearFeed.send(surfaceId)
             }
+            parsed = .unknown(type: type, raw: json)
+
+        case "a2ui_canvas":
+            // Persistent dashboard surface for the Agent tab. Decoded like
+            // a2ui_surface (same shape); the canvas store caches it.
+            if let data = try? JSONSerialization.data(withJSONObject: json),
+               let surface = try? JSONDecoder().decode(A2UISurface.self, from: data) {
+                a2uiCanvasFeed.send(surface)
+            } else {
+                AppLogger.shared.warning("a2ui", "failed to decode a2ui_canvas")
+            }
+            parsed = .unknown(type: type, raw: json)
+
+        case "a2ui_canvas_update":
+            // Patch: merge these components into the live canvas by id.
+            if let comps = json["components"],
+               let data = try? JSONSerialization.data(withJSONObject: comps),
+               let nodes = try? JSONDecoder().decode([A2UINode].self, from: data) {
+                a2uiCanvasUpdateFeed.send(nodes)
+            } else {
+                AppLogger.shared.warning("a2ui", "failed to decode a2ui_canvas_update")
+            }
+            parsed = .unknown(type: type, raw: json)
+
+        case "a2ui_canvas_clear":
+            a2uiCanvasClearFeed.send(())
             parsed = .unknown(type: type, raw: json)
 
         case "calibration_phrase":

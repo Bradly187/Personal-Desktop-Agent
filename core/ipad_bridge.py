@@ -290,6 +290,17 @@ class IPadBridge:
         except Exception as exc:
             log.debug("Failed to send welcome: %s", exc)
 
+        # Seed the Agent-tab dashboard so it isn't empty on first connect. The
+        # iPad also restores its cached canvas on launch; this refreshes it with
+        # current state once the bridge is reachable.
+        try:
+            from core import a2ui
+            canvas = self._build_status_dashboard()
+            if not a2ui.validate_surface(canvas):
+                await ws.send_json(canvas)
+        except Exception as exc:
+            log.debug("Failed to send initial dashboard: %s", exc)
+
         try:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
@@ -1037,6 +1048,72 @@ class IPadBridge:
         """Dismiss a live surface on the iPad (agent resolved it another way)."""
         await self.broadcast_json({"type": "a2ui_clear", "surface_id": surface_id})
 
+    # --- Persistent dashboard canvas (iPad Agent tab) --------------------- #
+
+    async def send_a2ui_canvas(self, canvas: dict) -> bool:
+        """Validate and broadcast a persistent dashboard canvas. Replaces whatever
+        is currently shown on the Agent tab; the iPad caches it across restarts.
+        Returns False (sends nothing) on schema-validation failure.
+        """
+        from core import a2ui
+
+        errs = a2ui.validate_surface(canvas)
+        if errs:
+            log.warning("a2ui: refusing to send invalid canvas: %s", "; ".join(errs))
+            return False
+        log.info("a2ui: sending canvas %s (%d components)",
+                 canvas.get("surface_id"), len(canvas.get("components", [])))
+        await self.broadcast_json(canvas)
+        return True
+
+    async def update_a2ui_canvas(self, components: list, surface_id: str = "dashboard") -> None:
+        """Patch a live canvas — merge/replace components by id (no full re-render)."""
+        from core import a2ui
+
+        await self.broadcast_json(a2ui.canvas_update_message(components, surface_id=surface_id))
+
+    async def clear_a2ui_canvas(self, surface_id: str = "dashboard") -> None:
+        """Reset the dashboard canvas to its empty state."""
+        from core import a2ui
+
+        await self.broadcast_json(a2ui.canvas_clear_message(surface_id=surface_id))
+
+    def _build_status_dashboard(self) -> dict:
+        """Compose an agent-status dashboard from cheaply-available state.
+
+        Defensive: every field degrades gracefully so a missing/unwired subsystem
+        never blocks the dashboard. The action button routes as a voice-equivalent
+        command (handled by the coordinator's capability summary).
+        """
+        from core import a2ui
+
+        rows: list[tuple[str, str]] = [("Status", "Ready")]
+        # Pain-day state — the accessibility-relevant signal the iPad can't see.
+        try:
+            mem = getattr(self._coordinator, "_memory", None)
+            if mem is not None:
+                rows.append(("Pain day", "Yes" if mem.get_pain_day_active() else "No"))
+        except Exception:
+            pass
+        # Voice mic state (PC-authoritative).
+        try:
+            rows.append(("Voice", "Muted" if (self._whisper and self._whisper._muted) else "Live"))
+        except Exception:
+            pass
+        return a2ui.status_dashboard(
+            "Agent Status",
+            rows,
+            actions=[("What can you do?", "what can you do")],
+        )
+
+    async def push_status_dashboard(self) -> None:
+        """Broadcast a freshly-built status dashboard to all connected iPads.
+
+        Reusable refresh hook — e.g. the proactive scheduler can call this on its
+        tick or after a pain-day transition to keep the Agent tab current.
+        """
+        await self.send_a2ui_canvas(self._build_status_dashboard())
+
     def register_a2ui_surface(self, surface_id: str) -> "asyncio.Future":
         """Create a Future resolved when the user taps on ``surface_id``.
 
@@ -1088,6 +1165,27 @@ class IPadBridge:
                 asyncio.create_task(self._coordinator.route(cmd))
             except Exception as exc:
                 log.debug("a2ui_event: bad click_target value %r: %s", value, exc)
+            await self._ack(ws, msg.get("id"), "ok")
+            return
+
+        if event == "canvas":
+            # Dashboard (Agent-tab) control tap. Two paths:
+            #   1. If the agent registered a Future for this canvas (it pushed an
+            #      interactive surface and is awaiting the choice), resolve it.
+            #   2. Otherwise treat the button's value as a voice-equivalent
+            #      command and route it through the normal pipeline — so a button
+            #      valued "open kiro" runs that command, gated like any other.
+            # The canvas itself persists; a tap never dismisses it (the agent
+            # decides when to update/clear via a2ui_canvas messages).
+            fut = self._a2ui_pending.pop(surface_id, None)
+            if fut is not None and not fut.done():
+                fut.set_result({"event": event, "value": value, "values": values})
+            elif value and self._coordinator is not None:
+                try:
+                    cmd = Command(text=str(value), action="DICTATE", source="voice")
+                    asyncio.create_task(self._coordinator.route(cmd))
+                except Exception as exc:
+                    log.debug("a2ui_event: could not route canvas command %r: %s", value, exc)
             await self._ack(ws, msg.get("id"), "ok")
             return
 

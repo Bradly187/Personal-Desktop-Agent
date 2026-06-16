@@ -39,7 +39,7 @@ import asyncio
 import logging
 import sys
 import threading
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from core.fusion_engine import FusionEngine
@@ -88,6 +88,9 @@ class ResourceGovernor:
         self._running = False
         self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
         self._loop: Optional[asyncio.AbstractEventLoop] = None  # captured at start()
+        # Fired (with the new flare state) on each flare on/off transition so
+        # observers can react — e.g. refresh the iPad Agent-tab dashboard.
+        self._flare_change_cb: Optional[Callable[[bool], Any]] = None
 
     # ── Wiring ────────────────────────────────────────────────────────────────
 
@@ -112,6 +115,24 @@ class ResourceGovernor:
         free to start the instant VRAM frees up — pausing admission stops that
         until the flare clears. The fast accessibility path is never gated."""
         self._scheduler = scheduler
+
+    def set_flare_change_callback(self, cb: Optional[Callable[[bool], Any]]) -> None:
+        """Register a callback fired on each flare on/off transition with the new
+        flare state (True=flare started, False=ended). May be sync or async; it's
+        scheduled fire-and-forget so a slow observer never delays governor action."""
+        self._flare_change_cb = cb
+
+    def _notify_flare_change(self, active: bool) -> None:
+        """Invoke the flare-change callback safely (sync or coroutine)."""
+        cb = self._flare_change_cb
+        if cb is None:
+            return
+        try:
+            result = cb(active)
+            if asyncio.iscoroutine(result):
+                self._spawn_bg(result, "governor_flare_change_cb")
+        except Exception as exc:
+            log.debug("flare_change callback failed: %s", exc)
 
     def _heavy_models(self) -> list[str]:
         """The heavy specialist model names to evict on a flare."""
@@ -257,6 +278,9 @@ class ResourceGovernor:
             except Exception as exc:
                 log.debug("ResourceGovernor: sleep_specialists failed: %s", exc)
 
+        # 6. Notify observers (e.g. refresh the iPad Agent dashboard's pain-day).
+        self._notify_flare_change(True)
+
     async def _on_flare_end(self, score: float) -> None:
         self._flare_active = False
         log.info(
@@ -271,6 +295,9 @@ class ResourceGovernor:
             except Exception as exc:
                 log.debug("ResourceGovernor: scheduler.resume_dev() failed: %s", exc)
         await asyncio.to_thread(self._restore_resources_sync)
+
+        # Notify observers (e.g. refresh the iPad Agent dashboard's pain-day).
+        self._notify_flare_change(False)
 
     # ── Resource actions (blocking; run in asyncio.to_thread) ─────────────────
 
