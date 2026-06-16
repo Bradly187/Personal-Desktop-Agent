@@ -518,8 +518,10 @@ class OllamaInference(LocalInference):
                     return action
         except Exception as exc:
             self._available = False
+            # Keep the raw transport error in the log; the user-facing CLARIFY
+            # stays a stable sentence (E16) — never leak aiohttp/SSL internals.
             log.error("OllamaInference failed: %s", exc)
-            return f"CLARIFY inference error: {exc}"
+            return "CLARIFY the local model is unavailable right now. Please try again."
         finally:
             if succeeded:
                 # Pass latency so a slow-but-successful call counts toward the
