@@ -182,9 +182,19 @@ class _CloudInference:
         if self._client is None:
             try:
                 import anthropic
-                self._client = anthropic.Anthropic()
             except ImportError:
                 raise RuntimeError("anthropic not installed — run: pip install anthropic")
+            # Proactively check for a credential before constructing the client, so
+            # a missing key produces a clear, actionable message instead of the raw
+            # SDK "Could not resolve authentication method" traceback at request time.
+            if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+                raise RuntimeError(
+                    "ANTHROPIC_API_KEY not set — the cloud fallback is disabled. "
+                    "Set it (User scope) with: setx ANTHROPIC_API_KEY \"sk-ant-...\" then "
+                    "restart the agent. Note: this is a separate pay-as-you-go API key "
+                    "from console.anthropic.com, not your Claude Max subscription."
+                )
+            self._client = anthropic.Anthropic()
         return self._client
 
     async def infer(self, cmd: Command) -> str:
@@ -228,6 +238,22 @@ class _CloudInference:
             log.info("CloudInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
             return action
         except Exception as exc:
+            # Surface authentication problems (invalid/expired/empty key, 401) with
+            # an actionable hint rather than the raw SDK error text. AuthenticationError
+            # subclasses the SDK's APIStatusError with status 401.
+            msg = str(exc)
+            is_auth = (
+                type(exc).__name__ == "AuthenticationError"
+                or getattr(exc, "status_code", None) == 401
+                or "authentication" in msg.lower()
+                or "x-api-key" in msg.lower()
+            )
+            if is_auth:
+                log.error("CloudInference auth failure: %s", exc)
+                return (
+                    "CLARIFY cloud auth failed: ANTHROPIC_API_KEY is missing or invalid. "
+                    "Set a valid key from console.anthropic.com and restart the agent."
+                )
             log.error("CloudInference failed: %s", exc)
             return f"CLARIFY cloud error: {exc}"
 

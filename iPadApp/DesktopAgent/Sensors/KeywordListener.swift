@@ -34,6 +34,9 @@ final class KeywordListener: NSObject, ObservableObject {
     private var consecutiveRestarts: Int = 0
     private let maxConsecutiveRestarts = 5
     private var lastRestartTime: Date?
+    /// Guards against the several terminal callbacks SFSpeechRecognitionTask can
+    /// deliver per cycle (isFinal + error) scheduling more than one restart.
+    private var restartScheduled = false
 
     init(ws: WebSocketManager, settings: SettingsStore, sharedAudioSession: SharedAudioSession) {
         self.ws = ws
@@ -78,6 +81,7 @@ final class KeywordListener: NSObject, ObservableObject {
         request.requiresOnDeviceRecognition = true   // force on-device for speed + privacy
 
         lastScannedLength = 0
+        restartScheduled = false
 
         // Register with shared audio session and receive buffers via fan-out
         sharedAudioSession.addConsumer(Self.consumerID) { [weak self] buffer, _ in
@@ -93,20 +97,60 @@ final class KeywordListener: NSObject, ObservableObject {
                     self._checkKeywords(in: result.bestTranscription.formattedString)
                 }
                 if error != nil || (result?.isFinal ?? false) {
-                    if let error {
+                    // Dedup the multiple terminal callbacks (isFinal + error) that
+                    // a single recognition cycle can deliver.
+                    guard !self.restartScheduled else { return }
+                    self.restartScheduled = true
+
+                    // "No speech detected" is the normal end of a silent cycle, not a
+                    // failure. Log it at debug and restart quietly so silence doesn't
+                    // spam ERROR or churn the backoff machinery.
+                    let benign = Self.isBenignNoSpeech(error)
+                    if let error, !benign {
                         AppLogger.shared.error("KeywordListener",
                             "Recognition ended with error: \(error.localizedDescription)")
+                    } else if benign {
+                        AppLogger.shared.debug("KeywordListener",
+                            "Recognition cycle ended (no speech) — restarting quietly")
                     }
                     self.stop()
-                    self._restartWithBackoff()
+                    self._restartWithBackoff(benign: benign)
                 }
             }
         }
     }
 
+    /// SFSpeechRecognizer reports "no speech detected" (and a couple of related
+    /// no-input codes) at the end of a silent cycle, and a cancellation when we
+    /// tear the task down ourselves. These are expected, not failures — we restart
+    /// quietly instead of logging an error and escalating the backoff.
+    private static func isBenignNoSpeech(_ error: Error?) -> Bool {
+        guard let error else { return true }   // clean isFinal end → benign
+        let ns = error as NSError
+        // kAFAssistantErrorDomain: 1110 = no speech; 203 = retry; 216/301 = cancelled.
+        if ns.domain == "kAFAssistantErrorDomain"
+            && (ns.code == 1110 || ns.code == 203 || ns.code == 216 || ns.code == 301) {
+            return true
+        }
+        // Fallback on the localized text in case the domain/code shifts across iOS versions.
+        return error.localizedDescription.lowercased().contains("no speech")
+    }
+
     /// Restart with exponential backoff to prevent infinite loop on persistent errors.
     /// Resets counter only after 10s of stable operation, so the delay actually escalates.
-    private func _restartWithBackoff() {
+    /// `benign` cycles (normal end-of-silence) skip the backoff machinery entirely and
+    /// just relisten after a short quiet delay.
+    private func _restartWithBackoff(benign: Bool) {
+        if benign {
+            // Not a failure — relisten after a short delay so a silent room doesn't
+            // spin a tight restart loop, without touching the failure counter.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(1.0 * 1_000_000_000))
+                self?._startRecognition()
+            }
+            return
+        }
+
         let now = Date()
 
         // Reset counter only when last restart was >10s ago (stable operation window)
