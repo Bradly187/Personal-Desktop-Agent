@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,8 +100,17 @@ class SkillRegistry:
         from mcp.client.stdio import stdio_client
 
         server = manifest["server"]
+        # Launch the skill server under the SAME interpreter that runs the agent
+        # (sys.executable = the venv), not whatever bare "python" resolves to on
+        # PATH. Relying on PATH split the runtime across two interpreters (the
+        # venv that runs main.py vs. the system Python that "python" resolved to),
+        # so a dependency installed for the agent was missing for the skill
+        # subprocess — and vice-versa. One interpreter, one dependency set.
+        command = server["command"]
+        if command in ("python", "python3", "python.exe", "python3.exe"):
+            command = sys.executable
         params = StdioServerParameters(
-            command=server["command"],
+            command=command,
             args=server.get("args", []),
             env=dict(os.environ),
             cwd=server.get("cwd") or str(_REPO_ROOT),
