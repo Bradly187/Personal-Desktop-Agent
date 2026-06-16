@@ -328,6 +328,7 @@ class DevAgent:
         self._kiro: Optional["KiroClient"] = None            # set via set_kiro()
         self._scheduler = None                               # set via set_scheduler()
         self._memory = None                                  # set via set_memory()
+        self._compactor = None                               # set via set_memory_compactor() (R-2)
         self._remote_indexer = None       # RemoteIndexerClient | None (laptop offload)
         self._cluster_health = None        # ClusterHealthMonitor | None
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
@@ -388,6 +389,32 @@ class DevAgent:
     def set_memory(self, memory) -> None:
         """Wire MemoryManager for standardised storage access."""
         self._memory = memory
+
+    def set_memory_compactor(self, compactor) -> None:
+        """Wire the MemoryCompactor (R-2): finished multi-step runs are compacted
+        into episodic notes off the hot path. Optional — no-op if never set."""
+        self._compactor = compactor
+
+    async def _recall_episodes(self, goal: str, n: int = 3) -> str:
+        """R-2: recall past episodic notes for a similar goal as planner context.
+
+        Returns a labelled block ("Past episodes: ...") or "" when none / no memory.
+        Local-only via MemoryManager.recall_episodic. Best-effort.
+        """
+        if self._memory is None or not hasattr(self._memory, "recall_episodic"):
+            return ""
+        try:
+            hits = await self._memory.recall_episodic(goal, n=n)
+        except Exception as exc:
+            log.debug("DevAgent._recall_episodes failed: %s", exc)
+            return ""
+        if not hits:
+            return ""
+        lines = ["Past episodes (how similar goals went before):"]
+        for h in hits:
+            tag = "flare" if h.get("pain_day_active") else "normal"
+            lines.append(f"- [{h.get('kind', 'note')}/{tag}] {h.get('summary', '')}")
+        return "\n".join(lines)
 
     def set_skill_registry(self, registry) -> None:
         """Wire the SkillRegistry so SKILL_QUERY/SKILL_CALL steps can run and the
@@ -544,6 +571,11 @@ class DevAgent:
         rag = await self._rag_context(goal, n=4)
         if rag:
             extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
+
+        # R-2: episodic recall — "how similar goals went before" (local-only).
+        episodes = await self._recall_episodes(goal, n=3)
+        if episodes:
+            extra_ctx = f"{episodes}\n\n{extra_ctx}" if extra_ctx else episodes
 
         # Git context injection (item #8): gives LLM branch/diff awareness
         git_ctx = await self._git_context()
@@ -748,6 +780,14 @@ class DevAgent:
         self._results_log.append(result)
         status = "cancelled" if cancelled else ("completed" if succeeded else "failed")
         await self._finalize_run(run_id, result, status)
+
+        # R-2: compact notable runs (multi-step or failed) into an episodic note,
+        # off the hot path. Fire-and-forget — never blocks plan completion, and the
+        # compactor itself flare-skips. A user cancel produces no lesson worth keeping.
+        if (self._compactor is not None and run_id >= 0 and not cancelled
+                and (len(executed) >= 2 or not succeeded)):
+            from core.async_utils import fire_and_log
+            fire_and_log(self._compactor.summarize_run(run_id))
 
         # Speak completion summary and clean up goal-session state
         await self._speak_plan_completion(result, cancelled)

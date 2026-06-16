@@ -771,6 +771,11 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     dev_agent.set_memory(memory)
     trainer.set_memory(memory)
 
+    # R-2: episodic memory compaction — finished multi-step/failed runs are
+    # summarized locally into episodic notes (off the hot path, flare-skipping).
+    from storage.memory_compactor import MemoryCompactor
+    dev_agent.set_memory_compactor(MemoryCompactor(memory, router, agent_db))
+
     # ── Cloud DevAgent (--cloud-dev-agent) ─────────────────────────────────
     _cloud_dev_agent = None
     if getattr(args, "cloud_dev_agent", False):

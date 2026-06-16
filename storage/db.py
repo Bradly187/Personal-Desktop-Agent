@@ -2654,6 +2654,35 @@ class AgentDB:
             log.warning("AgentDB.prune_episodic_memory failed: %s", exc)
             return 0
 
+    async def get_agent_run(self, run_id: int) -> Optional[dict]:
+        """Fetch one agent_runs row as a dict (or None). Used by memory_compactor (R-2)."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                "SELECT * FROM agent_runs WHERE id = ?", (run_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+        except Exception as exc:
+            log.warning("AgentDB.get_agent_run failed: %s", exc)
+            return None
+
+    async def get_agent_steps(self, run_id: int) -> list[dict]:
+        """Fetch a run's steps in order. Used by memory_compactor (R-2)."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT step_num, action, args, body, result, success, latency_ms
+                   FROM agent_steps WHERE run_id = ? ORDER BY step_num""",
+                (run_id,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_agent_steps failed: %s", exc)
+            return []
+
     # ---------------------------------------------------------------------- #
     # Self-evolution candidate staging (R-3)
     # ---------------------------------------------------------------------- #
