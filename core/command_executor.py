@@ -268,6 +268,21 @@ _KNOWN_URLS: dict[str, str] = {
     "claude ai":        "https://claude.ai",
     "linkedin":         "https://linkedin.com",
     "github":           "https://github.com",
+    # Gmail / Google web apps — "open gmail" launches the website in the default
+    # browser. This is a plain desktop action and needs NO OAuth / email skill;
+    # the google_pim skill is only for reading/summarising/sending via the API.
+    "gmail":            "https://mail.google.com",
+    "google mail":      "https://mail.google.com",
+    "email":            "https://mail.google.com",
+    "my email":         "https://mail.google.com",
+    "inbox":            "https://mail.google.com",
+    "google":           "https://www.google.com",
+    "google calendar":  "https://calendar.google.com",
+    "calendar":         "https://calendar.google.com",
+    "google drive":     "https://drive.google.com",
+    "drive":            "https://drive.google.com",
+    "youtube":          "https://youtube.com",
+    "gemini":           "https://gemini.google.com",
 }
 
 
