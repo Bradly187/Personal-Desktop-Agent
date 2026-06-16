@@ -39,6 +39,7 @@ import asyncio
 import logging
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
@@ -86,6 +87,7 @@ class ResourceGovernor:
         self._flare_active: bool = False
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._last_beat: float = 0.0  # monotonic ts of last poll iteration (#2 heartbeat)
         self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
         self._loop: Optional[asyncio.AbstractEventLoop] = None  # captured at start()
         # Fired (with the new flare state) on each flare on/off transition so
@@ -153,6 +155,7 @@ class ResourceGovernor:
             return
         self._running = True
         self._loop = asyncio.get_running_loop()
+        self._last_beat = time.monotonic()   # seed heartbeat baseline (#2)
         self._task = asyncio.create_task(
             self._poll_loop(), name="resource_governor"
         )
@@ -225,6 +228,7 @@ class ResourceGovernor:
     async def _poll_loop(self) -> None:
         while self._running:
             try:
+                self._last_beat = time.monotonic()   # heartbeat (#2): prove the loop cycles
                 await asyncio.sleep(self.POLL_INTERVAL_S)
                 score = self._memory.get_pain_day_score()  # zero-copy, no await
 
@@ -420,21 +424,25 @@ class ResourceGovernor:
             and not self._task.done()
         )
 
-    async def restart(self) -> None:
-        """Relaunch a dead poll loop (Supervisor-driven). Idempotent.
+    def last_heartbeat(self) -> float:
+        """Monotonic ts of the last poll iteration (#2) — lets the Supervisor
+        detect a loop that is alive but wedged on a hung await."""
+        return self._last_beat
 
-        Preserves `_flare_active` so a restart mid-flare does NOT re-trigger the
-        full eviction sequence — the loop simply resumes polling from current
-        state and will react to the next threshold crossing.
+    async def restart(self) -> None:
+        """Relaunch a dead OR wedged poll loop (Supervisor-driven). Idempotent.
+
+        The Supervisor only calls this once it has judged us unhealthy — either
+        the task exited, or its heartbeat went stale (alive but stuck). In the
+        stale case the task is still 'alive', so cancel it before relaunching or
+        we would leak a wedged duplicate. Preserves `_flare_active` so a restart
+        mid-flare does NOT re-trigger the full eviction sequence.
         """
         if not self._running:
             return
-        if self._task is not None and not self._task.done():
-            return
-        if self._task is not None and self._task.done() and not self._task.cancelled():
-            exc = self._task.exception()
-            if exc is not None:
-                log.error("ResourceGovernor poll loop had died with %r — relaunching", exc)
+        from core.async_utils import cancel_if_alive
+        await cancel_if_alive(self._task, "ResourceGovernor poll loop", log)
+        self._last_beat = time.monotonic()   # reset baseline for the new loop
         self._task = asyncio.create_task(self._poll_loop(), name="resource_governor")
         log.warning("ResourceGovernor: poll loop relaunched by supervisor")
 

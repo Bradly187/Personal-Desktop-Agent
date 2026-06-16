@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +41,7 @@ class EmailWatcher:
         self._baselined = False
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._last_beat: float = 0.0   # monotonic ts of last poll iteration (#2)
         # One-time expiry alert: set after notifying, cleared on the next
         # successful poll so a future expiry alerts again.
         self._auth_alerted = False
@@ -71,6 +73,7 @@ class EmailWatcher:
             log.info("EmailWatcher: registry/bus not wired — watcher idle")
             return
         self._running = True
+        self._last_beat = time.monotonic()   # seed heartbeat baseline (#2)
         self._task = asyncio.create_task(self._poll_loop(), name="email_watcher")
         log.info("EmailWatcher started (poll=%.0fs%s)", self.POLL_INTERVAL_S,
                  "" if self._available() else "; waiting for google_pim")
@@ -87,6 +90,7 @@ class EmailWatcher:
     async def _poll_loop(self) -> None:
         while self._running:
             try:
+                self._last_beat = time.monotonic()   # heartbeat (#2)
                 await asyncio.sleep(self.POLL_INTERVAL_S)
                 await self._tick()
             except asyncio.CancelledError:
@@ -185,10 +189,18 @@ class EmailWatcher:
     def is_healthy(self) -> bool:
         return self._running and self._task is not None and not self._task.done()
 
+    def last_heartbeat(self) -> float:
+        """Monotonic ts of the last poll iteration (#2) — Supervisor staleness check.
+        A wedged skill stdio call (no internal timeout) is the likely stall here."""
+        return self._last_beat
+
     async def restart(self) -> None:
+        """Relaunch a dead OR wedged poll loop (Supervisor-driven). A stale loop is
+        still alive, so cancel it before relaunching to avoid a duplicate."""
         if not self._running:
             return
-        if self._task is not None and not self._task.done():
-            return
+        from core.async_utils import cancel_if_alive
+        await cancel_if_alive(self._task, "EmailWatcher poll loop", log)
+        self._last_beat = time.monotonic()
         self._task = asyncio.create_task(self._poll_loop(), name="email_watcher")
         log.warning("EmailWatcher: poll loop relaunched by supervisor")

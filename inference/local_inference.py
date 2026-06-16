@@ -456,7 +456,13 @@ class OllamaInference(LocalInference):
         # Latched breaker (gap #4): once Ollama looks down, fail fast instead of
         # paying the full timeout on every request until it recovers.
         from core.circuit_breaker import CircuitBreaker
-        self._breaker = CircuitBreaker(name="ollama", fail_threshold=3, cooldown_s=30.0)
+        # slow_call_s = 80% of the call timeout: a backend that keeps barely
+        # beating the timeout is degrading — trip the breaker before the user
+        # eats near-timeout latency on every request (timeout-aware, #4 tail).
+        self._breaker = CircuitBreaker(
+            name="ollama", fail_threshold=3, cooldown_s=30.0,
+            slow_call_s=max(1.0, timeout * 0.8),
+        )
 
     async def infer(
         self,
@@ -516,7 +522,11 @@ class OllamaInference(LocalInference):
             return f"CLARIFY inference error: {exc}"
         finally:
             if succeeded:
-                self._breaker.record_success(_probe_gen)
+                # Pass latency so a slow-but-successful call counts toward the
+                # timeout-aware breaker (#4 tail).
+                self._breaker.record_success(
+                    _probe_gen, latency_s=time.monotonic() - t0
+                )
             else:
                 # Covers both `except Exception` returns and BaseException
                 # (CancelledError/timeout) propagation.

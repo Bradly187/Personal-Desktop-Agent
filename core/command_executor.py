@@ -262,6 +262,40 @@ _KNOWN_APPS: dict[str, str] = {
     "discord":          r"C:\Users\bradt\AppData\Local\Discord\app-1.0.9237\Discord.exe",
 }
 
+# Detached-launch registry for the OPEN verb. Launched GUI apps must OUTLIVE the
+# agent (the user keeps them open), so we deliberately never kill them — but the
+# old fire-and-forget `Popen([exe])` had two real defects this fixes: (1) the app
+# shared the agent's process group, so a Ctrl-C / shutdown signal to the agent's
+# console could tear down the app the user just opened; (2) the handle was dropped,
+# so on POSIX an app that exits while the agent lives lingers as a zombie. We now
+# launch in a NEW process group/session (detached from the agent's signals) and
+# keep the handle, opportunistically poll()-reaping exited launches on each OPEN.
+_launched_procs: list = []
+
+
+def _launch_detached(argv: list[str]) -> "subprocess.Popen":
+    """Launch `argv` detached from the agent's signal group and track the handle.
+
+    New process group on Windows / new session on POSIX so an agent shutdown
+    signal does not propagate to the user's freshly-opened app. Never auto-killed.
+    """
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    # Reap previously-launched apps that have since exited (avoid POSIX zombies).
+    for p in _launched_procs[:]:
+        try:
+            if p.poll() is not None:
+                _launched_procs.remove(p)
+        except Exception:
+            _launched_procs.remove(p)
+    proc = subprocess.Popen(argv, **kwargs)
+    _launched_procs.append(proc)
+    return proc
+
+
 # URL shortcuts — opened with the default browser via os.startfile.
 _KNOWN_URLS: dict[str, str] = {
     "claude":           "https://claude.ai",
@@ -591,8 +625,7 @@ class CommandExecutor:
             # 1. Known exe path
             exe = _KNOWN_APPS.get(key)
             if exe and Path(exe).exists():
-                import subprocess
-                subprocess.Popen([exe])
+                _launch_detached([exe])
                 return {"status": "ok", "opened": target, "method": "direct"}
             # 2. Known URL
             url = _KNOWN_URLS.get(key)

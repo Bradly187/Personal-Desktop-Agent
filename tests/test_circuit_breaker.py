@@ -113,6 +113,71 @@ def test_half_open_lost_probe_self_heals():
 
 
 # ---------------------------------------------------------------------------
+# Timeout-awareness: slow-but-successful calls trip the breaker (#4 tail)
+# ---------------------------------------------------------------------------
+
+def _cb_slow(clock, fail_threshold=3, slow_call_s=12.0, slow_threshold=3):
+    return CircuitBreaker(name="t", fail_threshold=fail_threshold, cooldown_s=30.0,
+                          time_fn=clock, slow_call_s=slow_call_s,
+                          slow_threshold=slow_threshold)
+
+
+def test_slow_successes_open_breaker():
+    cb = _cb_slow(_Clock(), slow_threshold=3, slow_call_s=12.0)
+    cb.record_success(latency_s=13.0)   # slow #1
+    cb.record_success(latency_s=20.0)   # slow #2
+    assert cb.state == "closed"         # not yet
+    cb.record_success(latency_s=12.5)   # slow #3 → open
+    assert cb.state == "open"
+    assert cb.allow() is False
+
+
+def test_fast_success_resets_slow_counter():
+    cb = _cb_slow(_Clock(), slow_threshold=3, slow_call_s=12.0)
+    cb.record_success(latency_s=13.0)   # slow #1
+    cb.record_success(latency_s=13.0)   # slow #2
+    cb.record_success(latency_s=1.0)    # fast → resets slow run
+    cb.record_success(latency_s=13.0)
+    cb.record_success(latency_s=13.0)
+    assert cb.state == "closed"         # only 2 consecutive slow after reset
+
+
+def test_slow_tracking_disabled_by_default():
+    # No slow_call_s → a slow success is just a success (old behavior preserved).
+    cb = _cb(_Clock(), fail_threshold=3)
+    for _ in range(10):
+        cb.record_success(latency_s=999.0)
+    assert cb.state == "closed"
+
+
+def test_slow_half_open_probe_reopens():
+    clock = _Clock()
+    cb = _cb_slow(clock, fail_threshold=1, slow_call_s=12.0)
+    cb.record_failure()                 # open
+    clock.advance(31.0)
+    assert cb.allow() is True           # half-open probe admitted
+    cb.record_success(latency_s=20.0)   # probe came back SLOW → not a clean recovery
+    assert cb.state == "open"
+
+
+def test_fast_probe_closes_breaker():
+    clock = _Clock()
+    cb = _cb_slow(clock, fail_threshold=1, slow_call_s=12.0)
+    cb.record_failure()
+    clock.advance(31.0)
+    assert cb.allow() is True
+    cb.record_success(latency_s=0.5)    # fast clean probe
+    assert cb.state == "closed"
+
+
+def test_ollama_breaker_configured_slow_aware():
+    from inference.local_inference import OllamaInference
+    b = OllamaInference(timeout=10.0)
+    st = b._breaker.get_status()
+    assert st["slow_call_s"] == pytest.approx(8.0)   # 80% of the 10s timeout
+
+
+# ---------------------------------------------------------------------------
 # OllamaInference wiring
 # ---------------------------------------------------------------------------
 

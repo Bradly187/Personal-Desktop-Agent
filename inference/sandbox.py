@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from core.proc_utils import run_capped
+
 log = logging.getLogger(__name__)
 
 # Resource ceilings for a single RUN_TERMINAL (mistake-containment, not security).
@@ -204,9 +206,14 @@ def run_sandboxed(
     tool = sandbox_tool() if _enabled() else None
     preexec = _rlimits if _POSIX else None
 
+    # run_capped (not subprocess.run): on a wall-clock timeout it kills the WHOLE
+    # process tree, not just the direct child, so a runaway command that forked
+    # grandchildren (a shell loop, npm → node) can't leave orphans burning CPU —
+    # the real gap on the Windows-native path, which has no namespace jail to
+    # --die-with-parent the tree for us.
     if tool:
         argv = build_sandbox_argv(tool, command, proj, allow_network)
-        proc = subprocess.run(
+        proc = run_capped(
             argv, capture_output=True, text=True, timeout=timeout, preexec_fn=preexec,
         )
         sandboxed = True
@@ -218,7 +225,7 @@ def run_sandboxed(
             log.warning("RUN_TERMINAL sandbox unavailable — %s; running unsandboxed "
                         "(allowlist still gates auto-approval)", reason)
             _warned_unsandboxed = True
-        proc = subprocess.run(
+        proc = run_capped(
             command, shell=True, capture_output=True, text=True, timeout=timeout,
             cwd=proj, preexec_fn=preexec,
         )

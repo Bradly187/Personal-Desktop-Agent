@@ -97,13 +97,18 @@ def _ensure_started() -> bool:
         if not node_modules.exists():
             log.info("TTS: running npm install in %s ...", _SIDECAR_DIR)
             try:
-                subprocess.run(
+                # run_capped: npm forks node/git children; on timeout kill the
+                # whole tree so a stalled install can't leave orphans.
+                from core.proc_utils import run_capped
+                res = run_capped(
                     ["npm", "install"],
-                    cwd=_SIDECAR_DIR,
-                    check=True,
+                    cwd=str(_SIDECAR_DIR),
                     capture_output=True,
                     timeout=120,
                 )
+                if res.returncode != 0:
+                    log.error("TTS: npm install failed (exit %d)", res.returncode)
+                    return False
             except Exception as exc:
                 log.error("TTS: npm install failed — %s", exc)
                 return False
@@ -129,17 +134,30 @@ def _ensure_started() -> bool:
             time.sleep(0.2)
 
         log.error("TTS: sidecar failed to start within 6s")
-        _sidecar_proc.kill()
-        _sidecar_proc = None
+        _kill_sidecar()
         return False
+
+
+def _kill_sidecar() -> None:
+    """Reap the sidecar and any children it spawned (tree-kill), then forget it."""
+    global _sidecar_proc
+    if _sidecar_proc is None:
+        return
+    try:
+        from core.proc_utils import kill_process_tree
+        kill_process_tree(_sidecar_proc.pid)
+    except Exception:
+        try:
+            _sidecar_proc.kill()
+        except Exception:
+            pass
+    _sidecar_proc = None
 
 
 def shutdown() -> None:
     """Terminate the TTS sidecar (called at agent shutdown)."""
-    global _sidecar_proc
     if _sidecar_proc and _sidecar_proc.poll() is None:
-        _sidecar_proc.terminate()
-        _sidecar_proc = None
+        _kill_sidecar()
         log.info("TTS: sidecar terminated")
 
 

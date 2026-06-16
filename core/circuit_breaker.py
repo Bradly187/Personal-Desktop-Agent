@@ -7,18 +7,28 @@ backend that is genuinely down still costs the FULL timeout on EVERY request
 (no network attempt, no wait) until `cooldown_s` elapses; then it HALF-OPENS and
 admits one probe — success closes it, failure re-opens it for another cooldown.
 
+A backend can also degrade WITHOUT hard-failing: it stops erroring but every call
+crawls in just under the timeout. Pure failure-counting never trips on that — each
+slow call still "succeeds", so the breaker stays closed and the user keeps paying
+near-timeout latency forever. With `slow_call_s` set, a successful-but-slow call
+(latency ≥ `slow_call_s`) counts toward opening too: `slow_threshold` consecutive
+slow calls open the breaker, and a slow half-open probe re-opens rather than
+closing. A single fast clean call resets both counters.
+
 States:
     closed     — normal; calls allowed; failures counted toward the threshold
     open       — failing fast; calls rejected until cooldown elapses
     half_open   — one probe allowed; its outcome decides closed vs open
 
 Usage:
-    cb = CircuitBreaker(name="ollama", fail_threshold=3, cooldown_s=30.0)
+    cb = CircuitBreaker(name="ollama", fail_threshold=3, cooldown_s=30.0,
+                        slow_call_s=12.0)
     if not cb.allow():
         return fast_fallback()
+    t0 = monotonic()
     try:
         result = do_call()
-        cb.record_success()
+        cb.record_success(latency_s=monotonic() - t0)
         return result
     except Exception:
         cb.record_failure()
@@ -44,11 +54,19 @@ class CircuitBreaker:
         fail_threshold: int = 3,
         cooldown_s: float = 30.0,
         time_fn: Callable[[], float] = time.monotonic,
+        slow_call_s: float | None = None,
+        slow_threshold: int | None = None,
     ) -> None:
         self._name = name
         self._fail_threshold = max(1, fail_threshold)
         self._cooldown_s = cooldown_s
         self._now = time_fn
+        # Timeout-awareness (#4 tail): latency at/above which a *successful* call
+        # is "slow"; `slow_threshold` consecutive slow calls open the breaker.
+        # None disables slow tracking (pure failure-counting, the old behavior).
+        self._slow_call_s = slow_call_s
+        self._slow_threshold = max(1, slow_threshold) if slow_threshold else self._fail_threshold
+        self._consecutive_slow = 0
         self._state = "closed"
         self._consecutive_failures = 0
         self._opened_at: float = 0.0
@@ -108,13 +126,30 @@ class CircuitBreaker:
 
     # ── Outcome reporting ──────────────────────────────────────────────────────
 
-    def record_success(self, gen: int | None = None) -> None:
+    def record_success(self, gen: int | None = None,
+                        latency_s: float | None = None) -> None:
         if gen is not None and gen != self._probe_gen:
             return   # outcome from a superseded probe (#16) — ignore
+        # Slow-but-successful: the backend is degrading, not down. Count it toward
+        # opening so a hang-then-barely-respond loop stops costing near-timeout
+        # latency on every call. A slow half-open probe is NOT a clean recovery.
+        if (self._slow_call_s is not None and latency_s is not None
+                and latency_s >= self._slow_call_s):
+            self._half_open_probe_inflight = False
+            self._consecutive_slow += 1
+            if self._state == "half_open":
+                self._open(reason=f"slow probe ({latency_s:.1f}s)")
+                return
+            if self._consecutive_slow >= self._slow_threshold:
+                self._open(reason=f"{self._consecutive_slow} slow call(s) "
+                                  f">= {self._slow_call_s:.1f}s")
+            return   # slow but tolerated — stay in current state (closed)
+        # Fast, clean success → fully close and reset both counters.
         if self._state != "closed":
             log.info("CircuitBreaker[%s]: success — closing", self._name)
         self._state = "closed"
         self._consecutive_failures = 0
+        self._consecutive_slow = 0
         self._half_open_probe_inflight = False
 
     def record_failure(self, gen: int | None = None) -> None:
@@ -123,17 +158,17 @@ class CircuitBreaker:
         self._half_open_probe_inflight = False
         if self._state == "half_open":
             # Probe failed → straight back to open for another cooldown.
-            self._open()
+            self._open(reason="probe failed")
             return
         self._consecutive_failures += 1
         if self._consecutive_failures >= self._fail_threshold:
-            self._open()
+            self._open(reason=f"{self._consecutive_failures} failure(s)")
 
-    def _open(self) -> None:
+    def _open(self, reason: str = "") -> None:
         if self._state != "open":
             log.warning(
-                "CircuitBreaker[%s]: OPEN after %d failure(s) — fast-failing for %.0fs",
-                self._name, self._consecutive_failures, self._cooldown_s,
+                "CircuitBreaker[%s]: OPEN after %s — fast-failing for %.0fs",
+                self._name, reason or "threshold reached", self._cooldown_s,
             )
         self._state = "open"
         self._opened_at = self._now()
@@ -145,4 +180,7 @@ class CircuitBreaker:
             "consecutive_failures": self._consecutive_failures,
             "fail_threshold": self._fail_threshold,
             "cooldown_s": self._cooldown_s,
+            "consecutive_slow": self._consecutive_slow,
+            "slow_call_s": self._slow_call_s,
+            "slow_threshold": self._slow_threshold,
         }

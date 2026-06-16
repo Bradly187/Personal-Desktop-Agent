@@ -102,7 +102,10 @@ def run_solution(code, entry, tests):
         f.write(script)
         path = f.name
     try:
-        r = subprocess.run([PY, path], capture_output=True, text=True, timeout=RUN_TIMEOUT)
+        # run_capped: generated code may spawn its own subprocesses; on timeout
+        # kill the whole tree so a runaway grandchild can't outlive the eval.
+        from core.proc_utils import run_capped
+        r = run_capped([PY, path], capture_output=True, text=True, timeout=RUN_TIMEOUT)
     except subprocess.TimeoutExpired:
         os.unlink(path); return "timeout"
     os.unlink(path)
