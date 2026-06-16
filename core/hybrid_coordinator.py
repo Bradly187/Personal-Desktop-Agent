@@ -255,8 +255,10 @@ class _CloudInference:
                     "CLARIFY cloud auth failed: ANTHROPIC_API_KEY is missing or invalid. "
                     "Set a valid key from console.anthropic.com and restart the agent."
                 )
+            # Raw SDK/network error stays in the log; the user hears a stable
+            # sentence rather than leaked internals (E16).
             log.error("CloudInference failed: %s", exc)
-            return f"CLARIFY cloud error: {exc}"
+            return "CLARIFY the cloud service had an error. Please try again."
 
 
 # ---------------------------------------------------------------------------
@@ -1413,8 +1415,25 @@ class HybridCoordinator:
                     # Gate 1 — Confidence
                     passed, cmd = await self._gate1(cmd)
                     if passed is None:
-                        # Gesture low confidence — discard silently
+                        # Gesture low confidence — discard. Record it (E10) so the
+                        # drop is visible to retraining and analytics instead of
+                        # vanishing with only a debug line.
                         log.debug("Gate 1 discard (low gesture conf): %r", cmd.text)
+                        if self._agent_db and self._agent_db.available:
+                            try:
+                                await self._agent_db.insert_command(
+                                    session_id=self._session_id,
+                                    cmd=cmd,
+                                    action="DISCARDED",
+                                    route="local",
+                                    gate_that_decided="gate1_gesture_conf",
+                                    latency_ms=(time.monotonic() - t0) * 1000,
+                                    success=False,
+                                    error_msg="low gesture confidence",
+                                    trace_id=cmd.trace_id or None,
+                                )
+                            except Exception as _disc_exc:
+                                log.debug("discard log failed: %s", _disc_exc)
                         return {"status": "discarded", "reason": "gate1_gesture_conf"}
                     if not passed:
                         # Voice low confidence. If the pre-gate vocabulary pass
@@ -1447,6 +1466,16 @@ class HybridCoordinator:
             # --- Execute the action ----------------------------------------
             result = await self._execute_action(action_str, cmd, route_label=route_label)
             success = result.get("status") == "ok"
+
+            # E17: record a concrete failure reason so root-cause analysis does
+            # not have to reverse-engineer it from the action column. CLARIFY
+            # outcomes carry their reason text; verify_failed/resolve_miss/error
+            # carry the status (or executor error).
+            if not success and error_msg is None:
+                if isinstance(action_str, str) and action_str.upper().startswith("CLARIFY"):
+                    error_msg = action_str[len("CLARIFY"):].strip()[:200] or "clarify"
+                else:
+                    error_msg = result.get("error") or result.get("status")
 
             # Persist to DB now so command_id is valid before trainer uses it
             latency_ms = (time.monotonic() - t0) * 1000
@@ -1922,11 +1951,13 @@ class HybridCoordinator:
         # (explicit click coords or x/y from touch). Falls through silently on
         # any failure — CommandExecutor's Tesseract + cursor fallback takes over.
         grounded_coords = cmd.gaze_coords
+        used_vision = False
         if verb == "CLICK" and target and "x" not in params:
             vision_coords = await self._ground_target(target)
             if vision_coords:
                 params["x"], params["y"] = vision_coords
                 grounded_coords = vision_coords
+                used_vision = True
 
         exec_cmd = Command(
             text=target or cmd.text,
@@ -1951,6 +1982,44 @@ class HybridCoordinator:
 
         with get_tracer().timed("execute", verb=verb):
             result = await self._executor.execute(exec_cmd)
+
+        # EH-1 (E1): a vision-resolved CLICK that produced no visible change gets
+        # ONE corrective retry forcing the structured (UIAutomation) resolver —
+        # the vision coords may simply have been wrong. Strictly one attempt; a
+        # second miss falls through to the CLARIFY conversion below.
+        if (result.get("status") == "verify_failed" and verb == "CLICK"
+                and used_vision):
+            log.info(
+                "CLICK %r verify-failed on vision coords — retrying via UIAutomation",
+                target,
+            )
+            retry_params = {k: v for k, v in params.items() if k not in ("x", "y")}
+            retry_cmd = _dc_replace(exec_cmd, params=retry_params, gaze_coords=None)
+            with get_tracer().timed("execute", verb=verb):
+                result = await self._executor.execute(retry_cmd)
+
+        # EH-1 (E1/E2): a verifiable action that still had no effect, or a named
+        # target nothing could resolve, becomes an honest CLARIFY instead of a
+        # silently-recorded miss. The original action_str is reported as the
+        # outcome (status != "ok") so route() persists and learns it as a
+        # failure, while the clarification is spoken to the user.
+        miss_status = result.get("status")
+        if miss_status in ("verify_failed", "resolve_miss"):
+            if miss_status == "resolve_miss" and target:
+                msg = f"I couldn't find {target}. Could you say it another way?"
+            elif target:
+                msg = (f"I tried to {verb.lower()} {target}, but nothing seemed "
+                       "to happen. Could you say it another way?")
+            else:
+                msg = ("I tried that, but nothing seemed to happen. Could you say "
+                       "it another way?")
+            await self._execute_action(f"CLARIFY {msg}", cmd, route_label=route_label)
+            return {
+                "status": miss_status,
+                "action": verb,
+                "spoke_clarification": True,
+                "verification": result.get("verification"),
+            }
 
         # Post-action suppression:
         #   CLARIFY  — long suppress covers TTS echo (already pre-suppressed too)

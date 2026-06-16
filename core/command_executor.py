@@ -424,6 +424,21 @@ import json as _json
 # when the exact same call already succeeded in this session (safe to deduplicate).
 _IDEMPOTENT_VERBS: frozenset[str] = frozenset({"WRITE_FILE"})
 
+# Verbs where a verified "no visible change" is a genuine failure worth a
+# corrective CLARIFY (EH-1). SCROLL is deliberately excluded — scrolling to the
+# end of a page legitimately produces no change and must not nag the user.
+_VERIFY_FAIL_VERBS: frozenset[str] = frozenset({"CLICK", "OPEN", "CLOSE"})
+
+
+class TargetResolutionError(Exception):
+    """A named click target could not be resolved by any locator tier.
+
+    Raised by ``_resolve_coords`` (strict mode) instead of silently falling back
+    to the cursor position, so the coordinator can emit an honest CLARIFY rather
+    than clicking wherever the cursor happens to be (EH-1 / E2). The message is
+    the target text that could not be found.
+    """
+
 
 class CommandExecutor:
     """Translates a Command into one or more desktop tool calls."""
@@ -543,6 +558,12 @@ class CommandExecutor:
             async with asyncio.timeout(timeout_ms / 1000):
                 result = await asyncio.to_thread(self._dispatch, action, cmd)
             log.info("Executed %s [source=%s]: %s", action, cmd.source, result)
+        except TargetResolutionError as exc:
+            # A named click target nothing could locate (E2). Report it distinctly
+            # so the coordinator emits an honest CLARIFY instead of treating a
+            # cursor-position click as a success.
+            log.info("CommandExecutor: %s could not resolve target %r", action, str(exc))
+            return {"status": "resolve_miss", "action": action, "target": str(exc)}
         except TimeoutError:
             elapsed_ms = (time.monotonic() - t_start) * 1000
             log.error("CommandExecutor: %s timed out after %d ms (limit=%d ms)",
@@ -584,7 +605,18 @@ class CommandExecutor:
             except Exception as _db_exc:
                 log.debug("CommandExecutor: insert_tool_call failed: %s", _db_exc)
 
-        resp = {"status": "ok", "action": action, "result": result}
+        # A verifiable action that produced no visible change is a real failure
+        # for click-like verbs (EH-1 / E1) — surface it so the coordinator can
+        # retry the resolution once and/or emit a corrective CLARIFY instead of
+        # silently recording the no-op as a success.
+        verify_failed = bool(
+            verify_result
+            and not verify_result["success"]
+            and verify_result["reason"] == "no_change"
+            and action in _VERIFY_FAIL_VERBS
+        )
+        resp = {"status": "verify_failed" if verify_failed else "ok",
+                "action": action, "result": result}
         if verify_result:
             resp["verification"] = verify_result
         return resp
@@ -596,7 +628,7 @@ class CommandExecutor:
         # CLICK — left-click at provided coords, explicit click coords, or screen centre
         # ------------------------------------------------------------------ #
         if action == "CLICK":
-            x, y = self._resolve_coords(cmd)
+            x, y = self._resolve_coords(cmd, strict_target=True)
             btn = p.get("button", "left")
             return mouse.mouse_click(x, y, button=btn)
 
@@ -822,7 +854,7 @@ class CommandExecutor:
     # ---------------------------------------------------------------------- #
 
     @staticmethod
-    def _resolve_coords(cmd: Command) -> tuple[int, int]:
+    def _resolve_coords(cmd: Command, *, strict_target: bool = False) -> tuple[int, int]:
         """Return (x, y) via: explicit params → UIAutomation → explicit coords → cursor.
 
         Fallback chain:
@@ -832,6 +864,11 @@ class CommandExecutor:
           2. UIAutomation structured element lookup  ← Sprint 6
           3. Explicit click coords from Command (gaze_coords)
           4. Current cursor position
+
+        When ``strict_target`` is set and the caller named a target that none of
+        tiers 1–3 could resolve, raise ``TargetResolutionError`` instead of
+        silently clicking the cursor position (EH-1 / E2). Callers without a
+        named target (tilt/voice-click) keep the cursor fallback.
         """
         p = cmd.params
         if "x" in p and "y" in p:
@@ -854,6 +891,12 @@ class CommandExecutor:
 
         if cmd.gaze_coords:
             return cmd.gaze_coords
+
+        # A named target that nothing could resolve — surface it rather than
+        # clicking blindly at the cursor (which would be recorded as a success).
+        if strict_target and target:
+            raise TargetResolutionError(target)
+
         # Fall back to current cursor position
         import pyautogui
         return pyautogui.position()
