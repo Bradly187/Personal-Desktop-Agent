@@ -957,6 +957,17 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             ),
             _loop,
         )
+        # R-1 foundation: publish voice.drift so observer agents (Fatigue Monitor)
+        # and event rules can react. Best-effort; never blocks the audio thread.
+        asyncio.run_coroutine_threadsafe(
+            event_bus.publish(
+                "voice.drift",
+                {"drift_pct": drift.degradation_pct, "reason": drift.reason,
+                 "voice_samples": getattr(drift, "voice_samples", 0)},
+                source="acoustic_profiler",
+            ),
+            _loop,
+        )
     profiler.add_drift_callback(_on_drift)
 
     # A2UI: push an Approve/Deny surface to the iPad when the approval gate opens

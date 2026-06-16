@@ -55,6 +55,9 @@ _VALID_KEYS: dict[str, frozenset[str]] = {
         "voice_profile",      # AgentDB upsert_voice_profile(dict)
         "sensor_telemetry",   # AgentDB insert_sensor_telemetry(**kwargs)
     }),
+    "memory": frozenset({
+        "memory_note",        # dict: kind, goal, summary, domain, source_run_id, source_command_id
+    }),
     # NB: "session_event" was removed — it had no backing AgentDB method and no
     # caller, so a write_state("session_event", ...) validated and then silently
     # dropped. It now fails loudly via _validate_write instead.
@@ -154,6 +157,68 @@ class MemoryManager:
         read_context with namespace='accessibility'."""
         return await self.read_context(query, namespace="accessibility", n=n)
 
+    # ── Episodic / archival memory (R-2) ──────────────────────────────────────
+
+    async def recall_episodic(
+        self,
+        query: str,
+        *,
+        n: int = 5,
+        kind: Optional[str] = None,
+        domain: Optional[str] = None,
+        pain_day: Optional[bool] = None,
+    ) -> list[dict]:
+        """Recall episodic "how I solved X under state Y" notes for this query.
+
+        Local-only (agent.db); never hits the cloud. Returns [] gracefully when
+        the DB is unavailable or empty. Touches recalled rows so salience tracks use.
+        """
+        if self._db is None or not self._db.available:
+            return []
+        try:
+            hits = await self._db.query_episodic_memory(
+                query, n=n, kind=kind, domain=domain, pain_day=pain_day
+            )
+            for h in hits:
+                try:
+                    await self._db.touch_episodic_memory(h["id"])
+                except Exception:
+                    pass
+            return hits
+        except Exception as exc:
+            log.warning("MemoryManager.recall_episodic(%r) failed: %s", query, exc)
+            return []
+
+    async def write_memory_note(
+        self,
+        *,
+        kind: str,
+        goal: str,
+        summary: str,
+        domain: str = "general",
+        source_run_id: Optional[int] = None,
+        source_command_id: Optional[int] = None,
+    ) -> Optional[int]:
+        """Persist one episodic memory note, tagged with the CURRENT physical state.
+
+        The pain-day tag is read zero-copy from the twin so the note records the
+        state the user was in when this episode happened.
+        """
+        if self._db is None:
+            return None
+        try:
+            return await self._db.insert_episodic_memory(
+                kind, goal, summary,
+                domain=domain,
+                source_run_id=source_run_id,
+                source_command_id=source_command_id,
+                pain_day_active=self.get_pain_day_active(),
+                pain_day_score=self.get_pain_day_score(),
+            )
+        except Exception as exc:
+            log.warning("MemoryManager.write_memory_note(%r) failed: %s", goal, exc)
+            return None
+
     # ── Async writes ──────────────────────────────────────────────────────────
 
     async def write_state(
@@ -238,6 +303,10 @@ class MemoryManager:
                 gesture_conf_delta=v.get("gesture_conf_delta", 0.0),
                 cmd_rate_delta=v.get("cmd_rate_delta", 0.0),
             )
+
+        elif key == "memory_note":
+            # value is a dict matching write_memory_note kwargs
+            await self.write_memory_note(**value)
 
         elif key == "command_outcome":
             # Intentional no-op: commands are inserted by HybridCoordinator via

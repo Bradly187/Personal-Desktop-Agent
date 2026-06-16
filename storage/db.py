@@ -282,6 +282,54 @@ CREATE TABLE IF NOT EXISTS few_shot_counterexamples (
 CREATE INDEX IF NOT EXISTS idx_fsce_ts     ON few_shot_counterexamples(ts);
 CREATE INDEX IF NOT EXISTS idx_fsce_domain ON few_shot_counterexamples(domain);
 
+-- Episodic / archival memory (R-2): MemGPT-style "how the user solved X under
+-- physical state Y" notes. Synthesized locally (zero egress) by memory_compactor
+-- from agent_runs/agent_steps or written directly via MemoryManager.write_memory_note.
+-- Recall is cosine (when embedding present) else Jaccard × recency — mirrors
+-- few_shot_examples. The SQLite row is the durable source of truth; `embedding`
+-- is the recall index. pain_day_active/score tag the physical state at capture.
+CREATE TABLE IF NOT EXISTS episodic_memory (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                REAL    NOT NULL,
+    kind              TEXT    NOT NULL DEFAULT 'note',   -- 'correction' | 'recovery' | 'note'
+    goal              TEXT    NOT NULL,
+    summary           TEXT    NOT NULL,
+    source_run_id     INTEGER REFERENCES agent_runs(id),
+    source_command_id INTEGER REFERENCES commands(id),
+    domain            TEXT    NOT NULL DEFAULT 'general',
+    pain_day_active   INTEGER NOT NULL DEFAULT 0,
+    pain_day_score    REAL    NOT NULL DEFAULT 0.0,
+    embedding         BLOB,
+    salience          REAL    NOT NULL DEFAULT 1.0,
+    usage_count       INTEGER NOT NULL DEFAULT 0,
+    last_recalled_ts  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_epm_ts     ON episodic_memory(ts);
+CREATE INDEX IF NOT EXISTS idx_epm_kind   ON episodic_memory(kind);
+CREATE INDEX IF NOT EXISTS idx_epm_domain ON episodic_memory(domain);
+
+-- Self-evolution candidate staging (R-3): the offline self_evolution pipeline
+-- synthesizes few-shot examples/counterexamples from adaptation_log + dev_escalations
+-- + corrections and STAGES them here (status='proposed') — never straight into the
+-- active few_shot tables. Promotion is human-approved by default; eval-gated
+-- auto-promote only when DA_SELF_EVOLVE=1. action_or_wrong holds the target action
+-- (kind='example') or the rejected action (kind='counterexample').
+CREATE TABLE IF NOT EXISTS self_evolution_candidates (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL    NOT NULL,
+    kind            TEXT    NOT NULL,            -- 'example' | 'counterexample'
+    domain          TEXT    NOT NULL DEFAULT 'command',
+    text            TEXT    NOT NULL,
+    action_or_wrong TEXT    NOT NULL,
+    reason          TEXT,
+    source_refs     TEXT,                        -- JSON: {escalation_ids:[], adaptation_ids:[], command_ids:[]}
+    eval_delta      REAL,                        -- baseline-lock accuracy delta measured at gate time
+    status          TEXT    NOT NULL DEFAULT 'proposed',  -- proposed | promoted | rejected | rolled_back
+    decided_ts      REAL,
+    UNIQUE(kind, text, action_or_wrong)
+);
+CREATE INDEX IF NOT EXISTS idx_sec_status ON self_evolution_candidates(status, ts);
+
 CREATE TABLE IF NOT EXISTS word_counts (
     word  TEXT    PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 1
@@ -2430,6 +2478,254 @@ class AgentDB:
             await self._conn.commit()
         except Exception as exc:
             log.warning("AgentDB.delete_few_shot_counterexample failed: %s", exc)
+
+    # ---------------------------------------------------------------------- #
+    # Episodic / archival memory (R-2)
+    # ---------------------------------------------------------------------- #
+
+    async def insert_episodic_memory(
+        self,
+        kind: str,
+        goal: str,
+        summary: str,
+        *,
+        domain: str = "general",
+        source_run_id: Optional[int] = None,
+        source_command_id: Optional[int] = None,
+        pain_day_active: bool = False,
+        pain_day_score: float = 0.0,
+        salience: float = 1.0,
+    ) -> Optional[int]:
+        """Persist one episodic memory note. Returns its row id (or None).
+
+        The embedding is computed from `summary` (the recall key) when MiniLM is
+        available; recall falls back to Jaccard otherwise — same model as few-shot.
+        """
+        if not self._conn:
+            return None
+        now = time.time()
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO episodic_memory
+                   (ts, kind, goal, summary, source_run_id, source_command_id,
+                    domain, pain_day_active, pain_day_score, salience, usage_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                (
+                    now, kind, goal, summary,
+                    source_run_id if (source_run_id and source_run_id > 0) else None,
+                    source_command_id if (source_command_id and source_command_id > 0) else None,
+                    domain, 1 if pain_day_active else 0, float(pain_day_score),
+                    float(salience),
+                ),
+            )
+            row_id = cur.lastrowid
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.insert_episodic_memory failed: %s", exc)
+            return None
+        # Best-effort embedding of the summary (non-fatal if MiniLM absent).
+        try:
+            encoder = await _get_encoder()
+            if encoder is not None:
+                emb = await asyncio.to_thread(_encode_sync, summary, encoder)
+                await self._conn.execute(
+                    "UPDATE episodic_memory SET embedding = ? WHERE id = ?",
+                    (emb, row_id),
+                )
+                await self._conn.commit()
+        except Exception as exc:
+            log.debug("Episodic embedding update failed (non-fatal): %s", exc)
+        return row_id
+
+    async def query_episodic_memory(
+        self,
+        query: str,
+        n: int = 5,
+        *,
+        kind: Optional[str] = None,
+        domain: Optional[str] = None,
+        pain_day: Optional[bool] = None,
+    ) -> list[dict]:
+        """Recall up to n episodic notes ranked by (cosine | Jaccard) × recency × salience.
+
+        Optional filters narrow by kind/domain/physical-state. Mirrors
+        get_few_shot_examples scoring; the SQLite row is the source of truth.
+        """
+        if not self._conn:
+            return []
+        try:
+            now = time.time()
+            query_tokens = _tokens(query)
+            encoder = await _get_encoder()
+            query_emb: Optional[bytes] = None
+            if encoder is not None:
+                try:
+                    query_emb = await asyncio.to_thread(_encode_sync, query, encoder)
+                except Exception:
+                    pass
+
+            where = ["1=1"]
+            params: list = []
+            if kind is not None:
+                where.append("kind = ?")
+                params.append(kind)
+            if domain is not None:
+                where.append("domain = ?")
+                params.append(domain)
+            if pain_day is not None:
+                where.append("pain_day_active = ?")
+                params.append(1 if pain_day else 0)
+
+            async with self._conn.execute(
+                f"""SELECT id, kind, goal, summary, domain, pain_day_active,
+                          pain_day_score, ts, salience, usage_count, embedding
+                   FROM episodic_memory
+                   WHERE {' AND '.join(where)}
+                   ORDER BY ts DESC LIMIT 1000""",
+                tuple(params),
+            ) as cur:
+                rows = [dict(r) for r in await cur.fetchall()]
+
+            def _score(row: dict) -> float:
+                recency = _recency_weight(row["ts"], now)
+                salience = max(0.1, float(row.get("salience", 1.0)))
+                if query_emb is not None and row.get("embedding"):
+                    sim = _cosine(query_emb, row["embedding"])
+                else:
+                    sim = _jaccard(query_tokens, _tokens(row["summary"]))
+                return sim * recency * salience
+
+            scored = sorted(rows, key=_score, reverse=True)
+            out = []
+            for r in scored[:n]:
+                if _score(r) <= 0.0:
+                    continue
+                out.append({
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "goal": r["goal"],
+                    "summary": r["summary"],
+                    "domain": r["domain"],
+                    "pain_day_active": bool(r["pain_day_active"]),
+                    "pain_day_score": r["pain_day_score"],
+                    "ts": r["ts"],
+                    "score": round(_score(r), 4),
+                })
+            return out
+        except Exception as exc:
+            log.warning("AgentDB.query_episodic_memory failed: %s", exc)
+            return []
+
+    async def touch_episodic_memory(self, mem_id: int) -> None:
+        """Bump usage_count + last_recalled_ts after a note is recalled (salience signal)."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE episodic_memory SET usage_count = usage_count + 1, "
+                "last_recalled_ts = ? WHERE id = ?",
+                (time.time(), mem_id),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.debug("AgentDB.touch_episodic_memory failed (non-fatal): %s", exc)
+
+    async def prune_episodic_memory(self, cap: int = 2000) -> int:
+        """Keep the newest `cap` notes; delete the rest. Returns rows deleted."""
+        if not self._conn:
+            return 0
+        try:
+            async with self._conn.execute(
+                "SELECT COUNT(*) FROM episodic_memory"
+            ) as cur:
+                total = (await cur.fetchone())[0]
+            if total <= cap:
+                return 0
+            await self._conn.execute(
+                """DELETE FROM episodic_memory WHERE id IN (
+                       SELECT id FROM episodic_memory ORDER BY ts DESC
+                       LIMIT -1 OFFSET ?
+                   )""",
+                (cap,),
+            )
+            await self._conn.commit()
+            return total - cap
+        except Exception as exc:
+            log.warning("AgentDB.prune_episodic_memory failed: %s", exc)
+            return 0
+
+    # ---------------------------------------------------------------------- #
+    # Self-evolution candidate staging (R-3)
+    # ---------------------------------------------------------------------- #
+
+    async def insert_evolution_candidate(
+        self,
+        kind: str,
+        text: str,
+        action_or_wrong: str,
+        *,
+        domain: str = "command",
+        reason: Optional[str] = None,
+        source_refs: Optional[str] = None,
+    ) -> Optional[int]:
+        """Stage one synthesized candidate (status='proposed'). Idempotent on
+        UNIQUE(kind, text, action_or_wrong) — a re-run never duplicates."""
+        if not self._conn:
+            return None
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO self_evolution_candidates
+                   (ts, kind, domain, text, action_or_wrong, reason, source_refs, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed')
+                   ON CONFLICT(kind, text, action_or_wrong) DO NOTHING""",
+                (time.time(), kind, domain, text, action_or_wrong, reason, source_refs),
+            )
+            await self._conn.commit()
+            if cur.lastrowid:
+                return cur.lastrowid
+            async with self._conn.execute(
+                "SELECT id FROM self_evolution_candidates "
+                "WHERE kind = ? AND text = ? AND action_or_wrong = ?",
+                (kind, text, action_or_wrong),
+            ) as c2:
+                row = await c2.fetchone()
+                return row[0] if row else None
+        except Exception as exc:
+            log.warning("AgentDB.insert_evolution_candidate failed: %s", exc)
+            return None
+
+    async def get_evolution_candidates(
+        self, status: str = "proposed", limit: int = 100
+    ) -> list[dict]:
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT id, ts, kind, domain, text, action_or_wrong, reason,
+                          source_refs, eval_delta, status, decided_ts
+                   FROM self_evolution_candidates
+                   WHERE status = ? ORDER BY ts DESC LIMIT ?""",
+                (status, limit),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_evolution_candidates failed: %s", exc)
+            return []
+
+    async def set_evolution_candidate_status(
+        self, candidate_id: int, status: str, eval_delta: Optional[float] = None
+    ) -> None:
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE self_evolution_candidates SET status = ?, decided_ts = ?, "
+                "eval_delta = COALESCE(?, eval_delta) WHERE id = ?",
+                (status, time.time(), eval_delta, candidate_id),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.set_evolution_candidate_status failed: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Hotwords
