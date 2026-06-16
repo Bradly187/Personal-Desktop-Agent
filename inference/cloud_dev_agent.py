@@ -209,21 +209,13 @@ class CloudDevAgent:
         if self._client is None:
             if not _HAS_ANTHROPIC:
                 raise RuntimeError("anthropic SDK not installed (pip install anthropic)")
-            from core.cloud_backend import resolve_backend, bedrock_selected
-            if self._api_key and not bedrock_selected():
-                # Explicit constructor key → direct Anthropic API.
-                self._client = anthropic.AsyncAnthropic(
-                    api_key=self._api_key, timeout=self._timeout
-                )
-                self._backend = "anthropic"
-                self.model = self._base_model
-            else:
-                backend = resolve_backend()   # raises actionable RuntimeError if no credential
-                self._client = anthropic.AsyncAnthropic(
-                    timeout=self._timeout, **backend.client_kwargs
-                )
-                self._backend = backend.name
-                self.model = backend.map_model(self._base_model)
+            from core.cloud_backend import resolve_backend
+            # An explicit constructor key takes the direct Anthropic path; it is
+            # ignored when Bedrock is selected (the env bearer token wins).
+            backend = resolve_backend(api_key=self._api_key)
+            self._client = backend.make_client(async_=True, timeout=self._timeout)
+            self._backend = backend.name
+            self.model = backend.map_model(self._base_model)
         return self._client
 
     # ---------------------------------------------------------------------- #

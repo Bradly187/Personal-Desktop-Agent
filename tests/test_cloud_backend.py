@@ -1,13 +1,12 @@
 """Offline tests for the cloud backend selector (Anthropic vs Amazon Bedrock).
 
 No network: every test either inspects the resolved CloudBackend or patches the
-SDK client constructor. Bedrock is exercised via the documented bearer-token
-Mantle path (standard client + base_url + api_key).
+SDK client constructor. Bedrock uses the classic AnthropicBedrock InvokeModel
+client with cross-region inference-profile model ids.
 """
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -17,18 +16,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core import cloud_backend as cb
-from core.command_executor import Command
 from core.hybrid_coordinator import _CloudInference
 
-
-def _run(coro):
-    return asyncio.run(coro)
+_HAIKU_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_OPUS_BEDROCK = "us.anthropic.claude-opus-4-8"
 
 
 @pytest.fixture
 def clean_env(monkeypatch):
     for v in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
-              "DA_CLOUD_BACKEND", "DA_BEDROCK_REGION", "AWS_REGION"):
+              "DA_CLOUD_BACKEND", "DA_BEDROCK_REGION", "AWS_REGION",
+              "DA_BEDROCK_PROFILE_PREFIX"):
         monkeypatch.delenv(v, raising=False)
     return monkeypatch
 
@@ -65,8 +63,9 @@ def test_resolve_bedrock_backend(clean_env):
     be = cb.resolve_backend()
     assert be.is_bedrock
     assert be.name == "bedrock:us-east-1"
-    assert be.client_kwargs["api_key"] == "bedrock-key"
-    assert be.client_kwargs["base_url"] == "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+    assert be.aws_region == "us-east-1"
+    assert be.api_key == "bedrock-key"
+    assert be.profile_prefix == "us"          # default
 
 
 def test_bedrock_region_defaults_to_us_east_1(clean_env):
@@ -79,17 +78,26 @@ def test_resolve_anthropic_backend(clean_env):
     be = cb.resolve_backend()
     assert not be.is_bedrock
     assert be.name == "anthropic"
-    assert be.client_kwargs == {}
+    assert be.api_key is None                 # SDK resolves env itself
+
+
+def test_resolve_anthropic_explicit_key_override(clean_env):
+    be = cb.resolve_backend(api_key="sk-ant-explicit")
+    assert not be.is_bedrock
+    assert be.api_key == "sk-ant-explicit"
 
 
 # --- model id mapping ------------------------------------------------------
 
-def test_map_model_bedrock_prefixes(clean_env):
-    be = cb.CloudBackend(name="bedrock:us-east-1", is_bedrock=True)
-    assert be.map_model("claude-haiku-4-5") == "anthropic.claude-haiku-4-5"
-    assert be.map_model("claude-opus-4-8") == "anthropic.claude-opus-4-8"
-    # idempotent — already-prefixed ids are left alone
-    assert be.map_model("anthropic.claude-opus-4-8") == "anthropic.claude-opus-4-8"
+def test_map_model_bedrock_inference_profile(clean_env):
+    be = cb.CloudBackend(name="bedrock:us-east-1", is_bedrock=True, profile_prefix="us")
+    assert be.map_model("claude-haiku-4-5") == _HAIKU_BEDROCK
+    assert be.map_model("claude-opus-4-8") == _OPUS_BEDROCK
+
+
+def test_map_model_bedrock_global_prefix(clean_env):
+    be = cb.CloudBackend(name="bedrock:us-east-1", is_bedrock=True, profile_prefix="global")
+    assert be.map_model("claude-opus-4-8") == "global.anthropic.claude-opus-4-8"
 
 
 def test_map_model_anthropic_unchanged(clean_env):
@@ -99,17 +107,15 @@ def test_map_model_anthropic_unchanged(clean_env):
 
 # --- _CloudInference wiring (command path) ---------------------------------
 
-def test_cloud_inference_uses_bedrock_model_and_endpoint(clean_env):
+def test_cloud_inference_uses_bedrock_client_and_profile_id(clean_env):
     clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
     cloud = _CloudInference(model="claude-haiku-4-5")
-    with patch("anthropic.Anthropic", return_value=object()) as ctor:
+    with patch("anthropic.AnthropicBedrock", return_value=object()) as ctor:
         cloud._get_client()
-    # client built against the Mantle endpoint with the Bedrock key
     _, kwargs = ctor.call_args
-    assert kwargs["base_url"] == "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+    assert kwargs["aws_region"] == "us-east-1"
     assert kwargs["api_key"] == "bedrock-key"
-    # request will use the Bedrock-prefixed model id
-    assert cloud._effective_model == "anthropic.claude-haiku-4-5"
+    assert cloud._effective_model == _HAIKU_BEDROCK
     assert cloud._backend == "bedrock:us-east-1"
 
 
@@ -119,7 +125,7 @@ def test_cloud_inference_uses_anthropic_when_no_bedrock(clean_env):
     with patch("anthropic.Anthropic", return_value=object()) as ctor:
         cloud._get_client()
     _, kwargs = ctor.call_args
-    assert "base_url" not in kwargs           # first-party default endpoint
+    assert "aws_region" not in kwargs          # first-party client, not Bedrock
     assert cloud._effective_model == "claude-haiku-4-5"
     assert cloud._backend == "anthropic"
 
@@ -130,12 +136,13 @@ def test_cloud_dev_agent_maps_opus_to_bedrock(clean_env):
     clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
     from inference.cloud_dev_agent import CloudDevAgent
     agent = CloudDevAgent(model="claude-opus-4-8")
-    with patch("anthropic.AsyncAnthropic", return_value=object()) as ctor:
+    with patch("anthropic.AsyncAnthropicBedrock", return_value=object()) as ctor:
         agent._get_client()
     _, kwargs = ctor.call_args
-    assert kwargs["base_url"] == "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+    assert kwargs["aws_region"] == "us-east-1"
     assert kwargs["api_key"] == "bedrock-key"
-    assert agent.model == "anthropic.claude-opus-4-8"
+    assert kwargs["timeout"] == agent._timeout
+    assert agent.model == _OPUS_BEDROCK
     assert agent._backend == "bedrock:us-east-1"
 
 
@@ -146,5 +153,5 @@ def test_cloud_dev_agent_explicit_key_takes_anthropic_path(clean_env):
         agent._get_client()
     _, kwargs = ctor.call_args
     assert kwargs.get("api_key") == "sk-ant-explicit"
-    assert "base_url" not in kwargs
+    assert "aws_region" not in kwargs
     assert agent.model == "claude-opus-4-8"

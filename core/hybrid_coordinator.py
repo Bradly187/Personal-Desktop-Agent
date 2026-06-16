@@ -192,7 +192,7 @@ class _CloudInference:
             # not resolve authentication method" traceback at request time.
             from core.cloud_backend import resolve_backend
             backend = resolve_backend()
-            self._client = anthropic.Anthropic(**backend.client_kwargs)
+            self._client = backend.make_client()
             self._backend = backend.name
             self._effective_model = backend.map_model(self._model)
         return self._client
