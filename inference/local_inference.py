@@ -463,6 +463,11 @@ class OllamaInference(LocalInference):
             name="ollama", fail_threshold=3, cooldown_s=30.0,
             slow_call_s=max(1.0, timeout * 0.8),
         )
+        # Serialise requests to this Ollama endpoint. Concurrent calls overwhelm
+        # Ollama's GPU-discovery phase and can trigger a runner-spawn storm (observed
+        # 2026-06-04). One in-flight request at a time is sufficient; the circuit
+        # breaker handles the backend-down fast-fail path.
+        self._request_sem = asyncio.Semaphore(1)
 
     async def infer(
         self,
@@ -497,42 +502,43 @@ class OllamaInference(LocalInference):
         # breaker's half-open probe flag — otherwise a cancelled probe wedges
         # the breaker shut forever.
         succeeded = False
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.host}/api/generate",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout),
-                ) as resp:
-                    if resp.status != 200:
-                        raise RuntimeError(f"Ollama HTTP {resp.status}")
-                    data = await resp.json()
-                    action = data.get("response", "").strip().splitlines()[0].strip()
-                    set_inference_capture(
-                        prompt, data.get("prompt_eval_count"), data.get("eval_count")
+        async with self._request_sem:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.host}/api/generate",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                    ) as resp:
+                        if resp.status != 200:
+                            raise RuntimeError(f"Ollama HTTP {resp.status}")
+                        data = await resp.json()
+                        action = data.get("response", "").strip().splitlines()[0].strip()
+                        set_inference_capture(
+                            prompt, data.get("prompt_eval_count"), data.get("eval_count")
+                        )
+                        latency_ms = (time.monotonic() - t0) * 1000
+                        log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
+                        self._available = True
+                        succeeded = True
+                        return action
+            except Exception as exc:
+                self._available = False
+                # Keep the raw transport error in the log; the user-facing CLARIFY
+                # stays a stable sentence (E16) — never leak aiohttp/SSL internals.
+                log.error("OllamaInference failed: %s", exc)
+                return "CLARIFY the local model is unavailable right now. Please try again."
+            finally:
+                if succeeded:
+                    # Pass latency so a slow-but-successful call counts toward the
+                    # timeout-aware breaker (#4 tail).
+                    self._breaker.record_success(
+                        _probe_gen, latency_s=time.monotonic() - t0
                     )
-                    latency_ms = (time.monotonic() - t0) * 1000
-                    log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
-                    self._available = True
-                    succeeded = True
-                    return action
-        except Exception as exc:
-            self._available = False
-            # Keep the raw transport error in the log; the user-facing CLARIFY
-            # stays a stable sentence (E16) — never leak aiohttp/SSL internals.
-            log.error("OllamaInference failed: %s", exc)
-            return "CLARIFY the local model is unavailable right now. Please try again."
-        finally:
-            if succeeded:
-                # Pass latency so a slow-but-successful call counts toward the
-                # timeout-aware breaker (#4 tail).
-                self._breaker.record_success(
-                    _probe_gen, latency_s=time.monotonic() - t0
-                )
-            else:
-                # Covers both `except Exception` returns and BaseException
-                # (CancelledError/timeout) propagation.
-                self._breaker.record_failure(_probe_gen)
+                else:
+                    # Covers both `except Exception` returns and BaseException
+                    # (CancelledError/timeout) propagation.
+                    self._breaker.record_failure(_probe_gen)
 
     async def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """POST /api/chat and return the parsed JSON response.
