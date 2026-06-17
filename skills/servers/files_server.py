@@ -38,9 +38,19 @@ def _roots() -> list[Path]:
 
 
 def _in_roots(path: Path, roots: list[Path]) -> bool:
-    target = os.path.normcase(os.path.abspath(str(path)))
+    # realpath (not abspath) resolves symlinks/junctions, so a link planted inside
+    # an allowed root can't redirect an open outside it; abspath only collapses '..'
+    # lexically. Mirrors core.goal_session._path_in_scope (Sprint P). Fail-safe: a
+    # path that can't be resolved is out of scope.
+    try:
+        target = os.path.normcase(os.path.realpath(str(path)))
+    except Exception:
+        return False
     for r in roots:
-        base = os.path.normcase(os.path.abspath(str(r)))
+        try:
+            base = os.path.normcase(os.path.realpath(str(r)))
+        except Exception:
+            continue
         if target == base or target.startswith(base + os.sep):
             return True
     return False

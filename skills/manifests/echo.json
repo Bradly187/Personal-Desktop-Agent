@@ -12,7 +12,7 @@
     "send_tools": ["record_note"]
   },
   "intents": {
-    "echo": {"keywords": ["echo this", "repeat after me"], "tool": "echo_text", "send": false},
-    "record": {"keywords": ["record a note", "save a note"], "tool": "record_note", "send": true}
+    "echo": {"keywords": ["echo demo test", "demo echo this"], "tool": "echo_text", "send": false},
+    "record": {"keywords": ["echo demo record"], "tool": "record_note", "send": true}
   }
 }

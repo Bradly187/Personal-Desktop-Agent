@@ -253,6 +253,76 @@ def test_manifests_valid_and_enabled():
             assert intent["keywords"]
 
 
+def test_no_keyword_collisions_across_all_skills():
+    """No intent keyword may belong to more than one skill — a cross-skill collision
+    makes routing depend on manifest load order (first-seen wins), the whitepaper's
+    'regression' failure mode. Covers EVERY shipped manifest, not just this wave."""
+    owners: dict[str, set[str]] = {}
+    for f in sorted(_MANIFEST_DIR.glob("*.json")):
+        m = json.loads(f.read_text(encoding="utf-8"))
+        for intent in (m.get("intents") or {}).values():
+            for kw in intent.get("keywords", []):
+                owners.setdefault(kw.lower(), set()).add(m["skill_id"])
+    clashes = {kw: sorted(s) for kw, s in owners.items() if len(s) > 1}
+    assert not clashes, f"keyword(s) owned by multiple skills: {clashes}"
+
+
+# ---------------------------------------------------------------------------
+# Containment: symlink/junction must not escape the allowlist (realpath, Sprint P)
+# ---------------------------------------------------------------------------
+
+def _make_symlink(link: Path, target: Path):
+    """Create a symlink, skipping the test if the OS/user can't (Windows w/o
+    Developer Mode raises OSError; some CI lacks the privilege)."""
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks not permitted here: {exc}")
+
+
+def test_containment_rejects_symlink_escape(tmp_path):
+    root = tmp_path / "root"; root.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    secret = outside / "secret.txt"; secret.write_text("x", encoding="utf-8")
+    escape = root / "escape.txt"           # lives *inside* root, points *outside*
+    _make_symlink(escape, secret)
+
+    # files: open_file must refuse the escaping symlink (realpath resolves it out)
+    opened = []
+    assert "Refusing" in fs._open_file([root], str(escape), opener=opened.append)
+    assert not opened
+    assert not fs._in_roots(escape, [root])
+    # notes + diagrams containment helpers reject it too
+    assert not ns._in_root(escape, root)
+    assert not ds._in_dir(escape, root)
+    # sanity: a real file actually inside the root is still allowed
+    real = root / "ok.txt"; real.write_text("x", encoding="utf-8")
+    assert fs._in_roots(real, [root]) and ns._in_root(real, root)
+
+
+def test_containment_consults_realpath_not_abspath(tmp_path, monkeypatch):
+    """Privilege-free proof of the fix: the helpers must resolve via realpath (so a
+    symlink/junction is followed), not abspath. We simulate a link by making realpath
+    redirect a path that lexically sits inside the root to a location outside it — a
+    redirect abspath would miss. Runs everywhere (no real symlink needed)."""
+    import os as _os
+    root = tmp_path / "root"; root.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    inside_looking = root / "link.txt"          # abspath() would call this in-root
+    redirected = outside / "real.txt"           # realpath() resolves it out-of-root
+    real_realpath = _os.path.realpath
+
+    def fake_realpath(p):
+        if _os.path.normcase(str(p)) == _os.path.normcase(str(inside_looking)):
+            return str(redirected)
+        return real_realpath(p)
+
+    monkeypatch.setattr(_os.path, "realpath", fake_realpath)
+    assert not fs._in_roots(inside_looking, [root])   # would be True under abspath
+    assert not ns._in_root(inside_looking, root)
+    assert not ds._in_dir(inside_looking, root)
+
+
 def test_skill_keywords_never_hijack_other_domains():
     # The personal-KB review lesson: generic keywords steal queries from
     # code/command/schedule routing. Every intent keyword across the new
