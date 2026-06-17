@@ -296,6 +296,10 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            // iPadOS 26 crash fix: UINavigationBar.layoutSubviews asserts at
+            // symbolLocation 852 when this grouped Form's bar lays out via the
+            // tab transition in large-title mode. Inline mode skips that path.
+            .navigationBarTitleDisplayMode(.inline)
             // All modals live at the Form level — a single `.sheet(item:)` plus
             // one `.alert`. Attaching these to individual Sections (whose identity
             // can change as the Form re-renders) is fragile and crashed Settings
