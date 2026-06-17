@@ -67,7 +67,15 @@ class ClickableTargetCache:
         heartbeat_s: float = 1.5,
         max_targets: int = 200,
         max_backoff_s: float = 2.0,
+        hwnd_source=None,
     ) -> None:
+        # Which window to enumerate each refresh. Default None → the foreground
+        # (focused) window — correct for the tilt/touch flow where the focused
+        # window IS the target. A free-roaming pointer (RealSense hand cursor)
+        # passes a callable returning the window UNDER THE CURSOR, so gravity
+        # snaps to whatever window the cursor is hovering (incl. its title-bar
+        # min/max/close), not the focused one.
+        self._hwnd_source = hwnd_source
         # Wake cadence — cheap (just reads the foreground hwnd). The actual COM
         # walk only happens on a foreground change or once per heartbeat.
         self._poll_interval = 1.0 / max(1.0, poll_hz)
@@ -121,6 +129,16 @@ class ClickableTargetCache:
         except Exception:
             return 0
 
+    def _current_hwnd(self) -> int:
+        """The window to enumerate this refresh: the injected source (e.g.
+        window-under-cursor) if provided, else the foreground window."""
+        if self._hwnd_source is not None:
+            try:
+                return int(self._hwnd_source() or 0)
+            except Exception:
+                return 0
+        return self._foreground_hwnd()
+
     def _walk_due(
         self, hwnd: int, last_hwnd: int, now: float, last_walk: float
     ) -> bool:
@@ -167,7 +185,7 @@ class ClickableTargetCache:
 
             while not self._stop_event.is_set():
                 now = time.monotonic()
-                hwnd = self._foreground_hwnd()
+                hwnd = self._current_hwnd()
                 if self._walk_due(hwnd, last_hwnd, now, last_walk):
                     last_hwnd = hwnd
                     last_walk = now
@@ -211,21 +229,29 @@ class ClickableTargetCache:
     def count(self) -> int:
         return len(self._targets)
 
-    def nearest(self, x: int, y: int, radius: float) -> Target | None:
+    def nearest(self, x: int, y: int, radius: float,
+                max_dim: float | None = None) -> Target | None:
         """Nearest snap target within `radius` px of (x, y), or None.
 
         Distance is to the element's rectangle (0 if inside). Ties (e.g. nested
         controls both containing the point) break toward the smaller, more
-        specific element. Pure Python over the cached snapshot — safe to call at
-        60 Hz from the FusionEngine tick. Lock-free: grab the snapshot reference
-        once (atomic rebind) and iterate it; the worker only ever swaps in a new
-        list, never mutates this one, so it can't change under us.
+        specific element. `max_dim` (optional) skips targets whose width OR
+        height exceeds it — used by cursor gravity to stick only to compact
+        controls (buttons, caption min/max/close, toolbar icons) and ignore
+        large regions / long hyperlinks, so it assists the hard small targets
+        without grabbing everything. Pure Python over the cached snapshot — safe
+        to call at 60 Hz. Lock-free: grab the snapshot reference once (atomic
+        rebind) and iterate it; the worker only ever swaps in a new list.
         """
         best: Target | None = None
         best_d = float(radius) + 1.0
         best_area = float("inf")
         targets = self._targets   # atomic reference grab
         for tg in targets:
+            if max_dim is not None:
+                l, t, r, b = tg.bounds
+                if (r - l) > max_dim or (b - t) > max_dim:
+                    continue
             d = tg.distance_to(x, y)
             if d > radius:
                 continue

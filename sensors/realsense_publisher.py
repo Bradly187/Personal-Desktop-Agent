@@ -232,12 +232,16 @@ async def run(args: argparse.Namespace) -> int:
     # available profiles depends on the USB link (USB2 caps depth to 320x240).
     # Enable color explicitly (640x480 bgr8 is universal); let librealsense pick
     # the native depth profile for the link. Retry fully-auto if the request fails.
-    def _make_config(depth_explicit: bool) -> "rs.config":
+    def _make_config(explicit: bool) -> "rs.config":
         cfg = rs.config()
-        cfg.enable_stream(rs.stream.color, args.color_width, args.color_height,
-                          rs.format.bgr8, eff_fps)
+        if explicit:
+            cfg.enable_stream(rs.stream.color, args.color_width, args.color_height,
+                              rs.format.bgr8, eff_fps)
+        else:
+            # Auto: let librealsense pick a valid color profile for the device.
+            cfg.enable_stream(rs.stream.color)
         if want_depth:
-            if depth_explicit and args.depth_capture_width > 0:
+            if explicit and args.depth_capture_width > 0:
                 cfg.enable_stream(rs.stream.depth, args.depth_capture_width,
                                   args.depth_capture_height, rs.format.z16, eff_fps)
             else:
@@ -245,10 +249,10 @@ async def run(args: argparse.Namespace) -> int:
         return cfg
 
     try:
-        profile = pipeline.start(_make_config(depth_explicit=True))
+        profile = pipeline.start(_make_config(explicit=True))
     except Exception as exc:  # noqa: BLE001
         log.warning("requested stream config rejected (%s) — retrying with auto profiles", exc)
-        profile = pipeline.start(_make_config(depth_explicit=False))
+        profile = pipeline.start(_make_config(explicit=False))
 
     usb = "?"
     try:
@@ -312,8 +316,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1", help="bridge host (default 127.0.0.1)")
     p.add_argument("--port", type=int, default=8765, help="bridge WebSocket port (default 8765)")
     p.add_argument("--path", default="/ws", help="bridge WebSocket path (default /ws)")
-    p.add_argument("--color-width", type=int, default=640, help="color capture width (default 640)")
-    p.add_argument("--color-height", type=int, default=480, help="color capture height (default 480)")
+    # The L515 RGB camera's smallest profile is 960x540 — it has NO 640x480
+    # color mode (requesting it fails with "Couldn't resolve requests"). Use
+    # --scale to downscale for MediaPipe speed; landmarks are normalized so
+    # accuracy is preserved.
+    p.add_argument("--color-width", type=int, default=960, help="color capture width (default 960; L515 min)")
+    p.add_argument("--color-height", type=int, default=540, help="color capture height (default 540; L515 min)")
     p.add_argument("--depth-capture-width", type=int, default=0,
                    help="depth capture width (0 = auto/native for the USB link)")
     p.add_argument("--depth-capture-height", type=int, default=0,

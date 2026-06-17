@@ -12,6 +12,7 @@ import pytest
 from sensors.hand_pointer import (
     HandPointer, HandPointerConfig, fingertip_centroid,
     ThumbClick, ThumbClickConfig, thumb_finger_ratio,
+    compute_homography, apply_homography,
 )
 
 
@@ -40,7 +41,8 @@ def _cfg(**kw):
     # No inversion + full-frame input box so screen coords are easy to reason about.
     base = dict(in_x0=0.0, in_y0=0.0, in_x1=1.0, in_y1=1.0, invert_x=False,
                 invert_y=False, dwell_time_s=0.5, dwell_radius_px=40.0,
-                rearm_radius_px=70.0, min_cutoff=10.0, beta=1.0)
+                rearm_radius_px=70.0, min_cutoff=10.0, beta=1.0,
+                median_window=1)  # isolate dwell/box logic from the median pre-filter
     base.update(kw)
     return HandPointerConfig(**base)
 
@@ -206,3 +208,143 @@ def test_reset_clears_dwell():
     clk.advance(0.3)
     # after reset the anchor is gone; this sample just re-anchors, no click yet
     assert hp.update(0.5, 0.5)["click"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Perspective (homography) mapping  — audit 2026-06-09
+# --------------------------------------------------------------------------- #
+
+def test_homography_maps_corners_exactly():
+    # A trapezoid (wider at the bottom) → unit screen. Corners must land exactly.
+    src = [(0.30, 0.20), (0.70, 0.20), (0.85, 0.80), (0.15, 0.80)]  # TL,TR,BR,BL
+    dst = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+    H = compute_homography(src, dst)
+    assert H is not None
+    for (sx, sy), (dx, dy) in zip(src, dst):
+        px, py = apply_homography(H, sx, sy)
+        assert px == pytest.approx(dx, abs=1e-6)
+        assert py == pytest.approx(dy, abs=1e-6)
+
+
+def test_homography_degenerate_returns_none():
+    # All four points collinear → no valid perspective transform.
+    src = [(0.1, 0.1), (0.2, 0.2), (0.3, 0.3), (0.4, 0.4)]
+    dst = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    assert compute_homography(src, dst) is None
+
+
+def test_pointer_uses_homography_when_corners_set():
+    # Trapezoid corners (TL,TR,BR,BL) on a 1000x1000 screen. The four corners
+    # must map to the screen corners regardless of the trapezoid skew, and the
+    # CENTER of the trapezoid edges maps sensibly inside the screen.
+    sw = sh = 1000
+    corners = [(0.30, 0.20), (0.70, 0.20), (0.85, 0.80), (0.15, 0.80)]
+    cfg = HandPointerConfig(corners=corners, dwell_enabled=False,
+                            min_cutoff=50.0, beta=1.0)
+    p = HandPointer(sw, sh, cfg, now_fn=FakeClock())
+    assert p._H is not None
+    # Top-left hand-corner → screen top-left (~0,0).
+    ev = p.update(0.30, 0.20)
+    assert ev["x"] == pytest.approx(0, abs=3)
+    assert ev["y"] == pytest.approx(0, abs=3)
+    # Bottom-right hand-corner → screen bottom-right (~999,999).
+    p2 = HandPointer(sw, sh, cfg, now_fn=FakeClock())
+    ev2 = p2.update(0.85, 0.80)
+    assert ev2["x"] == pytest.approx(sw - 1, abs=3)
+    assert ev2["y"] == pytest.approx(sh - 1, abs=3)
+
+
+def test_pointer_homography_clamps_outside_trapezoid():
+    # A point well outside the trapezoid still yields an on-screen, clamped px.
+    sw = sh = 1000
+    corners = [(0.30, 0.20), (0.70, 0.20), (0.85, 0.80), (0.15, 0.80)]
+    cfg = HandPointerConfig(corners=corners, dwell_enabled=False,
+                            min_cutoff=50.0, beta=1.0)
+    p = HandPointer(sw, sh, cfg, now_fn=FakeClock())
+    ev = p.update(0.95, 0.05)   # outside the quad
+    assert 0 <= ev["x"] <= sw - 1
+    assert 0 <= ev["y"] <= sh - 1
+
+
+def test_pointer_falls_back_to_box_without_corners():
+    # No corners → axis-aligned box mapping still works (regression).
+    cfg = _cfg()
+    p = HandPointer(1000, 1000, cfg, now_fn=FakeClock())
+    assert p._H is None
+    ev = p.update(0.5, 0.5)
+    assert ev["x"] == pytest.approx(499, abs=2)
+    assert ev["y"] == pytest.approx(499, abs=2)
+
+
+# --------------------------------------------------------------------------- #
+# Cursor gravity (stickiness near targets) — audit 2026-06-09
+# --------------------------------------------------------------------------- #
+
+def _gcfg(**kw):
+    base = dict(in_x0=0.0, in_y0=0.0, in_x1=1.0, in_y1=1.0, invert_x=False,
+                invert_y=False, dwell_enabled=False, min_cutoff=1e6, beta=1.0,
+                median_window=1, gravity_radius_px=90.0, gravity_max_pull_px=22.0)
+    base.update(kw)
+    return HandPointerConfig(**base)
+
+
+def test_gravity_pulls_toward_nearby_target():
+    # Target center at screen (500,500); hand maps to (540,500) — 40px away,
+    # inside the 90px radius → cursor pulled toward the center (x decreases).
+    target = (500, 500)
+    prov = lambda x, y, r: target if abs(x - 500) <= r and abs(y - 500) <= r else None
+    p = HandPointer(1000, 1000, _gcfg(), now_fn=FakeClock(), gravity_provider=prov)
+    ev = p.update(0.54, 0.50)   # → raw (540 - ish, 500)
+    assert ev["x"] < 540        # pulled toward 500
+    assert ev["x"] >= 500       # never overshoots the center
+
+
+def test_gravity_snaps_when_essentially_on_target():
+    target = (500, 500)
+    prov = lambda x, y, r: target
+    p = HandPointer(1000, 1000, _gcfg(), now_fn=FakeClock(), gravity_provider=prov)
+    ev = p.update(0.5005, 0.5005)   # ~ (500,500), within 1px
+    assert ev["x"] == 500 and ev["y"] == 500
+
+
+def test_gravity_noop_when_no_target_in_range():
+    prov = lambda x, y, r: None      # nothing nearby
+    p = HandPointer(1000, 1000, _gcfg(), now_fn=FakeClock(), gravity_provider=prov)
+    ev = p.update(0.20, 0.20)
+    assert ev["x"] == pytest.approx(200, abs=1)   # unchanged by gravity
+
+
+def test_gravity_pull_capped_and_no_overshoot():
+    # Target far within radius (80px); pull must not exceed max_pull (22) and
+    # must not cross the center.
+    target = (500, 500)
+    prov = lambda x, y, r: target
+    p = HandPointer(1000, 1000, _gcfg(gravity_max_pull_px=22.0),
+                    now_fn=FakeClock(), gravity_provider=prov)
+    ev = p.update(0.58, 0.50)    # raw x≈580, 80px from center (within 90 radius)
+    # pulled toward 500 but by a capped amount → stays well right of center
+    assert 500 < ev["x"] < 580
+
+
+def test_gravity_off_without_provider():
+    p = HandPointer(1000, 1000, _gcfg(), now_fn=FakeClock())  # no provider
+    ev = p.update(0.54, 0.50)
+    assert ev["x"] == pytest.approx(540, abs=1)   # exact mapping, no pull
+
+
+def test_overshoot_makes_corner_reachable_short_of_extreme():
+    # Square calibration corners; with overshoot, a hand position INSIDE the
+    # calibrated quad (short of the extreme) still reaches the screen corner.
+    corners = [(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)]  # TL,TR,BR,BL
+    base = dict(corners=corners, dwell_enabled=False, min_cutoff=1e6, beta=1.0,
+                median_window=1)
+    # No overshoot: hand just inside the TL corner does NOT reach (0,0).
+    p0 = HandPointer(1000, 1000, HandPointerConfig(overshoot=0.0, **base),
+                     now_fn=FakeClock())
+    ev0 = p0.update(0.23, 0.23)   # a bit inside TL
+    assert ev0["x"] > 0 and ev0["y"] > 0
+    # With overshoot, the same short-of-extreme reach clamps onto (0,0).
+    p1 = HandPointer(1000, 1000, HandPointerConfig(overshoot=0.10, **base),
+                     now_fn=FakeClock())
+    ev1 = p1.update(0.23, 0.23)
+    assert ev1["x"] == 0 and ev1["y"] == 0
