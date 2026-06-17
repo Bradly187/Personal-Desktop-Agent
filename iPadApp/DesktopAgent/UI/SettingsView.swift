@@ -26,7 +26,24 @@ struct SettingsView: View {
     @AppStorage("onboardingCurrentStep") private var onboardingCurrentStep = 0
 
     var body: some View {
-        NavigationStack {
+        // SettingsView is rendered in ContentView's bare ZStack (outside TabView),
+        // so it has no UINavigationController context. UINavigationBar asserts in
+        // -[UINavigationBar layoutSubviews] at symbolLocation 852 on iPadOS 26.5
+        // (confirmed across three crash reports — the .inline workaround is
+        // insufficient). Replacing NavigationStack with a plain VStack + custom
+        // title header eliminates UINavigationBar entirely.
+        VStack(spacing: 0) {
+            // Custom title bar matching the system grouped-background tone
+            HStack {
+                Text("Settings")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Color(UIColor.systemGroupedBackground))
+
             Form {
                 // Connection
                 Section {
@@ -43,33 +60,6 @@ struct SettingsView: View {
                         ))
                             .multilineTextAlignment(.trailing)
                             .keyboardType(.numberPad)
-                    }
-
-                    // Pairing token (security fix C1). The PC prints it once at
-                    // startup; the bridge rejects tokenless connections with 401.
-                    VStack(alignment: .leading, spacing: DesignTokens.Spacing.xs) {
-                        Text("Pairing Token")
-                            .font(DesignTokens.Typography.caption)
-                            .foregroundStyle(theme.textSecondary)
-                        TextField("paste the token from the PC startup log", text: $settings.pairingToken)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.system(.footnote, design: .monospaced))
-                            .submitLabel(.done)
-                            .accessibilityLabel("Pairing token")
-                            .accessibilityHint("Paste the token printed in the PC startup log. Required to connect.")
-                        Text("The PC prints this once at startup (“iPad pairing token: …”). After pasting, tap Reconnect.")
-                            .font(DesignTokens.Typography.caption)
-                            .foregroundStyle(theme.textSecondary)
-                    }
-
-                    // Auth-failure banner — shown when the bridge rejected the
-                    // last attempt with HTTP 401 (missing or wrong token).
-                    if let authError = wsManager.lastConnectionError {
-                        Label(authError, systemImage: "lock.trianglebadge.exclamationmark")
-                            .font(DesignTokens.Typography.caption)
-                            .foregroundStyle(.red)
-                            .accessibilityLabel("Connection failed: \(authError)")
                     }
 
                     if settings.wsURL == nil {
@@ -272,7 +262,7 @@ struct SettingsView: View {
                     .disabled(wsManager.state != .connected)
                     .accessibilityHint("PC-driven session: corrects pronunciation errors and adapts recognition to today's condition.")
 
-                    Text("PC plays prompts, scores your speech, and saves per-condition corrections (good day / flare / allergy). Requires bridge connection.")
+                    Text("PC plays prompts, scores your speech, and saves per-condition corrections (good day / flare / allergy / SVT). Requires bridge connection.")
                         .font(DesignTokens.Typography.caption)
                         .foregroundStyle(theme.textSecondary)
 
@@ -282,6 +272,7 @@ struct SettingsView: View {
                             Text("Good day").tag("good_day")
                             Text("Flare day").tag("flare_day")
                             Text("Allergy day").tag("allergy_day")
+                            Text("SVT attack").tag("svt_attack")
                         }
                         .pickerStyle(.menu)
                     }
@@ -321,14 +312,6 @@ struct SettingsView: View {
                     DASectionHeader(title: "Onboarding")
                 }
             }
-            .navigationTitle("Settings")
-            // iPadOS 26 crash fix: the large-title layout path in
-            // -[UINavigationBar layoutSubviews] throws an NSInternalInconsistency
-            // assertion when this grouped Form's bar lays out during the tab
-            // transition (confirmed via on-device .ips: EXC_CRASH/SIGABRT in
-            // UINavigationBar layoutSubviews → CA::Transaction::commit). The
-            // inline title bar skips that subroutine and lays out cleanly.
-            .navigationBarTitleDisplayMode(.inline)
             // All modals live at the Form level — a single `.sheet(item:)` plus
             // one `.alert`. Attaching these to individual Sections (whose identity
             // can change as the Form re-renders) is fragile and crashed Settings
@@ -354,7 +337,7 @@ struct SettingsView: View {
             } message: {
                 Text("The calibration wizard will reopen on the next screen. Your saved settings and calibrations are not erased.")
             }
-        }
+        } // VStack
     }
 
     private func _addKeyword() {
