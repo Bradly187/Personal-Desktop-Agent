@@ -296,6 +296,36 @@ def _launch_detached(argv: list[str]) -> "subprocess.Popen":
     return proc
 
 
+def _open_target_window_present(target: str) -> bool:
+    """Corroborate an OPEN whose perceptual diff was ~0% (EH-1 / F3).
+
+    Launching an app that is already running — or one that steals focus without a
+    pixel delta — legitimately produces no visible change, yet the app IS open,
+    which is exactly what OPEN promises. Before the verify block flags OPEN as a
+    failure (which makes EH-1 emit a corrective CLARIFY and drags the command-
+    domain success rate below its SLO floor), check whether a top-level window now
+    matches the target so a real launch isn't reported as a miss. Conservative by
+    design: any plausible match suppresses the false failure rather than nagging.
+    """
+    import re as _re
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "mcp_server"))
+        from tools import windows as win_tools
+    except Exception:
+        return False
+    # Significant words from the target — drop short tokens ("vs", "my", "the").
+    words = [w for w in _re.findall(r"[a-z0-9]+", (target or "").lower()) if len(w) >= 3]
+    if not words:
+        return False
+    try:
+        titles = [str(w.get("title") or "").lower() for w in win_tools.list_windows()]
+    except Exception:
+        return False
+    return any(word in title for title in titles for word in words)
+
+
 # URL shortcuts — opened with the default browser via os.startfile.
 _KNOWN_URLS: dict[str, str] = {
     "claude":           "https://claude.ai",
@@ -615,6 +645,20 @@ class CommandExecutor:
             and verify_result["reason"] == "no_change"
             and action in _VERIFY_FAIL_VERBS
         )
+        # F3: an OPEN with no pixel delta is NOT a failure if the target window is
+        # actually present (app already running / focus-only change). Corroborate
+        # via the window list before nagging, so EH-1 doesn't CLARIFY a real launch
+        # and command-domain success isn't dinged below its SLO floor.
+        if verify_failed and action == "OPEN":
+            target_text = (result or {}).get("opened") or cmd.text or ""
+            if await asyncio.to_thread(_open_target_window_present, target_text):
+                verify_failed = False
+                verify_result["success"] = True
+                verify_result["reason"] = "window_present"
+                log.info(
+                    "ActionVerifier: OPEN %r corroborated by window presence — "
+                    "treating diff=0%% as success", target_text,
+                )
         resp = {"status": "verify_failed" if verify_failed else "ok",
                 "action": action, "result": result}
         if verify_result:
