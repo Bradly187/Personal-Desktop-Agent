@@ -337,17 +337,18 @@ final class WebSocketManager: ObservableObject {
 
         state = .connecting
 
-        // Connection timeout: if no message received within 10s, treat as failed
+        // Connection timeout: if no message received within 10s, treat as failed.
+        // Only cancel the wsTask here — its cancellation causes receiveTask's
+        // wsTask.receive() to throw, which calls _handleDisconnect once. Calling
+        // _handleDisconnect here too would double-fire the reconnect loop.
         connectionTimeoutTask?.cancel()
         connectionTimeoutTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(10_000_000_000))
             guard !Task.isCancelled else { return }
             guard let self else { return }
-            // If still connecting (no message received), trigger disconnect/reconnect
             if self.state == .connecting {
                 AppLogger.shared.warning("WebSocketManager", "Connection timeout after \(self.connectionTimeoutSeconds)s")
                 wsTask.cancel(with: .abnormalClosure, reason: nil)
-                self._handleDisconnect(error: URLError(.timedOut))
             }
         }
 
@@ -361,6 +362,11 @@ final class WebSocketManager: ObservableObject {
                     self.lastConnectionError = nil  // handshake succeeded
                     self.state = .connected
                     self.reconnectAttempt = 0
+                    // Cancel any queued reconnect timer — it must not fire now
+                    // that we have a working connection, or it will call
+                    // _handleDisconnect and kill this session mid-flight.
+                    self.reconnectWorkItem?.cancel()
+                    self.reconnectWorkItem = nil
                     self._startPingTimer()
                     self._flushPendingGestureAssessment()  // G2
                 }
@@ -582,7 +588,7 @@ final class WebSocketManager: ObservableObject {
 
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.state != .connected else { return }
                 self.state = .connecting
                 self._connect()
             }
