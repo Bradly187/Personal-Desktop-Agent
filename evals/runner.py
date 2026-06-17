@@ -181,6 +181,56 @@ def router_predictor(*, register_skills: bool = True) -> PredictFn:
 
 
 # --------------------------------------------------------------------------- #
+# Skill-trigger evals — does an utterance fire the RIGHT skill? (MODEL-FREE)
+# --------------------------------------------------------------------------- #
+
+def skill_trigger_predictor(manifest_dir=None) -> PredictFn:
+    """Build a MODEL-FREE predict_fn over the REAL runtime skill router.
+
+    The whitepaper's first eval gate is the *trigger*: the right skill must fire on
+    its phrasings and stay quiet otherwise. We exercise the production routing logic
+    by populating a `SkillRegistry` straight from the shipped manifests — its `tools`
+    are the manifest's declared `allow`-list (no MCP servers started) — and calling
+    the real `SkillRegistry.match_intent`. So this eval tracks the actual router, not
+    a copy: editing `match_intent` or a manifest's keywords moves the score.
+
+    Every manifest is loaded regardless of its `enabled` flag (we gate the routing
+    LOGIC, not the user's runtime state — mirrors `router_predictor`). A case's
+    `expected_verb` holds the expected `skill_id`, or "none" when nothing should fire.
+    """
+    import json
+    from pathlib import Path
+    from skills.registry import SkillRegistry, _Skill
+
+    mdir = (Path(manifest_dir) if manifest_dir
+            else Path(__file__).parent.parent / "skills" / "manifests")
+    reg = SkillRegistry(manifest_dir=mdir)
+    if mdir.exists():
+        for f in sorted(mdir.glob("*.json")):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            sid = d.get("skill_id")
+            if not sid:
+                continue
+            allow = (d.get("tools") or {}).get("allow") or []
+            # session/lock are unused by match_intent; tools is the allow-list so the
+            # intent->tool availability check matches production routing.
+            reg._skills[sid] = _Skill(
+                manifest=d, session=None, tools={t: None for t in allow}, lock=None)
+
+    def predict(case) -> Prediction:
+        t0 = time.monotonic()
+        m = reg.match_intent(case.utterance)
+        verb = m["skill_id"] if m else "none"
+        return Prediction(verb=verb, raw=((m or {}).get("intent") or "none"),
+                          latency_ms=(time.monotonic() - t0) * 1000)
+
+    return predict
+
+
+# --------------------------------------------------------------------------- #
 # Trajectory evals — score a multi-step plan against an expected path
 # --------------------------------------------------------------------------- #
 

@@ -1,0 +1,49 @@
+# skill_triggers — utterance -> which SKILL should fire. MODEL-FREE.
+# expected_verb holds the expected skill_id (matched via the REAL SkillRegistry.match_intent
+# over every shipped manifest), or "none" when NO skill should fire (negative / boundary case).
+# The whitepaper's first eval gate: positive AND negative triggers, target >=90% accuracy.
+# Every manifest is loaded regardless of `enabled` — we gate the routing LOGIC, not user state.
+#
+# --- arxiv (positive) ---
+{"id": "trg-arxiv-search", "suite": "skill_triggers", "utterance": "find papers about diffusion transformers", "expected_verb": "arxiv", "tags": ["positive"]}
+{"id": "trg-arxiv-recent", "suite": "skill_triggers", "utterance": "any recent papers in quant-ph?", "expected_verb": "arxiv", "tags": ["positive"]}
+{"id": "trg-arxiv-fetch", "suite": "skill_triggers", "utterance": "download the paper 2406.01234", "expected_verb": "arxiv", "tags": ["positive"]}
+# --- diagrams (positive) ---
+{"id": "trg-diagrams-create", "suite": "skill_triggers", "utterance": "draw a diagram of the fusion pipeline", "expected_verb": "diagrams", "tags": ["positive"]}
+{"id": "trg-diagrams-wireframe", "suite": "skill_triggers", "utterance": "make a wireframe of the settings screen", "expected_verb": "diagrams", "tags": ["positive"]}
+{"id": "trg-diagrams-list", "suite": "skill_triggers", "utterance": "list my diagrams", "expected_verb": "diagrams", "tags": ["positive"]}
+# --- files (positive) ---
+{"id": "trg-files-recent", "suite": "skill_triggers", "utterance": "show my recent files", "expected_verb": "files", "tags": ["positive"]}
+{"id": "trg-files-find", "suite": "skill_triggers", "utterance": "find the file called budget", "expected_verb": "files", "tags": ["positive"]}
+{"id": "trg-files-download", "suite": "skill_triggers", "utterance": "what's my latest download?", "expected_verb": "files", "tags": ["positive"]}
+# --- google_pim (positive; loaded for routing even though disabled by default) ---
+{"id": "trg-gpim-meeting", "suite": "skill_triggers", "utterance": "what's my next meeting?", "expected_verb": "google_pim", "tags": ["positive"]}
+{"id": "trg-gpim-inbox", "suite": "skill_triggers", "utterance": "summarize my inbox", "expected_verb": "google_pim", "tags": ["positive"]}
+{"id": "trg-gpim-reply", "suite": "skill_triggers", "utterance": "reply to this email", "expected_verb": "google_pim", "tags": ["positive", "send"]}
+{"id": "trg-gpim-event", "suite": "skill_triggers", "utterance": "schedule a meeting with Bob tomorrow", "expected_verb": "google_pim", "tags": ["positive", "send"]}
+# --- notes (positive) ---
+{"id": "trg-notes-add", "suite": "skill_triggers", "utterance": "add a note: pick up groceries", "expected_verb": "notes", "tags": ["positive"]}
+{"id": "trg-notes-down", "suite": "skill_triggers", "utterance": "note this down for later", "expected_verb": "notes", "tags": ["positive"]}
+{"id": "trg-notes-journal", "suite": "skill_triggers", "utterance": "append to my journal: slept poorly", "expected_verb": "notes", "tags": ["positive"]}
+{"id": "trg-notes-recent", "suite": "skill_triggers", "utterance": "read my recent notes", "expected_verb": "notes", "tags": ["positive"]}
+# --- pain_journal (positive) ---
+{"id": "trg-pain-log", "suite": "skill_triggers", "utterance": "log my pain right now", "expected_verb": "pain_journal", "tags": ["positive"]}
+{"id": "trg-pain-med", "suite": "skill_triggers", "utterance": "i took my methotrexate", "expected_verb": "pain_journal", "tags": ["positive"]}
+{"id": "trg-pain-history", "suite": "skill_triggers", "utterance": "how's my pain been this week?", "expected_verb": "pain_journal", "tags": ["positive"]}
+{"id": "trg-pain-brief", "suite": "skill_triggers", "utterance": "summary for my doctor", "expected_verb": "pain_journal", "tags": ["positive"]}
+# --- weather (positive) ---
+{"id": "trg-weather-now", "suite": "skill_triggers", "utterance": "what's the weather right now?", "expected_verb": "weather", "tags": ["positive"]}
+{"id": "trg-weather-forecast", "suite": "skill_triggers", "utterance": "what's the forecast?", "expected_verb": "weather", "tags": ["positive"]}
+{"id": "trg-weather-location", "suite": "skill_triggers", "utterance": "set my location to Austin Texas", "expected_verb": "weather", "tags": ["positive"]}
+# --- adjacency / disambiguation (the two 'summarize' skills must not cross) ---
+{"id": "trg-adj-pain-summary", "suite": "skill_triggers", "utterance": "summarize my pain", "expected_verb": "pain_journal", "tags": ["positive", "adjacency"]}
+{"id": "trg-adj-flare-summary", "suite": "skill_triggers", "utterance": "give me a flare summary", "expected_verb": "pain_journal", "tags": ["positive", "adjacency"]}
+# --- negative / boundary (NO skill should fire) ---
+{"id": "trg-neg-click", "suite": "skill_triggers", "utterance": "click the save button", "expected_verb": "none", "tags": ["negative"]}
+{"id": "trg-neg-open", "suite": "skill_triggers", "utterance": "open visual studio code", "expected_verb": "none", "tags": ["negative"]}
+{"id": "trg-neg-scroll", "suite": "skill_triggers", "utterance": "scroll down a little", "expected_verb": "none", "tags": ["negative"]}
+{"id": "trg-neg-time", "suite": "skill_triggers", "utterance": "what time is it?", "expected_verb": "none", "tags": ["negative"]}
+{"id": "trg-neg-commit", "suite": "skill_triggers", "utterance": "commit my changes to git", "expected_verb": "none", "tags": ["negative"]}
+{"id": "trg-neg-read-fn", "suite": "skill_triggers", "utterance": "read the classify function in domain_classifier", "expected_verb": "none", "tags": ["negative"]}
+{"id": "trg-neg-joke", "suite": "skill_triggers", "utterance": "tell me a joke", "expected_verb": "none", "tags": ["negative"]}
+{"id": "trg-neg-volume", "suite": "skill_triggers", "utterance": "turn the volume up", "expected_verb": "none", "tags": ["negative"]}

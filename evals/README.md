@@ -31,14 +31,23 @@ This package covers all three; all share the same regression gate (on `exact_acc
 |------|----------|----------|-------------|
 | `single` (default) | utterance → right verb + slots? | `command_verbs`, `*_slots` | exact accuracy |
 | `single --predictor router` | utterance → right domain? (**model-free**) | `router_domains` | exact accuracy |
+| `single --predictor skill_trigger` | utterance → right **skill** fires (or none)? (**model-free**) | `skill_triggers` | exact accuracy |
 | `trajectory` | goal → right plan (verbs, order, no forbidden actions)? | `dev_trajectory` | exact (fully-correct) rate |
 | `judge` | free-form answer → meets the rubric (correct, grounded, no hallucination)? | `explain_quality` | pass rate |
 
 ```bash
 python -m evals.run --suite router_domains  --predictor router          # no model needed
+python -m evals.run --suite skill_triggers   --predictor skill_trigger   # no model needed
 python -m evals.run --suite dev_trajectory  --mode trajectory --model qwen3-coder:30b
 python -m evals.run --suite explain_quality --mode judge --judge-model gemma3:27b
+python -m evals.token_budget                                            # always-loaded metadata budget
 ```
+
+The four-condition skill-eval coverage from the *Agent Skills* whitepaper:
+**trigger** = `skill_triggers` (positive AND negative cases, ≥90%, model-free over the
+real `SkillRegistry.match_intent`); **execution** = `command_verbs`/`*_slots`/`dev_*`;
+**regression** = the shared baseline-lock gate; **token budget** = `evals.token_budget`
+(static check that the always-loaded skill metadata stays small — context-rot defense).
 
 The `router` predictor scores the deterministic `DomainClassifier` (no model, ~0 ms);
 the trajectory eval scores the **live production `_PLAN_PROMPT`** (imported from

@@ -40,3 +40,18 @@ truth for cross-tool behavior; do not duplicate these rules elsewhere.
 ## 8. 📝 Collaboration & History Check
 - **Rule:** At the start of a session, check the most recent work in the project's git history (and open PRs) to ensure your work does not conflict with or duplicate effort from other LLM sessions. Provide a brief summary of previous work.
 - **Context:** This repo is worked by multiple AI assistants (Antigravity + Claude Code) and across git worktrees. A quick `git log`/`gh pr list` scan up front prevents duplicated or conflicting changes.
+
+## Skills catalog (dev/meta procedural memory)
+
+Real [agentskills.io](https://agentskills.io) `SKILL.md` skills live in `.agents/skills/`
+(see `.agents/skills/README.md`). They load on demand — consult the matching one
+*before* the task instead of re-deriving the procedure:
+
+| Skill | Load it when you're about to… |
+|-------|-------------------------------|
+| `adding-a-connector-skill` | add an MCP-connector skill (manifest + FastMCP server) |
+| `changing-the-db-schema`   | add/alter a table, column, or migration in `agent.db` |
+| `running-the-eval-harness` | run, lock, or extend the `evals/` behavioral gates |
+
+These are **not** the runtime accessibility agent's MCP-connector skills
+(`skills/manifests/*.json`) — different primitive, different location.
