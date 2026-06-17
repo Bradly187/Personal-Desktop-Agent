@@ -31,6 +31,7 @@ from pathlib import Path
 from evals.corpus import load_suite, harvest_from_agent_db
 from evals.runner import (
     run_suite, command_predictor, slot_predictor, router_predictor,
+    skill_trigger_predictor,
     run_trajectory_suite, plan_predictor,
     run_judge_suite, llm_judge, answer_producer,
 )
@@ -63,7 +64,7 @@ def _infer_text(model: str | None):
 
 def _run_single(args):
     cases = load_suite(args.suite)
-    if args.db and args.predictor != "router":
+    if args.db and args.predictor not in ("router", "skill_trigger"):
         gold = harvest_from_agent_db(args.db, suite=args.suite, limit=args.limit)
         print(f"harvested {len(gold)} gold case(s) from {args.db}")
         cases += gold
@@ -72,6 +73,8 @@ def _run_single(args):
         return None
     if args.predictor == "router":          # deterministic, no model needed
         return run_suite(cases, router_predictor())
+    if args.predictor == "skill_trigger":   # deterministic, no model needed
+        return run_suite(cases, skill_trigger_predictor())
     oi, infer_text = _infer_text(args.model)
     predict = (command_predictor(oi.infer, timeout_s=args.timeout)
                if args.predictor == "command"
@@ -207,9 +210,11 @@ def main(argv: list[str] | None = None) -> int:
                          "score the executed trajectory (read-only suites only); "
                          "ablation = run each goal WITH vs WITHOUT the codebase "
                          "indexer and score grounding (anchor recall) delta")
-    ap.add_argument("--predictor", choices=["command", "slots", "router"],
+    ap.add_argument("--predictor",
+                    choices=["command", "slots", "router", "skill_trigger"],
                     default="command",
-                    help="single mode only (router = model-free DomainClassifier eval)")
+                    help="single mode only (router = model-free DomainClassifier eval; "
+                         "skill_trigger = model-free skill-router eval)")
     ap.add_argument("--model", default=None, help="override local model name")
     ap.add_argument("--judge-model", default=None, help="judge mode: model for the judge")
     ap.add_argument("--timeout", type=float, default=60.0,

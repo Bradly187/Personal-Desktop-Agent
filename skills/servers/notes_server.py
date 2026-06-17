@@ -35,9 +35,11 @@ def _notes_root() -> Path:
 
 
 def _in_root(path: Path, root: Path) -> bool:
+    # realpath (not abspath) resolves symlinks/junctions so a link planted inside the
+    # notes root can't redirect a write outside it (mirrors goal_session, Sprint P).
     try:
-        target = os.path.normcase(os.path.abspath(str(path)))
-        base = os.path.normcase(os.path.abspath(str(root)))
+        target = os.path.normcase(os.path.realpath(str(path)))
+        base = os.path.normcase(os.path.realpath(str(root)))
         return target == base or target.startswith(base + os.sep)
     except Exception:
         return False

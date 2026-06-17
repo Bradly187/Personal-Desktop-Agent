@@ -55,11 +55,24 @@ function Invoke-Gate {
 # --- Tier 1: model-free (always) ------------------------------------------- #
 Write-Host "=== eval-harness logic tests ===" -ForegroundColor Cyan
 $logicTests = @("tests/test_evals.py", "tests/test_evals_trajectory.py",
-                "tests/test_evals_judge.py", "tests/test_evals_router.py")
+                "tests/test_evals_judge.py", "tests/test_evals_router.py",
+                "tests/test_evals_skill_trigger.py")
 & $py -m pytest @logicTests -q
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
 
 Invoke-Gate "router gate" @("--suite", "router_domains", "--predictor", "router", "--check") $false
+Invoke-Gate "skill-trigger gate" @("--suite", "skill_triggers", "--predictor", "skill_trigger", "--check") $false
+
+# Static always-loaded skill-metadata token budget (model-free; its own module).
+Write-Host ""
+Write-Host "=== token-budget gate ===" -ForegroundColor Cyan
+& $py -m evals.token_budget
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "PASS: token-budget gate" -ForegroundColor Green
+} else {
+    Write-Host "FAIL: token-budget gate (skill metadata over budget)" -ForegroundColor Red
+    $fail = 1
+}
 
 # --- Tier 2: model-backed (skip if Ollama down) ---------------------------- #
 if (-not $SkipModel) {

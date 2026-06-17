@@ -63,8 +63,13 @@ def _slugify(text: str, max_len: int = 48) -> str:
 
 
 def _in_dir(path: Path, root: Path) -> bool:
-    target = os.path.normcase(os.path.abspath(str(path)))
-    base = os.path.normcase(os.path.abspath(str(root)))
+    # realpath (not abspath) resolves symlinks/junctions so a link planted inside the
+    # diagrams dir can't redirect a write outside it (mirrors goal_session, Sprint P).
+    try:
+        target = os.path.normcase(os.path.realpath(str(path)))
+        base = os.path.normcase(os.path.realpath(str(root)))
+    except Exception:
+        return False
     return target.startswith(base + os.sep)
 
 
