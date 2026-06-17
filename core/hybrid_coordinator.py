@@ -952,6 +952,20 @@ class HybridCoordinator:
                 cmd.trace_id = _tid
             _tracer.set_current(_tid)
 
+        # De-glue an ASR-concatenated leading command verb ("OpenVSCode" ->
+        # "open VSCode") so a mish-spaced launch command still classifies as the
+        # command domain and reaches the OPEN/CLOSE action path instead of the
+        # free-form dev agent. No-op unless the text starts with a launch verb
+        # glued on a camelCase boundary. Skip bypass sources (touch/multimodal),
+        # whose text is a pre-resolved token, not a transcript.
+        if cmd.source not in _BYPASS_SOURCES:
+            from core.domain_classifier import deglue_command_verb
+            deglued = deglue_command_verb(cmd.text)
+            if deglued != cmd.text:
+                log.info("HybridCoordinator: de-glued command verb %r -> %r",
+                         cmd.text, deglued)
+                cmd.text = deglued
+
         # --- Dev-agent pre-gate: intercept non-command domains ---
         # Skip for voice system-control keywords so they reach the keyword block
         # below instead of being misrouted to an LLM (e.g. "pain day on").

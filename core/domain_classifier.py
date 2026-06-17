@@ -137,6 +137,56 @@ def _tokenize(text: str) -> list[str]:
     return words + bigrams
 
 
+# Verbs that take a proper-noun target (window / app) which ASR commonly
+# capitalises and runs together with the verb ("OpenVSCode", "CloseSlack").
+# Restricted to launch/window verbs — typing/text verbs are never glued to a
+# capitalised target in practice, so they are excluded to avoid false splits.
+_DEGLUE_VERBS = (
+    "open", "close", "click", "focus", "switch", "maximize", "minimize",
+)
+
+
+def deglue_command_verb(text: str) -> str:
+    """De-glue a leading command verb that ASR ran into its target word.
+
+    Whisper sometimes transcribes "open VS Code" as the single token
+    "OpenVSCode" (no space). With the verb hidden inside one token the
+    DomainClassifier can no longer see a leading command verb, so the query
+    falls through to the dev/general pipeline and never produces an OPEN action.
+
+    This restores the space when — and only when — the first word starts with a
+    known launch verb immediately followed by a camelCase boundary
+    ("Open|VSCode"). The uppercase-boundary requirement keeps legitimate single
+    tokens ("opener", "screenshot", a bare "open") untouched. Only the FIRST
+    word is ever modified; whitespace and the rest of the utterance are
+    preserved verbatim.
+    """
+    stripped = text.lstrip()
+    if not stripped:
+        return text
+    lead = re.split(r"\s", stripped, maxsplit=1)[0]
+    low = lead.lower()
+    for verb in _DEGLUE_VERBS:
+        if low == verb:
+            return text  # already a standalone verb — nothing to do
+    for verb in _DEGLUE_VERBS:
+        if (
+            low.startswith(verb)
+            and len(lead) > len(verb)
+            and lead[len(verb)].isupper()
+        ):
+            remainder = lead[len(verb):]
+            # Skip pure acronyms ("OpenAPI", "OpenAI") — those are single proper
+            # nouns, not a verb glued to an app name (which carries lowercase,
+            # e.g. "VSCode", "Slack", "Notepad").
+            if remainder.isupper():
+                return text
+            leading_ws = text[: len(text) - len(stripped)]
+            rest = stripped[len(lead):]
+            return f"{leading_ws}{lead[:len(verb)]} {remainder}{rest}"
+    return text
+
+
 def _score_against(tokens: list[str], keyword_set: set[str]) -> tuple[float, list[str]]:
     matched = [t for t in tokens if t in keyword_set]
     # Unique matches weighted by set coverage (penalise accidental overlaps)
