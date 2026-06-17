@@ -26,7 +26,24 @@ struct SettingsView: View {
     @AppStorage("onboardingCurrentStep") private var onboardingCurrentStep = 0
 
     var body: some View {
-        NavigationStack {
+        // SettingsView is rendered in ContentView's bare ZStack (outside TabView),
+        // so it has no UINavigationController context. UINavigationBar asserts in
+        // -[UINavigationBar layoutSubviews] at symbolLocation 852 on iPadOS 26.5
+        // (confirmed across three crash reports — the .inline workaround is
+        // insufficient). Replacing NavigationStack with a plain VStack + custom
+        // title header eliminates UINavigationBar entirely.
+        VStack(spacing: 0) {
+            // Custom title bar matching the system grouped-background tone
+            HStack {
+                Text("Settings")
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Color(UIColor.systemGroupedBackground))
+
             Form {
                 // Connection
                 Section {
@@ -295,11 +312,6 @@ struct SettingsView: View {
                     DASectionHeader(title: "Onboarding")
                 }
             }
-            .navigationTitle("Settings")
-            // iPadOS 26 crash fix: UINavigationBar.layoutSubviews asserts at
-            // symbolLocation 852 when this grouped Form's bar lays out via the
-            // tab transition in large-title mode. Inline mode skips that path.
-            .navigationBarTitleDisplayMode(.inline)
             // All modals live at the Form level — a single `.sheet(item:)` plus
             // one `.alert`. Attaching these to individual Sections (whose identity
             // can change as the Form re-renders) is fragile and crashed Settings
@@ -325,7 +337,7 @@ struct SettingsView: View {
             } message: {
                 Text("The calibration wizard will reopen on the next screen. Your saved settings and calibrations are not erased.")
             }
-        }
+        } // VStack
     }
 
     private func _addKeyword() {
