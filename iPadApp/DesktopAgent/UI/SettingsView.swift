@@ -322,6 +322,13 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            // iPadOS 26 crash fix: the large-title layout path in
+            // -[UINavigationBar layoutSubviews] throws an NSInternalInconsistency
+            // assertion when this grouped Form's bar lays out during the tab
+            // transition (confirmed via on-device .ips: EXC_CRASH/SIGABRT in
+            // UINavigationBar layoutSubviews → CA::Transaction::commit). The
+            // inline title bar skips that subroutine and lays out cleanly.
+            .navigationBarTitleDisplayMode(.inline)
             // All modals live at the Form level — a single `.sheet(item:)` plus
             // one `.alert`. Attaching these to individual Sections (whose identity
             // can change as the Form re-renders) is fragile and crashed Settings
