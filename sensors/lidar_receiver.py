@@ -125,7 +125,7 @@ class LiDARReceiver:
         px = nx * (w - 1)
         py = ny * (h - 1)
 
-        x0, y0 = int(px), int(py)
+        x0, y0 = min(int(px), w - 1), min(int(py), h - 1)
         x1, y1 = min(x0 + 1, w - 1), min(y0 + 1, h - 1)
 
         samples = [

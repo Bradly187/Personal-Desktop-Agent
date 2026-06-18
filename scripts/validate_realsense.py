@@ -148,6 +148,7 @@ _corner_captured_t = 0.0        # monotonic time of the last capture (for the ga
 _corner_progress = 0.0          # 0..1 hold progress for the overlay ring
 _corner_done = False
 _corner_bad = False             # last capture was non-convex (rejected; redo)
+_corner_jitter = None           # (jitter_x, jitter_y) std dev of current hold window
 
 
 def _mon_key(m) -> str:
@@ -295,6 +296,7 @@ def _finalize_corners() -> None:
     by flagging _corner_bad and NOT saving, so the user redoes the monitor.
     """
     global _corner_done, _corner_bad
+    _corner_done = True  # always stop capture; _corner_bad drives the rejection overlay
     if not _is_convex_quad(_corner_results):
         _corner_bad = True
         log.warning("CALIBRATION REJECTED [monitor %s]: corners form a crossed/"
@@ -327,14 +329,26 @@ def _finalize_corners() -> None:
     with open(CAL_PATH, "w") as f:
         json.dump({"monitors": mons}, f, indent=2)
     _corner_done = True
+    x_span = x1 - x0
+    y_span = y1 - y0
     log.warning("CORNER CALIBRATION DONE [monitor %s]  box=(%.3f,%.3f)-(%.3f,%.3f)  "
-                "span=%.2fx%.2f  -> %s", key, x0, y0, x1, y1, x1 - x0, y1 - y0, CAL_PATH)
+                "span=%.2fx%.2f  -> %s", key, x0, y0, x1, y1, x_span, y_span, CAL_PATH)
+    if x_span < 0.30:
+        log.warning("  NARROW X-SPAN (%.2f < 0.30) — horizontal reach is cramped. "
+                    "Try a wider arm sweep when capturing LEFT/RIGHT corners, "
+                    "or press 'r' to redo.", x_span)
+    if y_span < 0.25:
+        log.warning("  NARROW Y-SPAN (%.2f < 0.25) — vertical reach is cramped; "
+                    "small hand movements will cause large cursor jumps. "
+                    "Try raising/lowering hand more clearly for TOP/BOTTOM corners, "
+                    "or press 'r' to redo.", y_span)
 
 
 def _reset_corners() -> None:
     """Restart the corner-calibration sequence from TOP-LEFT ('r' key)."""
     global _corner_idx, _corner_results, _corner_anchor, _corner_anchor_t
     global _corner_hold, _corner_captured_t, _corner_progress, _corner_done, _corner_bad
+    global _corner_jitter
     _corner_idx = 0
     _corner_results = []
     _corner_anchor = None
@@ -344,6 +358,7 @@ def _reset_corners() -> None:
     _corner_progress = 0.0
     _corner_done = False
     _corner_bad = False
+    _corner_jitter = None
     log.warning("corner calibration RESET — point to TOP-LEFT and hold")
 
 
@@ -355,7 +370,7 @@ def _corner_step(cen) -> None:
     is captured and we advance. A short CORNER_GAP_S flash follows each capture.
     """
     global _corner_idx, _corner_anchor, _corner_anchor_t, _corner_hold
-    global _corner_captured_t, _corner_progress
+    global _corner_captured_t, _corner_progress, _corner_jitter
     if _corner_done or cen is None:
         return
     now = time.monotonic()
@@ -363,26 +378,39 @@ def _corner_step(cen) -> None:
     if now - _corner_captured_t < CORNER_GAP_S:
         _corner_progress = 0.0
         _corner_anchor = None
+        _corner_jitter = None
         return
     if _corner_anchor is None or math.dist(cen, _corner_anchor) > CORNER_RADIUS:
         _corner_anchor = cen
         _corner_anchor_t = now
         _corner_hold = [cen]
         _corner_progress = 0.0
+        _corner_jitter = None
         return
     _corner_hold.append(cen)
     _corner_progress = min(1.0, (now - _corner_anchor_t) / CORNER_HOLD_S)
+    # Live jitter feedback: std dev of accumulated hold samples (updates every frame)
+    if len(_corner_hold) >= 3:
+        jx = float(np.std([c[0] for c in _corner_hold]))
+        jy = float(np.std([c[1] for c in _corner_hold]))
+        _corner_jitter = (jx, jy)
     if _corner_progress >= 1.0:
-        med = (float(np.median([c[0] for c in _corner_hold])),
-               float(np.median([c[1] for c in _corner_hold])))
+        xs = [c[0] for c in _corner_hold]
+        ys = [c[1] for c in _corner_hold]
+        med = (float(np.median(xs)), float(np.median(ys)))
+        jitter_max = max(float(np.std(xs)), float(np.std(ys)))
+        log.warning("captured %s corner -> (%.3f, %.3f)  jitter_max=%.4f  [%d/4]",
+                    CORNER_LABELS[_corner_idx], med[0], med[1], jitter_max, _corner_idx + 1)
+        if jitter_max > 0.02:
+            log.warning("  HIGH JITTER (%.4f > 0.02) — consider pressing 'r' and "
+                        "recapturing this corner with a steadier hold", jitter_max)
         _corner_results.append(med)
-        log.warning("captured %s corner -> (%.3f, %.3f)  [%d/4]",
-                    CORNER_LABELS[_corner_idx], med[0], med[1], _corner_idx + 1)
         _corner_idx += 1
         _corner_captured_t = now
         _corner_anchor = None
         _corner_hold = []
         _corner_progress = 0.0
+        _corner_jitter = None
         if _corner_idx >= 4:
             _finalize_corners()
 
@@ -464,7 +492,15 @@ def _render(bgr, landmarks, depth):
         cv2.putText(bgr, msg, (10, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.62, col, 2)
         if not _corner_done and _last_centroid is not None:
             cxp, cyp = int(_last_centroid[0] * w), int(_last_centroid[1] * h)
-            cv2.circle(bgr, (cxp, cyp), 30, (255, 255, 0), 2)
+            jit_col = (0, 255, 255)  # yellow-cyan default
+            if _corner_jitter is not None:
+                jmax = max(_corner_jitter)
+                jit_col = (0, 165, 255) if jmax > 0.02 else (0, 255, 0)  # orange=bad, green=good
+                cv2.putText(bgr,
+                            f"jitter x:{_corner_jitter[0]:.4f} y:{_corner_jitter[1]:.4f}"
+                            + ("  HOLD STILLER" if jmax > 0.02 else "  stable"),
+                            (cxp - 80, cyp + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, jit_col, 1)
+            cv2.circle(bgr, (cxp, cyp), 30, jit_col, 2)
             if _corner_progress > 0:
                 cv2.ellipse(bgr, (cxp, cyp), (30, 30), -90, 0,
                             int(360 * _corner_progress), (0, 255, 0), 5)

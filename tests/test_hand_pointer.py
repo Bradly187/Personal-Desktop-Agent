@@ -348,3 +348,165 @@ def test_overshoot_makes_corner_reachable_short_of_extreme():
                      now_fn=FakeClock())
     ev1 = p1.update(0.23, 0.23)
     assert ev1["x"] == 0 and ev1["y"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Bridge integration pattern — mirrors ipad_bridge.py's camera_frame routing
+# --------------------------------------------------------------------------- #
+
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from core.command_executor import Command
+
+
+def _full_hand(tip_nx, tip_ny, thumb_xy=(0.1, 0.1)):
+    """21-landmark hand with all four fingertips at (tip_nx, tip_ny),
+    hand-scale landmarks set so ThumbClick ratio is computable."""
+    lm = [(0.0, 0.0)] * 21
+    lm[5] = (0.40, 0.50)   # index MCP
+    lm[17] = (0.60, 0.50)  # pinky MCP  → scale = 0.2
+    for i in (8, 12, 16, 20):
+        lm[i] = (tip_nx, tip_ny)
+    lm[4] = thumb_xy        # thumb tip
+    return lm
+
+
+class _FakeFusion:
+    def __init__(self):
+        self.gestures: list = []
+    def on_gesture(self, cmd):
+        self.gestures.append(cmd)
+
+
+class _FakeBridge:
+    """Stand-in that replicates ipad_bridge.py's camera_frame HandPointer block."""
+    def __init__(self):
+        self._hand_pointer = None
+        self._thumb_click = None
+        self._fusion = _FakeFusion()
+
+    def set_hand_pointer(self, hp, thumb_click=None):
+        self._hand_pointer = hp
+        self._thumb_click = thumb_click
+
+    def on_landmarks(self, lms):
+        """Simulate the bridge processing one camera frame's landmarks."""
+        if not self._hand_pointer:
+            return
+        if lms:
+            cen = fingertip_centroid(lms)
+            if cen is not None:
+                hold = False
+                if self._thumb_click:
+                    tc = self._thumb_click.update(lms)
+                    hold = tc.get("ratio") is not None and tc["ratio"] < 0.95
+                    if tc.get("click"):
+                        pos = self._hand_pointer._last
+                        if pos:
+                            self._fusion.on_gesture(Command(
+                                text="realsense thumb-click", action="CLICK",
+                                source="realsense", gaze_coords=(pos[0], pos[1]),
+                            ))
+                ev = self._hand_pointer.update(cen[0], cen[1], hold=hold)
+                if ev.get("click") and not self._thumb_click:
+                    self._fusion.on_gesture(Command(
+                        text="realsense dwell-click", action="CLICK",
+                        source="realsense", gaze_coords=(ev["x"], ev["y"]),
+                    ))
+        else:
+            self._hand_pointer.reset()
+
+
+def test_set_hand_pointer_stores_refs():
+    clk = FakeClock()
+    hp = HandPointer(1000, 1000, _cfg(dwell_enabled=False), now_fn=clk)
+    tc = ThumbClick()
+    bridge = _FakeBridge()
+    bridge.set_hand_pointer(hp, thumb_click=tc)
+    assert bridge._hand_pointer is hp
+    assert bridge._thumb_click is tc
+
+
+def test_set_hand_pointer_no_thumb_click():
+    clk = FakeClock()
+    hp = HandPointer(1000, 1000, _cfg(dwell_enabled=False), now_fn=clk)
+    bridge = _FakeBridge()
+    bridge.set_hand_pointer(hp)
+    assert bridge._thumb_click is None
+
+
+def test_bridge_landmarks_move_cursor():
+    moves = []
+    clk = FakeClock()
+    hp = HandPointer(1000, 1000, _cfg(dwell_enabled=False, invert_x=False),
+                     now_fn=clk, move_cb=lambda x, y: moves.append((x, y)))
+    bridge = _FakeBridge()
+    bridge.set_hand_pointer(hp)
+    bridge.on_landmarks(_full_hand(0.5, 0.5))
+    assert len(moves) == 1
+    assert 400 <= moves[0][0] <= 600
+    assert 400 <= moves[0][1] <= 600
+
+
+def test_bridge_dwell_fires_click_via_fusion():
+    clk = FakeClock()
+    hp = HandPointer(1000, 1000, _cfg(dwell_enabled=True, dwell_time_s=0.5),
+                     now_fn=clk)
+    bridge = _FakeBridge()
+    bridge.set_hand_pointer(hp)
+    lms = _full_hand(0.5, 0.5)
+    bridge.on_landmarks(lms)
+    assert len(bridge._fusion.gestures) == 0
+    clk.advance(0.6)
+    bridge.on_landmarks(lms)   # still at same position; dwell should have elapsed
+    assert len(bridge._fusion.gestures) == 1
+    cmd = bridge._fusion.gestures[0]
+    assert cmd.action == "CLICK"
+    assert cmd.source == "realsense"
+    assert cmd.gaze_coords is not None
+
+
+def test_bridge_hand_lost_resets_dwell():
+    clk = FakeClock()
+    hp = HandPointer(1000, 1000, _cfg(dwell_enabled=True, dwell_time_s=0.5),
+                     now_fn=clk)
+    bridge = _FakeBridge()
+    bridge.set_hand_pointer(hp)
+    bridge.on_landmarks(_full_hand(0.5, 0.5))
+    assert hp._anchor is not None
+    bridge.on_landmarks(None)   # hand lost
+    assert hp._anchor is None   # reset clears anchor
+
+
+def test_bridge_thumb_click_fires_click_via_fusion():
+    clk = FakeClock()
+    hp = HandPointer(1000, 1000, _cfg(dwell_enabled=False), now_fn=clk)
+    tc = ThumbClick(ThumbClickConfig(close_ratio=0.55, open_ratio=0.85))
+    bridge = _FakeBridge()
+    bridge.set_hand_pointer(hp, thumb_click=tc)
+    # First frame: position the cursor (thumb far away → no click)
+    bridge.on_landmarks(_full_hand(0.5, 0.5, thumb_xy=(0.10, 0.10)))
+    assert len(bridge._fusion.gestures) == 0
+    # Second frame: thumb close to index/middle tips → ratio ≈ 0.05 → pinch fires
+    bridge.on_landmarks(_full_hand(0.5, 0.5, thumb_xy=(0.49, 0.5)))
+    assert len(bridge._fusion.gestures) == 1
+    assert bridge._fusion.gestures[0].action == "CLICK"
+    assert bridge._fusion.gestures[0].source == "realsense"
+
+
+def test_bridge_thumb_freezes_cursor_while_approaching_pinch():
+    moves = []
+    clk = FakeClock()
+    hp = HandPointer(1000, 1000, _cfg(dwell_enabled=False, invert_x=False),
+                     now_fn=clk, move_cb=lambda x, y: moves.append((x, y)))
+    tc = ThumbClick(ThumbClickConfig(close_ratio=0.55, open_ratio=0.85))
+    bridge = _FakeBridge()
+    bridge.set_hand_pointer(hp, thumb_click=tc)
+    # Position cursor at center
+    bridge.on_landmarks(_full_hand(0.5, 0.5, thumb_xy=(0.10, 0.10)))
+    pos_before = moves[-1]
+    # Thumb approaching pinch (ratio between 0.55 and 0.95) → hold=True → cursor frozen
+    # scale=0.2; ratio = d / 0.2; for ratio=0.7 need d = 0.14; thumb at (0.36, 0.5)
+    bridge.on_landmarks(_full_hand(0.8, 0.8, thumb_xy=(0.36, 0.5)))
+    # The move_cb should NOT have been called (hold=True freezes the cursor)
+    assert moves[-1] == pos_before

@@ -122,6 +122,9 @@ class IPadBridge:
         self._gesture: Optional["GestureProcessor"] = None
         self._whisper: Optional["WhisperStream"] = None
         self._viewer: Optional["SensorViewer"] = None
+        # RealSense L515 HandPointer — absolute cursor via relaxed hand (wired when --realsense)
+        self._hand_pointer: Optional[Any] = None   # sensors.hand_pointer.HandPointer
+        self._thumb_click: Optional[Any] = None    # sensors.hand_pointer.ThumbClick
 
         # DB for persistent iPad log storage (wired by main.py)
         self._agent_db = None
@@ -166,6 +169,15 @@ class IPadBridge:
 
     def set_viewer(self, viewer: "SensorViewer") -> None:
         self._viewer = viewer
+
+    def set_hand_pointer(self, hand_pointer, thumb_click=None) -> None:
+        """Wire the RealSense L515 HandPointer for absolute cursor positioning.
+
+        hand_pointer — HandPointer configured for the active monitor.
+        thumb_click  — optional ThumbClick; thumb-pinch fires CLICK instead of dwell.
+        """
+        self._hand_pointer = hand_pointer
+        self._thumb_click = thumb_click
 
     def set_agent_db(self, agent_db, session_id: int) -> None:
         self._agent_db = agent_db
@@ -386,6 +398,40 @@ class IPadBridge:
                 # Forward landmarks to viewer overlay
                 if self._viewer:
                     self._viewer.on_hand_landmarks(self._gesture.latest_landmarks)
+                # RealSense HandPointer: absolute cursor from the same MediaPipe pass —
+                # no second inference. Landmarks are in [0,1] normalized image space.
+                if self._hand_pointer:
+                    _lms = self._gesture.latest_landmarks
+                    if _lms:
+                        from sensors.hand_pointer import fingertip_centroid
+                        _cen = fingertip_centroid(_lms)
+                        if _cen is not None:
+                            _hold = False
+                            if self._thumb_click:
+                                _tc = self._thumb_click.update(_lms)
+                                # Freeze cursor while thumb is approaching the pinch
+                                # (ratio < 0.95) so the click lands where the user aimed.
+                                _hold = (_tc.get("ratio") is not None
+                                         and _tc["ratio"] < 0.95)
+                                if _tc.get("click") and self._fusion:
+                                    _pos = self._hand_pointer._last
+                                    if _pos:
+                                        self._fusion.on_gesture(Command(
+                                            text="realsense thumb-click",
+                                            action="CLICK",
+                                            source="realsense",
+                                            gaze_coords=(_pos[0], _pos[1]),
+                                        ))
+                            _ev = self._hand_pointer.update(_cen[0], _cen[1], hold=_hold)
+                            if _ev.get("click") and not self._thumb_click and self._fusion:
+                                self._fusion.on_gesture(Command(
+                                    text="realsense dwell-click",
+                                    action="CLICK",
+                                    source="realsense",
+                                    gaze_coords=(_ev["x"], _ev["y"]),
+                                ))
+                    else:
+                        self._hand_pointer.reset()
             else:
                 log.debug("camera_frame received but GestureProcessor not wired")
             if self._viewer:

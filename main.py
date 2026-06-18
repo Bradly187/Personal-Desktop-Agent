@@ -881,6 +881,94 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         )
     profiler.add_drift_callback(_on_drift)
 
+    # ── RealSense L515 HandPointer ────────────────────────────────────────────
+    _realsense_proc = None
+    if os.environ.get("DA_REALSENSE", "0") != "0" or getattr(args, "realsense", False):
+        try:
+            import json as _rs_json
+            from sensors.hand_pointer import (
+                HandPointer, HandPointerConfig, ThumbClick, ThumbClickConfig,
+            )
+            _CORNER_ORDER = ("TOP-LEFT", "TOP-RIGHT", "BOTTOM-RIGHT", "BOTTOM-LEFT")
+            _hp_cfg = HandPointerConfig()
+            _cal_path = Path(__file__).parent / "hand_pointer_calibration.json"
+            if _cal_path.exists():
+                try:
+                    with open(_cal_path) as _f:
+                        _cal_data = _rs_json.load(_f)
+                    _mon_key = f"{sw}x{sh}@0,0"
+                    _cal_entry = _cal_data.get("monitors", {}).get(_mon_key)
+                    if _cal_entry:
+                        _hp_cfg.in_x0 = float(_cal_entry["in_x0"])
+                        _hp_cfg.in_y0 = float(_cal_entry["in_y0"])
+                        _hp_cfg.in_x1 = float(_cal_entry["in_x1"])
+                        _hp_cfg.in_y1 = float(_cal_entry["in_y1"])
+                        _cc = _cal_entry.get("corners")
+                        if isinstance(_cc, dict) and len(_cc) == 4:
+                            _hp_cfg.corners = [
+                                list(map(float, _cc[k])) for k in _CORNER_ORDER
+                            ]
+                        _hp_cfg.overshoot = 0.06
+                        log.info("RealSense HandPointer: calibration loaded for %s", _mon_key)
+                    else:
+                        log.warning("RealSense HandPointer: no calibration for %s — "
+                                    "run validate_realsense.py --calibrate-corners", _mon_key)
+                except Exception as _e:
+                    log.warning("RealSense HandPointer: calibration load error: %s", _e)
+            else:
+                log.warning("RealSense HandPointer: no calibration file — "
+                            "run validate_realsense.py --calibrate-corners first")
+
+            import ctypes as _rs_ct
+            _rs_u32 = _rs_ct.windll.user32
+
+            def _rs_move(x, y):
+                _rs_u32.SetCursorPos(int(x), int(y))
+
+            _hp_gravity = None
+            if target_cache is not None:
+                def _hp_gravity(x, y, r):
+                    tg = target_cache.nearest(int(x), int(y), r, max_dim=120)
+                    return tg.center() if tg else None
+
+            _thumb_click = (
+                ThumbClick(ThumbClickConfig()) if getattr(args, "thumb_click", False) else None
+            )
+            hand_pointer = HandPointer(
+                sw, sh, _hp_cfg,
+                move_cb=_rs_move,
+                gravity_provider=_hp_gravity,
+            )
+            bridge.set_hand_pointer(hand_pointer, thumb_click=_thumb_click)
+            log.info(
+                "RealSense HandPointer active  screen=%dx%d  gravity=%s  click=%s",
+                sw, sh,
+                "ON" if _hp_gravity else "OFF",
+                "thumb-pinch" if _thumb_click else "dwell",
+            )
+
+            # Auto-start the capture sidecar (Python 3.10 venv) unless suppressed.
+            _sidecar_py = Path(__file__).parent / ".venv-realsense" / "Scripts" / "python.exe"
+            _sidecar_script = Path(__file__).parent / "sensors" / "realsense_publisher.py"
+            if (_sidecar_py.exists() and _sidecar_script.exists()
+                    and not getattr(args, "no_realsense_sidecar", False)):
+                import subprocess as _subp
+                _realsense_proc = _subp.Popen(
+                    [str(_sidecar_py), str(_sidecar_script),
+                     "--host", "127.0.0.1", "--port", str(args.port)],
+                    stdout=_subp.DEVNULL,
+                    stderr=open(Path(__file__).parent / "logs" / "realsense_sidecar.err", "w"),
+                )
+                log.info("RealSense sidecar started (pid=%d)", _realsense_proc.pid)
+            else:
+                if not _sidecar_py.exists():
+                    log.info("RealSense sidecar: .venv-realsense not found — "
+                             "run start_realsense.bat manually")
+                else:
+                    log.info("RealSense sidecar: auto-start suppressed (--no-realsense-sidecar)")
+        except Exception as _rs_exc:
+            log.warning("RealSense HandPointer setup failed: %s", _rs_exc)
+
     # ── Optional codebase RAG index ────────────────────────────────────────
     indexer = None
     if args.index_codebase:
@@ -1079,6 +1167,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
+    if _realsense_proc is not None:
+        _realsense_proc.terminate()
+        log.info("RealSense sidecar terminated (pid=%d)", _realsense_proc.pid)
+
     # Stop cluster health monitor
     if cluster_health is not None:
         await cluster_health.stop()
@@ -1227,6 +1319,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--watch", action="store_true",
                    help="Enable continuous file watcher for incremental RAG re-indexing "
                         "(requires --index-codebase and pip install watchdog)")
+    # ── RealSense L515 hand-pointer ───────────────────────────────────────────
+    p.add_argument("--realsense", action="store_true",
+                   help="Enable RealSense L515 absolute hand-pointer cursor "
+                        "(DA_REALSENSE=1 env var also works); auto-starts the "
+                        ".venv-realsense sidecar if found")
+    p.add_argument("--no-realsense-sidecar", action="store_true",
+                   help="With --realsense: wire HandPointer but don't auto-start "
+                        "the sidecar (run start_realsense.bat manually)")
+    p.add_argument("--thumb-click", action="store_true",
+                   help="With --realsense: use thumb-pinch to click instead of dwell")
     return p.parse_args()
 
 
