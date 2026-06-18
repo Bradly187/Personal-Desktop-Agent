@@ -937,6 +937,27 @@ class HybridCoordinator:
             return "Could not retrieve history."
 
     async def route(self, cmd: Command) -> dict:
+        """Route a Command, then durably persist its trace for eval replay (GAP-4).
+
+        Thin wrapper over `_route_impl`. When tracing is on, the completed trace's
+        spans are flushed to AgentDB fire-and-forget AFTER the command finishes —
+        never on the hot path, and a persistence fault never affects the result.
+        """
+        try:
+            return await self._route_impl(cmd)
+        finally:
+            try:
+                _tr = get_tracer()
+                if _tr.enabled and cmd.trace_id and self._agent_db and self._agent_db.available:
+                    from core.async_utils import fire_and_log
+                    fire_and_log(
+                        _tr.persist_trace(cmd.trace_id, self._agent_db, self._session_id),
+                        log, label="persist trace",
+                    )
+            except Exception:  # pragma: no cover - persistence must never break route
+                pass
+
+    async def _route_impl(self, cmd: Command) -> dict:
         """Route a Command through the gate decision tree and execute it.
 
         Dev-domain queries (code, math, vision, plan, general) are intercepted

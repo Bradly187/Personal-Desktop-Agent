@@ -150,6 +150,28 @@ class TraceRecorder:
         with self._lock:
             return [dict(t) for t in list(self._traces.values())[-n:]]
 
+    # ── Persistence (GAP-4 — durable traces for eval replay) ───────────────────
+
+    async def persist_trace(self, trace_id: str, agent_db, session_id: int = -1) -> int:
+        """Flush a completed trace's spans to durable storage. Returns spans written.
+
+        Decoupled from the 60 Hz hot path — call via `async_utils.fire_and_log`
+        AFTER the command finishes. Best-effort: returns 0 (never raises) when
+        tracing is disabled, the trace is unknown/empty, or the DB is unavailable.
+        """
+        if not self._enabled:
+            return 0
+        tr = self.get_trace(trace_id)
+        spans = (tr or {}).get("spans") or []
+        if not spans:
+            return 0
+        if agent_db is None or not getattr(agent_db, "available", False):
+            return 0
+        try:
+            return await agent_db.insert_trace_spans(trace_id, session_id, spans)
+        except Exception:
+            return 0
+
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
 
