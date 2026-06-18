@@ -788,6 +788,36 @@ CREATE TABLE IF NOT EXISTS domain_keyword_weights (
     ts       REAL NOT NULL,
     PRIMARY KEY (domain, keyword)
 );
+
+-- Intent drift / trust-decay log (GAP-6 — Pillar 6). When a multi-turn dev
+-- session's current command diverges from its opening intent below the drift
+-- threshold for several consecutive turns, a row is recorded for later review.
+-- Plain CREATE TABLE IF NOT EXISTS — no migration bump.
+CREATE TABLE IF NOT EXISTS intent_drift_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL    NOT NULL,
+    session_id      INTEGER,
+    trace_id        TEXT,
+    drift_score     REAL    NOT NULL,
+    original_intent TEXT,
+    current_command TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_driftlog_session ON intent_drift_log(session_id, ts);
+
+-- Harvested user corrections (GAP-9 — labeled failure data). Every confirmed
+-- "no, not like that" correction, persisted so scripts/cluster_corrections.py can
+-- cluster them offline into candidate eval cases / systematic failure modes.
+-- Plain CREATE TABLE IF NOT EXISTS — no migration bump.
+CREATE TABLE IF NOT EXISTS user_corrections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL    NOT NULL,
+    session_id      INTEGER,
+    trace_id        TEXT,
+    correction_text TEXT    NOT NULL,
+    prior_action    TEXT,
+    domain          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_usercorr_ts ON user_corrections(ts);
 """
 
 
@@ -3104,6 +3134,73 @@ class AgentDB:
     # ---------------------------------------------------------------------- #
     # Event bus
     # ---------------------------------------------------------------------- #
+
+    async def insert_drift(
+        self,
+        session_id: Optional[int],
+        trace_id: Optional[str],
+        drift_score: float,
+        original_intent: str,
+        current_command: str,
+    ) -> Optional[int]:
+        """Record an intent-drift event (GAP-6). Returns row id or None on error."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                "INSERT INTO intent_drift_log"
+                " (ts, session_id, trace_id, drift_score, original_intent, current_command)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (time.time(), session_id, trace_id, float(drift_score),
+                 original_intent, current_command),
+            ) as cur:
+                row_id = cur.lastrowid
+            await self._conn.commit()
+            return row_id
+        except Exception as exc:
+            log.warning("AgentDB.insert_drift failed: %s", exc)
+            return None
+
+    async def insert_correction(
+        self,
+        session_id: Optional[int],
+        trace_id: Optional[str],
+        correction_text: str,
+        prior_action: Optional[str],
+        domain: Optional[str],
+    ) -> Optional[int]:
+        """Harvest a confirmed user correction (GAP-9). Returns row id or None."""
+        if not self._conn or not correction_text:
+            return None
+        try:
+            async with self._conn.execute(
+                "INSERT INTO user_corrections"
+                " (ts, session_id, trace_id, correction_text, prior_action, domain)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (time.time(), session_id, trace_id, correction_text,
+                 prior_action, domain),
+            ) as cur:
+                row_id = cur.lastrowid
+            await self._conn.commit()
+            return row_id
+        except Exception as exc:
+            log.warning("AgentDB.insert_correction failed: %s", exc)
+            return None
+
+    async def get_corrections(self, limit: int = 1000) -> list[dict]:
+        """Return harvested corrections newest-first (GAP-9 offline clustering)."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT id, ts, session_id, trace_id, correction_text, prior_action, domain"
+                " FROM user_corrections ORDER BY ts DESC LIMIT ?",
+                (limit,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_corrections failed: %s", exc)
+            return []
 
     async def insert_event(
         self,
