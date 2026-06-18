@@ -882,7 +882,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # configured. set_remote_url() must precede whisper.start() so the local
     # large-v3 model is never loaded (saves ~3.5 GB VRAM on the desktop).
     if cluster_cfg.has_remote_whisper:
-        whisper.set_remote_url(cluster_cfg.laptop_whisper_url)
+        whisper.set_remote_url(cluster_cfg.laptop_whisper_url, token=cluster_cfg.laptop_whisper_token)
         whisper.set_cluster_health(cluster_health)
     coordinator.set_whisper_stream(whisper)
     coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation

@@ -43,14 +43,16 @@ class _Info:
 
 
 class RemoteWhisperClient:
-    def __init__(self, url: str, timeout: float = 8.0, retries: int = 1) -> None:
+    def __init__(self, url: str, timeout: float = 8.0, retries: int = 1, token: Optional[str] = None) -> None:
         # url e.g. "http://192.168.18.12:8888"
+        # token: optional Bearer token for C2 authentication (e.g., from WHISPER_TOKEN env var)
         # timeout 8s (was 30s): LAN inference is ~1-3s, so 30s only delayed the
         # fall back to local on a hung laptop. retries=1 absorbs a single
         # transient blip (jittered backoff) before giving up.
         self._endpoint = url.rstrip("/") + "/transcribe"
         self._timeout = timeout
         self._retries = max(0, retries)
+        self._token = token
 
     def transcribe(
         self,
@@ -73,9 +75,12 @@ class RemoteWhisperClient:
             "speech_pad_ms": speech_pad_ms,
         }
         body = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         req = urllib.request.Request(
             self._endpoint, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         last_exc: Optional[BaseException] = None
         data = None
