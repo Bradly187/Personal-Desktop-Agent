@@ -29,6 +29,8 @@ benchmark_results.json
 *.pem
 *.env
 .env*
+cluster_config.json
+approval_config.json
 
 # Calibration data files
 gaze_calibration.json

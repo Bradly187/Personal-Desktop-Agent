@@ -2663,7 +2663,7 @@ class DevAgent:
                 hits = await self._remote_indexer.query_combined(query, n=n)
                 from_remote = bool(hits)
             except Exception as exc:
-                log.debug("DevAgent._rag_context() remote indexer failed: %s — local fallback", exc)
+                log.warning("DevAgent._rag_context() remote indexer failed: %s — local fallback", exc)
                 hits = None
 
         # M3: an empty remote result (flaking service returning []) is treated as

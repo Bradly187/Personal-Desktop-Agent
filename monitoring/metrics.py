@@ -184,6 +184,10 @@ class Metrics:
             "corrections": 0,
             "whisper_hallucinations": 0,
             "gesture_rejections": 0,
+            # FusionEngine circuit breaker (commands shed during acoustic storms/latency spikes)
+            "route_task_breaker_sheds": 0,
+            # Ollama hang-timeout (FINDING 4): incremented when DA_OLLAMA_TIMEOUT_S fires
+            "ollama_hang_detected": 0,
         }
 
         # ── Gauges ────────────────────────────────────────────────────────
@@ -199,6 +203,8 @@ class Metrics:
             # Scheduler visibility (AccessibilityScheduler.set_metrics)
             "scheduler_queue_depth": 0.0,
             "scheduler_dev_inflight": 0.0,
+            # FusionEngine circuit breaker (commands shed during acoustic storms)
+            "coordinator_route_tasks_inflight": 0.0,
         }
 
         # ── Histograms ────────────────────────────────────────────────────

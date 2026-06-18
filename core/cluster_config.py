@@ -11,18 +11,22 @@ This module loads `cluster_config.json` (project root by default) into a frozen
 dataclass.  Every field is optional: a missing file or missing key means "use
 the desktop default", so the agent runs identically with no cluster configured.
 
-Example cluster_config.json:
+Example cluster_config.json (DO NOT hardcode secrets in this file):
     {
       "laptop": {
         "hostname": "Brad_Laptop",
         "ollama_url":  "http://192.168.18.12:11434",
         "whisper_url": "http://192.168.18.12:8888",
-        "indexer_url": "http://192.168.18.12:9000",
-        "indexer_token": "shared-secret-matching-the-service-INDEXER_TOKEN"
+        "indexer_url": "http://192.168.18.12:9000"
       },
       "routing": { "lightweight_host": "laptop" },
       "smb_share": null
     }
+
+IMPORTANT: Set bearer tokens via environment variables, never hardcode them:
+    - INDEXER_TOKEN: passed to the indexer service (--token or env)
+    - WHISPER_TOKEN: passed to the whisper service (--token or env)
+Do not add these to cluster_config.json or any version-controlled file.
 """
 
 from __future__ import annotations
@@ -53,8 +57,13 @@ class ClusterConfig:
     laptop_ollama_url: Optional[str] = None
     laptop_whisper_url: Optional[str] = None
     laptop_indexer_url: Optional[str] = None
+    # C2: shared bearer token the desktop presents to the laptop whisper service
+    # (must match the service's WHISPER_TOKEN). None → no auth header sent.
+    # IMPORTANT: Do NOT hardcode in this file; use WHISPER_TOKEN env var instead.
+    laptop_whisper_token: Optional[str] = None
     # C2: shared bearer token the desktop presents to the laptop indexer service
     # (must match the service's INDEXER_TOKEN). None → no auth header sent.
+    # IMPORTANT: Do NOT hardcode in this file; use INDEXER_TOKEN env var instead.
     laptop_indexer_token: Optional[str] = None
     # "laptop" → offload the lightweight (command-domain) inference to the laptop.
     # "desktop" (or anything else) → keep it local.
@@ -92,6 +101,7 @@ class ClusterConfig:
             laptop_ollama_url=_clean_url(laptop.get("ollama_url")),
             laptop_whisper_url=_clean_url(laptop.get("whisper_url")),
             laptop_indexer_url=_clean_url(laptop.get("indexer_url")),
+            laptop_whisper_token=(laptop.get("whisper_token") or None),
             laptop_indexer_token=(laptop.get("indexer_token") or None),
             lightweight_host=(routing.get("lightweight_host") or "desktop"),
             smb_share=data.get("smb_share"),

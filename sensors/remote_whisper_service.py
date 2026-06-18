@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hmac
 import logging
 import os
 import site
@@ -185,23 +186,54 @@ class RemoteWhisperService:
             return web.json_response({"error": str(exc)}, status=500)
 
 
+def _make_auth_middleware(token: str):
+    """Require a shared bearer token on the data-returning /transcribe and /devices routes (C2).
+
+    /health stays open so ClusterHealthMonitor can probe liveness without the token.
+    Constant-time comparison; any mismatch → 401.
+    """
+    @web.middleware
+    async def _auth(request: web.Request, handler):
+        if request.path in ("/transcribe", "/devices"):
+            supplied = request.headers.get("Authorization", "")
+            if not hmac.compare_digest(supplied, f"Bearer {token}"):
+                return web.json_response({"error": "unauthorized"}, status=401)
+        return await handler(request)
+    return _auth
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Remote faster-whisper service (laptop node)")
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="Bind address (default 127.0.0.1 for loopback; set to 0.0.0.0 only with --token)")
     ap.add_argument("--port", type=int, default=8888)
     ap.add_argument("--model", default="large-v3")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--compute-type", default="float16")
+    ap.add_argument("--token", default=None,
+                    help="Shared bearer token; falls back to the WHISPER_TOKEN env var")
     args = ap.parse_args()
+
+    # C2: refuse to run unauthenticated on non-loopback interfaces.
+    token = os.environ.get("WHISPER_TOKEN") or args.token
+    if not token:
+        if args.host != "127.0.0.1":
+            log.error("No whisper token set (WHISPER_TOKEN env or --token) and binding to "
+                      "non-loopback %s. Refusing to start an unauthenticated public service.", args.host)
+            sys.exit(2)
+        log.warning("Running without token on loopback (127.0.0.1) — set WHISPER_TOKEN for "
+                    "multi-machine deployments")
+        token = ""  # empty token => middleware always denies (fail-safe)
 
     svc = RemoteWhisperService(args.model, args.device, args.compute_type)
     svc.load()
 
-    app = web.Application(client_max_size=64 * 1024 * 1024)  # allow large audio bodies
+    app = web.Application(client_max_size=64 * 1024 * 1024, middlewares=[_make_auth_middleware(token)])
     app.router.add_post("/transcribe", svc.handle_transcribe)
     app.router.add_get("/health", svc.handle_health)
     app.router.add_get("/devices", svc.handle_devices)
-    log.info("RemoteWhisperService listening on %s:%d", args.host, args.port)
+    log.info("RemoteWhisperService listening on %s:%d (auth: %s)",
+             args.host, args.port, "token-required" if token else "loopback-only")
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 

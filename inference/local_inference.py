@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
@@ -30,6 +31,13 @@ from typing import Any, Optional
 from core.command_executor import Command
 
 log = logging.getLogger(__name__)
+
+
+class OllamaTimeoutError(Exception):
+    """Raised (internally) when DA_OLLAMA_TIMEOUT_S fires while waiting for
+    Ollama semaphore acquisition or an HTTP response.  Callers receive a
+    CLARIFY string — this exception is not propagated past OllamaInference."""
+
 
 # ---------------------------------------------------------------------------
 # Fine-tuning data capture (task-local)
@@ -468,6 +476,12 @@ class OllamaInference(LocalInference):
         # 2026-06-04). One in-flight request at a time is sufficient; the circuit
         # breaker handles the backend-down fast-fail path.
         self._request_sem = asyncio.Semaphore(1)
+        # Optional metrics sink; wired via set_metrics() from main.py or tests.
+        self._metrics = None
+
+    def set_metrics(self, metrics) -> None:
+        """Wire an in-process Metrics object for hang-timeout counter updates."""
+        self._metrics = metrics
 
     async def infer(
         self,
@@ -496,49 +510,79 @@ class OllamaInference(LocalInference):
             "options": {"temperature": 0.0, "num_predict": 64},
         }
 
+        # Outer hang-guard: if Ollama stalls (CUDA OOM, runner deadlock) the
+        # _request_sem could block the next caller indefinitely. DA_OLLAMA_TIMEOUT_S
+        # (default 45 s) is a hard ceiling covering BOTH semaphore acquisition and
+        # the HTTP call. This is wider than self.timeout (10 s aiohttp total) to
+        # allow cold-start model loading; tune down if the host is predictably fast.
+        _hang_timeout_s = float(os.environ.get("DA_OLLAMA_TIMEOUT_S", "45"))
         t0 = time.monotonic()
         # Report the outcome in `finally` so a CancelledError (which is a
         # BaseException, NOT caught by `except Exception`) still clears the
         # breaker's half-open probe flag — otherwise a cancelled probe wedges
         # the breaker shut forever.
         succeeded = False
-        async with self._request_sem:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.host}/api/generate",
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=self.timeout),
-                    ) as resp:
-                        if resp.status != 200:
-                            raise RuntimeError(f"Ollama HTTP {resp.status}")
-                        data = await resp.json()
-                        action = data.get("response", "").strip().splitlines()[0].strip()
-                        set_inference_capture(
-                            prompt, data.get("prompt_eval_count"), data.get("eval_count")
-                        )
-                        latency_ms = (time.monotonic() - t0) * 1000
-                        log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
-                        self._available = True
-                        succeeded = True
-                        return action
-            except Exception as exc:
-                self._available = False
-                # Keep the raw transport error in the log; the user-facing CLARIFY
-                # stays a stable sentence (E16) — never leak aiohttp/SSL internals.
-                log.error("OllamaInference failed: %s", exc)
-                return "CLARIFY the local model is unavailable right now. Please try again."
-            finally:
-                if succeeded:
-                    # Pass latency so a slow-but-successful call counts toward the
-                    # timeout-aware breaker (#4 tail).
-                    self._breaker.record_success(
-                        _probe_gen, latency_s=time.monotonic() - t0
-                    )
-                else:
-                    # Covers both `except Exception` returns and BaseException
-                    # (CancelledError/timeout) propagation.
-                    self._breaker.record_failure(_probe_gen)
+        # Track whether semaphore was acquired so the outer TimeoutError handler
+        # knows whether the inner finally already updated the breaker.
+        _entered_sem = False
+        try:
+            async with asyncio.timeout(_hang_timeout_s):
+                async with self._request_sem:
+                    _entered_sem = True
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(
+                                f"{self.host}/api/generate",
+                                json=payload,
+                                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                            ) as resp:
+                                if resp.status != 200:
+                                    raise RuntimeError(f"Ollama HTTP {resp.status}")
+                                data = await resp.json()
+                                action = data.get("response", "").strip().splitlines()[0].strip()
+                                set_inference_capture(
+                                    prompt, data.get("prompt_eval_count"), data.get("eval_count")
+                                )
+                                latency_ms = (time.monotonic() - t0) * 1000
+                                log.info("OllamaInference: %r → %r (%.0f ms)", cmd.text, action, latency_ms)
+                                self._available = True
+                                succeeded = True
+                                return action
+                    except Exception as exc:
+                        self._available = False
+                        # Keep the raw transport error in the log; the user-facing CLARIFY
+                        # stays a stable sentence (E16) — never leak aiohttp/SSL internals.
+                        log.error("OllamaInference failed: %s", exc)
+                        return "CLARIFY the local model is unavailable right now. Please try again."
+                    finally:
+                        if succeeded:
+                            # Pass latency so a slow-but-successful call counts toward the
+                            # timeout-aware breaker (#4 tail).
+                            self._breaker.record_success(
+                                _probe_gen, latency_s=time.monotonic() - t0
+                            )
+                        else:
+                            # Covers both `except Exception` returns and BaseException
+                            # (CancelledError/timeout) propagation.
+                            self._breaker.record_failure(_probe_gen)
+        except asyncio.TimeoutError:
+            elapsed_s = time.monotonic() - t0
+            log.error(
+                "OllamaInference: hang detected — outer timeout fired after %.1fs "
+                "(semaphore=%s). Tune DA_OLLAMA_TIMEOUT_S or check Ollama/VRAM health.",
+                elapsed_s,
+                "acquired" if _entered_sem else "waiting",
+            )
+            if self._metrics is not None:
+                self._metrics.inc("ollama_hang_detected")
+            # When the timeout fires during semaphore ACQUISITION (_entered_sem=False),
+            # the inner finally never ran — update the breaker here so it isn't left
+            # with a dangling half-open probe.  When it fires inside the sem block
+            # (_entered_sem=True), the inner finally already called record_failure.
+            if not _entered_sem:
+                self._breaker.record_failure(_probe_gen)
+            self._available = False
+            return "CLARIFY the local model is unavailable right now. Please try again."
 
     async def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """POST /api/chat and return the parsed JSON response.

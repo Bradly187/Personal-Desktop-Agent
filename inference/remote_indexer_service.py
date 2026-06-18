@@ -140,8 +140,8 @@ def _make_auth_middleware(token: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Remote CodebaseIndexer service (laptop node)")
-    ap.add_argument("--host", default="0.0.0.0",
-                    help="Bind address (default 0.0.0.0; pin to the WireGuard IP if available)")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="Bind address (default 127.0.0.1 for loopback; set to 0.0.0.0 only with --token)")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     help="Project root to index (default: this repo clone)")

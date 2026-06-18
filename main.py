@@ -833,6 +833,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     m = get_metrics()
     fusion_pre = None   # FusionEngine created below; wire metrics after
     coordinator.set_metrics(m)
+    if hasattr(local, "set_metrics"):
+        local.set_metrics(m)     # ollama_hang_detected counter (FINDING 4)
 
     fusion = FusionEngine(screen_width=sw, screen_height=sh)
     fusion.set_coordinator(coordinator)
@@ -882,7 +884,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # configured. set_remote_url() must precede whisper.start() so the local
     # large-v3 model is never loaded (saves ~3.5 GB VRAM on the desktop).
     if cluster_cfg.has_remote_whisper:
-        whisper.set_remote_url(cluster_cfg.laptop_whisper_url)
+        whisper.set_remote_url(cluster_cfg.laptop_whisper_url, token=cluster_cfg.laptop_whisper_token)
         whisper.set_cluster_health(cluster_health)
     coordinator.set_whisper_stream(whisper)
     coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
@@ -928,6 +930,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # Wire CommandExecutor DB access for per-call timeout + idempotency.
     coordinator._executor.set_agent_db(agent_db)
+    # Wire audit log so command execution failures appear in the tamper-evident trail.
+    coordinator._executor.set_audit_log(audit)
 
     # Read cache configs from DB and push to the cache-using components.
     try:

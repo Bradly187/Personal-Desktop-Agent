@@ -433,17 +433,20 @@ class WhisperStream:
     def set_fusion_engine(self, fusion: "FusionEngine") -> None:
         self._fusion = fusion
 
-    def set_remote_url(self, url: str) -> None:
+    def set_remote_url(self, url: str, token: Optional[str] = None) -> None:
         """Delegate model inference to the laptop Whisper service at `url`.
 
         When set, start() skips loading the local faster-whisper model. The
         desktop still owns VAD/buffering and the hallucination filter; only the
         forward pass moves to the laptop.
+
+        token: optional Bearer token for C2 authentication (e.g., WHISPER_TOKEN env var).
         """
         from sensors.remote_whisper_client import RemoteWhisperClient
         self._remote_url = url
-        self._remote_client = RemoteWhisperClient(url)
-        log.info("WhisperStream: remote transcription enabled → %s", url)
+        self._remote_client = RemoteWhisperClient(url, token=token)
+        log.info("WhisperStream: remote transcription enabled → %s (auth: %s)",
+                 url, "token-required" if token else "none")
 
     def set_cluster_health(self, monitor) -> None:
         """Wire ClusterHealthMonitor; remote is used only while 'whisper' is healthy."""

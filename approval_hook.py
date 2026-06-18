@@ -109,6 +109,34 @@ def _build_message(tool_name: str, tool_input: dict) -> str:
     return f"Approve {tool_name}?"
 
 
+def _try_audit_vibe_unavailable(exc: Exception) -> None:
+    """Best-effort: write a warning to audit.db so the approval trail records
+    that LLM feedback (vibe diff) was absent when the user approved the action.
+
+    Uses asyncio.run() for a one-shot async write — runs in under ~5 ms when
+    aiosqlite is available; no-ops silently on any failure so the approval flow
+    is never blocked by this observability write.
+    """
+    try:
+        import asyncio as _aio
+        from storage.audit_log import AuditLog as _AL
+
+        async def _write() -> None:
+            _a = _AL()
+            await _a.open(_DIR / "audit.db")
+            await _a.log(
+                "vibe_summary_unavailable",
+                severity="warning",
+                detail=str(exc)[:200],
+                params={"fallback": "static_prompt"},
+            )
+            await _a.close()
+
+        _aio.run(_write())
+    except Exception as _ae:
+        log.debug("approval_hook: audit for vibe_summary_unavailable failed: %s", _ae)
+
+
 def _vibe_summary(tool_name: str, tool_input: dict, config: dict) -> str | None:
     """Plain-English "Vibe Diff" of a pending action (GAP-2 — Pillar 5).
 
@@ -161,7 +189,8 @@ def _vibe_summary(tool_name: str, tool_input: dict, config: dict) -> str | None:
             out = json.loads(resp.read().decode("utf-8"))
         text = (out.get("response") or "").strip()
     except Exception as exc:  # noqa: BLE001 - best-effort, fail open
-        log.debug("approval_hook: vibe summary failed: %s", exc)
+        log.warning("approval_hook: vibe summary unavailable: %s (falling back to static prompt)", exc)
+        _try_audit_vibe_unavailable(exc)
         return None
 
     if not text:
