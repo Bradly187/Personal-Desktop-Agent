@@ -24,8 +24,19 @@ import signal
 import subprocess
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Optional
+
+# torch.cuda imports pynvml (deprecated package) and emits a FutureWarning on every
+# startup. nvidia-ml-py is already declared in requirements.txt and provides the same
+# API; the warning is upstream noise we cannot fix in torch itself.
+warnings.filterwarnings(
+    "ignore",
+    message="The pynvml package is deprecated",
+    category=FutureWarning,
+    module="torch",
+)
 
 log = logging.getLogger("desktop_agent")
 

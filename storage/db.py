@@ -789,6 +789,25 @@ CREATE TABLE IF NOT EXISTS domain_keyword_weights (
     PRIMARY KEY (domain, keyword)
 );
 
+-- Persisted command traces (GAP-4 — Pillar 6 Observability / eval replay). The
+-- in-memory TraceRecorder ring buffer (monitoring/trace.py) holds only the last
+-- 200 commands and is lost on restart; completed traces are flushed here
+-- (fire-and-forget, off the 60 Hz hot path) so the eval framework can replay a
+-- command's trajectory and diagnose session failures. One row per span, ordered
+-- by `seq`. Plain CREATE TABLE IF NOT EXISTS — no migration bump (same as
+-- skill_invocations / domain_keyword_weights).
+CREATE TABLE IF NOT EXISTS command_traces (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id    TEXT    NOT NULL,
+    session_id  INTEGER,
+    seq         INTEGER NOT NULL,
+    stage       TEXT    NOT NULL,
+    ts          REAL    NOT NULL,
+    dur_ms      REAL,
+    attrs_json  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ctrace_trace ON command_traces(trace_id, seq);
+
 -- Intent drift / trust-decay log (GAP-6 — Pillar 6). When a multi-turn dev
 -- session's current command diverges from its opening intent below the drift
 -- threshold for several consecutive turns, a row is recorded for later review.
@@ -3012,28 +3031,62 @@ class AgentDB:
     # Maintenance / pruning (called at startup or on a schedule)
     # ---------------------------------------------------------------------- #
 
+    async def _prune_with_retry(
+        self,
+        sql: str,
+        params: tuple,
+        *,
+        label: str,
+        checkpoint: bool = False,
+        attempts: int = 4,
+    ) -> int:
+        """Run a pruning DELETE, retrying briefly on a locked database.
+
+        ``PRAGMA busy_timeout`` only auto-retries ``SQLITE_BUSY``. A
+        ``"database table is locked"`` (``SQLITE_LOCKED``) — observed at startup
+        when a just-killed previous process still holds the WAL lock, or when a
+        checkpoint collides with a concurrent reader — is NOT retried by SQLite
+        itself, so the prune silently skipped and ``sensor_telemetry`` grew
+        unbounded. Back off and retry here. Stays non-fatal: returns 0 if every
+        attempt loses the race.
+        """
+        if not self._conn:
+            return 0
+        delay = 0.2
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self._conn.execute(sql, params) as cur:
+                    deleted = cur.rowcount or 0
+                if checkpoint:
+                    await self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                await self._conn.commit()
+                if deleted:
+                    log.info("AgentDB: pruned %d %s", deleted, label)
+                return deleted
+            except Exception as exc:
+                if "lock" in str(exc).lower() and attempt < attempts:
+                    log.debug(
+                        "AgentDB.prune %s locked (attempt %d/%d) — retrying in %.1fs",
+                        label, attempt, attempts, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                log.warning("AgentDB.prune %s failed: %s", label, exc)
+                return 0
+        return 0
+
     async def prune_sensor_telemetry(self, days: int = 7) -> int:
         """Delete sensor_telemetry rows older than `days`. Returns rows deleted.
 
         At 1 Hz write rate, 7 days = ~604,800 rows (~30–50 MB). Call at startup
         to keep the DB from growing unboundedly across long-uptime deployments.
         """
-        if not self._conn:
-            return 0
         cutoff = time.time() - days * 86400
-        try:
-            async with self._conn.execute(
-                "DELETE FROM sensor_telemetry WHERE ts < ?", (cutoff,)
-            ) as cur:
-                deleted = cur.rowcount or 0
-            await self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            await self._conn.commit()
-            if deleted:
-                log.info("AgentDB: pruned %d sensor_telemetry rows (> %d days)", deleted, days)
-            return deleted
-        except Exception as exc:
-            log.warning("AgentDB.prune_sensor_telemetry failed: %s", exc)
-            return 0
+        return await self._prune_with_retry(
+            "DELETE FROM sensor_telemetry WHERE ts < ?", (cutoff,),
+            label=f"sensor_telemetry rows (> {days} days)", checkpoint=True,
+        )
 
     async def prune_gesture_velocity_samples(self, days: int = 90) -> int:
         """Delete gesture_velocity_samples rows older than `days`. Returns rows deleted.
@@ -3041,23 +3094,11 @@ class AgentDB:
         At ~7,200/day, 90 days = ~648,000 rows. Retaining 90 days preserves enough
         signal for ContinuousTrainer's p10 velocity-floor calibration.
         """
-        if not self._conn:
-            return 0
         cutoff = time.time() - days * 86400
-        try:
-            async with self._conn.execute(
-                "DELETE FROM gesture_velocity_samples WHERE ts < ?", (cutoff,)
-            ) as cur:
-                deleted = cur.rowcount or 0
-            await self._conn.commit()
-            if deleted:
-                log.info(
-                    "AgentDB: pruned %d gesture_velocity_samples rows (> %d days)", deleted, days
-                )
-            return deleted
-        except Exception as exc:
-            log.warning("AgentDB.prune_gesture_velocity_samples failed: %s", exc)
-            return 0
+        return await self._prune_with_retry(
+            "DELETE FROM gesture_velocity_samples WHERE ts < ?", (cutoff,),
+            label=f"gesture_velocity_samples rows (> {days} days)",
+        )
 
     async def prune_ipad_logs(self, days: int = 60) -> int:
         """Delete ipad_logs rows older than `days`. Returns rows deleted."""
@@ -3227,6 +3268,69 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.insert_event failed: %s", exc)
             return None
+
+    async def insert_trace_spans(
+        self,
+        trace_id: str,
+        session_id: Optional[int],
+        spans: list[dict],
+    ) -> int:
+        """Persist a completed trace's spans (GAP-4). Returns the count written.
+
+        Called fire-and-forget at command end (off the hot path). Each trace is
+        persisted once by its owner, so this plain append never dedups.
+        """
+        if not self._conn or not spans:
+            return 0
+        try:
+            rows = []
+            for i, span in enumerate(spans):
+                attrs = span.get("attrs")
+                rows.append((
+                    trace_id,
+                    session_id,
+                    i,
+                    span.get("stage", ""),
+                    float(span.get("ts", 0.0) or 0.0),
+                    span.get("dur_ms"),
+                    json.dumps(attrs) if attrs else None,
+                ))
+            await self._conn.executemany(
+                "INSERT INTO command_traces"
+                " (trace_id, session_id, seq, stage, ts, dur_ms, attrs_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            await self._conn.commit()
+            return len(rows)
+        except Exception as exc:
+            log.warning("AgentDB.insert_trace_spans failed: %s", exc)
+            return 0
+
+    async def get_trace_spans(self, trace_id: str) -> list[dict]:
+        """Return persisted spans for a trace, ordered (GAP-4 eval replay)."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT seq, stage, ts, dur_ms, attrs_json FROM command_traces"
+                " WHERE trace_id = ? ORDER BY seq",
+                (trace_id,),
+            ) as cur:
+                out: list[dict] = []
+                for r in await cur.fetchall():
+                    d = dict(r)
+                    raw = d.pop("attrs_json", None)
+                    if raw:
+                        try:
+                            d["attrs"] = json.loads(raw)
+                        except Exception:
+                            d["attrs"] = {}
+                    out.append(d)
+                return out
+        except Exception as exc:
+            log.warning("AgentDB.get_trace_spans failed: %s", exc)
+            return []
 
     async def poll_events(
         self,

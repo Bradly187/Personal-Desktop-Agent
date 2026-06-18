@@ -266,6 +266,10 @@ struct TrackpadGestureView: UIViewRepresentable {
         pan.maximumNumberOfTouches = 2
         pan.delegate = c
         v.addGestureRecognizer(pan)
+        c.panRecognizer = pan
+        // Once the view is in the window, make the enclosing TabView page-swiper
+        // wait for this pan to fail before it can fire (see linkAncestorScrollViews).
+        DispatchQueue.main.async { c.linkAncestorScrollViewsIfNeeded() }
 
         let tap1 = UITapGestureRecognizer(target: c, action: #selector(Coordinator.tap1(_:)))
         tap1.numberOfTouchesRequired = 1
@@ -282,7 +286,12 @@ struct TrackpadGestureView: UIViewRepresentable {
         return v
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {}
+    func updateUIView(_ uiView: UIView, context: Context) {
+        // Retry the scroll-view link here too: on the first makeUIView the view
+        // may not yet be in a window, so the ancestor page scroll view isn't
+        // reachable. updateUIView runs after insertion / on layout.
+        context.coordinator.linkAncestorScrollViewsIfNeeded()
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(palmRadius: palmRadius, onEvent: onEvent)
@@ -294,14 +303,40 @@ struct TrackpadGestureView: UIViewRepresentable {
         var palmRadius: CGFloat
         let onEvent: (TrackpadEvent) -> Void
         weak var view: UIView?
+        weak var panRecognizer: UIPanGestureRecognizer?
         private var prevTranslation: CGPoint = .zero
         /// Timestamp of last 2-finger tap — used to suppress the spurious 1-finger tap
         /// that fires alongside it when require(toFail:) is removed.
         private var lastTap2Time: CFTimeInterval = 0
+        /// Set once we've made the ancestor page scroll view(s) defer to our pan.
+        private var didLinkScrollViews = false
 
         init(palmRadius: CGFloat, onEvent: @escaping (TrackpadEvent) -> Void) {
             self.palmRadius = palmRadius
             self.onEvent = onEvent
+        }
+
+        /// Walk up from the trackpad view and require every ancestor `UIScrollView`'s
+        /// pan (the TabView `.page` swiper) to fail before it fires. The trackpad's
+        /// own pan recognizes any 1–2 finger drag on the surface, so it always wins
+        /// and the page never swipes while the user is moving the cursor — while a
+        /// swipe that starts *outside* the trackpad still pages normally. Idempotent
+        /// and self-healing: no-ops until the view is in a window, retried until at
+        /// least one ancestor scroll view is found.
+        func linkAncestorScrollViewsIfNeeded() {
+            guard !didLinkScrollViews,
+                  let view, view.window != nil,
+                  let pan = panRecognizer else { return }
+            var current: UIView? = view.superview
+            var linked = false
+            while let v = current {
+                if let scrollView = v as? UIScrollView {
+                    scrollView.panGestureRecognizer.require(toFail: pan)
+                    linked = true
+                }
+                current = v.superview
+            }
+            if linked { didLinkScrollViews = true }
         }
 
         func gestureRecognizer(_ gr: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -317,6 +352,8 @@ struct TrackpadGestureView: UIViewRepresentable {
             let t = gr.translation(in: view)
             switch gr.state {
             case .began:
+                // Fallback in case the view wasn't in a window during make/update.
+                linkAncestorScrollViewsIfNeeded()
                 prevTranslation = t
             case .changed:
                 let dx = t.x - prevTranslation.x

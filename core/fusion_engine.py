@@ -941,6 +941,11 @@ class FusionEngine:
         interval = 1.0 / self._cfg.tick_hz
         log.info("FusionEngine running at %.0f Hz", self._cfg.tick_hz)
         _slow_tick_threshold = interval * 2  # warn if tick body takes > 2× the interval
+        # Deadline-based sleep: track the absolute time the next tick should start
+        # rather than sleeping for (interval - elapsed). This prevents scheduler jitter
+        # from accumulating — a late tick shortens the next sleep instead of drifting
+        # the long-term average below target (was ~57.4 Hz; target 60 Hz).
+        deadline = time.monotonic() + interval
         while self._running:
             t0 = time.monotonic()
             try:
@@ -952,7 +957,10 @@ class FusionEngine:
             if elapsed > _slow_tick_threshold:
                 log.warning("FusionEngine slow tick: %.1f ms (budget %.1f ms)",
                             elapsed * 1000, interval * 1000)
-            await asyncio.sleep(max(0.0, interval - elapsed))
+            to_sleep = deadline - time.monotonic()
+            if to_sleep > 0:
+                await asyncio.sleep(to_sleep)
+            deadline += interval  # advance to next boundary regardless of actual time
 
     def stop(self) -> None:
         self._running = False

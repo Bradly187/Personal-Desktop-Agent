@@ -186,6 +186,10 @@ class IPadBridge:
         # via _on_ipad_log_task_done. Mirrors the FusionEngine._route_tasks pattern.
         self._ipad_log_tasks: set[asyncio.Task] = set()
 
+        # Per-subsystem rate-limiting state for forwarded iPad INFO/DEBUG logs.
+        self._ipad_log_rate: dict[str, float] = {}       # subsystem → last emit time
+        self._ipad_log_suppressed: dict[str, int] = {}   # subsystem → pending count
+
         # iPad↔PC trace correlation: the most recent PC-side trace_id and the wall
         # time it was set. ipad_log entries arriving within _TRACE_WINDOW_S of a
         # command execution are tagged with this trace_id so they can be joined to
@@ -927,6 +931,12 @@ class IPadBridge:
         "fault":   logging.CRITICAL,
     }
 
+    # Rate-limit forwarded iPad INFO/DEBUG logs. High-frequency subsystems (e.g.
+    # TiltSensor at 34/s when the WS is disconnected) produce hundreds of lines per
+    # minute that add no diagnostic value. One log per subsystem per window, with a
+    # suppression count appended. WARNING+ entries are never rate-limited.
+    _IPAD_LOG_RATE_LIMIT_S: float = 30.0
+
     # Whitelist for the iPad-controlled `subsystem` field. The full string is
     # interpolated into a Python logger name; without bounding it, a malicious
     # client on the LAN could spam loggerDict and grow unbounded. Length-capped
@@ -966,6 +976,22 @@ class IPadBridge:
             subsystem = self._sanitize_subsystem(entry.get("subsystem", "unknown"))
             text = entry.get("msg", "")
             py_level = self._IPAD_LOG_LEVELS.get(level_str, logging.INFO)
+
+            # Rate-limit high-frequency INFO/DEBUG entries (e.g. TiltSensor 34/s
+            # when WS is disconnected). WARNING+ always passes through.
+            if py_level < logging.WARNING:
+                now = time.monotonic()
+                last = self._ipad_log_rate.get(subsystem, 0.0)
+                if now - last < self._IPAD_LOG_RATE_LIMIT_S:
+                    self._ipad_log_suppressed[subsystem] = (
+                        self._ipad_log_suppressed.get(subsystem, 0) + 1
+                    )
+                    continue
+                self._ipad_log_rate[subsystem] = now
+                suppressed = self._ipad_log_suppressed.pop(subsystem, 0)
+                if suppressed:
+                    text = f"[+{suppressed} suppressed] {text}"
+
             logging.getLogger(f"ipad.{subsystem}").log(py_level, "%s", text)
             if py_level >= logging.WARNING:
                 db_entries.append(entry)
