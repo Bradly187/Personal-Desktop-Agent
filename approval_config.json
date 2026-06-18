@@ -40,5 +40,8 @@
   "_note_timeout": "Fail safe: if no clear yes/no confirmation is heard within the window, timeout_action applies. Keep 'reject' so ambient audio / TTS echo / silence can never auto-approve a destructive tool call. 'approve' = proceed on ambiguity (NOT recommended).",
 
   "goal_session_duration_s":  900,
-  "goal_session_max_actions": 50
+  "goal_session_max_actions": 50,
+
+  "_note_cloud_budget": "GAP-10 denial-of-wallet tripwire: once a session exceeds this many Anthropic cloud calls, the coordinator speaks a one-time cost warning (advisory — it does not block the cloud path).",
+  "cloud_call_budget": 20
 }
