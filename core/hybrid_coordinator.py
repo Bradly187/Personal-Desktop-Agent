@@ -1661,6 +1661,10 @@ class HybridCoordinator:
         failed or CLARIFY outcome.  The corrected text becomes the canonical
         example for future routing of similar commands.
         """
+        # GAP-9: harvest the correction regardless of whether a trainer is wired —
+        # the user_corrections backlog must capture every confirmed correction,
+        # not only those on deploys that also run a ContinuousTrainer.
+        self._harvest_correction(cmd, self._last_executed_action)
         if not self._trainer:
             return
         try:
@@ -1676,7 +1680,6 @@ class HybridCoordinator:
             )
         except Exception as exc:
             log.warning("HybridCoordinator._on_correction failed: %s", exc)
-        self._harvest_correction(cmd, self._last_executed_action)
 
     # GAP-6 thresholds: 3 consecutive dev turns below this token-overlap to the
     # opening intent trip a single advisory warning.
@@ -1692,6 +1695,11 @@ class HybridCoordinator:
         row, and speak a gentle nudge — all fire-and-forget, off the hot path.
         The command itself is NOT blocked: the signal is advisory (noisy), so it
         informs rather than hijacks. Dev-domain only.
+
+        Scope note: the coordinator is one long-lived instance, so "session" here
+        means the process lifetime — the anchor is the first dev command after
+        boot and the warning latches once per process. That suits the typical
+        single-goal session; re-anchoring on an idle boundary is a future option.
         """
         text = (cmd.text or "").strip()
         if not text:

@@ -35,9 +35,10 @@ async def _load_corrections(db_path: str, limit: int) -> list[dict]:
         print("AgentDB unavailable (aiosqlite missing?) — nothing to cluster",
               file=sys.stderr)
         return []
-    rows = await db.get_corrections(limit=limit)
-    await db.close()
-    return rows
+    try:
+        return await db.get_corrections(limit=limit)
+    finally:
+        await db.close()
 
 
 def _cluster_embeddings(texts: list[str], k: int) -> list[int]:

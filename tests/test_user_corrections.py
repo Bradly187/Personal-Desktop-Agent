@@ -69,3 +69,24 @@ async def test_harvest_correction_schedules_write(tmp_path):
     rows = await db.get_corrections()
     assert any("close it" in r["correction_text"] for r in rows)
     assert rows[0]["prior_action"] == "OPEN editor"
+
+
+async def test_on_correction_harvests_without_trainer(tmp_path):
+    # Regression: _on_correction must harvest even when no ContinuousTrainer is
+    # wired (it used to early-return before the harvest call).
+    db = await _open(tmp_path, "corr4.db")
+    if not db.available:
+        pytest.skip("aiosqlite unavailable")
+    c = HybridCoordinator.__new__(HybridCoordinator)
+    c._agent_db = db
+    c._session_id = 5
+    c._trainer = None
+    c._last_executed_action = "OPEN editor"
+    c._last_command_id = -1
+
+    cmd = Command(source="voice", action="", text="no, I meant close it")
+    await c._on_correction(cmd, "CLOSE editor")
+    await asyncio.sleep(0.05)
+
+    rows = await db.get_corrections()
+    assert any("close it" in r["correction_text"] for r in rows)
