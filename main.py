@@ -833,6 +833,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     m = get_metrics()
     fusion_pre = None   # FusionEngine created below; wire metrics after
     coordinator.set_metrics(m)
+    if hasattr(local, "set_metrics"):
+        local.set_metrics(m)     # ollama_hang_detected counter (FINDING 4)
 
     fusion = FusionEngine(screen_width=sw, screen_height=sh)
     fusion.set_coordinator(coordinator)
