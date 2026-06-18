@@ -109,6 +109,68 @@ def _build_message(tool_name: str, tool_input: dict) -> str:
     return f"Approve {tool_name}?"
 
 
+def _vibe_summary(tool_name: str, tool_input: dict, config: dict) -> str | None:
+    """Plain-English "Vibe Diff" of a pending action (GAP-2 — Pillar 5).
+
+    For the high-impact tools listed in approval_config.json ``vibe_diff_tools``,
+    ask a fast local LLM to describe in one sentence what the command will DO to
+    the user's system, so the spoken consent prompt conveys *intent* rather than
+    a raw command string. Best-effort and fail-open: any failure (Ollama down,
+    >3s timeout, malformed reply, key absent) returns None and the caller falls
+    back to the static description — the gate is never blocked or slowed beyond
+    the timeout. Uses stdlib urllib so the hook gains no new dependency.
+    """
+    vibe_tools = config.get("vibe_diff_tools") or []
+    if tool_name not in vibe_tools:
+        return None
+
+    # Pull the most action-bearing text for each tool type.
+    if tool_name in ("Bash", "PowerShell"):
+        detail = tool_input.get("command", "")
+    elif tool_name in ("Write", "Edit"):
+        fp = tool_input.get("file_path", "")
+        body = tool_input.get("content") or tool_input.get("new_string") or ""
+        detail = f"write to file {fp}: {body[:800]}"
+    else:
+        detail = json.dumps(tool_input)[:800]
+    detail = (detail or "").strip()
+    if not detail:
+        return None
+
+    model = config.get("vibe_diff_model", "llama3.1:8b")
+    prompt = (
+        "In one short sentence, plainly describe what this action will DO to the "
+        "user's computer. Be concrete and non-technical. Do not add warnings, "
+        "preamble, or quotes.\n\nACTION:\n" + detail
+    )
+    payload = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0.0, "num_predict": 60},
+    }).encode("utf-8")
+
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "http://localhost:11434/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            out = json.loads(resp.read().decode("utf-8"))
+        text = (out.get("response") or "").strip()
+    except Exception as exc:  # noqa: BLE001 - best-effort, fail open
+        log.debug("approval_hook: vibe summary failed: %s", exc)
+        return None
+
+    if not text:
+        return None
+    # Collapse to a single line and cap length so TTS stays snappy.
+    text = " ".join(text.split())[:240]
+    return f"{text} Approve?"
+
+
 # ---------------------------------------------------------------------------
 # Polly TTS
 # ---------------------------------------------------------------------------
@@ -277,7 +339,13 @@ def main() -> None:
         log.debug("approval_hook: goal session check failed: %s", _gs_exc)
 
     # --- Speak the action description ----------------------------------------
+    # GAP-2 "Vibe Diff": for high-impact tools, prefer a plain-English summary of
+    # what the action DOES over the raw command. Falls back to the static
+    # description when the local LLM is unavailable.
     message = _build_message(tool_name, tool_input)
+    vibe = _vibe_summary(tool_name, tool_input, config)
+    if vibe:
+        message = vibe
     voice = config.get("voice_id", "Danielle")
     _polly_speak(message, voice)
 

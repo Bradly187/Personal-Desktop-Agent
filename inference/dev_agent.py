@@ -2426,8 +2426,15 @@ class DevAgent:
         log.info("DevAgent: PR created — %s", url)
         return url
 
-    async def _fetch_url(self, url: str, max_chars: int = 6000) -> str:
-        """Fetch a URL and return extracted text (replaces browser-open SEARCH_WEB)."""
+    async def _fetch_url(self, url: str, max_chars: int = 4000) -> str:
+        """Fetch a URL and return extracted text (replaces browser-open SEARCH_WEB).
+
+        GAP-3 (Pillar 1 — Egress Governance): adversarial web content is untrusted
+        input. Before it can enter the plan/reflect reasoning context the extracted
+        text is screened with MCPTrustClassifier — HIGH-risk pages (injection
+        payloads) are withheld, MEDIUM-risk pages are kept but flagged. The content
+        is capped (default 4000 chars) to bound the injection surface.
+        """
         try:
             import aiohttp
         except ImportError:
@@ -2453,10 +2460,34 @@ class DevAgent:
                         text = await resp.text(errors="replace")
                     if len(text) > max_chars:
                         text = text[:max_chars] + f"\n… [truncated at {max_chars}]"
+                    text = await self._scan_web_content(url, text)
                     log.info("DevAgent: fetched %s (%d chars)", url, len(text))
                     return text
         except Exception as exc:
             raise RuntimeError(f"FETCH_URL {url} failed: {exc}") from exc
+
+    async def _scan_web_content(self, url: str, text: str) -> str:
+        """Taint-screen fetched web content before it enters the reasoning context.
+
+        HIGH-risk → withheld sentinel (the LLM never sees the payload).
+        MEDIUM-risk → kept with a visible [TAINT] marker. Fails open on any
+        classifier error so a transient fault never breaks a legitimate fetch.
+        """
+        try:
+            verdict = await _get_trust_classifier().classify("fetch_url", text)
+        except Exception as exc:  # noqa: BLE001 - fail open
+            log.debug("DevAgent: web content scan failed (%s) — passing through", exc)
+            return text
+        if verdict.should_block:
+            log.warning(
+                "DevAgent: withheld HIGH-risk web content from %s [%s]",
+                url, ", ".join(verdict.flags) or "?",
+            )
+            return ("[fetched content withheld — flagged as a possible prompt-"
+                    "injection / unsafe payload]")
+        if verdict.should_warn:
+            return "[TAINT] " + text
+        return text
 
     # ── Context helpers ──────────────────────────────────────────────────────
 
