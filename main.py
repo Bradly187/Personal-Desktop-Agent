@@ -928,6 +928,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # Wire CommandExecutor DB access for per-call timeout + idempotency.
     coordinator._executor.set_agent_db(agent_db)
+    # Wire audit log so command execution failures appear in the tamper-evident trail.
+    coordinator._executor.set_audit_log(audit)
 
     # Read cache configs from DB and push to the cache-using components.
     try:

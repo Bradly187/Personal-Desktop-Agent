@@ -475,11 +475,16 @@ class CommandExecutor:
 
     def __init__(self) -> None:
         self._agent_db = None  # AgentDB — set via set_agent_db(); optional
+        self._audit_log = None  # AuditLog — set via set_audit_log(); optional
         self._writable_roots = _load_writable_roots()  # M2: WRITE_FILE/RUN_TERMINAL scope
 
     def set_agent_db(self, db) -> None:
         """Wire AgentDB for per-call idempotency tracking and timeout config."""
         self._agent_db = db
+
+    def set_audit_log(self, audit_log) -> None:
+        """Wire AuditLog so command execution failures are recorded in the tamper-evident trail."""
+        self._audit_log = audit_log
 
     async def _tool_timeout_ms(self, action: str) -> int:
         """Return the configured timeout for action (ms). Falls back to 30 000."""
@@ -598,10 +603,34 @@ class CommandExecutor:
             elapsed_ms = (time.monotonic() - t_start) * 1000
             log.error("CommandExecutor: %s timed out after %d ms (limit=%d ms)",
                       action, round(elapsed_ms), timeout_ms)
+            if self._audit_log and self._audit_log.available:
+                try:
+                    await self._audit_log.log(
+                        "command_execution_failed",
+                        severity="warning",
+                        tool=action,
+                        detail=f"timeout after {timeout_ms} ms (elapsed {round(elapsed_ms)} ms)",
+                        params={"action": action, "source": cmd.source, "trace_id": cmd.trace_id},
+                        outcome="timeout",
+                    )
+                except Exception as _ae:
+                    log.debug("CommandExecutor: audit log write failed: %s", _ae)
             return {"status": "error", "action": action,
                     "error": f"timeout after {timeout_ms} ms"}
         except Exception as exc:
             log.error("Failed to execute %s: %s", action, exc)
+            if self._audit_log and self._audit_log.available:
+                try:
+                    await self._audit_log.log(
+                        "command_execution_failed",
+                        severity="warning",
+                        tool=action,
+                        detail=str(exc)[:400],
+                        params={"action": action, "source": cmd.source, "trace_id": cmd.trace_id},
+                        outcome="exception",
+                    )
+                except Exception as _ae:
+                    log.debug("CommandExecutor: audit log write failed: %s", _ae)
             return {"status": "error", "action": action, "error": str(exc)}
         finally:
             latency_ms = (time.monotonic() - t_start) * 1000

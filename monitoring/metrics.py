@@ -186,6 +186,8 @@ class Metrics:
             "gesture_rejections": 0,
             # FusionEngine circuit breaker (commands shed during acoustic storms/latency spikes)
             "route_task_breaker_sheds": 0,
+            # Ollama hang-timeout (FINDING 4): incremented when DA_OLLAMA_TIMEOUT_S fires
+            "ollama_hang_detected": 0,
         }
 
         # ── Gauges ────────────────────────────────────────────────────────
