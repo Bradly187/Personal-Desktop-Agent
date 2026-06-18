@@ -44,7 +44,9 @@ def test_summary_returned_for_listed_tool(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     out = approval_hook._vibe_summary("Bash", {"command": "rm -rf ./build"}, _CONFIG)
-    assert out == "This deletes your build folder. Approve?"
+    # Returns the plain-English effect only; the caller prepends it to the static
+    # "Approve running rm?" prompt so the exe identity is never hidden.
+    assert out == "This deletes your build folder."
 
 
 def test_unlisted_tool_returns_none(monkeypatch):

@@ -167,8 +167,11 @@ def _vibe_summary(tool_name: str, tool_input: dict, config: dict) -> str | None:
     if not text:
         return None
     # Collapse to a single line and cap length so TTS stays snappy.
-    text = " ".join(text.split())[:240]
-    return f"{text} Approve?"
+    # Return just the plain-English effect — the caller PREPENDS it to the static
+    # identity-bearing prompt ("Approve running rm?") rather than replacing it, so
+    # a benign-sounding paraphrase of a destructive command can never hide the
+    # exe/target the user is consenting to.
+    return " ".join(text.split())[:240]
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +348,10 @@ def main() -> None:
     message = _build_message(tool_name, tool_input)
     vibe = _vibe_summary(tool_name, tool_input, config)
     if vibe:
-        message = vibe
+        # Prepend the plain-English effect to the static identity prompt so the
+        # user hears BOTH ("This deletes your build folder. Approve running rm?")
+        # — the summary never replaces the exe/target identity it describes.
+        message = f"{vibe} {message}"
     voice = config.get("voice_id", "Danielle")
     _polly_speak(message, voice)
 
