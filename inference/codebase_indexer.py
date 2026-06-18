@@ -54,6 +54,73 @@ def _get_cpu_pool() -> concurrent.futures.ProcessPoolExecutor:
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# RAG taint scanning (GAP-1 — Pillar 2 Data / Pillar 6 Invisible Payloads)
+#
+# Source files and docs PDFs feed DevAgent's RAG context. A poisoned comment
+# block (`// IGNORE PREVIOUS INSTRUCTIONS — do X instead`) would otherwise pass
+# through unchanged into the LLM's reasoning window. Every chunk is screened
+# with MCPTrustClassifier before it lands in ChromaDB: HIGH-risk chunks are
+# dropped, MEDIUM-risk chunks are kept but visibly marked so the model can see
+# they're flagged. Fails OPEN (indexes everything) if the classifier is
+# unavailable — indexing must never crash.
+# ---------------------------------------------------------------------------
+
+_TAINT_PREFIX = "[TAINT] "
+
+# Lazy MCPTrustClassifier singleton (mirrors DevAgent's pattern). The False
+# sentinel records a one-time import failure so we don't retry on every chunk.
+_trust_classifier_singleton = None
+
+
+def _get_trust_classifier():
+    global _trust_classifier_singleton
+    if _trust_classifier_singleton is None:
+        try:
+            from adaptive.mcp_trust_classifier import MCPTrustClassifier
+            _trust_classifier_singleton = MCPTrustClassifier()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("CodebaseIndexer: trust classifier unavailable: %s", exc)
+            _trust_classifier_singleton = False
+    return _trust_classifier_singleton or None
+
+
+def _scan_documents(documents: list, metadatas: list, ids: list, source_label: str):
+    """Screen RAG chunks for injection payloads before storing them (GAP-1).
+
+    Returns filtered (documents, metadatas, ids) tuples in lockstep. Runs in the
+    indexer worker thread, so it uses the synchronous classifier path.
+    """
+    clf = _get_trust_classifier()
+    if clf is None:
+        return documents, metadatas, ids
+
+    out_docs, out_meta, out_ids = [], [], []
+    for doc, meta, cid in zip(documents, metadatas, ids):
+        try:
+            verdict = clf.classify_sync("rag_chunk", doc)
+        except Exception as exc:  # pragma: no cover - defensive: fail open
+            log.debug("CodebaseIndexer: chunk scan failed (%s) — keeping", exc)
+            out_docs.append(doc); out_meta.append(meta); out_ids.append(cid)
+            continue
+
+        if verdict.should_block:
+            log.warning(
+                "CodebaseIndexer: dropped HIGH-risk chunk in %s [%s] (%s)",
+                meta.get("file", "?"), ", ".join(verdict.flags) or "?", source_label,
+            )
+            continue
+        if verdict.should_warn:
+            doc = _TAINT_PREFIX + doc
+            meta = {**meta, "taint": "medium"}
+            log.info(
+                "CodebaseIndexer: marked MEDIUM-risk chunk in %s [%s]",
+                meta.get("file", "?"), ", ".join(verdict.flags) or "?",
+            )
+        out_docs.append(doc); out_meta.append(meta); out_ids.append(cid)
+    return out_docs, out_meta, out_ids
+
+
+# ---------------------------------------------------------------------------
 # Chunk dataclass
 # ---------------------------------------------------------------------------
 
@@ -732,9 +799,11 @@ class CodebaseIndexer:
                 "mtime": mtime,
             })
 
-        self._codebase_col.add(documents=documents, metadatas=metadatas, ids=ids)
-        log.debug("CodebaseIndexer: indexed %s → %d chunks", rel, len(chunks))
-        return len(chunks)
+        documents, metadatas, ids = _scan_documents(documents, metadatas, ids, "source")
+        if ids:
+            self._codebase_col.add(documents=documents, metadatas=metadatas, ids=ids)
+        log.debug("CodebaseIndexer: indexed %s → %d chunks", rel, len(ids))
+        return len(ids)
 
     def _index_source_file(self, path: Path) -> int:
         """Index one .py or .swift file. Returns chunk count. Runs in thread."""
@@ -769,9 +838,11 @@ class CodebaseIndexer:
                 "mtime": mtime,
             })
 
-        self._codebase_col.add(documents=documents, metadatas=metadatas, ids=ids)
-        log.debug("CodebaseIndexer: indexed %s → %d chunks", rel, len(chunks))
-        return len(chunks)
+        documents, metadatas, ids = _scan_documents(documents, metadatas, ids, "source")
+        if ids:
+            self._codebase_col.add(documents=documents, metadatas=metadatas, ids=ids)
+        log.debug("CodebaseIndexer: indexed %s → %d chunks", rel, len(ids))
+        return len(ids)
 
     def _index_pdf_file(self, path: Path) -> int:
         """Index one PDF file. Returns page count. Runs in thread."""
@@ -794,9 +865,11 @@ class CodebaseIndexer:
                 "mtime": mtime,
             })
 
-        self._documents_col.add(documents=documents, metadatas=metadatas, ids=ids)
-        log.debug("CodebaseIndexer: indexed PDF %s → %d pages", rel, len(chunks))
-        return len(chunks)
+        documents, metadatas, ids = _scan_documents(documents, metadatas, ids, "pdf")
+        if ids:
+            self._documents_col.add(documents=documents, metadatas=metadatas, ids=ids)
+        log.debug("CodebaseIndexer: indexed PDF %s → %d pages", rel, len(ids))
+        return len(ids)
 
     def _delete_file_chunks(self, rel: str) -> None:
         """Remove all codebase chunks for `rel`. Runs in thread."""
