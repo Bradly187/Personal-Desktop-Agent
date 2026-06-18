@@ -56,6 +56,9 @@ def test_missing_key_infer_degrades_to_clarify(no_key):
 def test_present_key_passes_env_check(monkeypatch):
     """A present key gets past the proactive check (client construction is mocked)."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+    # Ensure the direct-Anthropic path is taken regardless of local Bedrock config.
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.delenv("DA_CLOUD_BACKEND", raising=False)
     cloud = _CloudInference(model="claude-haiku-4-5")
     with patch("anthropic.Anthropic", return_value=object()) as ctor:
         client = cloud._get_client()
