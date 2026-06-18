@@ -487,6 +487,14 @@ class HybridCoordinator:
         self._last_executed_action: str = ""
         self._last_command_id: int = -1
 
+        # GAP-6: intent drift / trust-decay tripwire. The first substantive
+        # dev-domain command of a session anchors the intent; subsequent dev
+        # commands are compared against it, and a sustained divergence logs a
+        # one-time advisory DRIFT_WARNING (the command still runs).
+        self._session_intent: Optional[str] = None
+        self._drift_streak: int = 0
+        self._drift_warned: bool = False
+
         # Gate 3 VRAM cache — avoid calling pynvml on every command
         self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
         self._vram_cache_ttl: float = 2.0  # seconds
@@ -1007,6 +1015,8 @@ class HybridCoordinator:
         ):
             domain = self._get_domain_classifier().classify(cmd.text)
             if domain != "command":
+                # GAP-6: anchor/track session intent for dev-domain commands.
+                self._note_intent_drift(cmd)
                 # Privacy: the dev pre-gate runs BEFORE the command-path Gate 0,
                 # so enforce Gate 0 here too — sensitive text (credentials/PII)
                 # must never reach the cloud. A Gate-0 failure forces the LOCAL
@@ -1678,6 +1688,10 @@ class HybridCoordinator:
         failed or CLARIFY outcome.  The corrected text becomes the canonical
         example for future routing of similar commands.
         """
+        # GAP-9: harvest the correction regardless of whether a trainer is wired —
+        # the user_corrections backlog must capture every confirmed correction,
+        # not only those on deploys that also run a ContinuousTrainer.
+        self._harvest_correction(cmd, self._last_executed_action)
         if not self._trainer:
             return
         try:
@@ -1693,6 +1707,83 @@ class HybridCoordinator:
             )
         except Exception as exc:
             log.warning("HybridCoordinator._on_correction failed: %s", exc)
+
+    # GAP-6 thresholds: 3 consecutive dev turns below this token-overlap to the
+    # opening intent trip a single advisory warning.
+    _DRIFT_SIM_THRESHOLD = 0.3
+    _DRIFT_STREAK_TRIGGER = 3
+
+    def _note_intent_drift(self, cmd: Command) -> None:
+        """GAP-6: watch a dev session for divergence from its opening intent.
+
+        The first dev-domain command anchors `_session_intent`; each later dev
+        command is scored by cheap token-overlap (Jaccard) against it. Three
+        consecutive below-threshold turns log a one-time DRIFT_WARNING, persist a
+        row, and speak a gentle nudge — all fire-and-forget, off the hot path.
+        The command itself is NOT blocked: the signal is advisory (noisy), so it
+        informs rather than hijacks. Dev-domain only.
+
+        Scope note: the coordinator is one long-lived instance, so "session" here
+        means the process lifetime — the anchor is the first dev command after
+        boot and the warning latches once per process. That suits the typical
+        single-goal session; re-anchoring on an idle boundary is a future option.
+        """
+        text = (cmd.text or "").strip()
+        if not text:
+            return
+        if self._session_intent is None:
+            self._session_intent = text
+            return
+        from storage.db import _tokens, _jaccard
+        sim = _jaccard(_tokens(self._session_intent), _tokens(text))
+        if sim >= self._DRIFT_SIM_THRESHOLD:
+            self._drift_streak = 0
+            return
+        self._drift_streak += 1
+        if self._drift_streak < self._DRIFT_STREAK_TRIGGER or self._drift_warned:
+            return
+        self._drift_warned = True
+        log.warning(
+            "HybridCoordinator: intent drift — %r diverges from opening %r (sim=%.2f)",
+            text[:60], self._session_intent[:60], sim,
+        )
+        from core.async_utils import fire_and_log
+        if self._agent_db and self._agent_db.available:
+            fire_and_log(
+                self._agent_db.insert_drift(
+                    self._session_id, getattr(cmd, "trace_id", None), sim,
+                    self._session_intent, text),
+                log, label="insert drift")
+        if self._audit and getattr(self._audit, "available", False):
+            fire_and_log(
+                self._audit.log_security_event(
+                    detail=f"intent drift: command diverges from session intent (sim={sim:.2f})",
+                    severity="warning",
+                    params={"original_intent": self._session_intent[:120],
+                            "current_command": text[:120],
+                            "drift_score": round(sim, 3)}),
+                log, label="audit drift")
+        nudge = f"You started by asking about {self._session_intent[:48]}. Are we still on track?"
+        fire_and_log(self._tts_speak(nudge), log, label="drift nudge")
+
+    def _harvest_correction(self, cmd: Command, prior_action: str) -> None:
+        """GAP-9: persist a confirmed user correction as labeled failure data.
+
+        Fire-and-forget; reuses the explicit-correction signal (reliable) rather
+        than a heuristic. scripts/cluster_corrections.py clusters these offline.
+        """
+        if not (self._agent_db and self._agent_db.available):
+            return
+        from core.async_utils import fire_and_log
+        try:
+            domain = self._get_domain_classifier().classify(cmd.text)
+        except Exception:
+            domain = None
+        fire_and_log(
+            self._agent_db.insert_correction(
+                self._session_id, getattr(cmd, "trace_id", None),
+                cmd.text or "", prior_action or "", domain),
+            log, label="harvest correction")
 
     def _cloud_call_budget(self) -> int:
         try:
@@ -2284,6 +2375,8 @@ class HybridCoordinator:
 
         if self._trainer:
             await self._trainer.record_correction(cmd, wrong_action, correct_action)
+
+        self._harvest_correction(cmd, wrong_action)
 
         return {
             "status": "ok",
