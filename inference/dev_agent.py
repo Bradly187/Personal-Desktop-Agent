@@ -2244,6 +2244,14 @@ class DevAgent:
         # push, …); everything else stays offline. Those ops are themselves
         # approval-gated by the goal-session allowlist upstream.
         from inference.sandbox import run_sandboxed, command_needs_network
+        # Slopsquatting guard (GAP-7): block a `pip install` of a package that
+        # doesn't exist on PyPI (a hallucinated name is the supply-chain threat).
+        # Fails open on a network error so offline dev isn't blocked.
+        from core.goal_session import verify_pip_install
+        ok, reason = verify_pip_install(cmd)
+        if not ok:
+            log.warning("DevAgent: blocked pip install — %s", reason)
+            raise RuntimeError(reason)
         net = command_needs_network(cmd)
         result = run_sandboxed(cmd, timeout=60, allow_network=net)
         output = (result.stdout + result.stderr).strip()

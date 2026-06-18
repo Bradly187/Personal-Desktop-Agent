@@ -509,6 +509,11 @@ class HybridCoordinator:
         # as context without a DB round-trip in the hot path.
         self._recent_dev_commands: list[str] = []
 
+        # GAP-10: denial-of-wallet tripwire. Count cloud API calls this session
+        # and speak a one-time warning once they exceed cloud_call_budget.
+        self._session_cloud_calls: int = 0
+        self._cloud_budget_warned: bool = False
+
     # ---------------------------------------------------------------------- #
     # Internal helpers
     # ---------------------------------------------------------------------- #
@@ -1022,6 +1027,7 @@ class HybridCoordinator:
                         "recent_commands": recent,
                         "source": cmd.source,
                     }
+                    self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
                     response_text = await self._cloud_dev_agent.run(clean_text, domain, ctx)
                     # Record the ORIGINAL locally (kept on-device; re-scrubbed at
                     # the next cloud egress).
@@ -1667,6 +1673,42 @@ class HybridCoordinator:
         except Exception as exc:
             log.warning("HybridCoordinator._on_correction failed: %s", exc)
 
+    def _cloud_call_budget(self) -> int:
+        try:
+            return int(self._approval_config().get("cloud_call_budget", 20))
+        except Exception:
+            return 20
+
+    def _note_cloud_call(self) -> None:
+        """GAP-10: count cloud API calls per session; warn once past the budget.
+
+        Denial-of-wallet tripwire — slow loops under the per-call cap can still
+        accumulate significant cost. Advisory (warn + audit, fire-and-forget): it
+        does NOT hard-block the cloud path, so a legitimate long session is never
+        wedged mid-task. The counter resets each session.
+        """
+        self._session_cloud_calls += 1
+        budget = self._cloud_call_budget()
+        if self._session_cloud_calls <= budget or self._cloud_budget_warned:
+            return
+        self._cloud_budget_warned = True
+        log.warning(
+            "HybridCoordinator: cloud-call budget exceeded (%d > %d) — DoW tripwire",
+            self._session_cloud_calls, budget,
+        )
+        from core.async_utils import fire_and_log
+        if self._audit and getattr(self._audit, "available", False):
+            fire_and_log(
+                self._audit.log_security_event(
+                    detail=(f"denial-of-wallet tripwire: {self._session_cloud_calls} "
+                            f"cloud calls this session (budget {budget})"),
+                    severity="warning",
+                    params={"cloud_calls": self._session_cloud_calls, "budget": budget}),
+                log, label="audit dow")
+        msg = (f"Heads up — this session has made {self._session_cloud_calls} cloud "
+               "calls, over the budget. Keeping an eye on cost.")
+        fire_and_log(self._tts_speak(msg), log, label="dow warning")
+
     def _gate0(self, cmd: Command) -> bool:
         """Gate 0 — Privacy. True = pass (safe to consider cloud).
 
@@ -1869,6 +1911,7 @@ class HybridCoordinator:
         (network drop, service hiccup) the coroutine is cancelled and the
         pipeline degrades to a CLARIFY response rather than stalling indefinitely.
         """
+        self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
         # Scrub secrets before sending to external API — from BOTH the command
         # text AND the session_context the cloud prompt embeds. A sensitive
         # prior command that Gate 0 correctly forced local must not leak later

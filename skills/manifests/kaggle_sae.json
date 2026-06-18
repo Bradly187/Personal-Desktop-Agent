@@ -1,0 +1,41 @@
+{
+  "skill_id": "kaggle_sae",
+  "display_name": "Kaggle SAE benchmark",
+  "enabled": false,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.kaggle_sae_server"]
+  },
+  "auth": {
+    "type": "env_bearer",
+    "env": ["KAGGLE_SAE_API_KEY", "KAGGLE_SAE_BASE_URL"],
+    "setup": "Set KAGGLE_SAE_API_KEY (Kaggle SAE bearer token) in the environment, then set enabled=true."
+  },
+  "tools": {
+    "allow": ["register_agent", "fetch_exam", "submit_answer", "get_score"],
+    "send_tools": ["register_agent", "submit_answer"]
+  },
+  "intents": {
+    "register": {
+      "keywords": ["register for the exam", "register kaggle sae", "sign up for the agent exam"],
+      "tool": "register_agent",
+      "send": true
+    },
+    "fetch_exam": {
+      "keywords": ["fetch the exam", "get the kaggle exam", "load the agent exam"],
+      "tool": "fetch_exam",
+      "send": false
+    },
+    "submit_answer": {
+      "keywords": ["submit my answer", "submit exam answer"],
+      "tool": "submit_answer",
+      "send": true
+    },
+    "get_score": {
+      "keywords": ["get my exam score", "check kaggle sae score", "how did i do on the exam"],
+      "tool": "get_score",
+      "send": false
+    }
+  }
+}

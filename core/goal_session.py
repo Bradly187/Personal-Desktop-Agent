@@ -185,6 +185,102 @@ def _bash_is_allowlisted(command: str) -> bool:
     return True
 
 
+# Slopsquatting defense (GAP-7): a hallucinated package name pointing at malware
+# is the specific supply-chain threat. The Bash allowlist already denies
+# `pip install` (it's not a safe subcommand), but when a user voice-approves one —
+# or the dev agent runs one — each named package is verified against PyPI first.
+# pip flags that consume the following token (so it isn't mistaken for a package).
+_PIP_OPT_ARGS_WITH_VALUE: frozenset[str] = frozenset({
+    "-r", "--requirement", "-c", "--constraint", "-i", "--index-url",
+    "--extra-index-url", "-t", "--target", "--prefix", "-e", "--editable",
+    "--root", "--src", "-f", "--find-links",
+})
+
+
+def _extract_pip_packages(command: str) -> list[str]:
+    """Best-effort PyPI package names from any `pip install` segment of `command`.
+
+    Handles `pip`/`pip3` and `python -m pip`. Skips flags (and their values),
+    requirement files, local paths, URLs, and VCS specs — only bare PyPI names
+    are returned (version/extras specifiers stripped).
+    """
+    import shlex
+
+    pkgs: list[str] = []
+    for seg in re.split(r"[;&|\n]+", command):
+        try:
+            tokens = shlex.split(seg.strip())
+        except ValueError:
+            continue
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        exe = tokens[0].rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+        if exe.endswith(".exe"):
+            exe = exe[:-4]
+        is_pip = exe in ("pip", "pip3")
+        if exe in ("python", "python3", "py") and "-m" in tokens and "pip" in tokens:
+            is_pip = True
+        if not is_pip or "install" not in tokens:
+            continue
+        after = tokens[tokens.index("install") + 1:]
+        skip_next = False
+        for tok in after:
+            if skip_next:
+                skip_next = False
+                continue
+            if tok.startswith("-"):
+                if tok in _PIP_OPT_ARGS_WITH_VALUE:
+                    skip_next = True
+                continue
+            if "/" in tok or "\\" in tok or tok.startswith(".") or "://" in tok:
+                continue   # local path / URL / VCS — not a PyPI name lookup
+            name = re.split(r"[<>=!~;\[\( ]", tok, maxsplit=1)[0].strip()
+            if name:
+                pkgs.append(name)
+    return pkgs
+
+
+def verify_pip_install(command: str) -> "tuple[bool, str]":
+    """Slopsquatting check (GAP-7): every PyPI package in a `pip install` must
+    actually exist before the install runs.
+
+    Returns (ok, reason). Fails OPEN — (True, "") — for non-pip commands and on
+    any network error/timeout (offline development must not be blocked). Fails
+    CLOSED — (False, reason) — only on a definitive PyPI 404 (the package does
+    not exist → likely a hallucinated name).
+    """
+    pkgs = _extract_pip_packages(command)
+    if not pkgs:
+        return True, ""
+    try:
+        import urllib.request
+        import urllib.error
+    except Exception:
+        return True, ""   # can't check → fail open
+    for pkg in pkgs:
+        url = f"https://pypi.org/pypi/{pkg}/json"
+        try:
+            req = urllib.request.Request(
+                url, method="HEAD",
+                headers={"User-Agent": "DesktopAgent/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                if getattr(resp, "status", 200) == 404:
+                    return False, _slop_msg(pkg)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False, _slop_msg(pkg)
+            # other HTTP status (405/5xx) → can't confirm absence → fail open
+        except Exception:
+            return True, ""   # network / timeout → fail open
+    return True, ""
+
+
+def _slop_msg(pkg: str) -> str:
+    return f"Package {pkg!r} not found on PyPI — possible hallucinated package."
+
+
 def _path_in_scope(path: str, scopes: list[str]) -> bool:
     """True if `path` resolves under one of the allowed scope prefixes.
 
