@@ -788,6 +788,15 @@ class CommandExecutor:
                 log.warning("RUN_TERMINAL denied: cwd %s is outside writable roots", cwd)
                 return {"status": "error",
                         "error": f"RUN_TERMINAL denied: cwd {cwd} is outside the writable-root allowlist"}
+            # Slopsquatting guard (GAP-7): refuse a `pip install` of a package
+            # that doesn't exist on PyPI (or via a redirected index) before it
+            # runs. Mirrors DevAgent._run_terminal so BOTH RUN_TERMINAL paths are
+            # covered. Fails open on a network error so offline dev isn't blocked.
+            from core.goal_session import verify_pip_install
+            ok, reason = verify_pip_install(command)
+            if not ok:
+                log.warning("RUN_TERMINAL denied: %s", reason)
+                return {"status": "error", "error": f"RUN_TERMINAL denied: {reason}"}
             # Sandbox (mistake-containment): cwd-jail + caps. Network granted only
             # for curated package/VCS/fetch ops, or when the caller explicitly
             # passes allow_network in params (e.g. an approved network step).

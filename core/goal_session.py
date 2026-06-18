@@ -242,15 +242,57 @@ def _extract_pip_packages(command: str) -> list[str]:
     return pkgs
 
 
+_PIP_INDEX_FLAGS: frozenset[str] = frozenset({"-i", "--index-url", "--extra-index-url"})
+
+
+def _pip_install_index_override(command: str) -> Optional[str]:
+    """Return a non-default index URL if a `pip install` segment redirects the
+    package index (--index-url / --extra-index-url / -i), else None.
+
+    A redirected index defeats the pypi.org existence check entirely: a name that
+    legitimately exists on PyPI passes verification while pip actually pulls a
+    malicious same-named package from the attacker's index. The official index
+    (pypi.org) is not treated as an override.
+    """
+    import shlex
+
+    for seg in re.split(r"[;&|\n]+", command):
+        try:
+            tokens = shlex.split(seg.strip())
+        except ValueError:
+            continue
+        if "install" not in tokens or not any(
+                t.lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1].startswith("pip")
+                for t in tokens[:3]):
+            continue
+        for i, tok in enumerate(tokens):
+            val = None
+            if tok in _PIP_INDEX_FLAGS:
+                val = tokens[i + 1] if i + 1 < len(tokens) else ""
+            else:
+                for f in _PIP_INDEX_FLAGS:
+                    if tok.startswith(f + "="):
+                        val = tok.split("=", 1)[1]
+                        break
+            if val is not None and val and "pypi.org" not in val:
+                return val
+    return None
+
+
 def verify_pip_install(command: str) -> "tuple[bool, str]":
     """Slopsquatting check (GAP-7): every PyPI package in a `pip install` must
     actually exist before the install runs.
 
     Returns (ok, reason). Fails OPEN — (True, "") — for non-pip commands and on
     any network error/timeout (offline development must not be blocked). Fails
-    CLOSED — (False, reason) — only on a definitive PyPI 404 (the package does
-    not exist → likely a hallucinated name).
+    CLOSED — (False, reason) — on a definitive PyPI 404 (the package does not
+    exist → likely a hallucinated name), or when the command redirects the
+    package index (the PyPI check no longer applies → require explicit approval).
     """
+    idx = _pip_install_index_override(command)
+    if idx:
+        return False, (f"pip install uses a non-default package index ({idx}) — "
+                       "PyPI verification does not apply; requires explicit approval.")
     pkgs = _extract_pip_packages(command)
     if not pkgs:
         return True, ""
