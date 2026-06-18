@@ -285,6 +285,9 @@ class FusionEngine:
         # and surfaces unhandled exceptions via the done-callback log.
         self._route_tasks: set = set()
         self._scheduler = None  # AccessibilityScheduler — wired via set_scheduler()
+        # Circuit breaker for route-task overflow (Gap F — acoustic storms, cloud latency spikes)
+        self._route_breaker_open = False  # True when shedding commands due to queue depth
+        self._metrics = None  # Metrics singleton — wired by main.py
 
     # ---------------------------------------------------------------------- #
     # Wiring
@@ -296,6 +299,10 @@ class FusionEngine:
     def set_scheduler(self, scheduler) -> None:
         """Wire AccessibilityScheduler so _emit() submits at the correct priority."""
         self._scheduler = scheduler
+
+    def set_metrics(self, metrics) -> None:
+        """Wire Metrics singleton for in-flight route-task tracking."""
+        self._metrics = metrics
 
     @staticmethod
     def _source_to_priority(source: str):
@@ -881,6 +888,35 @@ class FusionEngine:
                 )
                 return
             self._last_voice_emit_mono = now_mono
+
+        # Circuit breaker for route-task overflow (Gap F):
+        # During acoustic storms (continuous VAD false-positives) or cloud latency spikes,
+        # in-flight route tasks can accumulate. When they exceed a threshold, shed new
+        # commands (fail-safe to DENY) and log to alerting. Hysteresis prevents chatter.
+        inflight = len(self._route_tasks)
+        if self._metrics:
+            self._metrics.set("coordinator_route_tasks_inflight", float(inflight))
+
+        # State machine: closed (accepting) → open (shedding) → closed
+        if not self._route_breaker_open:
+            if inflight > 20:  # Open when queue grows too deep
+                self._route_breaker_open = True
+                log.error(
+                    "FusionEngine: route-task breaker OPENED (inflight=%d) — "
+                    "shedding commands until queue drains below 5",
+                    inflight
+                )
+        else:
+            if inflight < 5:  # Close when queue drains (hysteresis)
+                self._route_breaker_open = False
+                log.warning("FusionEngine: route-task breaker CLOSED (inflight=%d)", inflight)
+
+        if self._route_breaker_open:
+            # Shed: drop the command and increment the counter
+            log.warning("FusionEngine: shedding command due to route-task overflow (inflight=%d)", inflight)
+            if self._metrics:
+                self._metrics.inc("route_task_breaker_sheds")
+            return
 
         # Track last active source for telemetry and metrics
         self._last_active_source = cmd.source
