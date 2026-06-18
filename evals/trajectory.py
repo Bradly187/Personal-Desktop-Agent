@@ -298,6 +298,44 @@ class TrajReport:
         }
 
 
+@dataclass
+class TrajectoryReplayer:
+    """Replay a persisted command trace (GAP-4) and score what the agent ACTUALLY
+    executed against a TrajectoryCase.
+
+    `score_trajectory` above scores a planner's PROPOSED plan text; this scores
+    the executed verb sequence reconstructed from durable spans
+    (AgentDB.command_traces, written by TraceRecorder.persist_trace). DevAgent
+    records one span per step with ``attrs.action``; the coordinator records
+    execute spans with ``attrs.verb``. We pull verbs from either key in span
+    order and reuse score_trajectory unchanged — so the same required/precedence/
+    forbidden constraints that gate plans also gate real trajectories.
+    """
+
+    agent_db: Any
+    verb_keys: tuple = ("action", "verb")
+
+    def extract_executed_verbs(self, spans: list[dict]) -> list[str]:
+        """Ordered executed verbs from a list of persisted spans (sync, testable)."""
+        verbs: list[str] = []
+        for span in sorted(spans, key=lambda s: s.get("seq", 0)):
+            attrs = span.get("attrs") or {}
+            for key in self.verb_keys:
+                val = attrs.get(key)
+                if isinstance(val, str) and val.upper() in _PLAN_ACTIONS:
+                    verbs.append(val.upper())
+                    break
+        return verbs
+
+    async def verbs_for(self, trace_id: str) -> list[str]:
+        spans = await self.agent_db.get_trace_spans(trace_id)
+        return self.extract_executed_verbs(spans)
+
+    async def score(self, case: TrajectoryCase, trace_id: str) -> TrajResult:
+        verbs = await self.verbs_for(trace_id)
+        return score_trajectory(case, TrajPrediction(verbs=verbs))
+
+
 def aggregate_traj(results: list[TrajResult]) -> TrajReport:
     n = len(results)
     if n == 0:

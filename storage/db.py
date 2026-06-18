@@ -788,6 +788,25 @@ CREATE TABLE IF NOT EXISTS domain_keyword_weights (
     ts       REAL NOT NULL,
     PRIMARY KEY (domain, keyword)
 );
+
+-- Persisted command traces (GAP-4 — Pillar 6 Observability / eval replay). The
+-- in-memory TraceRecorder ring buffer (monitoring/trace.py) holds only the last
+-- 200 commands and is lost on restart; completed traces are flushed here
+-- (fire-and-forget, off the 60 Hz hot path) so the eval framework can replay a
+-- command's trajectory and diagnose session failures. One row per span, ordered
+-- by `seq`. Plain CREATE TABLE IF NOT EXISTS — no migration bump (same as
+-- skill_invocations / domain_keyword_weights).
+CREATE TABLE IF NOT EXISTS command_traces (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id    TEXT    NOT NULL,
+    session_id  INTEGER,
+    seq         INTEGER NOT NULL,
+    stage       TEXT    NOT NULL,
+    ts          REAL    NOT NULL,
+    dur_ms      REAL,
+    attrs_json  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ctrace_trace ON command_traces(trace_id, seq);
 """
 
 
@@ -3152,6 +3171,69 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.insert_event failed: %s", exc)
             return None
+
+    async def insert_trace_spans(
+        self,
+        trace_id: str,
+        session_id: Optional[int],
+        spans: list[dict],
+    ) -> int:
+        """Persist a completed trace's spans (GAP-4). Returns the count written.
+
+        Called fire-and-forget at command end (off the hot path). Each trace is
+        persisted once by its owner, so this plain append never dedups.
+        """
+        if not self._conn or not spans:
+            return 0
+        try:
+            rows = []
+            for i, span in enumerate(spans):
+                attrs = span.get("attrs")
+                rows.append((
+                    trace_id,
+                    session_id,
+                    i,
+                    span.get("stage", ""),
+                    float(span.get("ts", 0.0) or 0.0),
+                    span.get("dur_ms"),
+                    json.dumps(attrs) if attrs else None,
+                ))
+            await self._conn.executemany(
+                "INSERT INTO command_traces"
+                " (trace_id, session_id, seq, stage, ts, dur_ms, attrs_json)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            await self._conn.commit()
+            return len(rows)
+        except Exception as exc:
+            log.warning("AgentDB.insert_trace_spans failed: %s", exc)
+            return 0
+
+    async def get_trace_spans(self, trace_id: str) -> list[dict]:
+        """Return persisted spans for a trace, ordered (GAP-4 eval replay)."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT seq, stage, ts, dur_ms, attrs_json FROM command_traces"
+                " WHERE trace_id = ? ORDER BY seq",
+                (trace_id,),
+            ) as cur:
+                out: list[dict] = []
+                for r in await cur.fetchall():
+                    d = dict(r)
+                    raw = d.pop("attrs_json", None)
+                    if raw:
+                        try:
+                            d["attrs"] = json.loads(raw)
+                        except Exception:
+                            d["attrs"] = {}
+                    out.append(d)
+                return out
+        except Exception as exc:
+            log.warning("AgentDB.get_trace_spans failed: %s", exc)
+            return []
 
     async def poll_events(
         self,
