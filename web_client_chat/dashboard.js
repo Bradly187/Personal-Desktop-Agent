@@ -134,25 +134,31 @@
     tbl.appendChild(tb); box.appendChild(tbl);
   }
 
-  // ── Cost (poll) ─────────────────────────────────────────────────────────────
-  async function refreshCost() {
-    const res = await getJSON("/api/cost?days=30");
-    const box = $("cost"); box.innerHTML = "";
-    if (!res) { box.appendChild(el("div", "empty", "cost endpoint unavailable")); return; }
+  // ── Model usage (poll) — every model, local + cloud ─────────────────────────
+  async function refreshModels() {
+    const res = await getJSON("/api/models?days=30");
+    const box = $("models"); box.innerHTML = "";
+    if (!res) { box.appendChild(el("div", "empty", "model usage unavailable")); return; }
     const t = res.totals || {};
-    $("cost-sub").textContent = (res.days ? `last ${res.days}d` : "all time");
-    box.appendChild(el("div", "cost-total", `$${(t.cost ?? 0).toFixed(4)} · ${res.n_cloud_inferences || 0} calls · ${(t.tokens_in||0).toLocaleString()}/${(t.tokens_out||0).toLocaleString()} tok`));
-    const models = res.by_model || {};
-    const keys = Object.keys(models).sort((a, b) => models[b].cost - models[a].cost);
-    if (!keys.length) { box.appendChild(el("div", "empty", "no cloud spend recorded")); return; }
+    $("models-sub").textContent = (res.days ? `last ${res.days}d` : "all time");
+    box.appendChild(el("div", "cost-total",
+      `${(t.calls||0).toLocaleString()} calls · ${(t.tokens_in||0).toLocaleString()}/${(t.tokens_out||0).toLocaleString()} tok · ` +
+      `$${(t.cost ?? 0).toFixed(4)} cloud`));
+    const models = res.models || [];
+    if (!models.length) { box.appendChild(el("div", "empty", "no inferences recorded")); return; }
     const tbl = el("table", "tbl");
-    tbl.innerHTML = "<thead><tr><th>model</th><th>calls</th><th>tok in</th><th>tok out</th><th>cost</th></tr></thead>";
+    tbl.innerHTML = "<thead><tr><th>model</th><th>route</th><th>calls</th><th>tok in</th>" +
+      "<th>tok out</th><th>avg</th><th>cost</th></tr></thead>";
     const tb = el("tbody");
-    for (const k of keys) {
-      const m = models[k];
+    for (const m of models) {
       const tr = el("tr");
-      tr.innerHTML = `<td>${k}</td><td>${m.calls}</td><td>${m.tokens_in.toLocaleString()}</td>` +
-        `<td>${m.tokens_out.toLocaleString()}</td><td>$${m.cost.toFixed(4)}</td>`;
+      const where = m.local ? "local" : "cloud";
+      const tag = `<span class="tag ${where}">${where}</span>`;
+      const cost = m.local ? "—" : `$${(m.cost || 0).toFixed(4)}`;
+      const errs = m.errors ? ` <span class="tag err" title="${m.errors} error(s)">⚠${m.errors}</span>` : "";
+      tr.innerHTML = `<td>${m.model}${errs}</td><td>${tag}</td><td>${(m.calls||0).toLocaleString()}</td>` +
+        `<td>${(m.tokens_in||0).toLocaleString()}</td><td>${(m.tokens_out||0).toLocaleString()}</td>` +
+        `<td>${ms(m.avg_latency_ms)}</td><td>${cost}</td>`;
       tb.appendChild(tr);
     }
     tbl.appendChild(tb); box.appendChild(tbl);
@@ -176,9 +182,9 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshCost(); }
+  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); }
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => { refreshTraces(); refreshTrends(); refreshCost(); }, 15000);
+  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); }, 15000);
 })();

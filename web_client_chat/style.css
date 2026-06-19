@@ -151,4 +151,10 @@ body {
 .delta.flat { color: var(--text-dim); }
 .cost-total { padding: 12px 14px; font: 600 14px var(--mono); }
 
+/* Model-usage route badge */
+.tag { display: inline-block; padding: 1px 7px; border-radius: 6px; font: 11px var(--mono); white-space: nowrap; }
+.tag.local { background: rgba(63,185,80,.14); color: #3fb950; }
+.tag.cloud { background: rgba(47,129,247,.16); color: #2f81f7; }
+.tag.err { background: rgba(248,81,73,.16); color: var(--fail); margin-left: 4px; }
+
 @media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } }

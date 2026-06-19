@@ -154,6 +154,7 @@ class ChatServer:
         app.router.add_get("/api/replay/{tid}", self._api_replay)
         app.router.add_get("/api/trends", self._api_trends)
         app.router.add_get("/api/cost", self._api_cost)
+        app.router.add_get("/api/models", self._api_models)
         if _STATIC_DIR.exists():
             app.router.add_static("/static/", _STATIC_DIR, show_index=False)
 
@@ -261,6 +262,15 @@ class ChatServer:
         days_q = request.query.get("days", "30")
         days = None if str(days_q).lower() in ("0", "all", "none") else self._qint(request, "days", 30)
         result = await asyncio.to_thread(cost_ledger.cost_rollup, path, days)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_models(self, request: web.Request) -> web.Response:
+        """Per-model usage (local + cloud) for the Model-usage card."""
+        path = self._db_path() or "agent.db"
+        from monitoring import cost_ledger
+        days_q = request.query.get("days", "30")
+        days = None if str(days_q).lower() in ("0", "all", "none") else self._qint(request, "days", 30)
+        result = await asyncio.to_thread(cost_ledger.model_usage, path, days)
         return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
 
     async def _ws_handler(self, request: web.Request) -> web.StreamResponse:
