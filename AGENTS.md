@@ -41,6 +41,14 @@ truth for cross-tool behavior; do not duplicate these rules elsewhere.
 - **Rule:** At the start of a session, check the most recent work in the project's git history (and open PRs) to ensure your work does not conflict with or duplicate effort from other LLM sessions. Provide a brief summary of previous work.
 - **Context:** This repo is worked by multiple AI assistants (Antigravity + Claude Code) and across git worktrees. A quick `git log`/`gh pr list` scan up front prevents duplicated or conflicting changes.
 
+## 9. 📐 Spec-Driven Source of Truth
+- **Rule:** Before generating or substantially changing a feature, check `specs/` for its blueprint. `specs/<feature>/` holds the requirements (EARS acceptance criteria), design, and tasks; `specs/TEMPLATE.md` is the starting point for a new one. Treat the spec as authoritative for *intent and behavior*, and update it in the same change when the design moves.
+- **Context:** `specs/` is the consolidated home for all checked-in technical designs (migrated from the retired `.kiro/`/`kiro/` trees). It does **not** override the narrower, code-level sources of truth that already exist and remain authoritative for their domain: `storage/db.py` for the DB schema (#1), and the executable `evals/` suites for runtime behavior. Specs describe; `evals/` verifies — add eval cases rather than static Gherkin prose.
+
+## 10. ♻️ Spec-Bounded Regeneration ("disposable code", narrowly scoped)
+- **Rule:** When a spec fully defines a unit's behavior **and** tests/evals cover it, an agent may regenerate **that single function** from the spec rather than debugging it line-by-line. **Never** regenerate an entire module, class, or file wholesale without first confirming no untested invariant would be lost.
+- **Context:** This is a mature, security-hardened codebase (~1,400+ tests), not a greenfield prototype — "treat code as disposable" applies at function granularity only. Whole-file regeneration silently drops hard-won invariants that no spec captures in full: the fail-safe-DENY approval gate, the 60 Hz tick-loop guarantees (#2), VRAM eviction lifecycle (#6), `goal_session` path/Bash allowlists (#7), and pain-day threshold wiring (#5). If those invariants aren't both specced and test-covered, edit surgically instead.
+
 ## Skills catalog (dev/meta procedural memory)
 
 Real [agentskills.io](https://agentskills.io) `SKILL.md` skills live in `.agents/skills/`

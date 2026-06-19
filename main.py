@@ -132,8 +132,8 @@ def _measure_vram() -> None:
 
     print("\n  All done. Update the VRAM budget tables with the values above.")
     print("  Files to update:")
-    print("    .kiro/specs/ipad-sensor-focus/diagrams/05-data-flow.md")
-    print("    .kiro/specs/ipad-sensor-focus/local-inference-comparison.md\n")
+    print("    specs/ipad-sensor-focus/diagrams/05-data-flow.md")
+    print("    specs/ipad-sensor-focus/local-inference-comparison.md\n")
 
 
 # ---------------------------------------------------------------------------

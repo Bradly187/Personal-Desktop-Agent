@@ -44,11 +44,11 @@ project/
 │                             # and direct-to-pyautogui for trackpad/tilt/head events
 │                             # Also serves web_client/ as iPad Safari fallback
 ├── web_client/               # Static HTML/JS client served by ipad_bridge (Safari fallback)
-├── .kiro/
-│   ├── steering/             # AI assistant guidance (this directory)
-│   └── specs/                # Active feature specs
-└── kiro/
-    └── specs/                # Reference specs and diagrams
+└── specs/                    # Spec-Driven Development source of truth
+    ├── TEMPLATE.md           # Starting point for any new feature spec
+    ├── steering/             # AI assistant guidance (this directory)
+    ├── <feature>/            # Per-feature: requirements.md (EARS) + design.md + tasks.md
+    └── _legacy-kiro/         # Retired Kiro IDE hooks + settings (preserved, inert)
 ```
 
 ## Architectural Layers

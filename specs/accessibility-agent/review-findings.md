@@ -33,21 +33,21 @@ This review identifies 23 areas requiring attention across 6 categories: missing
   - iPad connection settings (IP, port, dwell timeout)
   - Gesture debounce timings
   - Voice activation keywords
-- Add `ConfigManager` class in [`design.md`](kiro/specs/accessibility-agent/design.md:1)
+- Add `ConfigManager` class in [`design.md`](specs/accessibility-agent/design.md:1)
 - Specify config file location (e.g., `~/.kiro/config.yaml`)
 - Add validation on load with sensible defaults
 
 **Files to Update:**
-- [`design.md`](kiro/specs/accessibility-agent/design.md:1) — add ConfigManager component
-- [`structure.md`](kiro/specs/accessibility-agent/structure.md:1) — add config file to persistent files table
-- [`tasks.md`](kiro/specs/accessibility-agent/tasks.md:1) — add config implementation to Phase 1
+- [`design.md`](specs/accessibility-agent/design.md:1) — add ConfigManager component
+- [`structure.md`](specs/accessibility-agent/structure.md:1) — add config file to persistent files table
+- [`tasks.md`](specs/accessibility-agent/tasks.md:1) — add config implementation to Phase 1
 
 ---
 
 ### 1.2 Logging Strategy 🟡
 **Gap:** No specification for application logging (distinct from routing_log.jsonl).
 
-**Current State:** [`tech.md`](kiro/specs/accessibility-agent/tech.md:96) mentions log levels but not implementation.
+**Current State:** [`tech.md`](specs/accessibility-agent/tech.md:96) mentions log levels but not implementation.
 
 **Recommendation:**
 - Specify Python `logging` module usage with:
@@ -73,7 +73,7 @@ This review identifies 23 areas requiring attention across 6 categories: missing
 - Sensor USB disconnect/reconnect
 
 **Recommendation:**
-Add to [`requirements.md`](kiro/specs/accessibility-agent/requirements.md:1):
+Add to [`requirements.md`](specs/accessibility-agent/requirements.md:1):
 
 ```markdown
 ## 8. Error recovery
@@ -97,7 +97,7 @@ THE SYSTEM SHALL maintain command history and reconnect automatically when Safar
 ---
 
 ### 1.4 Startup Sequence and Initialization Order 🟡
-**Gap:** [`diagrams/03-sequence-diagrams.md`](kiro/specs/accessibility-agent/diagrams/03-sequence-diagrams.md:160) shows startup but doesn't specify critical ordering.
+**Gap:** [`diagrams/03-sequence-diagrams.md`](specs/accessibility-agent/diagrams/03-sequence-diagrams.md:160) shows startup but doesn't specify critical ordering.
 
 **Issues:**
 - What happens if Ollama isn't running yet?
@@ -105,7 +105,7 @@ THE SYSTEM SHALL maintain command history and reconnect automatically when Safar
 - When does the system become "ready" to accept commands?
 
 **Recommendation:**
-Add startup specification to [`design.md`](kiro/specs/accessibility-agent/design.md:1):
+Add startup specification to [`design.md`](specs/accessibility-agent/design.md:1):
 
 1. Load configuration file
 2. Initialize logging
@@ -120,10 +120,10 @@ Add startup specification to [`design.md`](kiro/specs/accessibility-agent/design
 ---
 
 ### 1.5 Graceful Shutdown Procedure 🔴
-**Gap:** [`requirements.md`](kiro/specs/accessibility-agent/requirements.md:139) mentions Ctrl-C handling but lacks detail.
+**Gap:** [`requirements.md`](specs/accessibility-agent/requirements.md:139) mentions Ctrl-C handling but lacks detail.
 
 **Recommendation:**
-Specify shutdown sequence in [`design.md`](kiro/specs/accessibility-agent/design.md:1):
+Specify shutdown sequence in [`design.md`](specs/accessibility-agent/design.md:1):
 
 1. Catch SIGINT/SIGTERM
 2. Stop accepting new commands (set shutdown flag)
@@ -143,14 +143,14 @@ Specify shutdown sequence in [`design.md`](kiro/specs/accessibility-agent/design
 ### 2.1 Simultaneous Multimodal Input 🟡
 **Gap:** What happens if user speaks AND gestures simultaneously?
 
-**Current:** [`structure.md`](kiro/specs/accessibility-agent/structure.md:73) shows priority rules but not conflict resolution.
+**Current:** [`structure.md`](specs/accessibility-agent/structure.md:73) shows priority rules but not conflict resolution.
 
 **Scenario:**
 - User says "scroll down" while making SWIPE_UP gesture
 - Both arrive at FusionEngine within same 60Hz tick
 
 **Recommendation:**
-Add to [`requirements.md`](kiro/specs/accessibility-agent/requirements.md:1):
+Add to [`requirements.md`](specs/accessibility-agent/requirements.md:1):
 
 ```markdown
 **5.6** WHEN multiple input modalities produce conflicting commands within the same tick  
@@ -175,14 +175,14 @@ Add command rate limiter:
 ---
 
 ### 2.3 Ambiguous Target Names 🟡
-**Gap:** [`diagrams/06-routing-flowchart.md`](kiro/specs/accessibility-agent/diagrams/06-routing-flowchart.md:156) shows ElementFinder but not disambiguation.
+**Gap:** [`diagrams/06-routing-flowchart.md`](specs/accessibility-agent/diagrams/06-routing-flowchart.md:156) shows ElementFinder but not disambiguation.
 
 **Scenario:**
 - User says "click submit" but there are 3 "Submit" buttons visible
 - ElementFinder finds multiple matches
 
 **Recommendation:**
-Add to [`requirements.md`](kiro/specs/accessibility-agent/requirements.md:1):
+Add to [`requirements.md`](specs/accessibility-agent/requirements.md:1):
 
 ```markdown
 **5.7** WHEN ElementFinder locates multiple elements matching the target name  
@@ -203,7 +203,7 @@ THE SYSTEM SHALL prefer the element closest to the gaze point
 - LLM returns malformed action like "CLIK submit" (typo)
 
 **Recommendation:**
-Add validation in [`desktop_agent.py`](kiro/specs/accessibility-agent/design.md:94):
+Add validation in [`desktop_agent.py`](specs/accessibility-agent/design.md:94):
 - Validate action verb against allowed list
 - If invalid, log ERROR and return CLARIFY action
 - Track malformed response rate in routing_log.jsonl
@@ -216,7 +216,7 @@ Add validation in [`desktop_agent.py`](kiro/specs/accessibility-agent/design.md:
 **Issue:** Iris gaze estimation accuracy degrades as user shifts position or lighting changes.
 
 **Recommendation:**
-Add to [`requirements.md`](kiro/specs/accessibility-agent/requirements.md:1):
+Add to [`requirements.md`](specs/accessibility-agent/requirements.md:1):
 
 ```markdown
 **3.5** WHEN gaze-targeted clicks consistently miss their targets (>3 misses in 10 attempts)  
@@ -251,7 +251,7 @@ Add pain level detection heuristics:
 ### 3.1 AWS Credentials Management 🔴
 **Gap:** No specification for secure credential storage.
 
-**Current:** [`tech.md`](kiro/specs/accessibility-agent/tech.md:19) mentions boto3 but not credential handling.
+**Current:** [`tech.md`](specs/accessibility-agent/tech.md:19) mentions boto3 but not credential handling.
 
 **Recommendation:**
 - Use AWS credentials file (`~/.aws/credentials`) or IAM roles
@@ -270,7 +270,7 @@ Add pain level detection heuristics:
 - Is audio sent to AWS encrypted?
 
 **Recommendation:**
-Add privacy policy to [`product.md`](kiro/specs/accessibility-agent/product.md:1):
+Add privacy policy to [`product.md`](specs/accessibility-agent/product.md:1):
 
 ```markdown
 ## Privacy and data handling
@@ -301,7 +301,7 @@ Add simple token-based auth:
 ## 4. Testing Strategy 🟡🟢
 
 ### 4.1 Unit Test Coverage 🟡
-**Gap:** [`tasks.md`](kiro/specs/accessibility-agent/tasks.md:1) has integration tests but no unit test specification.
+**Gap:** [`tasks.md`](specs/accessibility-agent/tasks.md:1) has integration tests but no unit test specification.
 
 **Recommendation:**
 Add unit test requirements for:
@@ -372,7 +372,7 @@ Add to README:
 ---
 
 ### 5.2 Dependency Version Pinning 🟡
-**Gap:** [`tasks.md`](kiro/specs/accessibility-agent/tasks.md:163) mentions requirements.txt but no version strategy.
+**Gap:** [`tasks.md`](specs/accessibility-agent/tasks.md:163) mentions requirements.txt but no version strategy.
 
 **Recommendation:**
 - Pin all dependencies to specific versions
