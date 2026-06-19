@@ -7,7 +7,7 @@
     Creates two Windows Task Scheduler tasks that run at logon of the current
     user, each launching scripts\agent_watchdog.ps1 hidden:
 
-      PersonalDesktopAgent        -> main.py            (iPad bridge :8765)
+      PersonalDesktopAgent        -> main.py --chat     (iPad bridge :8765, dashboard :8770)
       PersonalDesktopAgent-Proxy  -> windows_action_proxy.py (:8768, WSL mode)
 
     The watchdog restarts its target on crash with bounded backoff
@@ -47,7 +47,7 @@ $Launcher = Join-Path $Root "scripts\run_hidden.vbs"
 
 $Tasks = @(
     @{ Name = "PersonalDesktopAgent";       Target = "agent"
-       Description = "Personal Desktop Agent (main.py, iPad bridge :8765). Auto-starts at logon; watchdog restarts on crash (3x/10min bound)." },
+       Description = "Personal Desktop Agent (main.py --chat, iPad bridge :8765, dashboard :8770). Auto-starts at logon; watchdog restarts on crash (3x/10min bound)." },
     @{ Name = "PersonalDesktopAgent-Proxy"; Target = "proxy"
        Description = "Windows Action Proxy (windows_action_proxy.py :8768) for WSL-mode accessibility. Auto-starts at logon; watchdog restarts on crash (3x/10min bound)." }
 )

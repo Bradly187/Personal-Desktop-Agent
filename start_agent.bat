@@ -12,4 +12,6 @@ if exist %LOG% copy /Y %LOG% %PREV% > nul
 
 echo [%DATE% %TIME%] Starting Personal Desktop Agent > %LOG%
 
-".venv\Scripts\python.exe" main.py >> %LOG% 2>&1
+:: --chat serves the chat UI + observability dashboard on :8770 alongside the
+:: iPad bridge (:8765) so the dashboard is always available.
+".venv\Scripts\python.exe" main.py --chat >> %LOG% 2>&1
