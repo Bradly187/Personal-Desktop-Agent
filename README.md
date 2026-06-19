@@ -35,6 +35,20 @@ python main.py
 python mcp_server/desktop_mcp_server.py
 ```
 
+### MCP server registration (Claude Code / Claude Desktop)
+
+Add to `~/.claude/claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "desktop-agent": {
+      "command": "python",
+      "args": ["E:/Personal_Desktop_Agent/mcp_server/desktop_mcp_server.py"]
+    }
+  }
+}
+```
+
 The bridge listens on `0.0.0.0:8765` and advertises via mDNS; the iPad app discovers it automatically. Useful flags:
 
 | Flag | Purpose |
