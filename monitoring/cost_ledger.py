@@ -171,6 +171,109 @@ def cost_rollup(db_path: str = "agent.db", days: Optional[int] = 30) -> dict:
     }
 
 
+# Backends whose calls bill against the cloud budget; everything else is local/free.
+_CLOUD_BACKENDS = {"anthropic", "bedrock"}
+
+
+def _p95(values: list) -> Optional[float]:
+    """95th-percentile (nearest-rank) of a list of latencies. None if empty."""
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    k = max(0, min(len(vals) - 1, int(round(0.95 * (len(vals) - 1)))))
+    return vals[k]
+
+
+def model_usage(db_path: str = "agent.db", days: Optional[int] = 30) -> dict:
+    """Per-model usage across ALL inferences — local AND cloud.
+
+    Unlike `cost_rollup` (which drops unpriced local models from the cloud
+    ledger), this reports every model that actually ran: call count, token
+    totals, avg/p95 latency, error count, and estimated cost (0 for local).
+    Feeds the dashboard "Model usage" card so local models (llama/qwen/…) are
+    visible alongside cloud spend, instead of everything appearing to be Claude.
+
+    Returns {days, n_inferences, models:[...], totals:{...}}; `days=None` = all
+    time. Never raises — returns empty aggregates if the DB is unreadable.
+    """
+    prices = _load_prices()
+    conn = _connect_ro(db_path)
+    rows: list[dict] = []
+    try:
+        if conn is not None:
+            import time as _time
+            where, params = "", ()
+            if days is not None:
+                where = "WHERE ts >= ?"
+                params = (_time.time() - days * 86400,)
+            try:
+                cur = conn.execute(
+                    f"SELECT ts, model, backend, tokens_in, tokens_out, "
+                    f"latency_ms, error FROM inferences {where} ORDER BY ts",
+                    params,
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+            except Exception:
+                rows = []
+    finally:
+        if conn is not None:
+            conn.close()
+
+    agg: dict = {}
+    lat: dict = {}
+    tot_in = tot_out = 0
+    tot_cost = 0.0
+    for r in rows:
+        model = r.get("model") or "(unknown)"
+        backend = r.get("backend") or ""
+        ti = int(r.get("tokens_in") or 0)
+        to = int(r.get("tokens_out") or 0)
+        price = _price_for(model, prices)
+        cost = (ti / 1e6 * price[0] + to / 1e6 * price[1]) if price else 0.0
+        # A row is "cloud" if it ran on a cloud backend OR carries a list price.
+        is_cloud = (backend in _CLOUD_BACKENDS) or (price is not None)
+
+        m = agg.setdefault(model, {
+            "model": model, "backend": backend, "local": not is_cloud,
+            "calls": 0, "tokens_in": 0, "tokens_out": 0, "cost": 0.0, "errors": 0,
+        })
+        m["calls"] += 1
+        m["tokens_in"] += ti
+        m["tokens_out"] += to
+        m["cost"] += cost
+        if r.get("error"):
+            m["errors"] += 1
+        if not m["backend"] and backend:
+            m["backend"] = backend
+        lat.setdefault(model, []).append(r.get("latency_ms"))
+
+        tot_in += ti
+        tot_out += to
+        tot_cost += cost
+
+    models: list[dict] = []
+    for model, m in agg.items():
+        lats = [v for v in lat.get(model, []) if v is not None]
+        m["avg_latency_ms"] = round(sum(lats) / len(lats), 1) if lats else None
+        m["p95_latency_ms"] = round(_p95(lats), 1) if lats else None
+        m["cost"] = round(m["cost"], 6)
+        models.append(m)
+    # Most-used first; ties broken by cost so cloud spend surfaces near the top.
+    models.sort(key=lambda x: (x["calls"], x["cost"]), reverse=True)
+
+    return {
+        "days": days,
+        "n_inferences": len(rows),
+        "models": models,
+        "totals": {
+            "calls": len(rows),
+            "tokens_in": tot_in,
+            "tokens_out": tot_out,
+            "cost": round(tot_cost, 4),
+        },
+    }
+
+
 def format_rollup(result: dict) -> str:
     days = result.get("days")
     span = f"last {days} days" if days else "all time"

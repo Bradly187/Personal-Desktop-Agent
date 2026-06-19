@@ -1272,6 +1272,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     from core.async_utils import fire_and_log
     fire_and_log(dev_agent.drain_goal_queue(), log, label="startup_goal_drain")
 
+    # Warm the command model so the FIRST real command doesn't pay the cold-load
+    # penalty (~7.5 s observed for llama3.1:8b loading into VRAM vs ~190 ms warm).
+    # Fire-and-forget: never blocks startup or the 60 Hz loop. No-op on non-Ollama
+    # backends (warmup() defaults to a no-op; only OllamaInference pre-loads).
+    # Opt out with DA_COMMAND_WARMUP=0.
+    if os.environ.get("DA_COMMAND_WARMUP", "1") != "0":
+        fire_and_log(local.warmup(), log, label="command_model_warmup")
+
     # Crash notice: the previous process exited uncleanly (marker survived).
     # Tell the user briefly — they may have been away when it happened and
     # should know that recovered state (requeued goals, interrupted plans)
