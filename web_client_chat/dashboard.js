@@ -164,6 +164,48 @@
     tbl.appendChild(tb); box.appendChild(tbl);
   }
 
+  // ── Routing + errors (poll) ─────────────────────────────────────────────────
+  async function refreshRouting() {
+    const res = await getJSON("/api/routing?days=30");
+    const rbox = $("routing"); rbox.innerHTML = "";
+    const ebox = $("errors"); ebox.innerHTML = "";
+    if (!res) { rbox.appendChild(el("div", "empty", "routing unavailable")); return; }
+    const rt = res.routes || {};
+    const local = rt.local || 0, cloud = rt.cloud || 0;
+    $("routing-sub").textContent = `local ${local.toLocaleString()} · cloud ${cloud.toLocaleString()}`;
+    const ok = res.success || {};
+    if (ok.rate != null) $("errors-sub").textContent = `${pct(ok.rate)} ok · ${ok.fail || 0} failed`;
+
+    const gates = res.gates || [];
+    if (!gates.length) { rbox.appendChild(el("div", "empty", "no routed commands yet")); }
+    const max = gates.reduce((m, g) => Math.max(m, g.count), 0) || 1;
+    for (const g of gates) {
+      const cls = g.gate === "bypass" ? "bypass" : (g.route === "cloud" ? "cloud" : "local");
+      const row = el("div", "gaterow");
+      row.title = g.desc || "";
+      row.appendChild(el("span", "g-name", g.gate));
+      const bar = el("div", "g-bar");
+      const fill = el("div", "g-fill " + cls);
+      fill.style.width = Math.max(2, Math.round(g.count / max * 100)) + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      row.appendChild(el("span", "g-ct", g.count.toLocaleString()));
+      rbox.appendChild(row);
+    }
+
+    const errs = res.errors || [];
+    if (!errs.length) { ebox.appendChild(el("div", "empty", "no inference errors 🎉")); return; }
+    for (const e of errs) {
+      const row = el("div", "err-row");
+      const tag = el("span", "tag " + (e.local ? "local" : "cloud"), e.model);
+      row.appendChild(tag);
+      const msg = el("span", "err-msg", e.error); msg.title = e.error;
+      row.appendChild(msg);
+      row.appendChild(el("span", "err-ct", "×" + e.count));
+      ebox.appendChild(row);
+    }
+  }
+
   // ── WebSocket (live feed) ───────────────────────────────────────────────────
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -182,9 +224,9 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); }
+  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); }, 15000);
+  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }, 15000);
 })();
