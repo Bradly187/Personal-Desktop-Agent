@@ -419,6 +419,16 @@ class LocalInference(ABC):
         result = await self.infer(cmd, few_shot_examples)
         yield result
 
+    async def warmup(self) -> bool:
+        """Best-effort pre-load of the backend's model so the first real command
+        doesn't pay a cold-load penalty.
+
+        Default no-op (returns False). Override where a cheap pre-load exists
+        (OllamaInference). MUST never raise — callers fire-and-forget it at
+        startup, off the 60 Hz loop.
+        """
+        return False
+
     @abstractmethod
     def get_status(self) -> dict:
         """Return a status dict: {'backend': str, 'available': bool, ...}."""
@@ -779,6 +789,51 @@ class OllamaInference(LocalInference):
             self._available = False
             log.error("OllamaInference.stream failed: %s", exc)
             yield f"CLARIFY inference error: {exc}"
+
+    async def warmup(self) -> bool:
+        """Pre-load the command model into VRAM so the FIRST real command doesn't
+        pay a cold-load penalty (~7.5 s observed for llama3.1:8b on a cold 5090,
+        vs ~190 ms warm).
+
+        Posts an empty-prompt /api/generate, which Ollama treats as a pure
+        model-load request — it returns once the model is resident without
+        generating tokens. Best-effort: never raises (CancelledError still
+        propagates so shutdown can cancel it), holds the same request semaphore
+        as infer() so it can't collide with a concurrent command, and is bounded
+        by DA_OLLAMA_TIMEOUT_S to cover a slow cold load. On any failure the
+        first command simply loads the model as it does today.
+        """
+        try:
+            import aiohttp
+        except ImportError:
+            return False
+
+        _hang_timeout_s = float(os.environ.get("DA_OLLAMA_TIMEOUT_S", "45"))
+        t0 = time.monotonic()
+        try:
+            async with asyncio.timeout(_hang_timeout_s):
+                async with self._request_sem:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            f"{self.host}/api/generate",
+                            json={"model": self.model, "prompt": "", "stream": False},
+                            timeout=aiohttp.ClientTimeout(total=_hang_timeout_s),
+                        ) as resp:
+                            if resp.status != 200:
+                                log.warning("OllamaInference.warmup: HTTP %s for %s",
+                                            resp.status, self.model)
+                                return False
+                            await resp.json()
+            self._available = True
+            log.info("OllamaInference.warmup: %s resident (%.1fs)",
+                     self.model, time.monotonic() - t0)
+            return True
+        except Exception as exc:
+            # Best-effort: a failed warm-up must not break startup. The breaker
+            # is intentionally NOT touched here so a cold-load hiccup doesn't
+            # fail-fast real traffic before it arrives.
+            log.warning("OllamaInference.warmup: %s did not warm (%s)", self.model, exc)
+            return False
 
     def get_status(self) -> dict:
         return {
