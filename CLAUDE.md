@@ -101,7 +101,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `mcp_server/tools/windows.py` | get_active_window, list_windows, focus_window (win32gui + psutil) |
 | `mcp_server/tools/handwriting.py` | pix2tex LaTeX OCR; latex_to_unicode fallback converter |
 | `core/fusion_engine.py` | 60 Hz tick loop; 7-level sensor priority; direct pyautogui for tilt (gaze/head removed) |
-| `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); Anthropic API cloud fallback (10s timeout circuit-breaker); local-inference circuit-breaker (`local_timeout_s`, default 15s → CLARIFY); LLM output schema validation (`_parse_action` + `_VALID_COMMAND_VERBS`; malformed verb → CLARIFY); outcome logger |
+| `core/hybrid_coordinator.py` | 4-gate routing (Gate 0 privacy + Gates 1–4); cloud fallback via `core/cloud_backend.py` (Amazon Bedrock when `AWS_BEARER_TOKEN_BEDROCK` set, else direct Anthropic; 10s timeout circuit-breaker); local-inference circuit-breaker (`local_timeout_s`, default 15s → CLARIFY); LLM output schema validation (`_parse_action` + `_VALID_COMMAND_VERBS`; malformed verb → CLARIFY); outcome logger |
 | `inference/local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, ~190ms warm wall p50 / ~29ms compute, Ollama 0.30.6), `VLLMInference` (verified in Ubuntu WSL2, vLLM 0.21.0; `--backend vllm`; use `--gpu-memory-utilization 0.65` with Whisper running) |
 | `adaptive/continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
 | `sensors/lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
@@ -127,7 +127,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `start_agent.bat` | Windows startup script; activates venv and runs `main.py`; logs to `logs/agent_startup.log` |
 | `calibration/acoustic_profiler.py` | Per-user VAD threshold + logprob floor from measured RMS/spectral-centroid/Whisper-logprob; passive calibration; drift detection; seasonal re-cal prompt; Signal 5 in PainDayEngine |
 | `calibration/voice_calibrator.py` | Guided voice calibration for 3 conditions (good/flare/allergy — svt_attack removed 2026-06-11, SVT no longer a project factor); 20 phrases; voice-triggered or iPad Settings tab; writes to `voice_profile` + `voice_phrases` tables |
-| `desktop/vision_grounder.py` | Local qwen3-vl:30b (Ollama) resolves named UI targets to pixel coords; claude-sonnet-4-6 as fallback; confidence ≥0.7; 2s cache; fallback chain: vision → gaze → OCR → CLARIFY |
+| `desktop/vision_grounder.py` | Local qwen3-vl:30b (Ollama) resolves named UI targets to pixel coords; claude-sonnet-4-6 cloud fallback via `core/cloud_backend.py` (Bedrock/Anthropic); confidence ≥0.7; 2s cache; fallback chain: vision → gaze → OCR → CLARIFY |
 | `desktop/ui_automation.py` | Win32 UIAutomation BFS tree search; fuzzy name scoring; 0.3s timeout; 1s cache; first fallback in `_resolve_coords` |
 | `desktop/action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |
 | `desktop/flick_engine.py` | Flick-to-snap gesture handler; maps GRAB_SNAP_* gestures to window snap zones; uses OneEuroFilter for smoothing |

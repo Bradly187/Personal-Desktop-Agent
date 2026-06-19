@@ -1,7 +1,7 @@
-"""Integration tests for the cloud fallback path (Gate 2 → Anthropic API).
+"""Integration tests for the cloud fallback path (Gate 2 → Amazon Bedrock).
 
 Covers:
-  1. _CloudInference.infer() — real Anthropic API call on a complex command
+  1. _CloudInference.infer() — real Amazon Bedrock call on a complex command
   2. HybridCoordinator.route() Gate 2 trigger — complexity keyword routes to cloud
   3. Voice-misrecognition disambiguation (cloud-specific guidance)
   4. Graceful degradation — bad API key → CLARIFY (no crash)
@@ -11,7 +11,7 @@ Covers:
 Run:
     python tests/test_cloud_path.py
 
-Requires ANTHROPIC_API_KEY in the environment.
+Requires AWS_BEARER_TOKEN_BEDROCK in the environment.
 
 Exit codes: 0 = all passed, 1 = any failed
 """
@@ -50,11 +50,11 @@ def _complex_cmd(text: str) -> Command:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: _CloudInference.infer() — real Anthropic API call
+# Test 1: _CloudInference.infer() — real Amazon Bedrock call
 # ---------------------------------------------------------------------------
 
 async def test_cloud_inference_real_anthropic() -> tuple[bool, str]:
-    """_CloudInference sends a complex command to the Anthropic API and gets a valid action."""
+    """_CloudInference sends a complex command to Amazon Bedrock and gets a valid action."""
     cloud = _CloudInference(model="claude-haiku-4-5")
     cmd = _cmd("close the window and then open Chrome")
     result = await cloud.infer(cmd)

@@ -1,8 +1,10 @@
-"""Offline tests for the cloud backend selector (Anthropic vs Amazon Bedrock).
+"""Offline tests for the cloud backend selector (Amazon Bedrock only).
 
-No network: every test either inspects the resolved CloudBackend or patches the
-SDK client constructor. Bedrock uses the classic AnthropicBedrock InvokeModel
-client with cross-region inference-profile model ids.
+This project accesses Claude exclusively through Amazon Bedrock — there is no
+direct first-party Anthropic API path and no ANTHROPIC_API_KEY dependency. No
+network: every test either inspects the resolved CloudBackend or patches the SDK
+client constructor. Bedrock uses the classic AnthropicBedrock InvokeModel client
+with cross-region inference-profile model ids.
 """
 
 from __future__ import annotations
@@ -31,28 +33,21 @@ def clean_env(monkeypatch):
     return monkeypatch
 
 
-# --- backend selection -----------------------------------------------------
+# --- credential availability -----------------------------------------------
 
-def test_bedrock_auto_selected_when_key_present(clean_env):
+def test_credential_available_with_bedrock_key(clean_env):
     clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
-    assert cb.bedrock_selected() is True
+    assert cb.credential_available() is True
 
 
-def test_bedrock_not_selected_without_key(clean_env):
-    assert cb.bedrock_selected() is False
+def test_credential_unavailable_without_bedrock_key(clean_env):
+    assert cb.credential_available() is False
 
 
-def test_force_anthropic_overrides_bedrock_key(clean_env):
-    clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
-    clean_env.setenv("DA_CLOUD_BACKEND", "anthropic")
-    assert cb.bedrock_selected() is False
-
-
-def test_force_bedrock_without_key_raises(clean_env):
-    clean_env.setenv("DA_CLOUD_BACKEND", "bedrock")
-    with pytest.raises(RuntimeError) as exc:
-        cb.resolve_backend()
-    assert "AWS_BEARER_TOKEN_BEDROCK" in str(exc.value)
+def test_anthropic_api_key_does_not_enable_cloud(clean_env):
+    """ANTHROPIC_API_KEY is no longer a cloud credential — only Bedrock is."""
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    assert cb.credential_available() is False
 
 
 # --- resolved backend shape ------------------------------------------------
@@ -61,7 +56,6 @@ def test_resolve_bedrock_backend(clean_env):
     clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
     clean_env.setenv("DA_BEDROCK_REGION", "us-east-1")
     be = cb.resolve_backend()
-    assert be.is_bedrock
     assert be.name == "bedrock:us-east-1"
     assert be.aws_region == "us-east-1"
     assert be.api_key == "bedrock-key"
@@ -73,36 +67,39 @@ def test_bedrock_region_defaults_to_us_east_1(clean_env):
     assert cb.resolve_backend().name == "bedrock:us-east-1"
 
 
-def test_resolve_anthropic_backend(clean_env):
+def test_missing_bedrock_key_raises_actionable(clean_env):
+    with pytest.raises(RuntimeError) as exc:
+        cb.resolve_backend()
+    assert "AWS_BEARER_TOKEN_BEDROCK" in str(exc.value)
+
+
+def test_anthropic_key_alone_still_raises(clean_env):
+    """A first-party key present but no Bedrock token must still raise."""
     clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
-    be = cb.resolve_backend()
-    assert not be.is_bedrock
-    assert be.name == "anthropic"
-    assert be.api_key is None                 # SDK resolves env itself
-
-
-def test_resolve_anthropic_explicit_key_override(clean_env):
-    be = cb.resolve_backend(api_key="sk-ant-explicit")
-    assert not be.is_bedrock
-    assert be.api_key == "sk-ant-explicit"
+    with pytest.raises(RuntimeError) as exc:
+        cb.resolve_backend()
+    assert "AWS_BEARER_TOKEN_BEDROCK" in str(exc.value)
 
 
 # --- model id mapping ------------------------------------------------------
 
 def test_map_model_bedrock_inference_profile(clean_env):
-    be = cb.CloudBackend(name="bedrock:us-east-1", is_bedrock=True, profile_prefix="us")
+    be = cb.CloudBackend(name="bedrock:us-east-1", aws_region="us-east-1",
+                         api_key="k", profile_prefix="us")
     assert be.map_model("claude-haiku-4-5") == _HAIKU_BEDROCK
     assert be.map_model("claude-opus-4-8") == _OPUS_BEDROCK
 
 
 def test_map_model_bedrock_global_prefix(clean_env):
-    be = cb.CloudBackend(name="bedrock:us-east-1", is_bedrock=True, profile_prefix="global")
+    be = cb.CloudBackend(name="bedrock:us-east-1", aws_region="us-east-1",
+                         api_key="k", profile_prefix="global")
     assert be.map_model("claude-opus-4-8") == "global.anthropic.claude-opus-4-8"
 
 
-def test_map_model_anthropic_unchanged(clean_env):
-    be = cb.CloudBackend(name="anthropic", is_bedrock=False)
-    assert be.map_model("claude-haiku-4-5") == "claude-haiku-4-5"
+def test_map_model_unknown_alias_falls_back(clean_env):
+    be = cb.CloudBackend(name="bedrock:us-east-1", aws_region="us-east-1",
+                         api_key="k", profile_prefix="us")
+    assert be.map_model("claude-future-9") == "us.anthropic.claude-future-9"
 
 
 # --- _CloudInference wiring (command path) ---------------------------------
@@ -119,15 +116,14 @@ def test_cloud_inference_uses_bedrock_client_and_profile_id(clean_env):
     assert cloud._backend == "bedrock:us-east-1"
 
 
-def test_cloud_inference_uses_anthropic_when_no_bedrock(clean_env):
-    clean_env.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+def test_cloud_inference_raises_without_bedrock_key(clean_env):
+    """No Bedrock token → infer() degrades to CLARIFY, never the raw SDK error."""
+    import asyncio
+    from core.command_executor import Command
     cloud = _CloudInference(model="claude-haiku-4-5")
-    with patch("anthropic.Anthropic", return_value=object()) as ctor:
-        cloud._get_client()
-    _, kwargs = ctor.call_args
-    assert "aws_region" not in kwargs          # first-party client, not Bedrock
-    assert cloud._effective_model == "claude-haiku-4-5"
-    assert cloud._backend == "anthropic"
+    out = asyncio.run(cloud.infer(Command(text="open chrome", action="OPEN", source="voice")))
+    assert out.startswith("CLARIFY")
+    assert "AWS_BEARER_TOKEN_BEDROCK" in out
 
 
 # --- CloudDevAgent wiring (dev path) ---------------------------------------
@@ -146,12 +142,14 @@ def test_cloud_dev_agent_default_maps_to_opus_on_bedrock(clean_env):
     assert agent._backend == "bedrock:us-east-1"
 
 
-def test_cloud_dev_agent_explicit_key_takes_anthropic_path(clean_env):
+def test_cloud_dev_agent_explicit_key_is_ignored_bedrock_wins(clean_env):
+    """An explicit constructor api_key is ignored — Bedrock is the only backend."""
+    clean_env.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
     from inference.cloud_dev_agent import CloudDevAgent
     agent = CloudDevAgent(model="claude-opus-4-8", api_key="sk-ant-explicit")
-    with patch("anthropic.AsyncAnthropic", return_value=object()) as ctor:
+    with patch("anthropic.AsyncAnthropicBedrock", return_value=object()) as ctor:
         agent._get_client()
     _, kwargs = ctor.call_args
-    assert kwargs.get("api_key") == "sk-ant-explicit"
-    assert "aws_region" not in kwargs
-    assert agent.model == "claude-opus-4-8"
+    assert kwargs["api_key"] == "bedrock-key"   # env token wins, not the arg
+    assert kwargs["aws_region"] == "us-east-1"
+    assert agent.model == _OPUS_BEDROCK

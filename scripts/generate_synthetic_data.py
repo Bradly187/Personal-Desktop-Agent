@@ -127,13 +127,22 @@ Generate {count} examples now:"""
 
 def _call_claude(prompt: str, model: str = "claude-haiku-4-5") -> str:
     try:
-        import anthropic
+        import anthropic  # noqa: F401  (imported by make_client)
     except ImportError:
         print("ERROR: anthropic not installed — run: pip install anthropic", file=sys.stderr)
         sys.exit(1)
-    client = anthropic.Anthropic()
+    # Claude is accessed exclusively through Amazon Bedrock — build the client and
+    # map the model id via the shared backend seam (AWS_BEARER_TOKEN_BEDROCK).
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from core.cloud_backend import resolve_backend
+    try:
+        backend = resolve_backend()
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+    client = backend.make_client()
     response = client.messages.create(
-        model=model,
+        model=backend.map_model(model),
         max_tokens=2048,
         temperature=0.8,
         messages=[{"role": "user", "content": prompt}],

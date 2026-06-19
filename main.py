@@ -268,9 +268,9 @@ def _print_startup_table(
         except ImportError:
             return "WARN", "anthropic SDK not installed"
         import os as _os
-        if not _os.environ.get("ANTHROPIC_API_KEY"):
-            return "WARN", "ANTHROPIC_API_KEY not set"
-        return "OK", f"{cloud_dev_model} (anthropic_cloud)"
+        if not _os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            return "WARN", "AWS_BEARER_TOKEN_BEDROCK not set"
+        return "OK", f"{cloud_dev_model} (bedrock)"
 
     def _check_vllm_server():
         import urllib.request as _ur
@@ -807,7 +807,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             log.info("CloudDevAgent: wired (available=%s model=%s always_cloud=%s)",
                      _cda_status["available"], _cda_status["model"], _no_local_specialists)
             if not _cda_status["available"]:
-                log.warning("CloudDevAgent: ANTHROPIC_API_KEY not set or anthropic SDK missing "
+                log.warning("CloudDevAgent: AWS_BEARER_TOKEN_BEDROCK not set or anthropic SDK missing "
                             "— dev queries will return CLARIFY until configured")
         except Exception as _cda_exc:
             log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
@@ -1501,12 +1501,12 @@ def _parse_args() -> argparse.Namespace:
                         "Routes code/math/vision/plan/general through in-process vLLM "
                         "LLM instances with TTL sleep; 3-8s wake vs Ollama's 60s cold load. "
                         "Needs AWQ checkpoints on HuggingFace (see model_router.py header).")
-    # ── Cloud DevAgent — Anthropic API path for dev-domain queries ───────────
+    # ── Cloud DevAgent — Amazon Bedrock path for dev-domain queries ──────────
     p.add_argument("--cloud-dev-agent", action="store_true",
                    help="Route dev-domain queries (code/math/vision/plan/general) to "
-                        "Claude via the Anthropic API as a fallback when no local "
+                        "Claude via Amazon Bedrock as a fallback when no local "
                         "specialist is awake — avoids a ~50s GPU wake. "
-                        "Needs ANTHROPIC_API_KEY. ~$0.01/query on Sonnet 4.6.")
+                        "Needs AWS_BEARER_TOKEN_BEDROCK. ~$0.0175/query on Opus 4.8.")
     p.add_argument("--no-local-specialists", action="store_true",
                    help="Skip the VLLMSpecialistPool entirely and route ALL dev-domain "
                         "queries to the cloud (implies the cloud is the primary dev "

@@ -69,7 +69,7 @@ def test_allowed_dev_query_is_scrubbed_before_cloud():
     joined = "\n".join(sent_ctx["recent_commands"])
     assert _SECRET not in joined
     assert "REDACTED" in joined
-    assert result["backend"] == "anthropic_cloud"
+    assert result["backend"] == "bedrock"
 
 
 def test_secret_in_dev_query_text_redacted_when_gate0_misses():

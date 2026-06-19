@@ -1,4 +1,4 @@
-"""CloudDevAgent — route dev-domain queries to Claude via the Anthropic API.
+"""CloudDevAgent — route dev-domain queries to Claude via Amazon Bedrock.
 
 Drop-in alternative / fallback for the local ``VLLMSpecialistPool`` + ``DevAgent``
 path.  Routing a code/math/vision/plan/general query to the cloud avoids waking a
@@ -161,8 +161,8 @@ def _extract_text(message) -> str:
 
 
 class CloudDevAgent:
-    """Route dev-domain queries (code/math/vision/plan/general) to Claude via the
-    Anthropic API with adaptive thinking on the reasoning-heavy domains.
+    """Route dev-domain queries (code/math/vision/plan/general) to Claude via
+    Amazon Bedrock with adaptive thinking on the reasoning-heavy domains.
 
     Used as a fallback when local specialists are unavailable/sleeping, or as the
     primary dev path with ``--cloud-dev-agent --no-local-specialists``.
@@ -185,14 +185,13 @@ class CloudDevAgent:
         resolved = model or os.environ.get("DA_CLOUD_DEV_MODEL") or _DEFAULT_MODEL
         self.model = resolved
         self._base_model = resolved       # backend-mapped at client-build time
-        self._backend = "anthropic_cloud"
+        self._backend = "bedrock"
         self._max_tokens = max_tokens
         self._timeout = timeout
-        # Resolve the key now so get_status() can report availability without a
-        # network call.  AsyncAnthropic would also resolve ANTHROPIC_API_KEY on
-        # its own, but we want the status check to be honest up front.
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self._client = None  # lazily constructed AsyncAnthropic
+        # `api_key` is accepted for signature stability but ignored: this project
+        # accesses Claude exclusively through Amazon Bedrock, whose credential is
+        # the AWS_BEARER_TOKEN_BEDROCK env var resolved in core.cloud_backend.
+        self._client = None  # lazily constructed AsyncAnthropicBedrock
         self._rate_limiter = None  # shared 'anthropic' bucket; wired by coordinator
 
     def set_rate_limiter(self, limiter) -> None:
@@ -208,18 +207,15 @@ class CloudDevAgent:
         """Lazily construct the async client (raises with an actionable message).
 
         Routes through core.cloud_backend so the dev path shares the command
-        path's backend choice (direct Anthropic vs Amazon Bedrock). An explicit
-        api_key passed to the constructor still takes the direct Anthropic path,
-        unless Bedrock is selected (then the Bedrock API key from the environment
-        is the credential).
+        path's Amazon Bedrock backend. The credential is the
+        AWS_BEARER_TOKEN_BEDROCK env var; resolve_backend() raises a clear,
+        actionable message when it is missing.
         """
         if self._client is None:
             if not _HAS_ANTHROPIC:
                 raise RuntimeError("anthropic SDK not installed (pip install anthropic)")
             from core.cloud_backend import resolve_backend
-            # An explicit constructor key takes the direct Anthropic path; it is
-            # ignored when Bedrock is selected (the env bearer token wins).
-            backend = resolve_backend(api_key=self._api_key)
+            backend = resolve_backend()
             self._client = backend.make_client(async_=True, timeout=self._timeout)
             self._backend = backend.name
             self.model = backend.map_model(self._base_model)
@@ -336,11 +332,10 @@ class CloudDevAgent:
     # ---------------------------------------------------------------------- #
 
     def get_status(self) -> dict:
-        # Available if the SDK is present AND a credential is configured for the
-        # active backend (an explicit constructor key, ANTHROPIC_API_KEY, or an
-        # Amazon Bedrock API key).
-        available = _HAS_ANTHROPIC and bool(self._api_key)
-        if not available and _HAS_ANTHROPIC:
+        # Available if the SDK is present AND an Amazon Bedrock credential
+        # (AWS_BEARER_TOKEN_BEDROCK) is configured.
+        available = False
+        if _HAS_ANTHROPIC:
             try:
                 from core.cloud_backend import credential_available
                 available = credential_available()
