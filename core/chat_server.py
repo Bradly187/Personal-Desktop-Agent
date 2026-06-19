@@ -157,6 +157,7 @@ class ChatServer:
         app.router.add_get("/api/models", self._api_models)
         app.router.add_get("/api/routing", self._api_routing)
         app.router.add_get("/api/latency", self._api_latency)
+        app.router.add_get("/api/painday", self._api_painday)
         if _STATIC_DIR.exists():
             app.router.add_static("/static/", _STATIC_DIR, show_index=False)
 
@@ -291,6 +292,15 @@ class ChatServer:
         days_q = request.query.get("days", "30")
         days = None if str(days_q).lower() in ("0", "all", "none") else self._qint(request, "days", 30)
         result = await asyncio.to_thread(latency.latency_breakdown, path, days)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_painday(self, request: web.Request) -> web.Response:
+        """Pain-day score, drivers, % time in flare, and trend sparkline."""
+        path = self._db_path() or "agent.db"
+        from monitoring import painday
+        days_q = request.query.get("days", "7")
+        days = None if str(days_q).lower() in ("0", "all", "none") else self._qint(request, "days", 7)
+        result = await asyncio.to_thread(painday.painday_breakdown, path, days)
         return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
 
     async def _ws_handler(self, request: web.Request) -> web.StreamResponse:

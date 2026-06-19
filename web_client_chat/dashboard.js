@@ -233,6 +233,58 @@
     tbl.appendChild(tb); box.appendChild(tbl);
   }
 
+  // ── Pain-day impact (poll) — score, drivers, flare time, trend ──────────────
+  async function refreshPainday() {
+    const res = await getJSON("/api/painday?days=7");
+    const box = $("painday"); box.innerHTML = "";
+    if (!res) { box.appendChild(el("div", "empty", "pain-day unavailable")); return; }
+    $("painday-sub").textContent = res.days ? `last ${res.days}d` : "all time";
+    const cur = res.current;
+    if (!cur) { box.appendChild(el("div", "empty", "no pain-day samples yet")); return; }
+    const active = !!cur.pain_day_active;
+    const score = cur.pain_day_score ?? 0;
+    const f2 = (v) => v == null ? "—" : Number(v).toFixed(2);
+
+    const wrap = el("div", "pd-wrap");
+    const top = el("div", "pd-top");
+    top.appendChild(el("span", "pd-score", f2(score)));
+    top.appendChild(el("span", "tag " + (active ? "flare" : "calm"), active ? "in flare" : "normal"));
+    top.appendChild(el("span", "pd-stats",
+      `${pct(res.pct_active)} of ${res.days ? res.days + "d" : "window"} in flare · ` +
+      `peak ${f2(res.peak_score)} · avg ${f2(res.avg_score)}`));
+    wrap.appendChild(top);
+
+    // sparkline (fixed 0..1 scale + dashed flare-threshold reference line)
+    const spark = res.spark || [];
+    if (spark.length > 1) {
+      const W = 100, H = 30, thr = res.flare_threshold ?? 0.6;
+      const clamp = (s) => Math.max(0, Math.min(1, s));
+      const pts = spark.map((s, i) =>
+        `${(i / (spark.length - 1) * W).toFixed(1)},${((1 - clamp(s)) * H).toFixed(1)}`).join(" ");
+      const ty = ((1 - thr) * H).toFixed(1);
+      const holder = el("div");
+      holder.innerHTML =
+        `<svg class="pd-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+        `<line class="pd-thr" x1="0" y1="${ty}" x2="${W}" y2="${ty}"></line>` +
+        `<polyline class="pd-line ${active ? "flare" : ""}" points="${pts}"></polyline></svg>`;
+      wrap.appendChild(holder.firstChild);
+    }
+
+    // drivers — the signals the score is built from
+    const drivers = el("div", "pd-drivers");
+    const chip = (label, val, title) => {
+      const c = el("span", "pd-chip"); c.title = title || "";
+      c.innerHTML = `${label} <b>${f2(val)}</b>`; return c;
+    };
+    drivers.appendChild(chip("failures", cur.fail_ratio, "recent command failure ratio"));
+    drivers.appendChild(chip("clarifies", cur.clarify_ratio, "recent CLARIFY ratio"));
+    drivers.appendChild(chip("gesture", cur.gesture_conf_delta, "gesture-confidence delta vs baseline"));
+    drivers.appendChild(chip("cmd rate", cur.cmd_rate_delta, "command-rate delta vs baseline"));
+    wrap.appendChild(drivers);
+
+    box.appendChild(wrap);
+  }
+
   // ── WebSocket (live feed) ───────────────────────────────────────────────────
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -251,9 +303,9 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); }
+  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); refreshPainday(); }
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); }, 15000);
+  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); refreshPainday(); }, 15000);
 })();
