@@ -1,5 +1,56 @@
 # Local Inference Engine Comparison for RTX 5090
 
+> **Note:** This document applies to the `ipad-sensor-focus` spec. The recommendation is to adopt the `LocalInference` ABC immediately and plan a vLLM migration in Phase 2.
+>
+> **VRAM measurement completed 2026-05-08** via `python main.py --measure-vram` (task 1.2).
+> See measured values in the table below. Key finding: `llama3.1:70b` cannot co-reside with
+> Whisper large-v3 on the RTX 5090 — use nemotron-mini (4B) or llama3.1:8b instead.
+
+## Measured VRAM — RTX 5090 (Blackwell, 31.8 GB, 2026-05-08)
+
+| State | VRAM Used | VRAM Free |
+|-------|-----------|-----------|
+| Baseline (OS + desktop + GPU drivers) | 8.3 GB | 23.5 GB |
+| + Whisper large-v3 (float16) | 12.5 GB | 19.4 GB |
+| + Ollama qwen3-vl:30b (18.2 GB model) | 31.7 GB | 0.1 GB |
+| YOLOv8-pose | *not measured — install ultralytics* | — |
+
+**Budget after Whisper loads: ~19 GB available for LLM.**
+`llama3.1:70b` requires ~40 GB and cannot fit alongside Whisper.
+
+---
+
+## Model Benchmark — RTX 5090, 2026-05-13 (latest)
+
+Tested against 12 representative commands covering all 9 action verbs, 2 runs per prompt.
+Script: `python benchmark_models.py --runs 2`
+
+| Model | VRAM | Accuracy | Verdict |
+|-------|------|----------|---------|
+| **llama3.1:8b** | 4.6 GB | **100%** | **Default — use this** |
+| llama3.2:3b | 6.3 GB | 100% | Also viable |
+| qwen3-coder:30b | 18.1 GB | 100% | Code specialist (too large for default) |
+| qwen2.5-coder | 0.9 GB | 83% | Misses some edge cases |
+| nemotron-mini | 2.5 GB | 25% | Not suitable without fine-tuning |
+| gpt-oss:20b | 9.6 GB | 0% | Doesn't follow verb-first format |
+| qwen3-vl:30b | 18.2 GB | 0% | Vision model, wrong task |
+
+**Note:** VRAM figures are Ollama-reported deltas (may differ from model file size).
+
+**Why llama3.1:8b over llama3.2:3b:** Both achieve 100% accuracy, but the 2026-05-13
+benchmark showed llama3.1:8b is more robust on edge cases across the full 12-prompt suite.
+VRAM difference is negligible given the RTX 5090's 32 GB budget.
+
+**Why nemotron-mini scored poorly:** It produces natural-language responses rather than
+strict verb-first output (e.g. "Capture the desktop screen" instead of "SCREENSHOT").
+It would need few-shot prompting or fine-tuning to be useful for this task.
+
+**Why gpt-oss / qwen3-vl scored 0%:** These models don't follow the constrained
+single-verb structured output format required by the command pipeline.
+
+**Recommendation:** Use `llama3.1:8b` as the default (`OllamaInference` updated).
+`llama3.2:3b` remains a viable alternative. Both are already pulled on this machine.
+
 **Context:** Accessibility desktop agent requiring <600ms inference latency for natural language command resolution.
 
 **Hardware:** NVIDIA RTX 5090 (32 GB VRAM)
@@ -264,8 +315,8 @@ This allows you to:
    - Worth the complexity if user testing shows latency sensitivity
 
 ### Implementation Plan:
-- Keep Ollama in [`.kiro/steering/tech.md`](.kiro/steering/tech.md) for Phase 1
-- Add vLLM evaluation to Phase 2 tasks (see `.kiro/specs/ipad-sensor-focus/tasks.md`)
+- Keep Ollama in [`specs/steering/tech.md`](../steering/tech.md) for Phase 1
+- Add vLLM evaluation to Phase 2 tasks (see `specs/ipad-sensor-focus/tasks.md`)
 - Design LocalInference interface to support multiple backends
 - Plan migration timeline based on user testing feedback
 

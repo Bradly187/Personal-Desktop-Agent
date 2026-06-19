@@ -84,7 +84,7 @@ class VisionGrounder:
     def _get_client(self):
         """Build the cloud client through the shared backend seam so the vision
         fallback uses the SAME cloud backend as the command/dev paths — Amazon
-        Bedrock when AWS_BEARER_TOKEN_BEDROCK is set, else direct Anthropic.
+        Bedrock (AWS_BEARER_TOKEN_BEDROCK).
 
         resolve_backend() raises an actionable RuntimeError when no cloud
         credential is configured; callers already treat that as "unavailable".

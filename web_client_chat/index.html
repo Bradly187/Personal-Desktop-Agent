@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Agent — Chat</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Left: chat -->
+    <section id="chat-pane">
+      <header class="pane-head">
+        <span class="dot" id="conn-dot" title="disconnected"></span>
+        <h1>Desktop Agent</h1>
+        <span class="sub" id="conn-label">connecting…</span>
+      </header>
+      <div id="transcript" aria-live="polite"></div>
+      <form id="composer" autocomplete="off">
+        <textarea id="input" rows="1" placeholder="Ask the agent… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="send" type="submit" title="Send">➤</button>
+      </form>
+    </section>
+
+    <!-- Right: live DAG preview -->
+    <section id="dag-pane">
+      <header class="pane-head">
+        <h2>Execution graph</h2>
+        <span class="sub" id="dag-sub">idle</span>
+      </header>
+      <div id="dag-wrap"><div id="dag"></div></div>
+      <div id="legend">
+        <span><i class="sw pending"></i>pending</span>
+        <span><i class="sw running"></i>running</span>
+        <span><i class="sw success"></i>done</span>
+        <span><i class="sw failed"></i>failed</span>
+      </div>
+    </section>
+  </div>
+
+  <!-- mermaid (client-side, same CDN module the diagrams skill uses) -->
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose", flowchart: { htmlLabels: true, curve: "basis" } });
+    window.__mermaid = mermaid;
+    window.dispatchEvent(new Event("mermaid-ready"));
+  </script>
+  <script src="/static/dag.js"></script>
+  <script src="/static/chat.js"></script>
+</body>
+</html>

@@ -106,7 +106,7 @@ This happens automatically on the first `git commit`; you'll see:
 ### Secrets Checklist
 
 Never commit to version control:
-- ✅ Do: Set `WHISPER_TOKEN`, `INDEXER_TOKEN`, `ANTHROPIC_API_KEY` as environment variables
+- ✅ Do: Set `WHISPER_TOKEN`, `INDEXER_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK` as environment variables
 - ❌ Don't: Hardcode in `cluster_config.json`, `approval_config.json`, `.env` files, or anywhere in git
 - ✅ Do: Document env vars in your deployment scripts / systemd service files
 - ❌ Don't: Check those scripts into git either (mark them `.gitignore`d or use a separate secure config management system)

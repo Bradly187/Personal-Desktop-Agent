@@ -1,15 +1,15 @@
-"""Cloud LLM backend selection — direct Anthropic API vs Amazon Bedrock.
+"""Cloud LLM backend — Amazon Bedrock (Claude models) only.
 
 Both cloud consumers — the command-path ``_CloudInference`` (Haiku 4.5) and the
 dev-path ``CloudDevAgent`` (Opus 4.8) — build their client through here, so the
-backend choice is made in exactly one place.
+backend is constructed in exactly one place. There is a single backend: Amazon
+Bedrock. The direct first-party Anthropic API path was removed — this project
+accesses Claude **exclusively** through Bedrock, so there is no
+``ANTHROPIC_API_KEY`` dependency anywhere in the cloud path.
 
-Backend selection
------------------
-- If an **Amazon Bedrock API key** is configured (``AWS_BEARER_TOKEN_BEDROCK``)
-  and ``DA_CLOUD_BACKEND`` is not forced to ``anthropic``, route through Amazon
-  Bedrock. ``DA_CLOUD_BACKEND=bedrock`` forces it on; ``=anthropic`` forces off.
-- Otherwise use the first-party Anthropic API (``ANTHROPIC_API_KEY``).
+Credential: ``AWS_BEARER_TOKEN_BEDROCK`` (an Amazon Bedrock API key). A missing
+credential degrades to a clear, actionable CLARIFY at the call site rather than a
+raw SDK "Could not resolve authentication method" traceback at request time.
 
 Bedrock path — classic InvokeModel via AnthropicBedrock
 -------------------------------------------------------
@@ -51,17 +51,6 @@ _BEDROCK_MODEL_BASE = {
 }
 
 
-def bedrock_selected() -> bool:
-    """Whether the Amazon Bedrock backend is the active choice (no network call)."""
-    forced = os.environ.get("DA_CLOUD_BACKEND", "").strip().lower()
-    if forced == "anthropic":
-        return False
-    if forced == "bedrock":
-        return True
-    # Auto: a configured Bedrock API key opts in.
-    return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK"))
-
-
 def _bedrock_region() -> str:
     return (
         os.environ.get("DA_BEDROCK_REGION")
@@ -79,84 +68,57 @@ def _profile_prefix() -> str:
 
 @dataclass
 class CloudBackend:
-    """Resolved cloud backend: how to build the client and map model ids."""
+    """Resolved Amazon Bedrock backend: how to build the client and map model ids."""
 
-    name: str                          # "bedrock:us-east-1" | "anthropic"
-    is_bedrock: bool = False
-    aws_region: str | None = None
-    api_key: str | None = None         # bearer token (Bedrock) or explicit key (direct)
+    name: str                          # "bedrock:us-east-1"
+    aws_region: str
+    api_key: str                       # Bedrock bearer token (AWS_BEARER_TOKEN_BEDROCK)
     profile_prefix: str = ""
 
     def map_model(self, model: str) -> str:
-        """First-party model id → backend-specific id.
+        """First-party model alias → Bedrock inference-profile id.
 
-        Direct Anthropic: unchanged. Bedrock: base id from the table (fallback:
-        ``anthropic.``-prefix the alias) + the cross-region profile prefix.
+        Base id from the table (fallback: ``anthropic.``-prefix the alias) plus
+        the cross-region profile prefix.
         """
-        if not self.is_bedrock:
-            return model
         base = _BEDROCK_MODEL_BASE.get(model)
         if base is None:
             base = model if model.startswith("anthropic.") else f"anthropic.{model}"
         return f"{self.profile_prefix}.{base}" if self.profile_prefix else base
 
     def make_client(self, *, async_: bool = False, timeout: float | None = None):
-        """Construct the SDK client for this backend (lazy import)."""
+        """Construct the AnthropicBedrock SDK client for this backend (lazy import)."""
         import anthropic
-        if self.is_bedrock:
-            cls = anthropic.AsyncAnthropicBedrock if async_ else anthropic.AnthropicBedrock
-            kwargs: dict = {"aws_region": self.aws_region, "api_key": self.api_key}
-            if timeout is not None:
-                kwargs["timeout"] = timeout
-            return cls(**kwargs)
-        cls = anthropic.AsyncAnthropic if async_ else anthropic.Anthropic
-        kwargs = {}
-        if self.api_key:               # explicit override; else SDK resolves env
-            kwargs["api_key"] = self.api_key
+        cls = anthropic.AsyncAnthropicBedrock if async_ else anthropic.AnthropicBedrock
+        kwargs: dict = {"aws_region": self.aws_region, "api_key": self.api_key}
         if timeout is not None:
             kwargs["timeout"] = timeout
         return cls(**kwargs)
 
 
 def credential_available() -> bool:
-    """True if a usable cloud credential is configured (no network call)."""
-    if bedrock_selected():
-        return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK"))
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    """True if an Amazon Bedrock credential is configured (no network call)."""
+    return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK"))
 
 
-def resolve_backend(api_key: str | None = None) -> CloudBackend:
-    """Resolve the active cloud backend, or raise an actionable ``RuntimeError``.
+def resolve_backend() -> CloudBackend:
+    """Resolve the Amazon Bedrock backend, or raise an actionable ``RuntimeError``.
 
-    ``api_key`` is an explicit override for the *direct Anthropic* path (e.g. a
-    key passed to ``CloudDevAgent(api_key=...)``); it is ignored when Bedrock is
-    selected (the Bedrock bearer token from the environment wins). The raised
-    message names the exact env var to set so a missing credential degrades to a
-    clear CLARIFY rather than a raw SDK traceback at request time.
+    The raised message names the exact env var to set so a missing credential
+    degrades to a clear CLARIFY rather than a raw SDK traceback at request time.
     """
-    if bedrock_selected():
-        key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-        if not key:
-            raise RuntimeError(
-                "Amazon Bedrock selected (DA_CLOUD_BACKEND=bedrock) but "
-                "AWS_BEARER_TOKEN_BEDROCK is not set. Set your Bedrock API key with: "
-                'setx AWS_BEARER_TOKEN_BEDROCK "<key>" then restart the agent.'
-            )
-        region = _bedrock_region()
-        return CloudBackend(
-            name=f"bedrock:{region}",
-            is_bedrock=True,
-            aws_region=region,
-            api_key=key,
-            profile_prefix=_profile_prefix(),
-        )
-
-    if not (api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+    key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+    if not key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY not set — the cloud fallback is disabled. Set it "
-            '(User scope) with: setx ANTHROPIC_API_KEY "sk-ant-..." then restart the '
-            "agent, or set AWS_BEARER_TOKEN_BEDROCK to use your Amazon Bedrock API key. "
-            "Note: ANTHROPIC_API_KEY is a separate pay-as-you-go key from "
-            "console.anthropic.com, not your Claude Max subscription."
+            "AWS_BEARER_TOKEN_BEDROCK not set — the cloud fallback is disabled. "
+            "Set your Amazon Bedrock API key (User scope) with: "
+            'setx AWS_BEARER_TOKEN_BEDROCK "<key>" then restart the agent. '
+            "This project accesses Claude models exclusively through Amazon Bedrock."
         )
-    return CloudBackend(name="anthropic", is_bedrock=False, api_key=api_key)
+    region = _bedrock_region()
+    return CloudBackend(
+        name=f"bedrock:{region}",
+        aws_region=region,
+        api_key=key,
+        profile_prefix=_profile_prefix(),
+    )

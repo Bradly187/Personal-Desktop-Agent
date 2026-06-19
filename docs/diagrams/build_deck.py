@@ -265,7 +265,7 @@ bullets_slide(
         (0, "Scale of the system today", True),
         (1, "16 action verbs · 6-level sensor fusion @ 60 Hz · 42-table operational DB · ~1,440 tests", False),
     ],
-    "CLAUDE.md · .kiro/specs/ipad-sensor-focus/requirements.md")
+    "CLAUDE.md · specs/ipad-sensor-focus/requirements.md")
 
 img_slide("End-to-End Architecture", GREEN, "Overview",
           OV / "A1-architecture.png",
@@ -396,7 +396,7 @@ text(s, Inches(1), Inches(2.2), Inches(11.3), Inches(0.8),
 text(s, Inches(1.5), Inches(3.4), Inches(10.3), Inches(2.5),
      [
         [("Diagrams (Mermaid source + PNG):  ", 14, RGBColor(0x9C,0xB4,0xE8), True), ("docs/diagrams/{state,overview,db}/", 14, WHITE, False)],
-        [("State-machine spec:  ", 14, RGBColor(0x9C,0xB4,0xE8), True), (".kiro/specs/ipad-sensor-focus/diagrams/04-state-machines.md", 14, WHITE, False)],
+        [("State-machine spec:  ", 14, RGBColor(0x9C,0xB4,0xE8), True), ("specs/ipad-sensor-focus/diagrams/04-state-machines.md", 14, WHITE, False)],
         [("DB design rationale:  ", 14, RGBColor(0x9C,0xB4,0xE8), True), ("docs/architecture/database-design.md", 14, WHITE, False)],
         [("Project orientation:  ", 14, RGBColor(0x9C,0xB4,0xE8), True), ("CLAUDE.md  (status, key files, conventions)", 14, WHITE, False)],
         [("Rebuild this deck:  ", 14, RGBColor(0x9C,0xB4,0xE8), True), ("python docs/diagrams/build_deck.py", 14, WHITE, False)],

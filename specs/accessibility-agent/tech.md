@@ -61,12 +61,12 @@ project/
 ├── budget_sensor_fusion.py   # Budget stack (FIFINE/OAK-D/Leap v1/iris gaze)
 ├── ipad_bridge.py            # iPad LiDAR (record3d) + Beam gaze + webcam
 ├── ipad_touch.py             # iPad Safari touch UI WebSocket server
-└── .kiro/
+└── specs/
     ├── steering/
     │   ├── product.md
     │   ├── tech.md
     │   └── structure.md
-    └── specs/
+    └── <feature>/
         └── accessibility-agent/
             ├── requirements.md
             ├── design.md

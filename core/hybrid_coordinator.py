@@ -178,7 +178,7 @@ class _CloudInference:
         self._model = model
         self._client = None
         self._effective_model = model   # backend-mapped at client-build time
-        self._backend = "anthropic"
+        self._backend = "bedrock"
 
     def _get_client(self):
         if self._client is None:
@@ -252,8 +252,8 @@ class _CloudInference:
             if is_auth:
                 log.error("CloudInference auth failure: %s", exc)
                 return (
-                    "CLARIFY cloud auth failed: ANTHROPIC_API_KEY is missing or invalid. "
-                    "Set a valid key from console.anthropic.com and restart the agent."
+                    "CLARIFY cloud auth failed: AWS_BEARER_TOKEN_BEDROCK is missing or invalid. "
+                    "Set a valid Amazon Bedrock API key and restart the agent."
                 )
             # Raw SDK/network error stays in the log; the user hears a stable
             # sentence rather than leaked internals (E16).
@@ -1057,6 +1057,7 @@ class HybridCoordinator:
                         "session_id": self._session_id,
                         "recent_commands": recent,
                         "source": cmd.source,
+                        "trace_id": cmd.trace_id,
                     }
                     self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
                     response_text = await self._cloud_dev_agent.run(clean_text, domain, ctx)
@@ -1072,11 +1073,11 @@ class HybridCoordinator:
                         "model": self._cloud_dev_agent.model,
                         "response": response_text,
                         "steps": 0,
-                        "backend": "anthropic_cloud",
+                        "backend": "bedrock",
                     }
 
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
-                agent_result = await self._dev_agent.handle(cmd.text)
+                agent_result = await self._dev_agent.handle(cmd.text, trace_id=cmd.trace_id)
                 # Personal-document queries are NOT recorded in the rolling dev
                 # context: _recent_dev_commands is sent verbatim to the cloud
                 # dev agent on later queries, which would leak the very text the

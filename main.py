@@ -132,8 +132,8 @@ def _measure_vram() -> None:
 
     print("\n  All done. Update the VRAM budget tables with the values above.")
     print("  Files to update:")
-    print("    .kiro/specs/ipad-sensor-focus/diagrams/05-data-flow.md")
-    print("    .kiro/specs/ipad-sensor-focus/local-inference-comparison.md\n")
+    print("    specs/ipad-sensor-focus/diagrams/05-data-flow.md")
+    print("    specs/ipad-sensor-focus/local-inference-comparison.md\n")
 
 
 # ---------------------------------------------------------------------------
@@ -268,9 +268,9 @@ def _print_startup_table(
         except ImportError:
             return "WARN", "anthropic SDK not installed"
         import os as _os
-        if not _os.environ.get("ANTHROPIC_API_KEY"):
-            return "WARN", "ANTHROPIC_API_KEY not set"
-        return "OK", f"{cloud_dev_model} (anthropic_cloud)"
+        if not _os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            return "WARN", "AWS_BEARER_TOKEN_BEDROCK not set"
+        return "OK", f"{cloud_dev_model} (bedrock)"
 
     def _check_vllm_server():
         import urllib.request as _ur
@@ -807,7 +807,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             log.info("CloudDevAgent: wired (available=%s model=%s always_cloud=%s)",
                      _cda_status["available"], _cda_status["model"], _no_local_specialists)
             if not _cda_status["available"]:
-                log.warning("CloudDevAgent: ANTHROPIC_API_KEY not set or anthropic SDK missing "
+                log.warning("CloudDevAgent: AWS_BEARER_TOKEN_BEDROCK not set or anthropic SDK missing "
                             "— dev queries will return CLARIFY until configured")
         except Exception as _cda_exc:
             log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
@@ -833,6 +833,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     m = get_metrics()
     fusion_pre = None   # FusionEngine created below; wire metrics after
     coordinator.set_metrics(m)
+    if hasattr(local, "set_metrics"):
+        local.set_metrics(m)     # ollama_hang_detected counter (FINDING 4)
 
     fusion = FusionEngine(screen_width=sw, screen_height=sh)
     fusion.set_coordinator(coordinator)
@@ -925,6 +927,21 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     coordinator.set_event_bus(event_bus)
     coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
     dev_agent.set_event_bus(event_bus)
+
+    # ── PC desktop chat UI (opt-in via --chat): chat window + live DAG preview ──
+    # Standalone localhost aiohttp server sharing the live pipeline. Kept separate
+    # from the iPad bridge so the iPad WebSocket protocol stays an iPad concern.
+    chat_server = None
+    if getattr(args, "chat", False):
+        from core.chat_server import ChatServer
+        chat_server = ChatServer(
+            host=args.chat_host, port=args.chat_port,
+            allow_destructive=not args.chat_readonly,
+        )
+        chat_server.set_coordinator(coordinator)
+        chat_server.set_scheduler(scheduler)
+        chat_server.set_event_bus(event_bus)
+        chat_server.set_agent_db(agent_db, session_id)
 
     # Wire CommandExecutor DB access for per-call timeout + idempotency.
     coordinator._executor.set_agent_db(agent_db)
@@ -1267,6 +1284,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion_task = asyncio.create_task(fusion.run())
     watchdog_task = asyncio.create_task(_watchdog(fusion, whisper, session_id))
 
+    # Start the chat UI server (if enabled) and open the desktop window/browser
+    # once it is actually listening.
+    if chat_server is not None:
+        await chat_server.start()
+        _open_chat_shell(chat_server.url(), getattr(args, "chat_window", False))
+
     # Wait for Ctrl-C
     await shutdown.wait_for_shutdown()
 
@@ -1293,6 +1316,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             await asyncio.wait_for(_kb_index_task, timeout=10)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
+
+    # Stop the chat UI server
+    if chat_server is not None:
+        await chat_server.stop()
 
     # Stop cluster health monitor
     if cluster_health is not None:
@@ -1357,6 +1384,44 @@ async def _run_viewer_only(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chat UI desktop shell
+# ---------------------------------------------------------------------------
+
+def _open_chat_shell(url: str, native_window: bool) -> None:
+    """Open the chat UI: a native pywebview window if requested and available,
+    else the default browser. Never fatal — the URL is always reachable
+    manually (and logged), so a missing GUI dependency can't break startup."""
+    def _browser() -> None:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            log.info("Chat UI: opened in default browser — %s", url)
+        except Exception as exc:
+            log.warning("Chat UI: could not open browser (%s). Open manually: %s", exc, url)
+
+    if native_window:
+        try:
+            import threading
+            import webview  # pywebview — optional dependency (Edge WebView2 on Windows)
+
+            def _win() -> None:
+                try:
+                    webview.create_window("Desktop Agent", url, width=1200, height=820)
+                    webview.start()
+                except Exception as exc:
+                    log.warning("Chat UI: native window failed (%s) — browser fallback", exc)
+                    _browser()
+
+            threading.Thread(target=_win, daemon=True, name="chat-webview").start()
+            log.info("Chat UI: launching native window — %s", url)
+            return
+        except ImportError:
+            log.info("Chat UI: pywebview not installed — using browser "
+                     "(install with: pip install pywebview)")
+    _browser()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1389,6 +1454,16 @@ def _parse_args() -> argparse.Namespace:
                    help="Index Python/Swift source + docs PDFs into ChromaDB RAG at startup")
     p.add_argument("--metrics-port", type=int, default=0,
                    help="Expose /metrics JSON endpoint on this port (0 = disabled)")
+    p.add_argument("--chat", action="store_true",
+                   help="Enable the PC desktop chat UI (chat window + live DAG preview)")
+    p.add_argument("--chat-port", type=int, default=8770,
+                   help="Port for the chat UI server (default: 8770)")
+    p.add_argument("--chat-host", type=str, default="127.0.0.1",
+                   help="Bind host for the chat UI server (default: 127.0.0.1, localhost-only)")
+    p.add_argument("--chat-window", action="store_true",
+                   help="Open the chat UI in a native window (pywebview) instead of the browser")
+    p.add_argument("--chat-readonly", action="store_true",
+                   help="Disable in-chat approval of destructive dev steps (voice/iPad approval only)")
     p.add_argument("--cluster-config", type=str, default=None,
                    help="Path to cluster_config.json (default: project root). "
                         "Enables laptop-node offload of the lightweight command domain.")
@@ -1426,12 +1501,12 @@ def _parse_args() -> argparse.Namespace:
                         "Routes code/math/vision/plan/general through in-process vLLM "
                         "LLM instances with TTL sleep; 3-8s wake vs Ollama's 60s cold load. "
                         "Needs AWQ checkpoints on HuggingFace (see model_router.py header).")
-    # ── Cloud DevAgent — Anthropic API path for dev-domain queries ───────────
+    # ── Cloud DevAgent — Amazon Bedrock path for dev-domain queries ──────────
     p.add_argument("--cloud-dev-agent", action="store_true",
                    help="Route dev-domain queries (code/math/vision/plan/general) to "
-                        "Claude via the Anthropic API as a fallback when no local "
+                        "Claude via Amazon Bedrock as a fallback when no local "
                         "specialist is awake — avoids a ~50s GPU wake. "
-                        "Needs ANTHROPIC_API_KEY. ~$0.01/query on Sonnet 4.6.")
+                        "Needs AWS_BEARER_TOKEN_BEDROCK. ~$0.0175/query on Opus 4.8.")
     p.add_argument("--no-local-specialists", action="store_true",
                    help="Skip the VLLMSpecialistPool entirely and route ALL dev-domain "
                         "queries to the cloud (implies the cloud is the primary dev "

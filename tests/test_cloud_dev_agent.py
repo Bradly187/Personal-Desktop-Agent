@@ -128,14 +128,15 @@ def test_default_model_when_no_override(monkeypatch):
     assert CloudDevAgent().model == "claude-opus-4-8"
 
 
-def test_get_status_shape():
-    agent = CloudDevAgent(api_key="k", model="claude-opus-4-8")
+def test_get_status_shape(monkeypatch):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
+    agent = CloudDevAgent(model="claude-opus-4-8")
     st = agent.get_status()
     assert set(st) == {"available", "model", "domain_count", "backend"}
-    assert st["backend"] == "anthropic_cloud"
+    assert st["backend"] == "bedrock"
     assert st["model"] == "claude-opus-4-8"
     assert st["domain_count"] == len(_SYSTEM_PROMPTS)
-    assert st["available"] is True  # key provided
+    assert st["available"] is True  # Bedrock credential present
 
 
 def _clear_cloud_creds(monkeypatch):
