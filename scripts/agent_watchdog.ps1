@@ -22,7 +22,7 @@
     external dependencies.
 
 .PARAMETER Target
-    agent  -> main.py            (iPad bridge :8765, full pipeline)
+    agent  -> main.py --chat     (iPad bridge :8765, chat + dashboard :8770)
     proxy  -> windows_action_proxy.py --port 8768  (WSL-mode action proxy)
 
 .PARAMETER TestCommand
@@ -64,7 +64,10 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 switch ($Target) {
     "agent" {
-        $childArgs = "main.py"
+        # --chat serves the observability dashboard + chat UI on :8770 alongside
+        # the iPad bridge (:8765), so the dashboard is always available without a
+        # second instance. The "Layla Dashboard" desktop shortcut relies on this.
+        $childArgs = "main.py --chat"
         $outLog = Join-Path $LogDir "agent_startup.log"
         $prevLog = Join-Path $LogDir "agent_startup.prev.log"   # preserved post-crash trail
         $watchLog = Join-Path $LogDir "watchdog_agent.log"
