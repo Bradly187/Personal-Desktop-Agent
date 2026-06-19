@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop Agent — Observability</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="dash">
+    <header class="pane-head">
+      <span class="dot" id="conn-dot" title="disconnected"></span>
+      <h1>Observability</h1>
+      <span class="sub" id="conn-label">connecting…</span>
+      <a class="navlink" href="/">← Chat</a>
+    </header>
+
+    <!-- NOW: live KPIs -->
+    <section class="panel">
+      <div class="panel-head"><h2>Now</h2><span class="sub" id="now-sub">live</span></div>
+      <div class="kpis" id="kpis"></div>
+    </section>
+
+    <div class="grid2">
+      <!-- ACTIVITY feed (live, broadcast) -->
+      <section class="panel">
+        <div class="panel-head"><h2>Activity</h2><span class="sub">background events</span></div>
+        <div class="feed" id="feed"><div class="empty">waiting for events…</div></div>
+      </section>
+
+      <!-- TRACES + replay -->
+      <section class="panel">
+        <div class="panel-head"><h2>Traces</h2><span class="sub" id="traces-sub"></span></div>
+        <div class="traces" id="traces"></div>
+        <div class="replay" id="replay"><div class="empty">pick a trace to replay its timeline</div></div>
+      </section>
+    </div>
+
+    <div class="grid2">
+      <!-- TRENDS -->
+      <section class="panel">
+        <div class="panel-head"><h2>Trends</h2><span class="sub" id="trends-sub"></span></div>
+        <div id="trends"></div>
+      </section>
+
+      <!-- COST -->
+      <section class="panel">
+        <div class="panel-head"><h2>Cloud cost</h2><span class="sub" id="cost-sub"></span></div>
+        <div id="cost"></div>
+      </section>
+    </div>
+  </div>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

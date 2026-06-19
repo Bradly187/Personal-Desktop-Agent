@@ -282,11 +282,26 @@ class CloudDevAgent:
             ) as stream:
                 message = await stream.get_final_message()
             text = _extract_text(message)
+            usage = getattr(message, "usage", None)
             log.info(
                 "CloudDevAgent[%s]: %d chars  model=%s  stop=%s  usage=%s",
                 domain, len(text), self.model,
-                getattr(message, "stop_reason", "?"), getattr(message, "usage", None),
+                getattr(message, "stop_reason", "?"), usage,
             )
+            # Publish token usage on the task-local capture so the coordinator can
+            # persist it to the `inferences` table (cost ledger). These dev calls
+            # run on Opus 4.8 — the most expensive cloud path — so leaving them
+            # unrecorded was the biggest blind spot in cloud spend. The coordinator
+            # clears the capture before calling run(), mirroring the command path.
+            try:
+                from inference.local_inference import set_inference_capture
+                set_inference_capture(
+                    None,
+                    getattr(usage, "input_tokens", None) if usage else None,
+                    getattr(usage, "output_tokens", None) if usage else None,
+                )
+            except Exception:
+                pass
             return text or "CLARIFY cloud dev agent returned no text"
         except Exception as exc:
             # anthropic.APIError subclasses (auth/rate-limit/server) + transport

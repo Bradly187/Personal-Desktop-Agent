@@ -56,11 +56,17 @@ class CircuitBreaker:
         time_fn: Callable[[], float] = time.monotonic,
         slow_call_s: float | None = None,
         slow_threshold: int | None = None,
+        on_open: Callable[[dict], None] | None = None,
     ) -> None:
         self._name = name
         self._fail_threshold = max(1, fail_threshold)
         self._cooldown_s = cooldown_s
         self._now = time_fn
+        # Optional observability hook fired on the closed/half-open → open
+        # transition (NOT on every rejected call). Mirrors the injectable clock:
+        # the breaker stays dependency-free; the wiring layer turns this into an
+        # EventBus publish. Exception-safe — a bad callback never breaks the breaker.
+        self._on_open = on_open
         # Timeout-awareness (#4 tail): latency at/above which a *successful* call
         # is "slow"; `slow_threshold` consecutive slow calls open the breaker.
         # None disables slow tracking (pure failure-counting, the old behavior).
@@ -165,13 +171,20 @@ class CircuitBreaker:
             self._open(reason=f"{self._consecutive_failures} failure(s)")
 
     def _open(self, reason: str = "") -> None:
-        if self._state != "open":
+        _transition = self._state != "open"
+        if _transition:
             log.warning(
                 "CircuitBreaker[%s]: OPEN after %s — fast-failing for %.0fs",
                 self._name, reason or "threshold reached", self._cooldown_s,
             )
         self._state = "open"
         self._opened_at = self._now()
+        if _transition and self._on_open is not None:
+            try:
+                self._on_open({"name": self._name, "state": "open",
+                               "reason": reason or "threshold reached"})
+            except Exception:  # pragma: no cover - hook must never break the breaker
+                pass
 
     def get_status(self) -> dict:
         return {

@@ -42,6 +42,7 @@ from core.events import (
     TOPIC_REPLAN_EXHAUSTED, TOPIC_STEP_FAILED,
     TOPIC_PLAN_GENERATED, TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
     TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
+    TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
 )
 from inference.model_router import ModelRouter, RouterResult
 
@@ -405,6 +406,19 @@ class DevAgent:
             await self._event_bus.publish(
                 topic, payload, source="dev_agent", trace_id=self._active_trace_id
             )
+        except Exception as exc:
+            log.debug("DevAgent: %s publish failed: %s", topic, exc)
+
+    async def _publish_bg(self, topic: str, payload: dict) -> None:
+        """Best-effort publish for BACKGROUND work (no active trace_id required).
+
+        Used by the goal-queue drainer so autonomous goal execution is visible on
+        the EventBus (and durable event_log) instead of silent. Never raises.
+        """
+        if self._event_bus is None:
+            return
+        try:
+            await self._event_bus.publish(topic, payload, source="dev_agent")
         except Exception as exc:
             log.debug("DevAgent: %s publish failed: %s", topic, exc)
 
@@ -1668,15 +1682,24 @@ class DevAgent:
                     gid = int(goal["id"])
                     log.info("DevAgent.drain_goal_queue: running goal %s — %r",
                              gid, goal["goal"][:60])
+                    await self._publish_bg(TOPIC_GOAL_DEQUEUED, {
+                        "goal_id": gid,
+                        "goal": goal["goal"][:200],
+                        "source_trigger": goal.get("source_trigger"),
+                    })
+                    _g_status, _g_ok = "failed", False
                     try:
                         result = await self.plan_and_run(goal["goal"])
-                        await db.complete_goal(
-                            gid, "done" if result.success else "failed",
-                            error=result.error,
-                        )
+                        _g_ok = bool(result.success)
+                        _g_status = "done" if _g_ok else "failed"
+                        await db.complete_goal(gid, _g_status, error=result.error)
                     except Exception as exc:
                         log.error("DevAgent.drain_goal_queue: goal %s raised: %s", gid, exc)
+                        _g_status, _g_ok = "failed", False
                         await db.complete_goal(gid, "failed", error=str(exc))
+                    await self._publish_bg(TOPIC_GOAL_COMPLETED, {
+                        "goal_id": gid, "status": _g_status, "success": _g_ok,
+                    })
                     processed += 1
                 # Re-check once if another caller requested a drain while we ran
                 # (until-empty mode only; bounded calls return at their cap).

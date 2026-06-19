@@ -89,3 +89,66 @@ body {
 .sw.failed { background: var(--fail); }
 
 @media (max-width: 820px) { #app { flex-direction: column; } #dag-pane, #chat-pane { flex-basis: auto; } #dag-pane { height: 42vh; } }
+
+/* ── Observability dashboard (/dashboard) ─────────────────────────────────── */
+#dash { max-width: 1200px; margin: 0 auto; padding: 0 16px 40px; }
+#dash .pane-head { position: sticky; top: 0; background: var(--bg); z-index: 5; }
+#dash .navlink { color: var(--accent); text-decoration: none; font-size: 13px; margin-left: 16px; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-top: 16px; overflow: hidden; }
+.panel-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+.panel-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
+.panel-head .sub { color: var(--text-dim); font-size: 12px; margin-left: auto; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.empty { color: var(--text-dim); font-size: 13px; padding: 22px 14px; text-align: center; }
+
+/* KPI cards */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: var(--border); }
+.kpi { background: var(--surface); padding: 14px 16px; }
+.kpi-val { font: 600 22px/1.1 var(--mono); }
+.kpi-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin-top: 4px; }
+.kpi.warn .kpi-val { color: var(--fail); }
+
+/* Activity feed */
+.feed { max-height: 320px; overflow-y: auto; padding: 6px 0; font: 12.5px/1.45 var(--mono); }
+.feed-row { display: flex; gap: 8px; padding: 4px 14px; align-items: baseline; border-bottom: 1px solid rgba(255,255,255,.03); }
+.feed-row.warn { background: rgba(245,166,35,.07); }
+.feed-time { color: var(--text-dim); flex: none; }
+.feed-kind { color: var(--accent); flex: none; min-width: 64px; }
+.feed-row.fail .feed-kind { color: var(--fail); }
+.feed-row.ok .feed-kind { color: var(--ok); }
+.feed-text { color: var(--text); word-break: break-word; }
+
+/* Traces + replay */
+.traces { max-height: 200px; overflow-y: auto; }
+.trace-item { display: flex; gap: 10px; width: 100%; text-align: left; background: none; border: none; border-bottom: 1px solid var(--border); color: var(--text); padding: 7px 14px; cursor: pointer; font: 12.5px var(--mono); align-items: baseline; }
+.trace-item:hover { background: var(--surface-2); }
+.trace-item .t-id { color: var(--accent); }
+.trace-item .t-src { color: var(--text-dim); min-width: 60px; }
+.trace-item .t-act { flex: 1; }
+.trace-item .t-ok.ok { color: var(--ok); }
+.trace-item .t-ok.fail { color: var(--fail); }
+.replay { border-top: 1px solid var(--border); max-height: 280px; overflow-y: auto; }
+.replay-head { padding: 8px 14px; font: 12px var(--mono); color: var(--text-dim); border-bottom: 1px solid var(--border); }
+.timeline { padding: 6px 0; }
+.tl-row { display: flex; gap: 10px; padding: 3px 14px; font: 12px/1.4 var(--mono); align-items: baseline; }
+.tl-rel { color: var(--text-dim); min-width: 64px; text-align: right; flex: none; }
+.tl-kind { min-width: 78px; flex: none; }
+.tl-span .tl-kind { color: var(--accent); }
+.tl-inference .tl-kind { color: var(--run); }
+.tl-event .tl-kind { color: var(--text-dim); }
+.tl-audit .tl-kind { color: var(--fail); }
+.tl-command .tl-kind { color: var(--ok); }
+
+/* Tables (trends + cost) */
+.tbl { width: 100%; border-collapse: collapse; font: 12.5px var(--mono); }
+.tbl th { text-align: right; color: var(--text-dim); font-weight: 500; padding: 6px 14px; border-bottom: 1px solid var(--border); }
+.tbl th:first-child, .tbl td:first-child { text-align: left; }
+.tbl td { text-align: right; padding: 5px 14px; border-bottom: 1px solid rgba(255,255,255,.03); }
+.deltas { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+.delta { font: 12px var(--mono); padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); }
+.delta.improving { color: var(--ok); border-color: var(--ok); }
+.delta.worsening { color: var(--fail); border-color: var(--fail); }
+.delta.flat { color: var(--text-dim); }
+.cost-total { padding: 12px 14px; font: 600 14px var(--mono); }
+
+@media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } }

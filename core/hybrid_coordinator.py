@@ -1060,7 +1060,29 @@ class HybridCoordinator:
                         "trace_id": cmd.trace_id,
                     }
                     self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
+                    # Clear the task-local capture so a stale prompt/token count
+                    # from a prior inference in this task can't be attributed to
+                    # this cloud-dev call (mirrors _run_cloud).
+                    set_inference_capture(None)
                     response_text = await self._cloud_dev_agent.run(clean_text, domain, ctx)
+                    # Persist the Opus-tier token usage for the cost ledger. This
+                    # is the most expensive cloud path; CloudDevAgent.run() set the
+                    # capture from the Bedrock response usage.
+                    if self._agent_db and self._agent_db.available:
+                        _p, _ti, _to = get_inference_capture()
+                        _cda_model = getattr(self._cloud_dev_agent, "model", "unknown")
+                        await self._agent_db.insert_inference(
+                            command_id=None,
+                            model=_cda_model,
+                            domain=domain,
+                            prompt=None,
+                            response=None,
+                            tokens_in=_ti,
+                            tokens_out=_to,
+                            latency_ms=0.0,
+                            backend="bedrock",
+                            error=None,
+                        )
                     # Record the ORIGINAL locally (kept on-device; re-scrubbed at
                     # the next cloud egress).
                     self._record_dev_command(cmd.text)
