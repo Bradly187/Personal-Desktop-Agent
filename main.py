@@ -535,6 +535,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await agent_db.prune_event_log(days=7)
     await agent_db.prune_tool_calls(days=30)
     await agent_db.prune_rate_limit_events(days=7)
+    # command_traces: tracing is on by default → grows per command; retain 30 days
+    await agent_db.prune_command_traces(days=30)
 
     # --- Crash recovery: reconcile plans left mid-run by a previous process ---
     # Any agent_run still 'running' means the process died during a plan. Mark
@@ -927,6 +929,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     coordinator.set_event_bus(event_bus)
     coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
     dev_agent.set_event_bus(event_bus)
+    # Surface silent backend events: Ollama hang (inference.stalled) + breaker open
+    # (breaker.opened). No-op on backends without a set_event_bus method.
+    if hasattr(local, "set_event_bus"):
+        local.set_event_bus(event_bus)
 
     # ── PC desktop chat UI (opt-in via --chat): chat window + live DAG preview ──
     # Standalone localhost aiohttp server sharing the live pipeline. Kept separate
@@ -1118,6 +1124,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     governor.set_whisper_stream(whisper)
     governor.set_model_router(router)   # eviction targets the live model lineup
     governor.set_scheduler(scheduler)   # gap #3: flare pauses new dev/background admission
+    governor.set_event_bus(event_bus)   # vram.evicted / vram.restored on flare transitions
     if indexer is not None:
         governor.set_indexer(indexer)
     # Live-refresh the iPad Agent dashboard on each pain-day (flare) transition so

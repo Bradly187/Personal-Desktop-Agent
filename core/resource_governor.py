@@ -93,8 +93,37 @@ class ResourceGovernor:
         # Fired (with the new flare state) on each flare on/off transition so
         # observers can react — e.g. refresh the iPad Agent-tab dashboard.
         self._flare_change_cb: Optional[Callable[[bool], Any]] = None
+        # Optional EventBus so flare-driven VRAM eviction/restore is visible on
+        # the bus (observability batch 2026-06-19), not just in the log.
+        self._event_bus = None
 
     # ── Wiring ────────────────────────────────────────────────────────────────
+
+    def set_event_bus(self, bus) -> None:
+        """Wire an EventBus so VRAM eviction/restore publish events (optional)."""
+        self._event_bus = bus
+
+    def _emit_bus(self, topic: str, payload: dict) -> None:
+        """Fire-and-forget publish from the (async) flare handlers. No-op if unset."""
+        if self._event_bus is None:
+            return
+        try:
+            from core.async_utils import fire_and_log
+            fire_and_log(
+                self._event_bus.publish(topic, payload, source="resource_governor"),
+                log, label=f"publish {topic}",
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _free_vram_gb() -> Optional[float]:
+        try:
+            from core.vram import free_vram_gb
+            v = free_vram_gb()
+            return round(v, 2) if v is not None else None
+        except Exception:
+            return None
 
     def set_fusion_engine(self, fusion: "FusionEngine") -> None:
         self._fusion = fusion
@@ -282,6 +311,13 @@ class ResourceGovernor:
             except Exception as exc:
                 log.debug("ResourceGovernor: sleep_specialists failed: %s", exc)
 
+        from core.events import TOPIC_VRAM_EVICTED
+        self._emit_bus(TOPIC_VRAM_EVICTED, {
+            "free_gb": self._free_vram_gb(),
+            "reason": "flare",
+            "score": round(score, 2),
+        })
+
         # 6. Notify observers (e.g. refresh the iPad Agent dashboard's pain-day).
         self._notify_flare_change(True)
 
@@ -299,6 +335,9 @@ class ResourceGovernor:
             except Exception as exc:
                 log.debug("ResourceGovernor: scheduler.resume_dev() failed: %s", exc)
         await asyncio.to_thread(self._restore_resources_sync)
+
+        from core.events import TOPIC_VRAM_RESTORED
+        self._emit_bus(TOPIC_VRAM_RESTORED, {"free_gb": self._free_vram_gb()})
 
         # Notify observers (e.g. refresh the iPad Agent dashboard's pain-day).
         self._notify_flare_change(False)

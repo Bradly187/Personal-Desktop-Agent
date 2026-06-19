@@ -43,6 +43,12 @@ from core.scheduler import Priority
 
 log = logging.getLogger(__name__)
 
+# Topics broadcast to ALL dashboard clients (not trace-targeted like chat frames).
+_DASHBOARD_TOPICS = {
+    "command.executed", "goal.dequeued", "goal.completed",
+    "vram.evicted", "vram.restored", "breaker.opened", "inference.stalled",
+}
+
 _STATIC_DIR = Path(__file__).parent.parent / "web_client_chat"
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
@@ -139,6 +145,15 @@ class ChatServer:
         app.router.add_get("/", self._index_handler)
         app.router.add_get("/chat", self._ws_handler)
         app.router.add_get("/health", self._health_handler)
+        # Unified observability dashboard (read-only JSON + a static page). The
+        # live "Now"/activity panels reuse the EventBus pump (broadcast frames);
+        # the historical panels call the monitoring/* modules off the loop.
+        app.router.add_get("/dashboard", self._dashboard_handler)
+        app.router.add_get("/api/metrics", self._api_metrics)
+        app.router.add_get("/api/recent-traces", self._api_recent_traces)
+        app.router.add_get("/api/replay/{tid}", self._api_replay)
+        app.router.add_get("/api/trends", self._api_trends)
+        app.router.add_get("/api/cost", self._api_cost)
         if _STATIC_DIR.exists():
             app.router.add_static("/static/", _STATIC_DIR, show_index=False)
 
@@ -190,6 +205,63 @@ class ChatServer:
 
     async def _health_handler(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "clients": len(self._clients)})
+
+    # ── Dashboard (read-only observability) ───────────────────────────────────
+    def _db_path(self) -> Optional[str]:
+        return getattr(self._agent_db, "path", None) if self._agent_db is not None else None
+
+    @staticmethod
+    def _qint(request: web.Request, key: str, default: int) -> int:
+        try:
+            return int(request.query.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    async def _dashboard_handler(self, request: web.Request) -> web.StreamResponse:
+        page = _STATIC_DIR / "dashboard.html"
+        if page.exists():
+            return web.FileResponse(page)
+        return web.Response(text="dashboard assets missing (web_client_chat/dashboard.html)",
+                            status=404)
+
+    async def _api_metrics(self, request: web.Request) -> web.Response:
+        try:
+            from monitoring.metrics import get_metrics
+            return web.json_response(get_metrics().get_snapshot())
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _api_recent_traces(self, request: web.Request) -> web.Response:
+        path = self._db_path()
+        if not path:
+            return web.json_response([], status=200)
+        from monitoring import replay
+        limit = self._qint(request, "limit", 25)
+        rows = await asyncio.to_thread(replay.recent_traces, path, limit)
+        return web.json_response(rows)
+
+    async def _api_replay(self, request: web.Request) -> web.Response:
+        path = self._db_path() or "agent.db"
+        audit = str(Path(path).parent / "audit.db")
+        from monitoring import replay
+        tid = request.match_info["tid"]
+        result = await asyncio.to_thread(replay.replay_trace, tid, path, audit)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_trends(self, request: web.Request) -> web.Response:
+        path = self._db_path() or "agent.db"
+        from monitoring import trends
+        limit = self._qint(request, "limit", 30)
+        result = await asyncio.to_thread(trends.session_trends, path, limit)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_cost(self, request: web.Request) -> web.Response:
+        path = self._db_path() or "agent.db"
+        from monitoring import cost_ledger
+        days_q = request.query.get("days", "30")
+        days = None if str(days_q).lower() in ("0", "all", "none") else self._qint(request, "days", 30)
+        result = await asyncio.to_thread(cost_ledger.cost_rollup, path, days)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
 
     async def _ws_handler(self, request: web.Request) -> web.StreamResponse:
         ws = web.WebSocketResponse(heartbeat=30)
@@ -286,6 +358,14 @@ class ChatServer:
         to that request's socket. A large queue resists slow-consumer drops."""
         try:
             async for ev in self._event_bus.subscribe("chat_server", "%", maxsize=1024):
+                # 1) Dashboard broadcast — ops topics go to EVERY client regardless
+                #    of trace_id (background events like vram.evicted have none).
+                if ev.get("topic") in _DASHBOARD_TOPICS:
+                    dframe = self._to_dashboard_frame(ev)
+                    if dframe is not None:
+                        for c in list(self._clients.values()):
+                            c.push(dframe)
+                # 2) Chat frame — fan only to the in-flight request's own socket.
                 tid = ev.get("trace_id")
                 if not tid:
                     continue
@@ -336,4 +416,41 @@ class ChatServer:
         if topic == "replan.exhausted":
             return {"type": "activity",
                     "text": f"replan exhausted after {p.get('failed_action')} ({p.get('replans')} replans)"}
+        return None
+
+    @staticmethod
+    def _to_dashboard_frame(ev: dict) -> Optional[dict]:
+        """Map an ops EventBus envelope to a broadcast dashboard frame.
+
+        These power the dashboard's live "Now" counters + activity feed. Unlike
+        chat frames they are NOT trace-targeted — every dashboard client sees them.
+        """
+        topic = ev.get("topic", "")
+        p = ev.get("payload") or {}
+        ts = ev.get("ts")
+        if topic == "command.executed":
+            return {"type": "dash_event", "kind": "command", "ts": ts,
+                    "action": p.get("action"), "route": p.get("route"),
+                    "success": p.get("success"), "latency_ms": p.get("latency_ms"),
+                    "gate": p.get("gate")}
+        if topic == "goal.dequeued":
+            return {"type": "dash_event", "kind": "goal", "ts": ts, "severity": "info",
+                    "text": f"goal {p.get('goal_id')} started: {str(p.get('goal',''))[:80]}"}
+        if topic == "goal.completed":
+            ok = p.get("success")
+            return {"type": "dash_event", "kind": "goal", "ts": ts,
+                    "severity": "info" if ok else "warn",
+                    "text": f"goal {p.get('goal_id')} {p.get('status')}"}
+        if topic == "vram.evicted":
+            return {"type": "dash_event", "kind": "vram", "ts": ts, "severity": "warn",
+                    "text": f"VRAM eviction ({p.get('reason')}); free={p.get('free_gb')} GB"}
+        if topic == "vram.restored":
+            return {"type": "dash_event", "kind": "vram", "ts": ts, "severity": "info",
+                    "text": f"models restored; free={p.get('free_gb')} GB"}
+        if topic == "breaker.opened":
+            return {"type": "dash_event", "kind": "breaker", "ts": ts, "severity": "warn",
+                    "text": f"circuit breaker open: {p.get('name')} — {p.get('reason')}"}
+        if topic == "inference.stalled":
+            return {"type": "dash_event", "kind": "stall", "ts": ts, "severity": "warn",
+                    "text": f"{p.get('backend')} stall ≥{p.get('timeout_s')}s ({p.get('phase')})"}
         return None

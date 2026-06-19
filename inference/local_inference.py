@@ -470,6 +470,7 @@ class OllamaInference(LocalInference):
         self._breaker = CircuitBreaker(
             name="ollama", fail_threshold=3, cooldown_s=30.0,
             slow_call_s=max(1.0, timeout * 0.8),
+            on_open=self._emit_breaker_open,
         )
         # Serialise requests to this Ollama endpoint. Concurrent calls overwhelm
         # Ollama's GPU-discovery phase and can trigger a runner-spawn storm (observed
@@ -478,10 +479,35 @@ class OllamaInference(LocalInference):
         self._request_sem = asyncio.Semaphore(1)
         # Optional metrics sink; wired via set_metrics() from main.py or tests.
         self._metrics = None
+        # Optional EventBus; wired via set_event_bus() so backend stalls and the
+        # breaker opening are visible on the bus (observability batch 2026-06-19).
+        self._event_bus = None
 
     def set_metrics(self, metrics) -> None:
         """Wire an in-process Metrics object for hang-timeout counter updates."""
         self._metrics = metrics
+
+    def set_event_bus(self, bus) -> None:
+        """Wire an EventBus so breaker-open and hang events publish (optional)."""
+        self._event_bus = bus
+
+    def _emit_bus(self, topic: str, payload: dict) -> None:
+        """Fire-and-forget publish on the running loop. No-op without a bus/loop."""
+        if self._event_bus is None:
+            return
+        try:
+            from core.async_utils import fire_and_log
+            fire_and_log(
+                self._event_bus.publish(topic, payload, source="ollama_inference"),
+                log, label=f"publish {topic}",
+            )
+        except Exception:
+            pass
+
+    def _emit_breaker_open(self, status: dict) -> None:
+        """CircuitBreaker on_open hook → breaker.opened event (runs on the loop)."""
+        from core.events import TOPIC_BREAKER_OPENED
+        self._emit_bus(TOPIC_BREAKER_OPENED, status)
 
     async def infer(
         self,
@@ -575,6 +601,13 @@ class OllamaInference(LocalInference):
             )
             if self._metrics is not None:
                 self._metrics.inc("ollama_hang_detected")
+            from core.events import TOPIC_INFERENCE_STALLED
+            self._emit_bus(TOPIC_INFERENCE_STALLED, {
+                "timeout_s": round(_hang_timeout_s, 1),
+                "elapsed_s": round(elapsed_s, 1),
+                "backend": "ollama",
+                "phase": "acquired" if _entered_sem else "waiting",
+            })
             # When the timeout fires during semaphore ACQUISITION (_entered_sem=False),
             # the inner finally never ran — update the breaker here so it isn't left
             # with a dangling half-open probe.  When it fires inside the sem block

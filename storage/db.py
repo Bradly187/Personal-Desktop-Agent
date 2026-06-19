@@ -956,9 +956,17 @@ class AgentDB:
     # Lifecycle
     # ---------------------------------------------------------------------- #
 
+    @property
+    def path(self) -> Optional[str]:
+        """Filesystem path of the open agent.db (None until open()). Lets read-only
+        consumers — e.g. the dashboard's replay/trends/cost endpoints — point the
+        stdlib-sqlite reader at the same file."""
+        return getattr(self, "_path", None)
+
     async def open(self, path: Path | str) -> None:
         if not _AIOSQLITE_AVAILABLE:
             return
+        self._path = str(Path(path))
         self._conn = await aiosqlite.connect(Path(path))
         self._conn.row_factory = aiosqlite.Row
         # WAL mode: concurrent readers don't block writers; no "database is locked" under load.
@@ -3171,6 +3179,20 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.prune_rate_limit_events failed: %s", exc)
             return 0
+
+    async def prune_command_traces(self, days: int = 30) -> int:
+        """Delete command_traces rows older than `days`. Returns rows deleted.
+
+        Tracing is on by default (2026-06-19), so this table now grows with every
+        command (~a handful of span rows each). 30 days keeps enough history for
+        latency-attribution debugging and `monitoring/replay.py` replays while
+        bounding growth — same cadence as tool_calls.
+        """
+        cutoff = time.time() - days * 86400
+        return await self._prune_with_retry(
+            "DELETE FROM command_traces WHERE ts < ?", (cutoff,),
+            label=f"command_traces rows (> {days} days)",
+        )
 
     # ---------------------------------------------------------------------- #
     # Event bus

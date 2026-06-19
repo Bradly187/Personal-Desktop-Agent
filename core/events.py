@@ -21,6 +21,15 @@ Topic namespace (dotted paths):
 
   The plan.generated / dag.* / chat.token topics carry a trace_id and drive the
   live DAG + token stream in the PC desktop chat UI (core/chat_server.py).
+
+  Background-work topics (2026-06-19 observability batch) — surface autonomous
+  actions that used to happen with no live signal (counter increments at most):
+  goal.dequeued      — a queued goal was claimed for execution; payload: {goal_id, goal, source_trigger}
+  goal.completed     — a queued goal finished; payload: {goal_id, status, success}
+  vram.evicted       — ResourceGovernor evicted heavy models on a flare; payload: {free_gb, reason}
+  vram.restored      — heavy models restored after a flare cleared; payload: {free_gb}
+  breaker.opened     — an inference backend circuit-breaker opened; payload: {name, state, reason}
+  inference.stalled  — an Ollama call hit DA_OLLAMA_TIMEOUT_S (hang guard); payload: {timeout_s, backend}
 """
 from __future__ import annotations
 
@@ -50,6 +59,13 @@ TOPIC_DAG_STEP_STARTED  = "dag.step_started"
 TOPIC_DAG_STEP_DONE     = "dag.step_completed"
 TOPIC_CHAT_TOKEN        = "chat.token"
 TOPIC_DAG_APPROVAL      = "dag.approval_requested"  # {message, destructive} — chat approval card
+# Background-work observability topics (2026-06-19) — make autonomous actions visible.
+TOPIC_GOAL_DEQUEUED     = "goal.dequeued"
+TOPIC_GOAL_COMPLETED    = "goal.completed"
+TOPIC_VRAM_EVICTED      = "vram.evicted"
+TOPIC_VRAM_RESTORED     = "vram.restored"
+TOPIC_BREAKER_OPENED    = "breaker.opened"
+TOPIC_INFERENCE_STALLED = "inference.stalled"
 
 
 class EventBus:

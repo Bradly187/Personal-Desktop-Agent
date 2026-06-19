@@ -1,4 +1,4 @@
-"""Cross-layer per-command tracing (opt-in via DA_TRACE).
+"""Cross-layer per-command tracing (on by default; opt-out via DA_TRACE=0).
 
 Reconstructs a single command's journey across the pipeline as one linked trace:
 
@@ -15,8 +15,18 @@ Two-part id propagation (mirrors how the pipeline actually hands work off):
   - Within the synchronous-await subtree (coordinator → router → executor) a
     ContextVar carries the id, so deep layers attach spans without new params.
 
-Zero cost when disabled: `DA_TRACE` unset → every method is an early-return
-no-op and nothing is allocated. Enable with `DA_TRACE=1`.
+Always-on by default (2026-06-19 observability batch): latency attribution is
+the single most useful debugging view, and losing it because a flag was off
+before the session you later care about defeated the purpose. Spans are recorded
+at command boundaries (a handful per human-paced command — NOT in the 60 Hz
+sensor tick), then flushed to AgentDB.command_traces fire-and-forget AFTER the
+command finishes, so the hot path is untouched. A bonus of on-by-default: every
+command now carries a `trace_id`, so `monitoring/replay.py` can reconstruct any
+command's full timeline (commands + spans + events + audit), not just the few
+captured while a flag happened to be set.
+
+Opt out with `DA_TRACE=0` (or false/no/off) — then every method is an
+early-return no-op and nothing is allocated, exactly as before.
 """
 
 from __future__ import annotations
@@ -36,7 +46,15 @@ _current_trace: ContextVar[Optional[str]] = ContextVar("da_current_trace", defau
 
 
 def _enabled_from_env() -> bool:
-    return os.environ.get("DA_TRACE", "0").strip().lower() not in ("", "0", "false", "no", "off")
+    """Tracing is ON by default. Opt out with DA_TRACE=0 (or false/no/off).
+
+    Unset → enabled (the always-on default). Any explicit falsy value disables
+    it for users who want the old zero-cost no-op behavior.
+    """
+    val = os.environ.get("DA_TRACE")
+    if val is None:
+        return True
+    return val.strip().lower() not in ("0", "false", "no", "off")
 
 
 class TraceRecorder:
