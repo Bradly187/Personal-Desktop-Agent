@@ -223,7 +223,7 @@ Remaining tasks:
 - 15.1–15.4: Create integration wiring tests
 
 See e:\Personal_Desktop_Agent\docs\sprint3-handoff.md for full context.
-Spec: e:\Personal_Desktop_Agent\.kiro\specs\behavioral-twin-state\
+Spec: e:\Personal_Desktop_Agent\specs\behavioral-twin-state\
 ```
 
 ---

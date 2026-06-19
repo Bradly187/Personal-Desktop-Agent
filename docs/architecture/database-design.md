@@ -2,7 +2,7 @@
 
 **Context:** The project originally stored data across four incompatible formats — `trainer.db` (SQLite), `routing_log.jsonl` (JSONL), `benchmark_results.json`, and `gesture_calibration.json`. This document records the decisions made when consolidating them into two purpose-fit stores.
 
-Diagrams: `.kiro/specs/ipad-sensor-focus/diagrams/14-database-schema.md`  
+Diagrams: `specs/ipad-sensor-focus/diagrams/14-database-schema.md`  
 Implementation: `db.py`
 
 ---
