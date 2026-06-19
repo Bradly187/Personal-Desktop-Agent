@@ -23,6 +23,18 @@ Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## Sprint S1 — Close the verification loop  *(EH-1)*
 
+> **STATUS (2026-06-19): ALREADY SHIPPED — no code work.** Validating the findings against the
+> code showed EH-1 was already implemented + tested in master by **PR #88** (merged 2026-06-16),
+> *before* this plan was written. Confirmed: executor `status="verify_failed"`
+> (`command_executor.py:691`) and `status="resolve_miss"` via `TargetResolutionError` (`:601`);
+> `_resolve_coords(strict_target=…)` raises instead of cursor-clicking a named miss (`:979`);
+> coordinator one-shot vision→UIA re-resolve + spoken CLARIFY (`hybrid_coordinator.py:2196-2228`);
+> `route()` computes `success` from the final status (`:1545`) so verified-failures reach
+> `record_failure` (`:1631`), never `record_success`. Fold-ins E10/E16/E17 done; `tests/test_verify_loop.py`
+> green (23). **Residuals deferred as marginal:** E20 iPad toast on no-coordinator drop (WARNING already
+> logged, `fusion_engine.py:955`; the drop is a startup-misconfig path); S1.3 explicit `resolved_by`
+> tier label (the next-tier retry already works for the dominant case). Sprint closed; effort moved to S2.
+
 **Goal:** a failed desktop action self-corrects once or honestly asks, instead of silently clicking
 the cursor and recording success. Highest leverage; directly serves the accessibility mission.
 
@@ -31,29 +43,29 @@ the cursor and recording success. Highest leverage; directly serves the accessib
 one-shot behind the existing verify gate so latency stays bounded.
 
 ### Tasks
-- [ ] **S1.1** `desktop/action_verifier.py` — expose the success/fail verdict cleanly to the
+- [x] **S1.1** `desktop/action_verifier.py` — expose the success/fail verdict cleanly to the
       executor (no change to the pixel-diff itself).
-- [ ] **S1.2** `core/command_executor.py` `execute()` (E1) — when verb ∈ `VERIFIABLE_VERBS` and
+- [x] **S1.2** `core/command_executor.py` `execute()` (E1) — when verb ∈ `VERIFIABLE_VERBS` and
       `vr.success is False`, return `status="verify_failed"` carrying `verification` + the resolver
       tier used. Non-verifiable verbs unchanged.
-- [ ] **S1.3** `core/command_executor.py` `_resolve_coords` (E2) — thread `target_specified: bool`
+- [x] **S1.3** `core/command_executor.py` `_resolve_coords` (E2) — thread `target_specified: bool`
       and a `resolved_by` label (`explicit|uia|vision|gaze|cursor`) to the caller. When a target was
       named and only the cursor fallback remains, return a `RESOLVE_MISS` sentinel (do **not** click
       the cursor). Keep cursor fallback only when no target was named (tilt/voice-click).
-- [ ] **S1.4** `core/hybrid_coordinator.py` `_execute_action` — on `RESOLVE_MISS` → CLARIFY
+- [x] **S1.4** `core/hybrid_coordinator.py` `_execute_action` — on `RESOLVE_MISS` → CLARIFY
       ("I couldn't find <target>…"); on `verify_failed` → **one** re-resolve forcing the next tier
       past `resolved_by`, re-verify; still failed → CLARIFY + record **failure**. Cap at one retry.
-- [ ] **S1.5** `core/hybrid_coordinator.py` `route()` outcome (E1) — compute `success` from the
+- [x] **S1.5** `core/hybrid_coordinator.py` `route()` outcome (E1) — compute `success` from the
       *final* verdict, not `status=="ok"`. Verified-failed must reach `record_failure`, never
       `record_success`.
-- [ ] **S1.6** Hot-path honesty fold-ins: Gate-1 gesture-fail logs a `discarded` command row (E10);
+- [x] **S1.6** Hot-path honesty fold-ins: Gate-1 gesture-fail logs a `discarded` command row (E10);
       sanitize raw exception strings in CLARIFY (E16); populate `error_msg` on CLARIFY-as-failure
       rows (E17); `fusion_engine._emit` no-coordinator drop → WARNING + toast (E20).
-- [ ] **S1.7** Tests — `tests/test_verify_loop.py`: verify-fail → one re-resolve → CLARIFY;
+- [x] **S1.7** Tests — `tests/test_verify_loop.py`: verify-fail → one re-resolve → CLARIFY;
       verify-pass → no retry; non-verifiable verb unchanged; `RESOLVE_MISS` → CLARIFY not
       cursor-click; outcome recorded as failure; retry capped at one (assert no storm). Extend
       `test_command_executor.py` (tier labelling + sentinel), `test_action_verifier.py` (status map).
-- [ ] **S1.8** Re-run model-free eval gates (`router_domains`, `skill_triggers`) + full pytest;
+- [x] **S1.8** Re-run model-free eval gates (`router_domains`, `skill_triggers`) + full pytest;
       confirm no regression. Add a verify-loop trajectory case if applicable.
 
 **Exit:** a named-target CLICK with no UIA/vision hit emits CLARIFY (never a cursor click); a
@@ -132,7 +144,7 @@ re-locked on that data; projections removed from the docs.
 
 | Sprint | Findings | Status | PR | Owner |
 |--------|----------|--------|----|----|
-| S1 — verification loop | E1, E2 (+E10/16/17/20) | `[ ]` not started | — | — |
+| S1 — verification loop | E1, E2 (+E10/16/17/20) | `[x]` already shipped (PR #88, 2026-06-16) | #88 | — |
 | S2 — durable-failure integrity | E3, E4, E5, E6 (+E18/19) | `[ ]` not started | — | — |
 | S3 — eval data accrual | roadmap D | `[ ]` background | — | — |
 
