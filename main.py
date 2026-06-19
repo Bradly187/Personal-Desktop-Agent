@@ -926,6 +926,21 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
     dev_agent.set_event_bus(event_bus)
 
+    # ── PC desktop chat UI (opt-in via --chat): chat window + live DAG preview ──
+    # Standalone localhost aiohttp server sharing the live pipeline. Kept separate
+    # from the iPad bridge so the iPad WebSocket protocol stays an iPad concern.
+    chat_server = None
+    if getattr(args, "chat", False):
+        from core.chat_server import ChatServer
+        chat_server = ChatServer(
+            host=args.chat_host, port=args.chat_port,
+            allow_destructive=not args.chat_readonly,
+        )
+        chat_server.set_coordinator(coordinator)
+        chat_server.set_scheduler(scheduler)
+        chat_server.set_event_bus(event_bus)
+        chat_server.set_agent_db(agent_db, session_id)
+
     # Wire CommandExecutor DB access for per-call timeout + idempotency.
     coordinator._executor.set_agent_db(agent_db)
     # Wire audit log so command execution failures appear in the tamper-evident trail.
@@ -1267,6 +1282,12 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion_task = asyncio.create_task(fusion.run())
     watchdog_task = asyncio.create_task(_watchdog(fusion, whisper, session_id))
 
+    # Start the chat UI server (if enabled) and open the desktop window/browser
+    # once it is actually listening.
+    if chat_server is not None:
+        await chat_server.start()
+        _open_chat_shell(chat_server.url(), getattr(args, "chat_window", False))
+
     # Wait for Ctrl-C
     await shutdown.wait_for_shutdown()
 
@@ -1293,6 +1314,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             await asyncio.wait_for(_kb_index_task, timeout=10)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
+
+    # Stop the chat UI server
+    if chat_server is not None:
+        await chat_server.stop()
 
     # Stop cluster health monitor
     if cluster_health is not None:
@@ -1357,6 +1382,44 @@ async def _run_viewer_only(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chat UI desktop shell
+# ---------------------------------------------------------------------------
+
+def _open_chat_shell(url: str, native_window: bool) -> None:
+    """Open the chat UI: a native pywebview window if requested and available,
+    else the default browser. Never fatal — the URL is always reachable
+    manually (and logged), so a missing GUI dependency can't break startup."""
+    def _browser() -> None:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            log.info("Chat UI: opened in default browser — %s", url)
+        except Exception as exc:
+            log.warning("Chat UI: could not open browser (%s). Open manually: %s", exc, url)
+
+    if native_window:
+        try:
+            import threading
+            import webview  # pywebview — optional dependency (Edge WebView2 on Windows)
+
+            def _win() -> None:
+                try:
+                    webview.create_window("Desktop Agent", url, width=1200, height=820)
+                    webview.start()
+                except Exception as exc:
+                    log.warning("Chat UI: native window failed (%s) — browser fallback", exc)
+                    _browser()
+
+            threading.Thread(target=_win, daemon=True, name="chat-webview").start()
+            log.info("Chat UI: launching native window — %s", url)
+            return
+        except ImportError:
+            log.info("Chat UI: pywebview not installed — using browser "
+                     "(install with: pip install pywebview)")
+    _browser()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1389,6 +1452,16 @@ def _parse_args() -> argparse.Namespace:
                    help="Index Python/Swift source + docs PDFs into ChromaDB RAG at startup")
     p.add_argument("--metrics-port", type=int, default=0,
                    help="Expose /metrics JSON endpoint on this port (0 = disabled)")
+    p.add_argument("--chat", action="store_true",
+                   help="Enable the PC desktop chat UI (chat window + live DAG preview)")
+    p.add_argument("--chat-port", type=int, default=8770,
+                   help="Port for the chat UI server (default: 8770)")
+    p.add_argument("--chat-host", type=str, default="127.0.0.1",
+                   help="Bind host for the chat UI server (default: 127.0.0.1, localhost-only)")
+    p.add_argument("--chat-window", action="store_true",
+                   help="Open the chat UI in a native window (pywebview) instead of the browser")
+    p.add_argument("--chat-readonly", action="store_true",
+                   help="Disable in-chat approval of destructive dev steps (voice/iPad approval only)")
     p.add_argument("--cluster-config", type=str, default=None,
                    help="Path to cluster_config.json (default: project root). "
                         "Enables laptop-node offload of the lightweight command domain.")

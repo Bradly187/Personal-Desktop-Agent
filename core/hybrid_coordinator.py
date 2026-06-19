@@ -1057,6 +1057,7 @@ class HybridCoordinator:
                         "session_id": self._session_id,
                         "recent_commands": recent,
                         "source": cmd.source,
+                        "trace_id": cmd.trace_id,
                     }
                     self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
                     response_text = await self._cloud_dev_agent.run(clean_text, domain, ctx)
@@ -1076,7 +1077,7 @@ class HybridCoordinator:
                     }
 
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
-                agent_result = await self._dev_agent.handle(cmd.text)
+                agent_result = await self._dev_agent.handle(cmd.text, trace_id=cmd.trace_id)
                 # Personal-document queries are NOT recorded in the rolling dev
                 # context: _recent_dev_commands is sent verbatim to the cloud
                 # dev agent on later queries, which would leak the very text the
