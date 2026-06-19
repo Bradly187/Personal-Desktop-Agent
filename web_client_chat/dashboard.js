@@ -285,6 +285,28 @@
     box.appendChild(wrap);
   }
 
+  // ── Input modality (poll) — usage by source ─────────────────────────────────
+  async function refreshModality() {
+    const res = await getJSON("/api/modality?days=30");
+    const box = $("modality"); box.innerHTML = "";
+    if (!res) { box.appendChild(el("div", "empty", "modality unavailable")); return; }
+    $("modality-sub").textContent = res.days ? `last ${res.days}d` : "all time";
+    const srcs = res.sources || [];
+    if (!srcs.length) { box.appendChild(el("div", "empty", "no commands yet")); return; }
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>source</th><th>calls</th><th>ok</th><th>avg</th>" +
+      "<th>cloud</th></tr></thead>";
+    const tb = el("tbody");
+    for (const s of srcs) {
+      const tr = el("tr");
+      tr.innerHTML = `<td>${s.source}</td><td>${(s.n || 0).toLocaleString()}</td>` +
+        `<td>${pct(s.success_rate)}</td><td>${ms(s.avg_latency_ms)}</td>` +
+        `<td>${pct(s.cloud_rate)}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
   // ── WebSocket (live feed) ───────────────────────────────────────────────────
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -303,9 +325,9 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); refreshPainday(); }
+  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); refreshPainday(); refreshModality(); }
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); refreshPainday(); }, 15000);
+  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); refreshPainday(); refreshModality(); }, 15000);
 })();
