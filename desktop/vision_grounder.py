@@ -75,20 +75,34 @@ class VisionGrounder:
     ) -> None:
         self._model = model
         self._backend = backend
-        self._client = None  # Anthropic client, lazy-init
+        self._client = None  # cloud client (Bedrock/Anthropic), lazy-init
+        self._cloud_model: Optional[str] = None  # backend-mapped model id
         self._cache: dict[str, tuple[int, int, float]] = {}
         self._cache_ttl_s: float = _CACHE_TTL_S
         self._cache_max: int = 200
 
     def _get_client(self):
+        """Build the cloud client through the shared backend seam so the vision
+        fallback uses the SAME cloud backend as the command/dev paths — Amazon
+        Bedrock when AWS_BEARER_TOKEN_BEDROCK is set, else direct Anthropic.
+
+        resolve_backend() raises an actionable RuntimeError when no cloud
+        credential is configured; callers already treat that as "unavailable".
+        """
         if self._client is None:
+            from core.cloud_backend import resolve_backend
+            backend = resolve_backend()
             try:
-                import anthropic
-                self._client = anthropic.Anthropic()
+                self._client = backend.make_client(timeout=20.0)
             except ImportError:
                 raise RuntimeError(
                     "anthropic package not installed — run: pip install anthropic"
                 )
+            # Bedrock needs the cross-region inference-profile id (e.g.
+            # us.anthropic.claude-sonnet-4-6); direct Anthropic leaves it unchanged.
+            self._cloud_model = backend.map_model(self._model)
+            log.info("VisionGrounder cloud fallback: backend=%s model=%s",
+                     backend.name, self._cloud_model)
         return self._client
 
     def ground(
@@ -127,16 +141,17 @@ class VisionGrounder:
                 parsed = self._ask_ollama(screenshot_b64, target)
             except Exception as exc:
                 log.warning(
-                    "VisionGrounder Ollama failed (%s), trying Anthropic fallback", exc
+                    "VisionGrounder Ollama failed (%s), trying cloud fallback", exc
                 )
                 parsed = None
             if parsed is None:
-                # Graceful fallback to Anthropic when local model is unavailable
+                # Graceful fallback to the cloud backend (Bedrock/Anthropic) when
+                # the local vision model is unavailable.
                 try:
                     client = self._get_client()
                     parsed = self._ask_claude(client, screenshot_b64, target)
                 except Exception as exc2:
-                    log.warning("VisionGrounder Anthropic fallback also failed: %s", exc2)
+                    log.warning("VisionGrounder cloud fallback also failed: %s", exc2)
                     return None
         else:
             try:
@@ -234,7 +249,7 @@ class VisionGrounder:
         """Send screenshot + target to Claude and parse the JSON response."""
         try:
             response = client.messages.create(
-                model=self._model,
+                model=self._cloud_model or self._model,
                 max_tokens=_MAX_TOKENS,
                 messages=[
                     {

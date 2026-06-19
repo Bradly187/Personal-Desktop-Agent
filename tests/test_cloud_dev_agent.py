@@ -138,8 +138,17 @@ def test_get_status_shape():
     assert st["available"] is True  # key provided
 
 
+def _clear_cloud_creds(monkeypatch):
+    """Clear every cloud credential so the 'no backend configured' path is tested
+    regardless of the developer's environment (a Bedrock token would otherwise
+    make resolve_backend() succeed)."""
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                "AWS_BEARER_TOKEN_BEDROCK", "DA_CLOUD_BACKEND"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_get_status_unavailable_without_key(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _clear_cloud_creds(monkeypatch)
     agent = CloudDevAgent(api_key=None)
     assert agent.get_status()["available"] is False
 
@@ -213,7 +222,7 @@ async def test_run_api_error_returns_clarify_string():
 
 
 async def test_run_missing_key_returns_clarify(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _clear_cloud_creds(monkeypatch)
     agent = CloudDevAgent(api_key=None)  # no client injected → _get_client raises
     out = await agent.run("write code", domain="code")
     assert out == "CLARIFY cloud dev agent temporarily unavailable"
