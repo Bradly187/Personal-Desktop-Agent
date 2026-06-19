@@ -40,6 +40,8 @@ from core.approval_keywords import classify_confirmation
 from core.domain_classifier import DomainClassifier
 from core.events import (
     TOPIC_REPLAN_EXHAUSTED, TOPIC_STEP_FAILED,
+    TOPIC_PLAN_GENERATED, TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
+    TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
 )
 from inference.model_router import ModelRouter, RouterResult
 
@@ -352,6 +354,14 @@ class DevAgent:
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
 
+        # Live DAG/token correlation for the PC chat UI. _active_trace_id is the
+        # trace_id of the in-flight request (set by handle/plan_and_run); _step_seq
+        # maps id(step) → the step's original 1-based plan position so dag.* events
+        # and plan.generated agree on node identity (deps reference these indices).
+        # Both are safe single-plan state because _plan_lock serializes plans.
+        self._active_trace_id: str = ""
+        self._step_seq: dict[int, int] = {}
+
         # Goal-level authorization state (reset after each plan)
         self._plan_authorized: bool = False
         self._approved_verbs: frozenset[str] = frozenset()
@@ -377,6 +387,57 @@ class DevAgent:
     def set_event_bus(self, bus) -> None:
         """Wire the EventBus for publishing replan-exhausted and step-failed events."""
         self._event_bus = bus
+
+    # ---------------------------------------------------------------------- #
+    # Live DAG / token event emission (PC chat UI — core/chat_server.py)
+    # ---------------------------------------------------------------------- #
+
+    async def _publish_live(self, topic: str, payload: dict) -> None:
+        """Best-effort publish of a live-UI event tagged with the active trace_id.
+
+        No-op when no EventBus is wired or no request is in flight, so the dev
+        path costs nothing outside a chat-correlated run. Never raises into the
+        execution loop.
+        """
+        if self._event_bus is None or not self._active_trace_id:
+            return
+        try:
+            await self._event_bus.publish(
+                topic, payload, source="dev_agent", trace_id=self._active_trace_id
+            )
+        except Exception as exc:
+            log.debug("DevAgent: %s publish failed: %s", topic, exc)
+
+    @staticmethod
+    def _result_snippet(step: "AgentStep") -> str:
+        """A short, secret-safe one-liner for a completed step.
+
+        Never surfaces WRITE_FILE bodies or RUN_TERMINAL stdout (may contain
+        secrets) — only a generic status for those verbs; reads/EXPLAIN show a
+        truncated result.
+        """
+        action = step.action.upper()
+        if action in ("WRITE_FILE", "RUN_TERMINAL"):
+            return "ok" if step.success else "failed"
+        return (step.result or "")[:120]
+
+    async def _emit_step_started(self, step: "AgentStep") -> None:
+        n = self._step_seq.get(id(step))
+        if n is None:
+            return
+        await self._publish_live(TOPIC_DAG_STEP_STARTED, {"n": n, "action": step.action})
+
+    async def _emit_step_completed(self, step: "AgentStep", step_num: int) -> None:
+        # Original plan position for mapped steps; completion order for steps a
+        # replan injected after plan.generated was published.
+        n = self._step_seq.get(id(step), step_num)
+        await self._publish_live(TOPIC_DAG_STEP_DONE, {
+            "n": n,
+            "action": step.action,
+            "success": bool(step.success),
+            "latency_ms": round(step.latency_ms, 1),
+            "result_snippet": self._result_snippet(step),
+        })
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
@@ -441,21 +502,27 @@ class DevAgent:
     # Primary entry point
     # ---------------------------------------------------------------------- #
 
-    async def handle(self, text: str, screenshot_b64: Optional[str] = None) -> AgentResult:
+    async def handle(self, text: str, screenshot_b64: Optional[str] = None,
+                     trace_id: str = "") -> AgentResult:
         """Classify, route, and execute a user query.
 
         - COMMAND domain → passes through to HybridCoordinator (existing pipeline)
         - PLAN domain → plan_and_run loop
         - CODE/MATH/VISION/GENERAL → single specialist inference, result returned
+
+        ``trace_id`` (set by the chat UI via HybridCoordinator) correlates every
+        live DAG / token event this request emits to one chat socket. Empty for
+        non-chat callers (voice / drain queue) → live emission is a no-op.
         """
         t0 = time.monotonic()
+        self._active_trace_id = trace_id
         domain = self._classifier.classify(text)
         log.info("DevAgent: domain=%s  text=%r", domain, text[:80])
 
         if domain == "command" and self._coordinator:
             # Pass through to the accessibility pipeline
             from core.command_executor import Command
-            cmd = Command(text=text, action="CLARIFY", source="voice")
+            cmd = Command(text=text, action="CLARIFY", source="voice", trace_id=trace_id)
             result_dict = await self._coordinator.route(cmd)
             return AgentResult(
                 goal=text,
@@ -476,7 +543,7 @@ class DevAgent:
             return await self._handle_personal_query(text)
 
         if domain == "plan":
-            return await self.plan_and_run(text)
+            return await self.plan_and_run(text, trace_id=trace_id)
 
         if domain == "vision" and screenshot_b64 is None:
             # Auto-capture screen for vision queries
@@ -489,12 +556,42 @@ class DevAgent:
             if rag:
                 extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
 
-        router_result = await self._router.infer(
-            domain=domain,
-            user_text=text,
-            screenshot_b64=screenshot_b64,
-            context=extra_ctx,
-        )
+        # Chat path (trace_id + EventBus wired): stream tokens so the chat UI
+        # types the answer out like Claude Code. Each chunk is published as a
+        # chat.token event keyed by trace_id; the assembled text becomes the
+        # final result. Non-chat callers take the original single-shot path.
+        if trace_id and self._event_bus is not None:
+            chunks: list[str] = []
+            try:
+                async for tok in self._router.infer_stream(
+                    domain=domain, user_text=text,
+                    screenshot_b64=screenshot_b64, context=extra_ctx,
+                ):
+                    if not tok:
+                        continue
+                    chunks.append(tok)
+                    await self._publish_live(TOPIC_CHAT_TOKEN, {"text": tok})
+                full_text = "".join(chunks)
+                router_result = RouterResult(
+                    text=full_text,
+                    model=self._router.select_profile(domain).name,
+                    domain=domain,
+                    latency_ms=(time.monotonic() - t0) * 1000,
+                    free_form=True,
+                )
+            except Exception as exc:
+                log.warning("DevAgent: stream failed (%s) — single-shot fallback", exc)
+                router_result = await self._router.infer(
+                    domain=domain, user_text=text,
+                    screenshot_b64=screenshot_b64, context=extra_ctx,
+                )
+        else:
+            router_result = await self._router.infer(
+                domain=domain,
+                user_text=text,
+                screenshot_b64=screenshot_b64,
+                context=extra_ctx,
+            )
 
         self._push_context(f"User: {text}\nAssistant ({router_result.model}): {router_result.text[:200]}")
 
@@ -528,17 +625,20 @@ class DevAgent:
     # Plan → Execute → Reflect loop
     # ---------------------------------------------------------------------- #
 
-    async def plan_and_run(self, goal: str) -> AgentResult:
+    async def plan_and_run(self, goal: str, trace_id: str = "") -> AgentResult:
         """Decompose a complex goal into steps and execute them sequentially.
 
         Serialized: plan state (_plan_authorized, _cancel_event, _current_goal,
         step counters, GoalSession) is instance-level, so two interleaved plans
         would answer each other's confirmations and un-cancel each other.
+
+        ``trace_id`` (chat UI) correlates plan.generated / dag.* events to one
+        socket; empty for non-chat callers → a fresh trace is minted as before.
         """
         async with self._plan_lock:
-            return await self._plan_and_run_locked(goal)
+            return await self._plan_and_run_locked(goal, trace_id)
 
-    async def _plan_and_run_locked(self, goal: str) -> AgentResult:
+    async def _plan_and_run_locked(self, goal: str, cmd_trace_id: str = "") -> AgentResult:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
@@ -549,7 +649,10 @@ class DevAgent:
         # cost when DA_TRACE is off (new_trace returns "" and spans no-op).
         from monitoring.trace import get_tracer
         _tracer = get_tracer()
-        trace_id = _tracer.new_trace(kind="plan", goal=goal[:80])
+        # Reuse the chat-supplied trace_id (so live DAG events correlate to the
+        # originating socket); otherwise mint a fresh one as before.
+        trace_id = cmd_trace_id or _tracer.new_trace(kind="plan", goal=goal[:80])
+        self._active_trace_id = trace_id
         _trace_tok = _tracer.set_current(trace_id)
         _tracer.record_span("plan", trace_id=trace_id, goal=goal[:80])
 
@@ -637,6 +740,19 @@ class DevAgent:
         self._current_step = 0
         self._escalated_this_run = False
 
+        # Live DAG: publish the approved plan as a node/edge graph and map each
+        # step object to its 1-based plan position so dag.* events line up with
+        # the deps edges. No-op when no chat request is in flight.
+        _plan_steps = list(steps[: self.MAX_STEPS])
+        self._step_seq = {id(s): i for i, s in enumerate(_plan_steps, 1)}
+        await self._publish_live(TOPIC_PLAN_GENERATED, {
+            "goal": goal[:120],
+            "steps": [
+                {"n": i, "action": s.action, "args": (s.args or "")[:80], "deps": list(s.deps)}
+                for i, s in enumerate(_plan_steps, 1)
+            ],
+        })
+
         # Durable ledger: write a 'running' run row now so a crash mid-plan is
         # recoverable (reconciled to 'interrupted' on next startup).
         run_id = await self._start_run(goal, plan_result.model)
@@ -715,6 +831,7 @@ class DevAgent:
             log.info("DevAgent: step %d  action=%s  args=%r",
                      self._current_step, step.action, step.args[:60])
 
+            await self._emit_step_started(step)
             ok = await self._run_step_with_retry(step)
             _tracer.record_span("step", trace_id=trace_id, action=step.action, ok=ok)
             executed.append(step)
@@ -964,6 +1081,9 @@ class DevAgent:
                 deduped_safe.append(i)
             safe = deduped_safe
 
+            # Live DAG: every step in this concurrent batch lights up together.
+            for i in safe:
+                await self._emit_step_started(pending[i])
             # Fan-out-safe ready steps run concurrently (or inline if just one).
             if len(safe) >= 2 and self._scheduler is not None:
                 results = await self._scheduler.fan_out(
@@ -989,6 +1109,7 @@ class DevAgent:
                 if self._cancel_event.is_set():
                     cancelled = True
                     break
+                await self._emit_step_started(pending[idx])
                 ok = await self._run_step_with_retry(pending[idx])
                 step = pending.pop(idx)
                 executed.append(step)
@@ -1143,9 +1264,13 @@ class DevAgent:
                     {"run_id": run_id, "step_num": step_num,
                      "action": step.action, "error": (step.result or "")[:200]},
                     source="dev_agent",
+                    trace_id=self._active_trace_id or None,
                 )
             except Exception as _pub_exc:
                 log.debug("DevAgent: step.failed publish failed: %s", _pub_exc)
+        # Live DAG: mark this node done (success or fail) for the chat UI. Single
+        # chokepoint for both the sequential and DAG-wave execution paths.
+        await self._emit_step_completed(step, step_num)
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
             return
@@ -1216,6 +1341,7 @@ class DevAgent:
                     {"run_id": run_id, "goal": goal[:120], "replans": replans,
                      "failed_action": failed_action},
                     source="dev_agent",
+                    trace_id=self._active_trace_id or None,
                 )
             except Exception as _pub_exc:
                 log.debug("DevAgent: event publish failed: %s", _pub_exc)
@@ -1590,6 +1716,14 @@ class DevAgent:
         plan_is_destructive = any(
             s.action.upper() in self._DESTRUCTIVE_VERBS for s in steps[: self.MAX_STEPS]
         )
+
+        # Live UI: surface an approval card in the chat (the spoken question +
+        # whether it's destructive). The actual yes/no still flows through the
+        # shared ~/.claude/approval signal files below — the chat just becomes
+        # another responder. No-op when no chat request is in flight.
+        await self._publish_live(TOPIC_DAG_APPROVAL, {
+            "message": message, "destructive": plan_is_destructive,
+        })
 
         def _grant(verdict: str) -> str:
             GoalSessionStore.create(goal=goal, domain="plan")

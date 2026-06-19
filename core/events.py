@@ -14,6 +14,13 @@ Topic namespace (dotted paths):
   replan.exhausted   — MAX_REPLANS hit; payload: {run_id, goal, replans}
   email.arrived      — external event published by the Gmail skill; payload:
                        {from, subject, snippet, thread_id} — drives event rules (N+2)
+  plan.generated     — DevAgent approved a plan; payload: {goal, steps:[{n,action,args,deps}]}
+  dag.step_started   — a plan step began executing; payload: {n, action}
+  dag.step_completed — a plan step finished; payload: {n, action, success, latency_ms, result_snippet}
+  chat.token         — a streamed LLM text chunk for the chat UI; payload: {text}
+
+  The plan.generated / dag.* / chat.token topics carry a trace_id and drive the
+  live DAG + token stream in the PC desktop chat UI (core/chat_server.py).
 """
 from __future__ import annotations
 
@@ -37,6 +44,12 @@ TOPIC_VOICE_DRIFT       = "voice.drift"
 TOPIC_STEP_FAILED       = "step.failed"
 TOPIC_REPLAN_EXHAUSTED  = "replan.exhausted"
 TOPIC_EMAIL_ARRIVED     = "email.arrived"   # external (Gmail skill) → event rules (N+2)
+# DAG/token topics for the PC desktop chat UI (core/chat_server.py). All carry trace_id.
+TOPIC_PLAN_GENERATED    = "plan.generated"
+TOPIC_DAG_STEP_STARTED  = "dag.step_started"
+TOPIC_DAG_STEP_DONE     = "dag.step_completed"
+TOPIC_CHAT_TOKEN        = "chat.token"
+TOPIC_DAG_APPROVAL      = "dag.approval_requested"  # {message, destructive} — chat approval card
 
 
 class EventBus:

@@ -84,7 +84,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Iterator, Optional
 
 from monitoring.trace import get_tracer
 
@@ -1080,6 +1080,128 @@ class ModelRouter:
                 free_form=False,
                 error=str(exc),
             )
+
+    async def infer_stream(
+        self,
+        domain: str,
+        user_text: str,
+        screenshot_b64: Optional[str] = None,
+        context: Optional[str] = None,
+    ) -> "AsyncIterator[str]":
+        """Yield the specialist response token-by-token for the chat UI.
+
+        Real incremental streaming is used only on the local-Ollama path for
+        free-form profiles whose thinking output isn't stripped (streaming a
+        stripped <think> block correctly would need a cross-chunk parser). Every
+        other case — non-free-form (short verb-first command lines), the vLLM
+        pool, laptop offload, or a profile that hides a think block — falls back
+        to a single full `infer()` and yields its text once. Callers therefore
+        get the same final text regardless; only the typing effect differs.
+        """
+        profile = self.select_profile(domain)
+        streamable = (
+            profile.free_form
+            and not (profile.thinking and profile.strip_thinking)
+            and self._vllm_pool is None
+            and not self._should_offload(domain)
+        )
+        if not streamable:
+            res = await self.infer(domain, user_text, screenshot_b64, context)
+            if res.text:
+                yield res.text
+            return
+
+        prompt_parts = [profile.system_prompt]
+        if context:
+            prompt_parts.append(f"\nRecent context:\n{context}")
+        prompt_parts.append(f"\nUser: {user_text}\nAssistant:")
+        prompt = "\n".join(prompt_parts)
+
+        # Bridge the blocking urllib line-reader (run in a thread) to async via a
+        # queue. A stream error before any token falls back to a single infer().
+        loop = asyncio.get_running_loop()
+        q: "asyncio.Queue" = asyncio.Queue()
+        _SENTINEL = object()
+
+        def _worker() -> None:
+            try:
+                for tok in self._call_ollama_stream(profile, prompt, screenshot_b64):
+                    loop.call_soon_threadsafe(q.put_nowait, tok)
+            except Exception as exc:  # noqa: BLE001 — surfaced as a fallback signal
+                loop.call_soon_threadsafe(q.put_nowait, ("__ERR__", str(exc)))
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, _SENTINEL)
+
+        worker = asyncio.create_task(asyncio.to_thread(_worker))
+        emitted = False
+        try:
+            while True:
+                item = await q.get()
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, tuple) and item and item[0] == "__ERR__":
+                    log.warning("ModelRouter.infer_stream: stream failed (%s)", item[1])
+                    if not emitted:
+                        res = await self.infer(domain, user_text, screenshot_b64, context)
+                        if res.text:
+                            yield res.text
+                    break
+                emitted = True
+                yield item
+        finally:
+            await worker
+
+    def _call_ollama_stream(
+        self,
+        profile: ModelProfile,
+        prompt: str,
+        screenshot_b64: Optional[str],
+    ) -> "Iterator[str]":
+        """Blocking generator over Ollama /api/generate (stream=true) NDJSON.
+
+        Yields each incremental `response` chunk. Mirrors `_call_ollama`'s
+        options/host/timeout. Only reached for free-form, non-think-stripped
+        profiles, so chunks are surfaced raw.
+        """
+        options: dict = {
+            "temperature": 0.0 if not profile.free_form else 0.3,
+            "num_predict": profile.max_tokens,
+        }
+        if profile.thinking:
+            options["think"] = True
+        payload: dict = {
+            "model": profile.name,
+            "prompt": prompt,
+            "stream": True,
+            "options": options,
+        }
+        if profile.json_schema:
+            payload["format"] = profile.json_schema
+        if screenshot_b64 and profile.supports_images:
+            payload["images"] = [screenshot_b64]
+
+        body = json.dumps(payload).encode()
+        base_url = profile.inference_host or self._host
+        req = urllib.request.Request(
+            f"{base_url}/api/generate",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            for line in resp:                    # NDJSON: one JSON object per line
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                chunk = obj.get("response", "")
+                if chunk:
+                    yield chunk
+                if obj.get("done"):
+                    break
 
     async def _infer_lightweight_remote(
         self,
