@@ -64,6 +64,7 @@ from desktop.vision_grounder import VisionGrounder
 from core.conversation_state import ConversationState
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
+from monitoring.cost_ledger import estimate_cost
 from contextvars import ContextVar
 
 # Task-local accumulator linking inference rows to their command row (the
@@ -2026,9 +2027,12 @@ class HybridCoordinator:
                 _ids.append(_inf_id)
         try:
             _st = self._local.get_status()
+            _ti, _to = get_inference_capture()[1:]
             get_tracer().record_span(
                 "inference", route="local", backend=_st.get("backend"),
                 model=_st.get("model"), dur_ms=round(latency_ms, 1),
+                tokens_in=_ti, tokens_out=_to,
+                cost_usd=estimate_cost(_st.get("model", ""), _ti, _to) or None,
             )
         except Exception:
             pass
@@ -2082,18 +2086,36 @@ class HybridCoordinator:
                 # shares the bucket with CloudDevAgent.
                 if self._rate_limiter is not None:
                     await self._rate_limiter.check("anthropic")
-                with get_tracer().timed("inference", route="cloud"):
-                    action_str = await self._cloud.infer(cmd)
+                action_str = await self._cloud.infer(cmd)
         except TimeoutError:
             log.error(
                 "HybridCoordinator: cloud inference timed out after %.0fs — CLARIFY fallback",
                 self._CLOUD_TIMEOUT_S,
             )
+            # Record the timed-out call as a span too (was previously invisible).
+            try:
+                get_tracer().record_span(
+                    "inference", route="cloud", model=self._cfg.anthropic_model,
+                    dur_ms=round((time.monotonic() - t0) * 1000, 1), status="timeout",
+                )
+            except Exception:
+                pass
             return "CLARIFY cloud inference timed out"
         latency_ms = (time.monotonic() - t0) * 1000
+        # Capture token usage once: shared by the trace span (cost-per-step in the
+        # replay timeline) and the durable inferences row below.
+        _prompt, _tokens_in, _tokens_out = get_inference_capture()
+        try:
+            get_tracer().record_span(
+                "inference", route="cloud", model=self._cfg.anthropic_model,
+                dur_ms=round(latency_ms, 1),
+                tokens_in=_tokens_in, tokens_out=_tokens_out,
+                cost_usd=estimate_cost(self._cfg.anthropic_model, _tokens_in, _tokens_out) or None,
+            )
+        except Exception:
+            pass
         if self._agent_db and self._agent_db.available:
             error = action_str if action_str.startswith("CLARIFY") else None
-            _prompt, _tokens_in, _tokens_out = get_inference_capture()
             _inf_id = await self._agent_db.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=self._cfg.anthropic_model,

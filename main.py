@@ -1553,14 +1553,74 @@ def _raise_windows_timer_resolution() -> None:
         log.warning("timeBeginPeriod(1) failed: %s — FusionEngine will run at ~32 Hz", exc)
 
 
+def _configure_logging(debug: bool) -> None:
+    """Configure root logging: pretty console + rotating file, with trace_id.
+
+    Two improvements over the old one-line ``basicConfig`` (2026-06-19 observability
+    follow-up):
+
+    * **Rotation** — the agent runs as a watchdog-restarted daemon, so an
+      unbounded ``logs/agent.log`` was a real disk-growth bug. A
+      ``RotatingFileHandler`` caps it at 10 MB × 5 backups.
+    * **trace_id correlation** — every record carries the in-flight ``trace_id``
+      (via a log-record factory reading the trace ContextVar), so a console/file
+      line can be pasted straight into ``python -m monitoring.replay <trace_id>``.
+      Records logged outside a command context show ``--------``.
+
+    Idempotent: safe to call once from ``main()``. Best-effort on the file handler
+    (a read-only ``logs/`` must never stop the agent from starting).
+    """
+    # Inject trace_id onto every LogRecord so the format string can reference it
+    # regardless of which logger emitted the record (a Filter would only cover
+    # records logged directly to the logger it's attached to).
+    from monitoring.trace import get_tracer
+
+    _prev_factory = logging.getLogRecordFactory()
+
+    def _factory(*fargs, **fkwargs):
+        record = _prev_factory(*fargs, **fkwargs)
+        try:
+            tid = get_tracer().get_current()
+        except Exception:
+            tid = None
+        record.trace_id = tid or "--------"
+        return record
+
+    logging.setLogRecordFactory(_factory)
+
+    level = logging.DEBUG if debug else logging.INFO
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(trace_id)s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    root.addHandler(console)
+
+    try:
+        from logging.handlers import RotatingFileHandler
+        log_dir = Path(__file__).resolve().parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_h = RotatingFileHandler(
+            log_dir / "agent.log", maxBytes=10 * 1024 * 1024,
+            backupCount=5, encoding="utf-8",
+        )
+        # Full date in the file (it persists across days, unlike the console).
+        file_h.setFormatter(logging.Formatter(
+            "%(asctime)s  %(levelname)-8s  %(trace_id)s  %(name)s  %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        root.addHandler(file_h)
+    except Exception as exc:  # disk/permission issue — console logging still works
+        log.warning("Rotating file log unavailable (%s) — console only", exc)
+
+
 def main() -> None:
     args = _parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _configure_logging(args.debug)
 
     _raise_windows_timer_resolution()
 
