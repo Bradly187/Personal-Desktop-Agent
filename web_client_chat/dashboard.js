@@ -206,6 +206,33 @@
     }
   }
 
+  // ── Latency split (poll) — unblend inference vs execute, local vs cloud ─────
+  async function refreshLatency() {
+    const res = await getJSON("/api/latency?days=30");
+    const box = $("latency"); box.innerHTML = "";
+    if (!res) { box.appendChild(el("div", "empty", "latency unavailable")); return; }
+    $("latency-sub").textContent = "inference vs execute · p50 / p95";
+    const routes = res.routes || {};
+    const order = ["local", "cloud"];
+    const keys = Object.keys(routes).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    if (!keys.length) { box.appendChild(el("div", "empty", "no LLM-routed commands yet")); return; }
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>route</th><th>n</th><th>inference p50/p95</th>" +
+      "<th>execute p50/p95</th><th>total p95</th></tr></thead>";
+    const tb = el("tbody");
+    for (const k of keys) {
+      const r = routes[k];
+      const tr = el("tr");
+      const tag = `<span class="tag ${k === "cloud" ? "cloud" : "local"}">${k}</span>`;
+      tr.innerHTML = `<td>${tag}</td><td>${r.n}</td>` +
+        `<td>${ms(r.infer.p50)} / ${ms(r.infer.p95)}</td>` +
+        `<td>${ms(r.execute.p50)} / ${ms(r.execute.p95)}</td>` +
+        `<td>${ms(r.total.p95)}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
   // ── WebSocket (live feed) ───────────────────────────────────────────────────
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -224,9 +251,9 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }
+  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); }
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }, 15000);
+  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); refreshLatency(); }, 15000);
 })();
