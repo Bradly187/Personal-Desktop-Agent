@@ -128,6 +128,8 @@ PC → iPad (6 types): `ack` `status` `screenshot` `handwriting_result` `recalib
 
 - **VRAM model roster (RTX 5090, measured 2026-05-08):** baseline 8.3 GB, Whisper +4.2 GB, ~19 GB free for LLM. Default command domain: `llama3.1:8b` (4.6 GB). Specialist models: `qwen3-coder:30b` (code+plan, thinking ON), `deepseek-r1:8b` (math, chain-of-thought kept), `qwen3-vl:30b` (vision), `gemma3:27b` (general). `llama3.1:70b` does not fit alongside Whisper. `nemotron-mini` (25%) and `gpt-oss:20b` (0%) were removed. `deepseek-r1:8b` reasoning output is kept for math but is incompatible with verb-first command format.
 
+- **DevAgent trajectory reduction is experimental and OFF by default (`DA_TRAJECTORY_REDUCE`).** With the flag unset, `_replan`/`_try_replan`/`_reflect` render the executed-step trajectory exactly as before (byte-identical legacy path). When on, `inference/trajectory.render_trajectory` synthesizes the re-sent trajectory — keeps the most recent 3 steps verbatim, abstracts older successes, collapses older read-only runs, and ALWAYS preserves failure signal — to cut prompt tokens on replan/reflect (lower local latency + Bedrock spend on escalation). Deterministic, no LLM call. Spec: `specs/trajectory-reduction/`. Tests: `test_trajectory_reduction.py` (11). Flip default on only after the replan eval baseline locks.
+
 - **`pyautogui.typewrite` is ASCII-only** — `TYPE` keeps this limitation for backward compat. `DICTATE` uses `keyboard_paste()` (win32clipboard + Ctrl+V) and supports full unicode.
 
 ## MCP Server Registration (Claude Code)

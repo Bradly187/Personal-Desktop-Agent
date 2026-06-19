@@ -1149,20 +1149,24 @@ class DevAgent:
                  (" (failure → replan)" if failed_step is not None else ""))
         return cancelled, failed_step
 
-    async def _replan(
-        self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
-    ) -> list[AgentStep]:
-        """Ask the planner for a revised plan for the REMAINING work after a failure.
+    @classmethod
+    def build_replan_prompt(
+        cls, goal: str, executed: list[AgentStep], remaining: list[AgentStep],
+        *, enabled: bool = False,
+    ) -> tuple[str, dict]:
+        """Build the recovery-replan user prompt + return (prompt, traj_stats).
 
-        Feeds the executed steps + their outcomes (the observation signal) back to
-        the plan-domain model so it can recover. Returns parsed steps, or [] if the
-        planner errors or declines.
+        Extracted so the replan eval (`evals.run --mode replan`) scores the EXACT
+        prompt production sends — a true closed loop, not a copy. `enabled` gates
+        trajectory reduction (`inference/trajectory.render_trajectory`): False
+        reproduces the legacy per-step rendering byte-for-byte.
         """
-        lines = [f"Goal: {goal}", "", "Steps already executed (with outcomes):"]
-        for i, s in enumerate(executed, 1):
-            status = "ok" if s.success else "FAILED"
-            snippet = (s.result or "")[:300]
-            lines.append(f"  {i}. [{status}] {s.action} {s.args[:60]} → {snippet}")
+        from inference.trajectory import render_trajectory
+        traj_text, traj_stats = render_trajectory(
+            executed, style="replan",
+            readonly_verbs=cls._PARALLEL_VERBS, enabled=enabled,
+        )
+        lines = [f"Goal: {goal}", "", "Steps already executed (with outcomes):", traj_text]
         if remaining:
             lines.append("")
             lines.append("Original remaining steps (not yet run):")
@@ -1175,7 +1179,37 @@ class DevAgent:
             "format. Do not repeat already-completed work. If the goal cannot proceed, "
             "reply with a single [EXPLAIN <reason>] step.",
         ]
-        prompt = "\n".join(lines)
+        return "\n".join(lines), traj_stats
+
+    async def _replan(
+        self, goal: str, executed: list[AgentStep], remaining: list[AgentStep]
+    ) -> list[AgentStep]:
+        """Ask the planner for a revised plan for the REMAINING work after a failure.
+
+        Feeds the executed steps + their outcomes (the observation signal) back to
+        the plan-domain model so it can recover. Returns parsed steps, or [] if the
+        planner errors or declines.
+        """
+        # Synthesize the executed trajectory before re-feeding it (token economics —
+        # spec specs/trajectory-reduction/). enabled=False reproduces the legacy
+        # per-step rendering byte-for-byte; the flag (DA_TRAJECTORY_REDUCE) gates
+        # the reduction until the eval baseline locks.
+        from inference.trajectory import reduction_enabled
+        _reduce = reduction_enabled()
+        prompt, traj_stats = self.build_replan_prompt(
+            goal, executed, remaining, enabled=_reduce
+        )
+        if _reduce and traj_stats["chars_saved"] > 0:
+            try:
+                from monitoring.trace import get_tracer
+                get_tracer().record_span(
+                    "replan",
+                    traj_steps_in=traj_stats["steps_in"],
+                    traj_steps_rendered=traj_stats["lines_out"],
+                    traj_chars_saved=traj_stats["chars_saved"],
+                )
+            except Exception:
+                pass
         try:
             r = await self._router.infer(domain="plan", user_text=prompt, context=None)
             if r.ok and r.text:
@@ -1883,19 +1917,16 @@ class DevAgent:
             return None
 
         # Build step summary — include full result for failed steps so the
-        # model can diagnose; truncate successes to avoid prompt bloat.
-        lines = [f"Goal: {goal}", "", "Steps executed:"]
-        for i, s in enumerate(steps, 1):
-            status = "✓" if s.success else "✗"
-            result_snippet = (s.result or "")
-            if s.success:
-                result_snippet = result_snippet[:200]
-            else:
-                result_snippet = result_snippet[:600]   # full error for failures
-            lines.append(
-                f"  {i}. {status} {s.action} {s.args[:60]}\n"
-                f"     → {result_snippet}"
-            )
+        # model can diagnose; truncate successes to avoid prompt bloat. The
+        # trajectory compactor (spec specs/trajectory-reduction/) reproduces this
+        # 200/600 budget byte-for-byte when reduction is off, and abstracts older
+        # steps when DA_TRAJECTORY_REDUCE is on.
+        from inference.trajectory import render_trajectory, reduction_enabled
+        traj_text, _ = render_trajectory(
+            steps, style="reflect", success_chars=200, failure_chars=600,
+            readonly_verbs=self._PARALLEL_VERBS, enabled=reduction_enabled(),
+        )
+        lines = [f"Goal: {goal}", "", "Steps executed:", traj_text]
 
         lines += [
             "",

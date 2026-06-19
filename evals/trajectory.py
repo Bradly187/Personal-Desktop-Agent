@@ -180,6 +180,43 @@ def load_trajectory_suite(name_or_path: str | Path) -> list[TrajectoryCase]:
 
 
 @dataclass
+class ReplanCase(TrajectoryCase):
+    """A RECOVERY scenario: a goal whose plan hit a failure mid-execution.
+
+    Extends TrajectoryCase (so `score_trajectory` gates the recovery plan with the
+    same required/precedence/forbidden constraints) with the trajectory state the
+    failure happened in: `executed` (the already-run steps, the LAST of which has
+    "success": false — the failure signal the recovery must respond to) and
+    `remaining` (steps not yet run). The predictor feeds these to the production
+    `DevAgent.build_replan_prompt`, so the eval scores recovery from the EXACT
+    prompt production sends — and the `DA_TRAJECTORY_REDUCE` flag toggles whether
+    that prompt is compacted. `executed`/`remaining` are kept as raw dicts here so
+    this module stays free of the heavy `dev_agent` deps (same policy as
+    `extract_plan_verbs`); the predictor converts them to `AgentStep` at call time.
+
+    `expected_verbs`/`required` describe the RECOVERY plan (what a sound fix does),
+    not the original plan.
+    """
+
+    executed: list[dict] = field(default_factory=list)
+    remaining: list[dict] = field(default_factory=list)
+
+
+def load_replan_suite(name_or_path: str | Path) -> list[ReplanCase]:
+    """Load a replan (recovery) suite by bare name or path."""
+    path = Path(name_or_path)
+    if not path.suffix:
+        path = _SUITES_DIR / f"{path.name}.jsonl"
+    cases: list[ReplanCase] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        cases.append(ReplanCase.from_dict(json.loads(line)))
+    return cases
+
+
+@dataclass
 class TrajPrediction:
     verbs: list[str] = field(default_factory=list)
     raw: str = ""

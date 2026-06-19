@@ -32,7 +32,7 @@ from evals.corpus import load_suite, harvest_from_agent_db
 from evals.runner import (
     run_suite, command_predictor, slot_predictor, router_predictor,
     skill_trigger_predictor,
-    run_trajectory_suite, plan_predictor,
+    run_trajectory_suite, plan_predictor, replan_predictor,
     run_judge_suite, llm_judge, answer_producer,
 )
 from evals.scoring import check_regression
@@ -90,6 +90,19 @@ def _run_trajectory(args):
         return None
     _, infer_text = _infer_text(args.model)
     return run_trajectory_suite(cases, plan_predictor(infer_text, timeout_s=args.timeout))
+
+
+def _run_replan(args):
+    from evals.trajectory import load_replan_suite
+    cases = load_replan_suite(args.suite)
+    if not cases:
+        print("no cases to run", file=sys.stderr)
+        return None
+    _, infer_text = _infer_text(args.model)
+    from inference.trajectory import reduction_enabled
+    print(f"trajectory reduction: {'ON' if reduction_enabled() else 'OFF'} "
+          f"(DA_TRAJECTORY_REDUCE)")
+    return run_trajectory_suite(cases, replan_predictor(infer_text, timeout_s=args.timeout))
 
 
 def _run_judge(args):
@@ -191,7 +204,7 @@ def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
     if report.failures:
         print(f"\nfailures (first {show_failures}):")
         for r in report.failures[:show_failures]:
-            if mode in ("trajectory", "execution"):
+            if mode in ("trajectory", "execution", "replan"):
                 why = r.error or r.detail or f"got {r.predicted_verbs}"
             elif mode == "judge":
                 why = r.error or f"overall={r.overall:.2f} :: {r.rationale}"
@@ -204,12 +217,15 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run a behavioral eval suite.")
     ap.add_argument("--suite", required=True, help="suite name (evals/suites/<name>.jsonl)")
     ap.add_argument("--mode",
-                    choices=["single", "trajectory", "judge", "execution", "ablation"],
+                    choices=["single", "trajectory", "judge", "execution",
+                             "ablation", "replan"],
                     default="single",
                     help="execution = run the goal through the LIVE DevAgent and "
                          "score the executed trajectory (read-only suites only); "
                          "ablation = run each goal WITH vs WITHOUT the codebase "
-                         "indexer and score grounding (anchor recall) delta")
+                         "indexer and score grounding (anchor recall) delta; "
+                         "replan = score recovery from a failure via the production "
+                         "build_replan_prompt (DA_TRAJECTORY_REDUCE toggles compaction)")
     ap.add_argument("--predictor",
                     choices=["command", "slots", "router", "skill_trigger"],
                     default="command",
@@ -231,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     runner = {"single": _run_single, "trajectory": _run_trajectory,
               "judge": _run_judge, "execution": _run_execution,
-              "ablation": _run_ablation}[args.mode]
+              "ablation": _run_ablation, "replan": _run_replan}[args.mode]
     report = runner(args)
     if report is None:
         return 2
