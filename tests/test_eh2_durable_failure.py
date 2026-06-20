@@ -174,3 +174,92 @@ async def test_reconcile_noop_without_sidecar(tmp_path):
     agent._escalation_sidecar_path = tmp_path / "absent.jsonl"
     assert await agent.reconcile_pending_escalations() == 0
     await db.close()
+
+
+# ===========================================================================
+# E3/E5 — a failed/skipped rollback during a USER CANCEL still escalates
+# ===========================================================================
+# A user cancel is deliberate and does not itself escalate. But the budget-halt
+# paths (max_steps / max_replans) already escalate carrying the incomplete count,
+# while the user_cancel path previously ran compensations and returned silently —
+# so a rollback that FAILED or was SKIPPED during a cancel never reached the
+# review queue. These tests pin the fix: an incomplete cancel-rollback escalates
+# with reason 'compensation_failed'; a clean one does not.
+
+class _RR:
+    """Minimal RouterResult stand-in (ok/text/model/error)."""
+    def __init__(self, text, ok=True, model="test-model"):
+        self.text = text
+        self.ok = ok
+        self.model = model
+        self.error = None if ok else "err"
+
+
+def _plan_agent(db, plan_text):
+    """DevAgent driven by a fixed two-step plan, side-channels stubbed, real DB."""
+    router = MagicMock()
+    router.infer = AsyncMock(return_value=_RR(plan_text))
+    agent = DevAgent(router=router, agent_db=db)
+    agent._approve_plan_upfront = AsyncMock(return_value=True)
+    agent._rag_context = AsyncMock(return_value="")
+    agent._git_context = AsyncMock(return_value="")
+    agent._format_context = lambda: ""
+    agent._reflect = AsyncMock(return_value="summary")
+    agent._persist_run = AsyncMock()
+    agent._speak_plan_completion = AsyncMock()
+    return agent
+
+
+async def test_skipped_rollback_on_user_cancel_escalates(tmp_path):
+    db = await _open_db(tmp_path)
+    await db.insert_session(mode="test")
+    # Two steps so the top-of-loop cancel check fires AFTER step 1 runs.
+    agent = _plan_agent(db, "Step 1: [WRITE_FILE out.py]\nStep 2: [EXPLAIN done]")
+
+    target = tmp_path / "out.py"
+    target.write_text("ORIGINAL", encoding="utf-8")       # the file EXISTED pre-write
+
+    async def exec_step(step):
+        if step.action.upper() == "WRITE_FILE":
+            # Simulate the WRITE_FILE handler capturing a snapshot with NO backup
+            # (file too large) → rollback is 'skipped', i.e. incomplete.
+            step.comp_args = json.dumps(
+                {"path": str(target), "existed": True, "backup": None})
+            agent.request_cancel()                         # cancel after the destructive step
+        return "ok:" + step.action
+
+    agent._execute_step = exec_step
+    result = await agent.plan_and_run("write then cancel")
+
+    assert result.success is False                         # cancelled
+    assert target.exists()                                 # overwritten file left in place, not deleted
+    escs = await db.get_pending_escalations()
+    matched = [e for e in escs if e["reason"] == "compensation_failed"]
+    assert len(matched) == 1                               # the skipped rollback reached the queue
+    assert json.loads(matched[0]["detail"])["incomplete_compensations"] == 1
+    await db.close()
+
+
+async def test_clean_rollback_on_user_cancel_does_not_escalate(tmp_path):
+    db = await _open_db(tmp_path)
+    await db.insert_session(mode="test")
+    agent = _plan_agent(db, "Step 1: [WRITE_FILE new.py]\nStep 2: [EXPLAIN done]")
+
+    target = tmp_path / "new.py"                           # does NOT exist pre-write
+
+    async def exec_step(step):
+        if step.action.upper() == "WRITE_FILE":
+            target.write_text("CREATED BY PLAN", encoding="utf-8")
+            step.comp_args = json.dumps(
+                {"path": str(target), "existed": False, "backup": None})
+            agent.request_cancel()
+        return "ok:" + step.action
+
+    agent._execute_step = exec_step
+    result = await agent.plan_and_run("write then cancel")
+
+    assert result.success is False                         # cancelled
+    assert not target.exists()                             # plan-created file cleanly rolled back
+    escs = await db.get_pending_escalations()
+    assert not any(e["reason"] == "compensation_failed" for e in escs)   # clean unwind → no escalation
+    await db.close()

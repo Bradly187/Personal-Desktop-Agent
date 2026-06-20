@@ -859,7 +859,18 @@ class DevAgent:
         # half-done destructive work. Runs once, only if a terminal path above
         # didn't already compensate.
         if cancelled and not compensated:
-            await self._run_compensations(run_id, triggered_by="user_cancel")
+            _incomplete = await self._run_compensations(run_id, triggered_by="user_cancel")
+            # A user cancel is deliberate and does NOT itself escalate. But a
+            # compensation that FAILED or was SKIPPED during that rollback (E3/E5)
+            # is a durable-integrity problem the human must see — a half-undone
+            # destructive plan left in an unknown state. So an incomplete rollback
+            # always reaches the review queue, even though the cancel did not.
+            # _record_escalation persists to the JSONL sidecar if the DB is down.
+            if _incomplete:
+                await self._record_escalation(
+                    run_id, goal, "compensation_failed", None, replans,
+                    incomplete=_incomplete,
+                )
             compensated = True
 
         # Step 3: Reflect — summarise outcomes for the user.
@@ -1051,9 +1062,13 @@ class DevAgent:
                      if all(d in completed for d in s.deps)]
             if not ready:
                 # Cycle, or a dependency landed on a step that didn't complete —
-                # let the sequential loop sort out the remainder.
+                # let the sequential loop sort out the remainder. Log the specific
+                # unmet deps per pending step (not just the count) so a stuck DAG
+                # is diagnosable instead of silently degrading (E19).
+                unmet = {i: sorted(set(s.deps) - completed) for i, s in pending.items()}
                 log.warning("DevAgent[dag]: no ready steps (cycle/unmet dep) — "
-                            "%d step(s) deferred to sequential", len(pending))
+                            "%d step(s) deferred to sequential; unmet deps %r",
+                            len(pending), unmet)
                 break
 
             safe = [i for i in ready if pending[i].action.upper() in self._FANOUT_SAFE_VERBS]
