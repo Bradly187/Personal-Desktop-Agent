@@ -1,5 +1,10 @@
 # Urgent Security Fixes — 2026-06-18
 
+> **⚠️ Historical (2026-06-18).** The **laptop compute cluster was excised on 2026-06-19**
+> (#118) — the agent is now single-machine local-only, so the multi-machine deployment steps
+> below (remote Whisper service, `cluster_config.json`, LAN-bound inference node) no longer
+> apply. Retained as a record of the fixes made while the cluster existed.
+
 ## Overview
 Fixed two CRITICAL network security gaps in multi-machine cluster deployments:
 

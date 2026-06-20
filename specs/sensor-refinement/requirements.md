@@ -1,5 +1,11 @@
 # Requirements Document
 
+> **⚠️ Partially superseded.** This spec predates the 2026-05-30 removal of eye-gaze and
+> head-pose control (the standard iPad lacks the required TrueDepth sensor). **Tilt is the only
+> remaining cursor-driving sensor** — all Gaze_Tracker / Head_Tracker requirements below are
+> retained for history only and are **not active**. See `specs/ipad-sensor-focus/` for the
+> current sensor design.
+
 ## Introduction
 
 This specification defines refinements to the three cursor-driving sensors (tilt/gyromouse, gaze tracker, head tracker) to align with established commercial and academic patterns for digital accessibility aids. The refinements address smoothing quality, transfer functions, axis mapping correctness, re-centering mechanics, and toggle ergonomics — informed by commercial AT devices (HeadMouse Nano, GlassOuse, Tobii), gaming gyro implementations (JibbSmart/JoyShockMapper, Steam Input, Splatoon), and academic HCI research (1-Euro filter, Fitts' Law, pointer acceleration studies).

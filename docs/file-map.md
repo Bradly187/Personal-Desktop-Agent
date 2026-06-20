@@ -44,7 +44,7 @@ Annotated map of every significant file in the pipeline. Loaded on-demand — no
 | `desktop/action_verifier.py` | Pillow perceptual diff pre/post screenshot; verifies CLICK/OPEN/CLOSE/SCROLL; 2% pixel threshold; 400ms animation delay |
 | `desktop/flick_engine.py` | Flick-to-snap gesture handler; maps GRAB_SNAP_* gestures to window snap zones; uses OneEuroFilter for smoothing |
 | `desktop/target_cache.py` | `ClickableTargetCache` — daemon thread publishing a lock-protected snapshot of clickable UI targets for magnetic snap + cursor gravity; change-gated COM walk (foreground-hwnd + 1.5 s heartbeat), failure backoff, `CoUninitialize`; started behind `DA_CURSOR_GRAVITY` |
-| `inference/kiro_client.py` | WebSocket client for Kiro/VS Code bridge extension on ws://127.0.0.1:8767; wired to DevAgent for code edits |
+| `inference/bridge_client.py` | WebSocket client for the VS Code bridge extension (`desktop-agent-bridge/`) on ws://127.0.0.1:8767; wired to DevAgent for code edits |
 | `inference/codebase_indexer.py` | ChromaDB RAG index (cosine) over Python/Swift source + docs PDFs; accepts `embedder=`; oversized units sub-split into `_(i/N)` chunks (no 4000-char truncation); per-path debounced file watcher; time-gated `_available` re-probe; fed to DevAgent for context |
 | `monitoring/metrics.py` | In-process metrics singleton; VRAM poller; optional `/metrics` HTTP endpoint |
 | `monitoring/trace.py` | Cross-layer per-command tracing (enqueue→dispatch→route→inference→execute). On by default (opt out with `DA_TRACE=0`). Spans recorded at command boundaries (not the 60 Hz tick), flushed to `command_traces` fire-and-forget; pruned 30 days |

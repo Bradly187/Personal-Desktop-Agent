@@ -365,7 +365,7 @@ class WhisperStream:
         # IMPORTANT: never include "hey agent" here — it would cause the wake-
         # phrase filter to pass lecture / ambient audio as commands.
         self._static_hotwords: list[str] = [
-            "Kiro IDE", "Kiro", "Slack", "Discord", "Claude",
+            "VS Code", "VSCode", "Slack", "Discord", "Claude",
             # Bias toward the real note phrasing so it isn't misheard as ambient
             # speech (e.g. "compose a note" -> "are you taking us now").
             "compose a note", "take a note", "add a note",
@@ -1051,7 +1051,7 @@ class WhisperStream:
         if not awaiting:
             import re as _re
             # Normalise: lowercase + collapse all punctuation/whitespace to
-            # single spaces so "Hey, Agent, open kiro." matches "hey agent".
+            # single spaces so "Hey, Agent, open vscode." matches "hey agent".
             normalised = _re.sub(r'[^\w\s]', ' ', text.lower())
             normalised = _re.sub(r'\s+', ' ', normalised).strip()
 
