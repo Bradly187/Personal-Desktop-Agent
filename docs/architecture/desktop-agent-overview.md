@@ -98,6 +98,9 @@ The desktop agent is a 7-layer async Python pipeline. All inter-layer communicat
 ```
 
 **Rendered diagram files:**
+> ⚠️ **Stale — pending regeneration.** `architecture-desktop-agent.svg` still depicts removed
+> gaze/head-pose nodes and the old 10-level priority. The current mermaid **sources** under
+> `docs/diagrams/overview/*.mmd` and `docs/diagrams/state/*.mmd` are accurate — regenerate the SVG/PNG from those (or drop these exports).
 - [`architecture-desktop-agent.svg`](architecture-desktop-agent.svg)
 - [`architecture-desktop-agent.png`](architecture-desktop-agent.png)
 
@@ -190,6 +193,9 @@ gaze_monitor_calibration (id, session_id, ref_dir JSON, matrix JSON [2×3],
 ```
 
 **Rendered schema files:**
+> ⚠️ **`db-schema-calibration.svg` is stale — pending regeneration** (still shows the removed
+> `gaze_monitor_calibration` table). Regenerate from the current mermaid sources under
+> `docs/diagrams/db/*.mmd`. (`db-schema-pipeline.svg` is current.)
 - Core pipeline: [`db-schema-pipeline.svg`](db-schema-pipeline.svg) / [`db-schema-pipeline.png`](db-schema-pipeline.png)
 - Calibration & voice: [`db-schema-calibration.svg`](db-schema-calibration.svg) / [`db-schema-calibration.png`](db-schema-calibration.png)
 
