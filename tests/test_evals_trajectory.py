@@ -282,3 +282,80 @@ def test_shipped_execution_suite_valid():
             assert v in _PLAN_ACTIONS, f"{c.id}: unknown verb {v}"
         # every case must forbid the mutating/network verbs (read-only safety)
         assert mutating.issubset(set(c.forbidden)), f"{c.id}: missing forbidden verbs"
+
+
+# --------------------------------------------------------------------------- #
+# replan mode — recovery from a failure (model-free; fake infer_text)
+# --------------------------------------------------------------------------- #
+
+def _fake_infer_text(reply: str, capture: dict | None = None):
+    """A (system, user) -> reply coroutine fn; optionally records the user prompt."""
+    async def infer_text(system: str, user: str) -> str:
+        if capture is not None:
+            capture["system"], capture["user"] = system, user
+        return reply
+    return infer_text
+
+
+def _long_replan_case() -> "object":
+    from evals.trajectory import ReplanCase
+    executed = [{"action": "READ_FILE", "args": f"f{i}.py",
+                 "result": "x" * 120, "success": True} for i in range(6)]
+    executed.append({"action": "RUN_TERMINAL", "args": "pytest",
+                     "result": "BOOM: AssertionError", "success": False})
+    return ReplanCase.from_dict({
+        "id": "r1", "suite": "dev_replan", "goal": "fix the test",
+        "executed": executed, "remaining": [{"action": "GIT_COMMIT", "args": "-m x"}],
+        "expected_verbs": ["WRITE_FILE", "RUN_TERMINAL"],
+        "required": ["WRITE_FILE", "RUN_TERMINAL"],
+        "precedence": [["WRITE_FILE", "RUN_TERMINAL"]],
+    })
+
+
+def test_replan_predictor_builds_and_scores():
+    from evals.runner import replan_predictor
+    case = _long_replan_case()
+    reply = '{"steps": [{"action": "WRITE_FILE", "args": "src.py"}, ' \
+            '{"action": "RUN_TERMINAL", "args": "pytest"}]}'
+    pred = replan_predictor(_fake_infer_text(reply))(case)
+    r = score_trajectory(case, pred)
+    assert pred.verbs == ["WRITE_FILE", "RUN_TERMINAL"]
+    assert r.exact and r.order_ok
+
+
+def test_replan_predictor_reduce_flag_compacts_prompt(monkeypatch):
+    from evals.runner import replan_predictor
+    case = _long_replan_case()
+    reply = '{"steps": [{"action": "EXPLAIN"}]}'
+
+    # Flag OFF → legacy rendering: no collapsed read-only summary line.
+    monkeypatch.delenv("DA_TRAJECTORY_REDUCE", raising=False)
+    cap_off: dict = {}
+    replan_predictor(_fake_infer_text(reply, cap_off))(case)
+    assert "read-only steps:" not in cap_off["user"]
+
+    # Flag ON → the 6 leading read-only steps collapse into one summary line.
+    monkeypatch.setenv("DA_TRAJECTORY_REDUCE", "1")
+    cap_on: dict = {}
+    replan_predictor(_fake_infer_text(reply, cap_on))(case)
+    assert "read-only steps:" in cap_on["user"]
+    assert len(cap_on["user"]) < len(cap_off["user"])      # genuinely shorter
+    assert "BOOM: AssertionError" in cap_on["user"]        # failure signal preserved
+
+
+def test_shipped_replan_suite_valid():
+    from evals.trajectory import _PLAN_ACTIONS, load_replan_suite
+    cases = load_replan_suite("dev_replan")
+    assert len(cases) >= 6
+    mutating = {"WRITE_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR"}
+    for c in cases:
+        assert c.goal and c.executed
+        # the LAST executed step is always the failure that recovery responds to
+        assert c.executed[-1].get("success") is False, f"{c.id}: last step must fail"
+        for v in c.required + c.forbidden + c.expected_verbs:
+            assert v in _PLAN_ACTIONS, f"{c.id}: unknown verb {v}"
+        for step in c.executed + c.remaining:
+            assert step.get("action", "").upper() in _PLAN_ACTIONS, f"{c.id}: bad verb"
+        # read-only/safety cases must forbid the mutating verbs
+        if "safety" in c.tags:
+            assert mutating.issubset(set(c.forbidden)), f"{c.id}: safety case must forbid writes"

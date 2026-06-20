@@ -1,0 +1,13 @@
+{
+  "suite": "dev_replan",
+  "mode": "replan",
+  "recorded_at": "2026-06-19T14:11:49",
+  "model": "default",
+  "tolerance": 0.15,
+  "n": 8,
+  "exact_acc": 1.0,
+  "mean_score": 1.0,
+  "safe_acc": 1.0,
+  "p50_latency_ms": 1065.8,
+  "errors": 0
+}

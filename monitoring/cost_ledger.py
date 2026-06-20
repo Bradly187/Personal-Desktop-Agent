@@ -76,6 +76,25 @@ def _price_for(model: str, prices: dict) -> Optional[tuple[float, float]]:
     return None
 
 
+def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Estimate USD cost for a single inference. 0.0 for local/unpriced models.
+
+    Public companion to `cost_rollup` for live attribution (e.g. attaching a
+    `cost_usd` attr to an inference trace span) without re-querying the DB. Honors
+    the same `DA_BEDROCK_PRICES` / `DA_BEDROCK_PRICE_MULT` env overrides. Never
+    raises — returns 0.0 on any bad input.
+    """
+    try:
+        price = _price_for(model or "", _load_prices())
+        if price is None:
+            return 0.0
+        ti = int(tokens_in or 0)
+        to = int(tokens_out or 0)
+        return round(ti / 1e6 * price[0] + to / 1e6 * price[1], 6)
+    except Exception:
+        return 0.0
+
+
 def _connect_ro(path: str) -> Optional[sqlite3.Connection]:
     if not path or not os.path.exists(path):
         return None

@@ -384,6 +384,51 @@ def run_ablation_suite(cases: list, build_no_rag, build_with_rag, *,
     return asyncio.run(_run_all())
 
 
+def replan_predictor(infer_text: TextFn, *, timeout_s: float = 60.0):
+    """Build a plan_fn for the REPLAN (recovery) eval.
+
+    Reconstructs the failure state from a ReplanCase (executed + remaining steps),
+    builds the EXACT recovery prompt production sends via the live
+    `DevAgent.build_replan_prompt`, runs the plan model, and extracts the recovery
+    plan's verb sequence. `enabled=` is read from `DA_TRAJECTORY_REDUCE` (the real
+    production toggle) so recording the baseline with the flag OFF and re-running
+    with it ON gates exactly the spec's "compaction must not degrade recovery"
+    claim. Imports dev_agent lazily (model-side only, like `_build_dev_agent`)."""
+    from inference.dev_agent import DevAgent, AgentStep
+    from inference.trajectory import reduction_enabled
+
+    system = _plan_system()
+    reduce_on = reduction_enabled()
+
+    def _steps(raw: list[dict]) -> list:
+        return [
+            AgentStep(
+                action=str(d.get("action", "")).upper(), args=str(d.get("args", "") or ""),
+                result=d.get("result"), success=d.get("success", True),
+            )
+            for d in (raw or [])
+        ]
+
+    def predict(case) -> TrajPrediction:
+        executed = _steps(getattr(case, "executed", []))
+        remaining = _steps(getattr(case, "remaining", []))
+        user, _ = DevAgent.build_replan_prompt(
+            case.goal, executed, remaining, enabled=reduce_on
+        )
+        t0 = time.monotonic()
+        try:
+            raw = asyncio.run(asyncio.wait_for(infer_text(system, user), timeout_s))
+        except Exception as exc:
+            return TrajPrediction(error=f"{type(exc).__name__}: {exc}",
+                                  latency_ms=(time.monotonic() - t0) * 1000)
+        lat = (time.monotonic() - t0) * 1000
+        if _is_backend_error(raw):
+            return TrajPrediction(raw=raw, error=raw.strip(), latency_ms=lat)
+        return TrajPrediction(verbs=extract_plan_verbs(raw), raw=raw, latency_ms=lat)
+
+    return predict
+
+
 def plan_predictor(infer_text: TextFn, *, timeout_s: float = 30.0):
     """Build a plan_fn: ask the model to plan the goal, extract the verb sequence
     exactly as dev_agent would parse it."""
