@@ -15,6 +15,11 @@
 # Not-yet-installed (install separately when ready):
 #   ultralytics>=8.0.0         # YOLOv8-pose gesture recognition
 #   qrcode>=7.4.2              # Terminal QR code for iPad connection URL
+#   chatterbox-tts==0.1.3      # Local TTS — hard-pins torch==2.6.0 (no CPython 3.14
+#                                wheel), which would abort the whole-file resolve.
+#                                Install into a torch-2.6 env, or after the rest:
+#                                  pip install --no-deps chatterbox-tts==0.1.3
+#                                chatterbox_tts.py degrades gracefully when absent.
 
 # ── Core bridge & MCP ────────────────────────────────────────────────────────
 mcp==1.27.0
@@ -90,7 +95,13 @@ sounddevice==0.5.5
 # ── Chatterbox local TTS (chatterbox_tts.py — RTX 5090, MIT licence) ─────────
 # Emotion exaggeration (0.25–2.0), paralinguistic tags, zero-shot voice cloning.
 # Models auto-download from HuggingFace on first call (~2 GB, cached).
-chatterbox-tts==0.1.3
+# MOVED to the "install separately" list at the top of this file: chatterbox-tts
+# 0.1.3 hard-pins torch==2.6.0, which has no CPython 3.14 wheel and aborts the
+# whole `pip install -r requirements.txt` resolution. The rest of the project
+# uses the installed torch (2.12.0) transitively; chatterbox_tts.py degrades
+# gracefully when the package is missing. Re-pin here if a torch-flexible
+# release ships.
+# chatterbox-tts==0.1.3
 
 # ── Anthropic API — cloud fallback, VisionGrounder, CloudDevAgent ────────────
 # HybridCoordinator routes gate-failing commands to Claude via Messages API.
