@@ -31,14 +31,32 @@ import asyncio
 import json
 import logging
 import time
+import urllib.parse
 import uuid
 from typing import Any, Optional
+
+from inference import bridge_protocol
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_PORT = 8767
 _CONNECT_TIMEOUT = 2.0   # seconds — fast fail if extension not running
 _REQUEST_TIMEOUT = 5.0   # seconds per request
+
+
+def _path_allowed(path: str) -> bool:
+    """True if `path` is under the writable-root allowlist (deny-by-default).
+
+    Reuses the exact same policy as CommandExecutor so the bridge can't be used
+    to edit/execute outside the sandbox even if the IDE side is compromised
+    (AGENTS.md #4/#7). Imported lazily to avoid a heavy import at module load.
+    """
+    try:
+        from core.command_executor import _load_writable_roots
+        from core.goal_session import _path_in_scope
+        return _path_in_scope(path, _load_writable_roots())
+    except Exception:  # pragma: no cover - fail safe to DENY on any import error
+        return False
 
 
 class BridgeClient:
@@ -89,6 +107,43 @@ class BridgeClient:
         """Return True if the extension is reachable."""
         result = await self._request("ping")
         return result is not None and result.get("pong", False)
+
+    async def get_editor_context(self) -> Optional[dict]:
+        """Return the active editor's file/cursor/selection/diagnostics, or None."""
+        return await self._request("get_editor_context")
+
+    async def apply_edit(self, file: str, range_: dict, text: str) -> bool:
+        """Replace a range in `file` with `text`, then save.
+
+        Gated: the target file must resolve under the writable-root allowlist
+        (same policy as CommandExecutor's WRITE_FILE — deny-by-default). A path
+        outside scope is refused here, before it reaches the IDE.
+        """
+        if not _path_allowed(file):
+            log.warning("BridgeClient: apply_edit refused — %s outside writable roots", file)
+            return False
+        result = await self._request(
+            "apply_edit", {"file": file, "range": range_, "text": text}
+        )
+        return result is not None and result.get("applied", False)
+
+    async def run_terminal(self, command: str, cwd: Optional[str] = None) -> Optional[dict]:
+        """Run `command` in the IDE's integrated terminal; return captured output.
+
+        Gated: when `cwd` is given it must resolve under the writable-root
+        allowlist (mirrors CommandExecutor's RUN_TERMINAL cwd check). Returns the
+        extension's response — ``{sent, output?, exit_code?}`` — or None if the
+        extension is unavailable or the cwd is out of scope. The extension
+        captures output via VS Code shell integration when available; older VS
+        Code returns ``{sent: true}`` with no output (fire-and-forget).
+        """
+        if cwd is not None and not _path_allowed(cwd):
+            log.warning("BridgeClient: run_terminal refused — cwd %s outside writable roots", cwd)
+            return None
+        extra: dict = {"command": command}
+        if cwd is not None:
+            extra["cwd"] = cwd
+        return await self._request("run_terminal", extra)
 
     def is_available(self) -> Optional[bool]:
         """Last known availability (None = never checked)."""
@@ -180,9 +235,16 @@ class BridgeClient:
 
             if _is_closed(self._ws):
                 try:
+                    # Append the shared auth token as a query param. Generated
+                    # on first use (ensure_token); the extension rejects a
+                    # handshake whose token doesn't match (fail-closed).
+                    connect_uri = self._uri
+                    token = bridge_protocol.ensure_token()
+                    if token:
+                        connect_uri = f"{self._uri}/?token={urllib.parse.quote(token)}"
                     self._ws = await asyncio.wait_for(
                         websockets.connect(
-                            self._uri,
+                            connect_uri,
                             open_timeout=_CONNECT_TIMEOUT,
                             close_timeout=1.0,
                         ),
