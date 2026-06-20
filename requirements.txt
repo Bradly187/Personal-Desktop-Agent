@@ -117,7 +117,9 @@ pypdf==6.13.3  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader A
 # ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
 # windows-curses provides the stdlib curses module on Windows.
 # On Linux/macOS the curses module ships with Python; this is a no-op there.
-windows-curses==2.4.1; sys_platform == "win32"
+# 2.4.2 is the first release with CPython 3.14 wheels — 2.4.1 was yanked/unavailable
+# for 3.14, which aborted the whole `pip install -r` resolution.
+windows-curses==2.4.2; sys_platform == "win32"
 
 # ── File watcher for incremental RAG indexing (CodebaseIndexer --watch) ───────
 # Provides watchdog.observers.Observer + FileSystemEventHandler.
