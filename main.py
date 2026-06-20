@@ -231,7 +231,7 @@ def _print_startup_table(
         import duckdb  # noqa: F401
         return "OK", f"v{duckdb.__version__}  (session analytics)"
 
-    def _check_kiro():
+    def _check_vscode_bridge():
         import urllib.request as _ur
         # Try a quick HTTP ping to the WebSocket port to see if extension is running
         try:
@@ -239,7 +239,7 @@ def _print_startup_table(
         except Exception as exc:
             msg = str(exc)
             if "Connection refused" in msg or "actively refused" in msg:
-                return "WARN", "extension not running — install kiro-extension/ and reload Kiro"
+                return "WARN", "extension not running — install desktop-agent-bridge/ and reload VS Code"
             # Any HTTP response (even 400/404) means the server is up
             return "OK", "bridge extension running on ws://127.0.0.1:8767"
         return "OK", "bridge extension running on ws://127.0.0.1:8767"
@@ -288,7 +288,7 @@ def _print_startup_table(
     check("Metrics (in-process)",           lambda: ("OK", "metrics.py singleton ready"))
     check("ChromaDB RAG (codebase index)",  _check_chromadb)
     check("DuckDB (session analytics)",     _check_duckdb)
-    check("Kiro/VS Code bridge",            _check_kiro)
+    check("VS Code Bridge",                 _check_vscode_bridge)
     check("llama.cpp server (:8080)",       _check_llamacpp)
     check("vLLM",                           _check_vllm)
     check("Cloud DevAgent (Anthropic)",     _check_cloud_dev_agent)
@@ -802,15 +802,15 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
             _cloud_dev_agent = None
 
-    # ── Kiro/VS Code bridge client (--kiro flag) ───────────────────────────
-    if getattr(args, "kiro", False):
+    # ── VS Code bridge client (--vscode flag) ─────────────────────────────
+    if getattr(args, "vscode", False):
         try:
-            from inference.kiro_client import KiroClient
-            kiro = KiroClient()
-            dev_agent.set_kiro(kiro)
-            log.info("KiroClient: wired to DevAgent (ws://127.0.0.1:8767)")
-        except Exception as _kiro_exc:
-            log.warning("KiroClient: failed to initialise: %s", _kiro_exc)
+            from inference.bridge_client import BridgeClient
+            bridge = BridgeClient()
+            dev_agent.set_bridge(bridge)
+            log.info("BridgeClient: wired to DevAgent (ws://127.0.0.1:8767)")
+        except Exception as _bridge_exc:
+            log.warning("BridgeClient: failed to initialise: %s", _bridge_exc)
 
     # ── Metrics singleton — wire to all pipeline components ────────────────
     m = get_metrics()
@@ -1492,9 +1492,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--embed-model", type=str,
                    default="nomic-ai/nomic-embed-text-v1.5",
                    help="HuggingFace embedding model for --vllm-embed")
-    # ── Kiro/VS Code bridge (roadmap item #2) ────────────────────────────────
-    p.add_argument("--kiro", action="store_true",
-                   help="Connect to Kiro/VS Code bridge extension on ws://127.0.0.1:8767")
+    # ── VS Code bridge (roadmap item #2) ───────────────────────────────────
+    p.add_argument("--vscode", action="store_true",
+                   help="Connect to VS Code bridge extension on ws://127.0.0.1:8767")
     # ── File watcher (roadmap item #5) ───────────────────────────────────────
     p.add_argument("--watch", action="store_true",
                    help="Enable continuous file watcher for incremental RAG re-indexing "

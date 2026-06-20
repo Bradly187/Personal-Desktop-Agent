@@ -53,7 +53,6 @@ class UIElement:
 _SUPPORTED_APP_FRAGMENTS = {
     "code":      "VS Code",
     "cursor":    "Cursor IDE",
-    "kiro":      "Kiro IDE",
     "chrome":    "Chrome",
     "msedge":    "Edge",
     "firefox":   "Firefox",

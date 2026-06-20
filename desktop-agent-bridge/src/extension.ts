@@ -1,5 +1,5 @@
 /**
- * Desktop Agent Bridge — VS Code / Kiro extension
+ * Desktop Agent Bridge — VS Code extension
  *
  * Exposes a WebSocket server on localhost:8767 so the Personal Desktop Agent
  * Python backend can read IDE state and send edit commands without screen-scraping.

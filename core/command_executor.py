@@ -239,12 +239,6 @@ def _get_ui_provider():
 # Keys are lowercased voice aliases; value is the absolute exe path.
 # ---------------------------------------------------------------------------
 _KNOWN_APPS: dict[str, str] = {
-    # Kiro IDE (phonetic aliases for Whisper misrecognitions)
-    "kiro":             r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
-    "kiro ide":         r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
-    "key row":          r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
-    "key-row":          r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
-    "cairo":            r"C:\Users\bradt\AppData\Local\Programs\Kiro\Kiro.exe",
     # VS Code
     "vs code":          r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
     "vscode":           r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
@@ -701,15 +695,18 @@ class CommandExecutor:
         # CLICK — left-click at provided coords, explicit click coords, or screen centre
         # ------------------------------------------------------------------ #
         if action == "CLICK":
-            x, y = self._resolve_coords(cmd, strict_target=True)
+            x, y, resolved_by = self._resolve_coords(cmd, strict_target=True)
             btn = p.get("button", "left")
-            return mouse.mouse_click(x, y, button=btn)
+            res = mouse.mouse_click(x, y, button=btn)
+            if isinstance(res, dict):
+                res["resolved_by"] = resolved_by
+            return res
 
         # ------------------------------------------------------------------ #
         # SCROLL
         # ------------------------------------------------------------------ #
         if action == "SCROLL":
-            x, y = self._resolve_coords(cmd)
+            x, y, _ = self._resolve_coords(cmd)
             direction = p.get("direction", "down")
             clicks = int(p.get("amount", 3))
             return mouse.mouse_scroll(x, y, direction=direction, clicks=clicks)
@@ -936,7 +933,7 @@ class CommandExecutor:
     # ---------------------------------------------------------------------- #
 
     @staticmethod
-    def _resolve_coords(cmd: Command, *, strict_target: bool = False) -> tuple[int, int]:
+    def _resolve_coords(cmd: Command, *, strict_target: bool = False) -> tuple[int, int, str]:
         """Return (x, y) via: explicit params → UIAutomation → explicit coords → cursor.
 
         Fallback chain:
@@ -958,8 +955,8 @@ class CommandExecutor:
             if p.get("snap_nearest"):
                 snapped = _magnetic_snap(x, y)
                 if snapped is not None:
-                    return snapped
-            return x, y
+                    return snapped[0], snapped[1], "explicit"
+            return x, y, "explicit"
 
         # UIAutomation: try structured element lookup when target text is available.
         # The COM walk runs on the dedicated apartment thread (see
@@ -969,10 +966,10 @@ class CommandExecutor:
         if target and len(target.split()) <= 5:  # skip long sentences
             coords = _run_on_com_thread(_uia_find_target, target)
             if coords is not None:
-                return coords
+                return coords[0], coords[1], "uia"
 
         if cmd.gaze_coords:
-            return cmd.gaze_coords
+            return cmd.gaze_coords[0], cmd.gaze_coords[1], "gaze"
 
         # A named target that nothing could resolve — surface it rather than
         # clicking blindly at the cursor (which would be recorded as a success).
@@ -981,4 +978,5 @@ class CommandExecutor:
 
         # Fall back to current cursor position
         import pyautogui
-        return pyautogui.position()
+        cursor = pyautogui.position()
+        return cursor[0], cursor[1], "cursor"

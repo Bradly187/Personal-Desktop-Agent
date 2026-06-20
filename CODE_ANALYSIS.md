@@ -178,7 +178,7 @@ Line counts are from `wc -l` on the live files (2026-06-07).
 | 1022 | `model_router.py` | VRAM-aware domain→model selection; Ollama / vLLM pool |
 | 894 | `codebase_indexer.py` | ChromaDB RAG indexer; chunk sub-splitting; file watcher |
 | 263 | `cloud_dev_agent.py` | Anthropic API dev path (`claude-opus-4-8`) |
-| 262 | `kiro_client.py` | WebSocket client for Kiro / VS Code bridge :8767 |
+| 231 | `bridge_client.py` | WebSocket client for VS Code bridge :8767 |
 | 198 | `sandbox.py` | WSL2 bubblewrap jail for `RUN_TERMINAL`; `DA_SANDBOX` flag |
 | 177 | `voice_prompt_composer.py` | Prompt assembly from voice + context |
 | 123 | `remote_indexer_service.py` | Remote RAG indexing HTTP service :9000 |
@@ -288,7 +288,7 @@ Line counts are from `wc -l` on the live files (2026-06-07).
 **Design system:** `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`, `DesignTokens`
 **App-level:** `AppLogger`, `DesktopAgentApp`, `ScreenshotStore`, `SensorManager`, `SettingsStore`
 
-VS Code / Kiro extension: `kiro-extension/` (TypeScript — Kiro bridge on :8767)
+VS Code extension: `desktop-agent-bridge/` (TypeScript — VS Code bridge on :8767)
 
 ---
 
@@ -412,7 +412,7 @@ hash-chaining protection (deferred — single-user home LAN scope).
 |-----------|---------|-------|
 | aiohttp | 3.14.0 | WebSocket server :8765 |
 | zeroconf | 0.149.16 | mDNS iPad discovery |
-| websockets | 16.0 | Kiro / VS Code bridge :8767 |
+| websockets | 16.0 | VS Code bridge :8767 |
 | MCP | 1.27.0 | stdio transport for Claude integration |
 
 ### Storage

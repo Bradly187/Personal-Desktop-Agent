@@ -43,7 +43,7 @@ truth for cross-tool behavior; do not duplicate these rules elsewhere.
 
 ## 9. 📐 Spec-Driven Source of Truth
 - **Rule:** Before generating or substantially changing a feature, check `specs/` for its blueprint. `specs/<feature>/` holds the requirements (EARS acceptance criteria), design, and tasks; `specs/TEMPLATE.md` is the starting point for a new one. Treat the spec as authoritative for *intent and behavior*, and update it in the same change when the design moves.
-- **Context:** `specs/` is the consolidated home for all checked-in technical designs (migrated from the retired `.kiro/`/`kiro/` trees). It does **not** override the narrower, code-level sources of truth that already exist and remain authoritative for their domain: `storage/db.py` for the DB schema (#1), and the executable `evals/` suites for runtime behavior. Specs describe; `evals/` verifies — add eval cases rather than static Gherkin prose.
+- **Context:** `specs/` is the consolidated home for all checked-in technical designs (migrated from the retired spec trees). It does **not** override the narrower, code-level sources of truth that already exist and remain authoritative for their domain: `storage/db.py` for the DB schema (#1), and the executable `evals/` suites for runtime behavior. Specs describe; `evals/` verifies — add eval cases rather than static Gherkin prose.
 
 ## 10. ♻️ Spec-Bounded Regeneration ("disposable code", narrowly scoped)
 - **Rule:** When a spec fully defines a unit's behavior **and** tests/evals cover it, an agent may regenerate **that single function** from the spec rather than debugging it line-by-line. **Never** regenerate an entire module, class, or file wholesale without first confirming no untested invariant would be lost.

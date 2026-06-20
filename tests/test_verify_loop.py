@@ -48,7 +48,7 @@ def _click(target: str = "", **params) -> Command:
 
 def test_resolve_explicit_coords_bypass_everything():
     cmd = _click(x=10, y=20)
-    assert CommandExecutor._resolve_coords(cmd, strict_target=True) == (10, 20)
+    assert CommandExecutor._resolve_coords(cmd, strict_target=True) == (10, 20, "explicit")
 
 
 def test_resolve_strict_raises_on_named_target_miss(monkeypatch):
@@ -64,7 +64,8 @@ def test_resolve_nonstrict_named_miss_falls_back_to_cursor(monkeypatch):
     # Same miss, but non-strict (SCROLL path) keeps the cursor fallback.
     monkeypatch.setattr(ce, "_run_on_com_thread", lambda *a, **k: None)
     coords = CommandExecutor._resolve_coords(_click("nowhere"), strict_target=False)
-    assert isinstance(coords, tuple) and len(coords) == 2
+    assert isinstance(coords, tuple) and len(coords) == 3
+    assert coords[2] == "cursor"
 
 
 def test_resolve_strict_no_target_keeps_cursor_fallback(monkeypatch):
@@ -72,14 +73,15 @@ def test_resolve_strict_no_target_keeps_cursor_fallback(monkeypatch):
     # in strict mode; must NOT raise.
     monkeypatch.setattr(ce, "_run_on_com_thread", lambda *a, **k: None)
     coords = CommandExecutor._resolve_coords(_click(""), strict_target=True)
-    assert isinstance(coords, tuple) and len(coords) == 2
+    assert isinstance(coords, tuple) and len(coords) == 3
+    assert coords[2] == "cursor"
 
 
 def test_resolve_uses_gaze_coords_before_raising(monkeypatch):
     monkeypatch.setattr(ce, "_run_on_com_thread", lambda *a, **k: None)
     cmd = Command(text="thing", action="CLICK", source="voice",
                   gaze_coords=(7, 8), params={})
-    assert CommandExecutor._resolve_coords(cmd, strict_target=True) == (7, 8)
+    assert CommandExecutor._resolve_coords(cmd, strict_target=True) == (7, 8, "gaze")
 
 
 def test_dispatch_click_raises_on_named_miss(monkeypatch):

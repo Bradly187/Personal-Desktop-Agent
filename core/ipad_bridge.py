@@ -1228,7 +1228,7 @@ class IPadBridge:
             #      interactive surface and is awaiting the choice), resolve it.
             #   2. Otherwise treat the button's value as a voice-equivalent
             #      command and route it through the normal pipeline — so a button
-            #      valued "open kiro" runs that command, gated like any other.
+            #      valued "open vscode" runs that command, gated like any other.
             # The canvas itself persists; a tap never dismisses it (the agent
             # decides when to update/clear via a2ui_canvas messages).
             fut = self._a2ui_pending.pop(surface_id, None)

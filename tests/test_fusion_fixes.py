@@ -336,7 +336,7 @@ class TestVoiceSingleFlight:
         run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
         # Simulate the single-flight window having elapsed.
         fe._last_voice_emit_mono -= (fe._effective_cfg.voice_single_flight_s + 0.1)
-        run(fe._emit(Command(text="open kiro", action="OPEN", source="voice")))
+        run(fe._emit(Command(text="open vscode", action="OPEN", source="voice")))
 
         assert fe._coordinator.route.call_count == 2
 

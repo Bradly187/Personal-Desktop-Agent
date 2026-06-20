@@ -96,7 +96,7 @@ DEFAULT_PHRASES: list[dict] = [
     {"phrase": "scroll up",      "category": "verb",       "phonetic": "scroll up"},
     {"phrase": "screenshot",     "category": "verb",       "phonetic": "screenshot"},
     {"phrase": "close",          "category": "verb",       "phonetic": "close"},
-    {"phrase": "open kiro",      "category": "app",        "phonetic": "open kiro"},
+    {"phrase": "open vscode",    "category": "app",        "phonetic": "open vscode"},
     {"phrase": "open chrome",    "category": "app",        "phonetic": "open chrome"},
     {"phrase": "open terminal",  "category": "app",        "phonetic": "open terminal"},
     # Wake phrase

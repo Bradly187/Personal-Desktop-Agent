@@ -279,10 +279,10 @@ _VOICE_CORRECTIONS: dict[str, str] = {
     "hot key":     "hotkey",
     "screen shot": "screenshot",
     # App name phonetic corrections
-    "key row":     "kiro",
-    "key-row":     "kiro",
-    "keyrow":      "kiro",
-    "cairo":       "kiro",
+    "key row":     "vscode",
+    "key-row":     "vscode",
+    "keyrow":      "vscode",
+    "cairo":       "vscode",
     "slap":        "slack",
     "diskord":     "discord",
     "dis cord":    "discord",
@@ -1415,7 +1415,7 @@ class HybridCoordinator:
                 )
 
             # Always apply vocabulary corrections before any gate evaluation
-            # so app-name phonetics ("key-row" → "kiro") reach the LLM fixed
+            # so app-name phonetics ("key-row" → "vscode") reach the LLM fixed
             # regardless of Whisper confidence level.
             vocab_corrected = False
             if cmd.source in ("voice", "voice_local"):
@@ -1559,6 +1559,7 @@ class HybridCoordinator:
             latency_ms = (time.monotonic() - t0) * 1000
             if self._agent_db and self._agent_db.available:
                 try:
+                    resolved_by_val = result.get("result", {}).get("resolved_by") if isinstance(result.get("result"), dict) else None
                     command_id = await self._agent_db.insert_command(
                         session_id=self._session_id,
                         cmd=cmd,
@@ -1569,6 +1570,7 @@ class HybridCoordinator:
                         success=success,
                         error_msg=error_msg,
                         trace_id=cmd.trace_id or None,
+                        resolved_by=resolved_by_val,
                     )
                 except Exception as db_exc:
                     log.warning("AgentDB.insert_command failed: %s", db_exc)
@@ -1642,7 +1644,7 @@ class HybridCoordinator:
 
             # D8: handle voice corrections — record the right action for
             # commands where the user said "no/wait/actually <new command>"
-            if cmd.source == "voice_correction" and self._trainer:
+            if cmd.source == "voice_correction":
                 await self._on_correction(cmd, action_str)
 
             # D8: record action/status so WhisperStream can detect next correction
@@ -1716,6 +1718,14 @@ class HybridCoordinator:
         # the user_corrections backlog must capture every confirmed correction,
         # not only those on deploys that also run a ContinuousTrainer.
         self._harvest_correction(cmd, self._last_executed_action)
+        # S3.1: Write the gold label to the commands table so it can be harvested
+        if self._agent_db and self._agent_db.available and self._last_command_id is not None:
+            from core.async_utils import fire_and_log
+            fire_and_log(
+                self._agent_db.mark_command_corrected(self._last_command_id, correct_action),
+                log, label="mark command corrected"
+            )
+
         if not self._trainer:
             return
         try:
