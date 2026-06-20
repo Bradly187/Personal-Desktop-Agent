@@ -1,10 +1,10 @@
 {
   "name": "desktop-agent-bridge",
   "displayName": "Desktop Agent Bridge",
-  "description": "Exposes IDE context (cursor, file, diagnostics, git) to the Personal Desktop Agent Python backend over WebSocket on port 8767.",
-  "version": "0.1.0",
+  "description": "Exposes IDE context (cursor, file, diagnostics, git) to the Personal Desktop Agent Python backend over an authenticated WebSocket on port 8767, with a dev-agent model picker.",
+  "version": "0.2.0",
   "publisher": "personal-desktop-agent",
-  "engines": { "vscode": "^1.85.0" },
+  "engines": { "vscode": "^1.93.0" },
   "categories": ["Other"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
@@ -17,6 +17,10 @@
       {
         "command": "desktopAgent.showStatus",
         "title": "Desktop Agent: Show Bridge Status"
+      },
+      {
+        "command": "desktopAgent.selectModel",
+        "title": "Desktop Agent: Select Dev-Agent Model"
       }
     ],
     "configuration": {
@@ -43,7 +47,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.93.0",
     "@types/ws": "^8.5.0",
     "typescript": "^5.3.0"
   },

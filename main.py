@@ -805,10 +805,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # ── VS Code bridge client (--vscode flag) ─────────────────────────────
     if getattr(args, "vscode", False):
         try:
+            from inference import bridge_protocol
             from inference.bridge_client import BridgeClient
+            # Establish the shared auth token now so the extension can
+            # authenticate on its next connect (generate-if-missing, 0600).
+            bridge_protocol.ensure_token()
             bridge = BridgeClient()
             dev_agent.set_bridge(bridge)
-            log.info("BridgeClient: wired to DevAgent (ws://127.0.0.1:8767)")
+            log.info("BridgeClient: wired to DevAgent (authenticated ws://127.0.0.1:8767)")
         except Exception as _bridge_exc:
             log.warning("BridgeClient: failed to initialise: %s", _bridge_exc)
 

@@ -1,0 +1,4 @@
+# Build output and dependencies — reproduced via `npm install && npm run compile`.
+node_modules/
+out/
+*.vsix

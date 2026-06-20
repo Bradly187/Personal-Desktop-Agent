@@ -8,17 +8,28 @@
  *   get_editor_context  → file, language, cursor, selection, context_above/below, diagnostics
  *   get_git_context     → branch, ahead, behind, staged, unstaged, last_commit
  *   apply_edit          → replace a range in a file; saves; triggers LSP re-check
- *   run_terminal        → send a command to the active integrated terminal
+ *   run_terminal        → run a command in the integrated terminal; capture output
  *   open_file           → open a file and jump to a line
  *   get_diagnostics     → all workspace diagnostics (errors/warnings)
  *   ping                → { pong: true }
  *
- * Install: npm install && npm run compile → copy to ~/.vscode/extensions/ or use 'code --install-extension'
+ * Security: the WebSocket handshake requires a shared token (?token=…) stored at
+ * ~/.claude/desktop_agent_bridge/token. The Python backend reads/generates the
+ * same file (inference/bridge_protocol.py) — keep the two sides in sync.
+ *
+ * Model picker: "Desktop Agent: Select Dev-Agent Model" reads the roster the
+ * backend publishes (roster.json) and writes the user's pick to override.json,
+ * which the backend's ModelRouter honors for all dev-agent queries.
+ *
+ * Install: npm install && npm run compile → 'code --install-extension' the .vsix
  */
 
 import * as vscode from 'vscode';
 import * as WebSocket from 'ws';
-import * as http from 'http';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as crypto from 'crypto';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +49,79 @@ interface BridgeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Shared file contract (mirrors inference/bridge_protocol.py)
+// ---------------------------------------------------------------------------
+
+const BRIDGE_DIR = path.join(os.homedir(), '.claude', 'desktop_agent_bridge');
+const TOKEN_FILE = path.join(BRIDGE_DIR, 'token');
+const ROSTER_FILE = path.join(BRIDGE_DIR, 'roster.json');
+const OVERRIDE_FILE = path.join(BRIDGE_DIR, 'override.json');
+
+/** Read the shared token, generating it (0600) if absent. Never overwrites. */
+function ensureToken(): string | null {
+  try {
+    fs.mkdirSync(BRIDGE_DIR, { recursive: true });
+  } catch { /* ignore */ }
+  try {
+    const existing = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+    if (existing) {
+      return existing;
+    }
+  } catch { /* not present yet */ }
+  const token = crypto.randomBytes(32).toString('hex');
+  try {
+    // wx = create-exclusive: if the backend created it first, fall back to read.
+    fs.writeFileSync(TOKEN_FILE, token, { flag: 'wx', mode: 0o600 });
+    return token;
+  } catch {
+    try {
+      return fs.readFileSync(TOKEN_FILE, 'utf8').trim() || null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Constant-time token comparison; false on any length/format mismatch. */
+function tokenMatches(provided: string | null, expected: string | null): boolean {
+  if (!expected) {
+    // No server token could be established (unwritable home) — fail closed.
+    return false;
+  }
+  if (!provided) {
+    return false;
+  }
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+function readCurrentOverride(): string | null {
+  try {
+    const data = JSON.parse(fs.readFileSync(OVERRIDE_FILE, 'utf8'));
+    return typeof data?.model === 'string' && data.model ? data.model : null;
+  } catch {
+    return null;
+  }
+}
+
+function readRoster(): string[] {
+  try {
+    const data = JSON.parse(fs.readFileSync(ROSTER_FILE, 'utf8'));
+    return Array.isArray(data?.models) ? data.models.filter((m: unknown) => typeof m === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Extension state
 // ---------------------------------------------------------------------------
 
@@ -45,6 +129,7 @@ let _server: WebSocket.Server | null = null;
 let _statusBar: vscode.StatusBarItem;
 let _clientCount = 0;
 let _log: vscode.OutputChannel;
+let _token: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Activation
@@ -54,6 +139,11 @@ export function activate(context: vscode.ExtensionContext): void {
   _log = vscode.window.createOutputChannel('Desktop Agent Bridge');
   _log.appendLine('[Desktop Agent Bridge] Activating...');
 
+  _token = ensureToken();
+  if (!_token) {
+    _log.appendLine('[Bridge] WARNING: could not establish auth token — connections will be refused.');
+  }
+
   _statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   _statusBar.command = 'desktopAgent.showStatus';
   context.subscriptions.push(_statusBar);
@@ -61,15 +151,18 @@ export function activate(context: vscode.ExtensionContext): void {
   // Register commands
   context.subscriptions.push(
     vscode.commands.registerCommand('desktopAgent.restartBridge', () => {
+      _token = ensureToken();
       stopServer();
       startServer(context);
     }),
     vscode.commands.registerCommand('desktopAgent.showStatus', () => {
       const port = getPort();
+      const pin = readCurrentOverride() ?? 'Auto (domain routing)';
       vscode.window.showInformationMessage(
-        `Desktop Agent Bridge: ${_clientCount} client(s) connected on port ${port}`
+        `Desktop Agent Bridge: ${_clientCount} client(s) on port ${port} — dev model: ${pin}`
       );
-    })
+    }),
+    vscode.commands.registerCommand('desktopAgent.selectModel', selectModel)
   );
 
   startServer(context);
@@ -78,6 +171,57 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   stopServer();
   _log.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// Model picker
+// ---------------------------------------------------------------------------
+
+const AUTO_LABEL = '$(sync) Auto (domain routing)';
+
+async function selectModel(): Promise<void> {
+  const roster = readRoster();
+  if (roster.length === 0) {
+    vscode.window.showWarningMessage(
+      'Desktop Agent: no model roster yet. Start the Python backend (it publishes the roster on launch), then try again.'
+    );
+    return;
+  }
+  const current = readCurrentOverride();
+  const items: vscode.QuickPickItem[] = [
+    {
+      label: AUTO_LABEL,
+      description: current === null ? '• current' : undefined,
+      detail: 'Let the backend pick a model per domain by VRAM fit (default).',
+    },
+    ...roster.map((m) => ({
+      label: m,
+      description: current === m ? '• current' : undefined,
+      detail: 'Pin this model for all dev-agent queries (code, math, plan, general).',
+    })),
+  ];
+
+  const choice = await vscode.window.showQuickPick(items, {
+    title: 'Desktop Agent — Dev-Agent Model',
+    placeHolder: 'Pin a model for dev-agent queries, or Auto for domain routing',
+  });
+  if (!choice) {
+    return;
+  }
+
+  const model = choice.label === AUTO_LABEL ? null : choice.label;
+  try {
+    fs.mkdirSync(BRIDGE_DIR, { recursive: true });
+    fs.writeFileSync(OVERRIDE_FILE, JSON.stringify({ model }), 'utf8');
+  } catch (err) {
+    vscode.window.showErrorMessage(`Desktop Agent: failed to write model override: ${err}`);
+    return;
+  }
+  _log.appendLine(`[Bridge] Dev-agent model override set to: ${model ?? 'Auto'}`);
+  updateStatusBar();
+  vscode.window.showInformationMessage(
+    `Desktop Agent: dev model → ${model ?? 'Auto (domain routing)'}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -92,10 +236,30 @@ function startServer(context: vscode.ExtensionContext): void {
   const port = getPort();
 
   try {
-    _server = new WebSocket.Server({ host: '127.0.0.1', port });
+    _server = new WebSocket.Server({
+      host: '127.0.0.1',
+      port,
+      // Reject the handshake unless ?token= matches the shared secret.
+      verifyClient: (
+        info: { req: { url?: string } },
+        cb: (ok: boolean, code?: number, msg?: string) => void
+      ) => {
+        let provided: string | null = null;
+        try {
+          const q = (info.req.url || '').split('?')[1] || '';
+          provided = new URLSearchParams(q).get('token');
+        } catch { /* malformed URL → reject below */ }
+        if (tokenMatches(provided, _token)) {
+          cb(true);
+        } else {
+          _log.appendLine('[Bridge] Rejected unauthenticated connection (bad/missing token).');
+          cb(false, 4401, 'Unauthorized');
+        }
+      },
+    });
 
     _server.on('listening', () => {
-      _log.appendLine(`[Bridge] WebSocket server listening on ws://127.0.0.1:${port}`);
+      _log.appendLine(`[Bridge] WebSocket server listening on ws://127.0.0.1:${port} (token required)`);
       updateStatusBar();
     });
 
@@ -157,8 +321,9 @@ function updateStatusBar(error = false): void {
     _statusBar.color = new vscode.ThemeColor('errorForeground');
   } else if (_server) {
     const icon = _clientCount > 0 ? '$(plug)' : '$(circle-outline)';
-    _statusBar.text = `${icon} Agent: ${_clientCount}`;
-    _statusBar.tooltip = `Desktop Agent Bridge — ${_clientCount} client(s) on port ${getPort()}`;
+    const pin = readCurrentOverride();
+    _statusBar.text = `${icon} Agent: ${_clientCount}${pin ? ` · ${pin}` : ''}`;
+    _statusBar.tooltip = `Desktop Agent Bridge — ${_clientCount} client(s) on port ${getPort()}\nDev model: ${pin ?? 'Auto (domain routing)'}\nClick for status.`;
     _statusBar.color = undefined;
   } else {
     _statusBar.text = '$(circle-slash) Agent Bridge: OFF';
@@ -196,8 +361,8 @@ async function handleRequest(req: BridgeRequest): Promise<BridgeResponse> {
       case 'run_terminal': {
         const cmd = req.command as string;
         const cwd = req.cwd as string | undefined;
-        runInTerminal(cmd, cwd);
-        return { id, ok: true, data: { sent: true } };
+        const result = await runInTerminal(cmd, cwd);
+        return { id, ok: true, data: result };
       }
 
       case 'open_file': {
@@ -380,7 +545,39 @@ async function applyEdit(file: string, range: EditRange, text: string): Promise<
 // Terminal
 // ---------------------------------------------------------------------------
 
-function runInTerminal(command: string, cwd?: string): void {
+interface TerminalResult {
+  sent: boolean;
+  output?: string;
+  exit_code?: number;
+  captured: boolean;
+}
+
+const _MAX_OUTPUT = 64_000;        // cap returned output so a noisy build can't flood the wire
+const _SHELL_INTEGRATION_WAIT = 3_000;  // ms to wait for shell integration before falling back
+const _CAPTURE_TIMEOUT = 8_000;    // ms max to wait for command completion
+
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+}
+
+async function waitForShellIntegration(terminal: vscode.Terminal): Promise<vscode.TerminalShellIntegration | undefined> {
+  if (terminal.shellIntegration) {
+    return terminal.shellIntegration;
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { sub.dispose(); resolve(undefined); }, _SHELL_INTEGRATION_WAIT);
+    const sub = vscode.window.onDidChangeTerminalShellIntegration((e) => {
+      if (e.terminal === terminal && e.shellIntegration) {
+        clearTimeout(timer);
+        sub.dispose();
+        resolve(e.shellIntegration);
+      }
+    });
+  });
+}
+
+async function runInTerminal(command: string, cwd?: string): Promise<TerminalResult> {
   let terminal = vscode.window.activeTerminal;
   if (!terminal) {
     terminal = vscode.window.createTerminal({
@@ -389,8 +586,41 @@ function runInTerminal(command: string, cwd?: string): void {
     });
   }
   terminal.show(true);    // preserveFocus=true so editor stays active
-  terminal.sendText(command);
-  _log.appendLine(`[Bridge] Sent to terminal: ${command.substring(0, 80)}`);
+
+  const si = await waitForShellIntegration(terminal);
+  if (!si) {
+    // No shell integration — best-effort fire-and-forget (no output capture).
+    terminal.sendText(command);
+    _log.appendLine(`[Bridge] Sent to terminal (no capture): ${command.substring(0, 80)}`);
+    return { sent: true, captured: false };
+  }
+
+  const execution = si.executeCommand(command);
+  let output = '';
+  const endPromise = new Promise<number | undefined>((resolve) => {
+    const timer = setTimeout(() => { sub.dispose(); resolve(undefined); }, _CAPTURE_TIMEOUT);
+    const sub = vscode.window.onDidEndTerminalShellExecution((e) => {
+      if (e.execution === execution) {
+        clearTimeout(timer);
+        sub.dispose();
+        resolve(e.exitCode);
+      }
+    });
+  });
+
+  try {
+    for await (const chunk of execution.read()) {
+      output += chunk;
+      if (output.length > _MAX_OUTPUT * 2) {
+        break;  // hard stop on runaway output; trimmed below
+      }
+    }
+  } catch { /* stream ended/closed */ }
+
+  const exitCode = await endPromise;
+  const clean = stripAnsi(output).slice(0, _MAX_OUTPUT);
+  _log.appendLine(`[Bridge] Ran in terminal (exit=${exitCode ?? '?'}): ${command.substring(0, 80)}`);
+  return { sent: true, captured: true, output: clean, exit_code: exitCode };
 }
 
 // ---------------------------------------------------------------------------

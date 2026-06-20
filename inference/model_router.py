@@ -83,9 +83,10 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator, Iterator, Optional
 
+from inference import bridge_protocol
 from monitoring.trace import get_tracer
 
 log = logging.getLogger(__name__)
@@ -863,6 +864,54 @@ class ModelRouter:
         # was previously the inline `+ 2.0` magic number in select_profile.
         from core.vram_arbiter import VramArbiter
         self._arbiter = VramArbiter(tolerance_gb=2.0)
+        # Publish the dev-agent model roster so the VS Code bridge picker can
+        # offer a "pin this model" override (read back in select_profile).
+        bridge_protocol.write_roster(self.dev_model_roster())
+
+    def dev_model_roster(self) -> list[str]:
+        """Distinct models a dev-agent query can route to (command domain excluded).
+
+        Drives the VS Code model picker. Union of every non-command fallback
+        chain, largest/most-capable first, de-duplicated by write_roster().
+        """
+        roster: list[str] = []
+        for domain, chain in _FALLBACK.items():
+            if domain == bridge_protocol.COMMAND_DOMAIN:
+                continue
+            roster.extend(chain)
+        return roster
+
+    def _apply_override(self, domain: str, free_gb: float) -> Optional["ModelProfile"]:
+        """Return an override profile if the user pinned a model, else None.
+
+        Honors the global dev-agent pin written by the VS Code picker. Skips:
+          - the command domain (accessibility path is never overridden),
+          - vision when the pinned model can't take images (would break grounding),
+          - a pin that doesn't fit current VRAM (falls through to auto routing —
+            never hard-fails on a too-large pin).
+        The pinned model reuses the *domain's* prompt/params, swapping only the
+        weights, so a code query keeps the code prompt under the new model.
+        """
+        if domain == bridge_protocol.COMMAND_DOMAIN:
+            return None
+        pinned = bridge_protocol.read_override()
+        if not pinned:
+            return None
+        base = self._profiles.get(domain) or self._profiles.get("general")
+        if base is None:
+            return None
+        known = next((p for p in self._profiles.values() if p.name == pinned), None)
+        if domain == "vision" and not (known and known.supports_images):
+            log.info("ModelRouter: override %s skipped for vision (no image support)", pinned)
+            return None
+        vram = known.vram_gb if known else base.vram_gb
+        prof = replace(base, name=pinned, vram_gb=vram)
+        if not self._arbiter.can_admit(prof.vram_gb, free_gb):
+            log.info("ModelRouter: override %s (%.1f GB) won't fit %.1f GB free — auto routing",
+                     pinned, prof.vram_gb, free_gb)
+            return None
+        log.info("ModelRouter: domain=%s → %s (pinned override)", domain, pinned)
+        return prof
 
     def set_vllm_pool(self, pool: VLLMSpecialistPool) -> None:
         """Wire the specialist pool.  Once set, all domain infer() calls use it."""
@@ -909,6 +958,12 @@ class ModelRouter:
     def select_profile(self, domain: str) -> ModelProfile:
         """Choose the best available profile for the domain given current VRAM."""
         free_gb = _free_vram_gb()
+
+        # User-pinned override from the VS Code picker wins when it fits.
+        override = self._apply_override(domain, free_gb)
+        if override is not None:
+            return override
+
         chain = _FALLBACK.get(domain, ["llama3.1:8b"])
 
         for model_name in chain:
