@@ -346,8 +346,6 @@ class DevAgent:
         self._kiro: Optional["KiroClient"] = None            # set via set_kiro()
         self._scheduler = None                               # set via set_scheduler()
         self._memory = None                                  # set via set_memory()
-        self._remote_indexer = None       # RemoteIndexerClient | None (laptop offload)
-        self._cluster_health = None        # ClusterHealthMonitor | None
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
         self._skill_registry = None        # SkillRegistry | None (set via set_skill_registry)
         self._personal_kb = None           # PersonalKB | None (set via set_personal_kb)
@@ -456,21 +454,6 @@ class DevAgent:
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
         self._indexer = indexer
-
-    def set_remote_indexer_url(self, url: str, token: "str | None" = None) -> None:
-        """Offload RAG queries to the laptop indexer service at `url`.
-
-        Preferred over the local indexer when the laptop 'indexer' service is
-        healthy; falls back to the local indexer otherwise. `token` is the shared
-        bearer token the service now requires on /query/* (C2).
-        """
-        from inference.remote_indexer_client import RemoteIndexerClient
-        self._remote_indexer = RemoteIndexerClient(url, token=token)
-        log.info("DevAgent: remote indexer enabled → %s", url)
-
-    def set_cluster_health(self, monitor) -> None:
-        """Wire ClusterHealthMonitor; remote indexer used only while 'indexer' is healthy."""
-        self._cluster_health = monitor
 
     def set_kiro(self, kiro: "KiroClient") -> None:
         """Wire a KiroClient for IDE context (cursor, file, git, diagnostics)."""
@@ -2809,31 +2792,13 @@ class DevAgent:
         in the system/user prompt, or None if the indexer is unavailable or returns
         no useful hits.
         """
-        # Prefer the laptop indexer service when configured and healthy.
-        hits = None
-        from_remote = False
-        use_remote = self._remote_indexer is not None and (
-            self._cluster_health is None or self._cluster_health.is_healthy("indexer")
-        )
-        if use_remote:
-            try:
-                hits = await self._remote_indexer.query_combined(query, n=n)
-                from_remote = bool(hits)
-            except Exception as exc:
-                log.warning("DevAgent._rag_context() remote indexer failed: %s — local fallback", exc)
-                hits = None
-
-        # M3: an empty remote result (flaking service returning []) is treated as
-        # a miss, not success — fall back to the local indexer rather than
-        # silently dropping RAG context.
-        if not hits:
-            if self._indexer is None or not self._indexer.available:
-                return None
-            try:
-                hits = await self._indexer.query_combined(query, n=n)
-            except Exception as exc:
-                log.debug("DevAgent._rag_context() failed: %s", exc)
-                return None
+        if self._indexer is None or not self._indexer.available:
+            return None
+        try:
+            hits = await self._indexer.query_combined(query, n=n)
+        except Exception as exc:
+            log.debug("DevAgent._rag_context() failed: %s", exc)
+            return None
 
         try:
             if not hits:
@@ -2856,16 +2821,6 @@ class DevAgent:
             # C2: cap total size so a flooding indexer can't blow the context.
             if len(body) > _RAG_MAX_CHARS:
                 body = body[:_RAG_MAX_CHARS] + "\n…[truncated]"
-            # C2: results from the REMOTE indexer are untrusted — drop the block on
-            # a high-risk (prompt-injection) verdict rather than feed it to the LLM.
-            if from_remote:
-                try:
-                    verdict = _get_trust_classifier().classify_sync("remote_indexer", body)
-                    if verdict.should_block:
-                        log.warning("DevAgent._rag_context: remote RAG dropped (trust=HIGH)")
-                        return None
-                except Exception as exc:
-                    log.debug("RAG taint check failed: %s", exc)
             # C2: wrap retrieved chunks as DATA, not instructions.
             return f"{_RAG_OPEN_FENCE}\n{body}\n{_RAG_CLOSE_FENCE}"
         except Exception as exc:

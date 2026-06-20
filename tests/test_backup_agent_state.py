@@ -71,7 +71,6 @@ def env(tmp_path: Path) -> BackupConfig:
     (project / "chroma_db" / "seg" / "data.bin").write_bytes(b"\x00\x01")
 
     (project / "approval_config.json").write_text('{"voice_id": "Danielle"}')
-    (project / "cluster_config.json").write_text('{"laptop": {}}')
     (project / "skills" / "manifests").mkdir(parents=True)
     (project / "skills" / "manifests" / "echo.json").write_text('{"enabled": false}')
 
@@ -152,11 +151,11 @@ class TestCollectSources:
         assert creds[0].archive == "credentials/google_pim/token.json.dpapi"
 
     def test_missing_sources_skipped(self, env: BackupConfig, caplog):
-        (env.project_root / "cluster_config.json").unlink()
+        (env.project_root / "approval_config.json").unlink()
         with caplog.at_level("WARNING"):
             sources = collect_sources(env)
-        assert not any(s.archive == "config/cluster_config.json" for s in sources)
-        assert any("cluster_config.json" in r.message for r in caplog.records)
+        assert not any(s.archive == "config/approval_config.json" for s in sources)
+        assert any("approval_config.json" in r.message for r in caplog.records)
 
 
 # ===========================================================================

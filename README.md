@@ -9,7 +9,6 @@ The system adapts to the user's body: a pain-day engine fuses behavioural signal
 - **PC**: Windows 10/11, NVIDIA RTX 5090 (32 GB VRAM), 32+ GB RAM
 - **iPad**: any iPad with Core Motion and a microphone. A LiDAR-equipped iPad Pro additionally enables depth-validated hand gestures and the camera/depth debug feeds; everything degrades gracefully without it
 - **Optional — Intel RealSense L515**: desk-mounted depth camera for camera-based hand-pointer control (experimental, in active bring-up)
-- **Optional — second GPU machine**: an RTX 4070 laptop acts as a compute node (Whisper + codebase indexer offload) via `cluster_config.json`
 - **Network**: PC and iPad on the same local network
 
 ## Quick Start
@@ -142,7 +141,7 @@ Cursor gravity (magnetic snap toward clickable UI targets) assists levels 2–3,
 ├── main.py                  # Unified entry point
 ├── core/                    # ipad_bridge, fusion_engine, hybrid_coordinator,
 │                            #   scheduler, supervisor, resource_governor,
-│                            #   goal_session, circuit_breaker, cluster_*
+│                            #   goal_session, circuit_breaker
 ├── sensors/                 # whisper_stream, gesture_processor, lidar_receiver,
 │                            #   one_euro_filter, sensor_viewer, realsense_*
 ├── inference/               # local_inference (Ollama/vLLM/llama.cpp backends),
