@@ -13,7 +13,7 @@ What gets backed up:
                                  sqlite is only written during indexing, and
                                  the store can always be re-indexed)
   - ~/.claude/personal_kb/     — personal-document RAG + config.json/state.json
-  - approval_config.json, cluster_config.json, skills/manifests/
+  - approval_config.json, skills/manifests/
   - ~/.claude/ipad_bridge/     — paired_token + config.json
 
 OAuth refresh tokens (~/.claude/skills/credentials/) are EXCLUDED by default —
@@ -101,7 +101,6 @@ def collect_sources(cfg: BackupConfig) -> list[Source]:
         Source(cfg.project_root / "chroma_db", "chroma/chroma_db", "dir"),
         Source(cfg.claude_home / "personal_kb" / "chroma", "chroma/personal_kb", "dir"),
         Source(cfg.project_root / "approval_config.json", "config/approval_config.json", "file"),
-        Source(cfg.project_root / "cluster_config.json", "config/cluster_config.json", "file"),
         Source(cfg.project_root / "skills" / "manifests", "config/skills_manifests", "dir"),
         Source(cfg.claude_home / "ipad_bridge" / "paired_token", "config/ipad_bridge/paired_token", "file"),
         Source(cfg.claude_home / "ipad_bridge" / "config.json", "config/ipad_bridge/config.json", "file"),

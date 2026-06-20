@@ -1,9 +1,9 @@
 """ModelRouter.infer_stream yields chunks when streamable, one chunk otherwise.
 
 Real token streaming is used only for free-form, non-think-stripped local-Ollama
-profiles; everything else (non-free-form command lines, vLLM pool, offload, or a
-hidden think block) falls back to a single full infer() so callers always get the
-same final text.
+profiles; everything else (non-free-form command lines, vLLM pool, or a hidden
+think block) falls back to a single full infer() so callers always get the same
+final text.
 """
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ def _router() -> ModelRouter:
     # infer_stream touches.
     r = ModelRouter.__new__(ModelRouter)
     r._vllm_pool = None
-    r._should_offload = lambda domain: False
     return r
 
 
