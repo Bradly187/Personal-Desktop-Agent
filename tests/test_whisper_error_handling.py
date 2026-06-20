@@ -67,13 +67,13 @@ def test_profiler_failure_does_not_drop_command(quiet_approval_dir, monkeypatch)
         def record(self, **kwargs):
             raise RuntimeError("profiler boom")
 
-    ws = _ready_stream(monkeypatch, [_Seg("hey agent open kiro")])
+    ws = _ready_stream(monkeypatch, [_Seg("hey agent open vscode")])
     ws._profiler = _BadProfiler()
 
     ws._transcribe(np.zeros(16_000, dtype=np.float32))   # must not raise
 
     assert len(ws._fusion.cmds) == 1                     # command still delivered
-    assert ws._fusion.cmds[0].text == "open kiro"
+    assert ws._fusion.cmds[0].text == "open vscode"
 
 
 def test_working_profiler_still_records(quiet_approval_dir, monkeypatch):
@@ -84,7 +84,7 @@ def test_working_profiler_still_records(quiet_approval_dir, monkeypatch):
         def record(self, **kwargs):
             self.calls += 1
 
-    ws = _ready_stream(monkeypatch, [_Seg("hey agent open kiro")])
+    ws = _ready_stream(monkeypatch, [_Seg("hey agent open vscode")])
     ws._profiler = _GoodProfiler()
 
     ws._transcribe(np.zeros(16_000, dtype=np.float32))

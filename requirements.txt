@@ -45,6 +45,13 @@ psutil==7.2.2
 pix2tex==0.1.4
 pylatexenc==2.10
 
+# ── Symbolic math skill (skills/servers/sympy_server.py) ─────────────────────
+# Local, offline ground-truth computation the math planner calls via SKILL_QUERY
+# (exact integrals/derivatives/solve) so the math model's reasoning is verified
+# against an actual CAS. No network, no credentials. Also a transitive dep of
+# several scientific packages, but pinned here as a first-class requirement.
+sympy==1.14.0
+
 # ── GPU monitoring (Gate 3 VRAM check, --measure-vram) ───────────────────────
 # pynvml is now deprecated; nvidia-ml-py is the maintained package (same API)
 nvidia-ml-py==13.595.45
@@ -117,9 +124,9 @@ windows-curses==2.4.1; sys_platform == "win32"
 # Optional — CodebaseIndexer degrades gracefully without it (one-shot indexing only).
 watchdog==6.0.0
 
-# ── WebSocket client for Kiro/VS Code bridge (KiroClient) ─────────────────────
-# Used by kiro_client.py to connect to the kiro-extension WebSocket server (:8767).
-# Optional — DevAgent degrades gracefully when Kiro is not running.
+# ── WebSocket client for VS Code bridge (BridgeClient) ────────────────────────
+# Used by bridge_client.py to connect to the desktop-agent-bridge WebSocket server (:8767).
+# Optional — DevAgent degrades gracefully when the bridge extension is not running.
 websockets==16.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────

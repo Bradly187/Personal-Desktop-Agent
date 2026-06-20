@@ -62,7 +62,7 @@ def test_empty_rejected():
     "compose note call the doctor",
     "scroll down",
     "click the save button",
-    "open kiro",
+    "open vscode",
     "take a note about the meeting",
     "what's my next meeting",             # question word but 'meeting' is a command noun
     "log my pain it's an eight",
@@ -95,7 +95,7 @@ def test_question_opener_beats_vocab_overlap():
 def test_instance_method_uses_live_hotwords():
     from sensors.whisper_stream import WhisperStream
     ws = WhisperStream.__new__(WhisperStream)        # skip heavy __init__
-    ws._static_hotwords = ["Kiro", "compose a note"]
+    ws._static_hotwords = ["VS Code", "compose a note"]
     ws._hotwords = ["zotero"]
     assert ws._bypass_reject_reason("zotero please") is None      # live hotword
     assert ws._bypass_reject_reason("are you taking us now?") is not None

@@ -2,6 +2,13 @@
 
 Generated: 2026-05-25
 
+> **⚠️ Partially superseded (snapshot of 2026-05-25).** Since this was written: eye-gaze and
+> head-pose control were **removed** (2026-05-30 — the standard iPad lacks TrueDepth); the laptop
+> compute cluster was **excised** (the agent is single-machine local-only); the Kiro IDE bridge was
+> renamed to the **VS Code bridge** (`inference/bridge_client.py`, `desktop-agent-bridge/`, `--vscode`);
+> `agent.db` is now **42 tables at `PRAGMA user_version = 8`**; the FusionEngine priority is **6-level**;
+> iPad→PC has **25** message types. `CLAUDE.md` + `storage/db.py` are the authoritative current sources.
+
 ---
 
 ## 1. Status
@@ -20,8 +27,8 @@ Generated: 2026-05-25
 | Action verification (action_verifier.py) | ✅ Pillow pre/post diff |
 | Voice pipeline (whisper_stream.py) | ✅ Silero VAD + faster-whisper large-v3, GPU |
 | Gesture processor (gesture_processor.py) | ✅ MediaPipe, 13 gestures |
-| Gaze calibration (gaze_calibrator.py) | ✅ 5-point affine, numpy lstsq |
-| AgentDB (db.py) | ✅ 28 tables, WAL mode, MiniLM retrieval |
+| ~~Gaze calibration (gaze_calibrator.py)~~ | ❌ Removed 2026-05-30 (no TrueDepth on the standard iPad) |
+| AgentDB (db.py) | ✅ 42 tables at v8, WAL mode, MiniLM retrieval |
 | Continuous trainer (continuous_trainer.py) | ✅ Threshold adaptation, pain-day −30% |
 | Acoustic profiler (acoustic_profiler.py) | ✅ VAD/logprob calibration, drift detection |
 | TTS (polly_stream.py / chatterbox_tts.py) | ✅ Danielle neural or local GPU |
@@ -91,6 +98,9 @@ The desktop agent is a 7-layer async Python pipeline. All inter-layer communicat
 ```
 
 **Rendered diagram files:**
+> ⚠️ **Stale — pending regeneration.** `architecture-desktop-agent.svg` still depicts removed
+> gaze/head-pose nodes and the old 10-level priority. The current mermaid **sources** under
+> `docs/diagrams/overview/*.mmd` and `docs/diagrams/state/*.mmd` are accurate — regenerate the SVG/PNG from those (or drop these exports).
 - [`architecture-desktop-agent.svg`](architecture-desktop-agent.svg)
 - [`architecture-desktop-agent.png`](architecture-desktop-agent.png)
 
@@ -98,7 +108,7 @@ The desktop agent is a 7-layer async Python pipeline. All inter-layer communicat
 
 ## 3. DB Schema
 
-AgentDB is a single SQLite file (`agent.db`) with WAL mode, 28 tables, and MiniLM semantic retrieval for few-shot examples.
+AgentDB is a single SQLite file (`agent.db`) with WAL mode, 42 tables (`PRAGMA user_version = 8`), and MiniLM semantic retrieval for few-shot examples.
 AnalyticsDB is a DuckDB sidecar (`analytics.duckdb`) that can attach `agent.db` directly for analytical queries.
 
 ### 3.1 Table Inventory
@@ -183,6 +193,9 @@ gaze_monitor_calibration (id, session_id, ref_dir JSON, matrix JSON [2×3],
 ```
 
 **Rendered schema files:**
+> ⚠️ **`db-schema-calibration.svg` is stale — pending regeneration** (still shows the removed
+> `gaze_monitor_calibration` table). Regenerate from the current mermaid sources under
+> `docs/diagrams/db/*.mmd`. (`db-schema-pipeline.svg` is current.)
 - Core pipeline: [`db-schema-pipeline.svg`](db-schema-pipeline.svg) / [`db-schema-pipeline.png`](db-schema-pipeline.png)
 - Calibration & voice: [`db-schema-calibration.svg`](db-schema-calibration.svg) / [`db-schema-calibration.png`](db-schema-calibration.png)
 

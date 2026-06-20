@@ -138,7 +138,8 @@ CREATE TABLE IF NOT EXISTS commands (
     success            INTEGER,
     error_msg          TEXT,
     corrected_to       TEXT,
-    trace_id           TEXT          -- cross-layer trace id (DA_TRACE); links to monitoring/trace.py spans
+    trace_id           TEXT,         -- cross-layer trace id (DA_TRACE); links to monitoring/trace.py spans
+    resolved_by        TEXT          -- CLICK resolver tier (explicit|uia|vision|gaze|cursor)
 );
 CREATE INDEX IF NOT EXISTS idx_commands_session ON commands(session_id);
 CREATE INDEX IF NOT EXISTS idx_commands_ts      ON commands(ts);
@@ -844,8 +845,10 @@ CREATE INDEX IF NOT EXISTS idx_usercorr_ts ON user_corrections(ts);
 # a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
 # append a row when introducing a new additive column; the batch is gated by
 # PRAGMA user_version so it runs at most once per database file.
-_AGENT_DB_SCHEMA_VERSION = 7
+_AGENT_DB_SCHEMA_VERSION = 8
 _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # v7→8 (Sprint S3.0)
+    ("commands", "resolved_by", "TEXT"),
     # v1→2
     ("flare_profile", "sound_degrades", "INTEGER NOT NULL DEFAULT 1"),
     ("agent_runs", "status", "TEXT NOT NULL DEFAULT 'completed'"),
@@ -1289,6 +1292,7 @@ class AgentDB:
         success: Optional[bool] = None,
         error_msg: Optional[str] = None,
         trace_id: Optional[str] = None,
+        resolved_by: Optional[str] = None,
     ) -> int:
         """Insert a command routing record and return its id."""
         if not self._conn:
@@ -1303,8 +1307,8 @@ class AgentDB:
                    (session_id, ts, source, text, action, params,
                     route, gate_that_decided, latency_ms,
                     whisper_logprob, gesture_confidence,
-                    gaze_x, gaze_y, success, error_msg, trace_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    gaze_x, gaze_y, success, error_msg, trace_id, resolved_by)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     session_id, time.time(), cmd.source, cmd.text,
                     action, json.dumps(
@@ -1314,7 +1318,7 @@ class AgentDB:
                     route, gate_that_decided,
                     round(latency_ms, 1) if latency_ms is not None else None,
                     cmd.whisper_logprob, cmd.gesture_confidence,
-                    gaze_x, gaze_y, success_int, error_msg, trace_id,
+                    gaze_x, gaze_y, success_int, error_msg, trace_id, resolved_by,
                 ),
             )
             await self._conn.commit()
@@ -1838,6 +1842,32 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.insert_agent_step failed: %s", exc)
             return None
+
+    async def update_agent_step(
+        self,
+        step_id: int,
+        result: Optional[str],
+        success: Optional[bool],
+        latency_ms: float,
+    ) -> None:
+        """Update an existing step record with execution results."""
+        if not self._conn or step_id < 0:
+            return
+        try:
+            await self._conn.execute(
+                """UPDATE agent_steps
+                   SET result = ?, success = ?, latency_ms = ?
+                   WHERE id = ?""",
+                (
+                    result or None,
+                    None if success is None else int(success),
+                    round(latency_ms, 1),
+                    step_id,
+                ),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.update_agent_step failed: %s", exc)
 
     # ---------------------------------------------------------------------- #
     # Agent run lifecycle (durable, resumable plan ledger)

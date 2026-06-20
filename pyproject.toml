@@ -20,7 +20,7 @@ dependencies = { file = ["requirements.txt"] }
 
 # Flat application layout: the importable packages live at the repo root. List
 # them explicitly so non-package trees (tests, docs, scripts, iPadApp, the Node
-# sidecar, kiro, _archive) are never picked up as installable packages.
+# sidecar, desktop-agent-bridge, _archive) are never picked up as installable packages.
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
@@ -43,7 +43,7 @@ exclude = [
     "scripts*",
     "iPadApp*",
     "tts_service*",
-    "kiro*",
+    "desktop-agent-bridge*",
 ]
 
 # NOTE: pytest configuration intentionally stays in pytest.ini (which takes

@@ -19,7 +19,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 
 ## Current Status (2026-06-19)
 
-> **Schema fact (authoritative):** `agent.db` = **42 tables** at `PRAGMA user_version = 7` (`storage/db.py` is the schema source of truth); `AnalyticsDB` (DuckDB) holds the **3** `benchmark_*` tables. Table counts in `docs/CHANGELOG.md` are historical (as-of-their-date), not current.
+> **Schema fact (authoritative):** `agent.db` = **42 tables** at `PRAGMA user_version = 8` (`storage/db.py` is the schema source of truth; v8 added the `commands.resolved_by` CLICK-resolver-tier column); `AnalyticsDB` (DuckDB) holds the **3** `benchmark_*` tables. Table counts in `docs/CHANGELOG.md` are historical (as-of-their-date), not current.
 
 Phases 1–6 + Sprints A–C / 5–7 / G1–G5 / N–Q shipped and merged. Full dated history → [`docs/CHANGELOG.md`](docs/CHANGELOG.md). Day-by-day notes → `docs/daily/`.
 

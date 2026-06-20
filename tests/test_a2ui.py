@@ -139,17 +139,17 @@ def test_template_matches_scroll_direction():
 
 def test_template_matches_open_type_and_extracts_name():
     s = a2ui.template_for_clarify(
-        'What is "Kiro"? Is it an application name, a file, or something else?')
+        'What is "VS Code"? Is it an application name, a file, or something else?')
     assert s is not None
     title = next(c["text"] for c in s["components"] if c["id"] == "q")
-    assert "Kiro" in title
+    assert "VS Code" in title
     values = [c["action"]["value"] for c in s["components"] if c.get("action")]
     assert values == ["application", "file", "other"]
 
 
 def test_template_matches_post_open_action():
     s = a2ui.template_for_clarify(
-        "What specific action would you like me to perform after opening Kiro? "
+        "What specific action would you like me to perform after opening VS Code? "
         "Should I click, drag, or interact with a particular element?")
     assert s is not None
     values = [c["action"]["value"] for c in s["components"] if c.get("action")]
@@ -165,10 +165,10 @@ def test_template_returns_none_for_free_form():
 def test_open_target_template_uses_recent_apps():
     s = a2ui.template_for_clarify(
         "What would you like to open? (an application, file, or folder name)",
-        recent_apps=["Kiro", "Chrome", "Slack"])
+        recent_apps=["VS Code", "Chrome", "Slack"])
     assert s is not None and a2ui.validate_surface(s) == []
     values = [c["action"]["value"] for c in s["components"] if c.get("action")]
-    assert values == ["Kiro", "Chrome", "Slack"]
+    assert values == ["VS Code", "Chrome", "Slack"]
 
 
 def test_open_target_template_falls_back_to_voice_without_recent_apps():
@@ -257,17 +257,17 @@ def test_record_open_target_dedup_recency_and_cap():
     coord = object.__new__(HybridCoordinator)
     coord._recent_open_targets = []
 
-    for app in ["Chrome", "Kiro", "Slack"]:
+    for app in ["Chrome", "vscode", "Slack"]:
         coord._record_open_target(app)
-    assert coord._recent_open_targets == ["Slack", "Kiro", "Chrome"]
+    assert coord._recent_open_targets == ["Slack", "vscode", "Chrome"]
 
-    # Re-open Kiro → moves to front, no duplicate (case-insensitive).
-    coord._record_open_target("kiro")
-    assert coord._recent_open_targets == ["kiro", "Slack", "Chrome"]
+    # Re-open vscode → moves to front, no duplicate (case-insensitive).
+    coord._record_open_target("vscode")
+    assert coord._recent_open_targets == ["vscode", "Slack", "Chrome"]
 
     # Blank target is ignored.
     coord._record_open_target("   ")
-    assert coord._recent_open_targets == ["kiro", "Slack", "Chrome"]
+    assert coord._recent_open_targets == ["vscode", "Slack", "Chrome"]
 
     # Cap at 8.
     for i in range(10):
@@ -487,11 +487,11 @@ async def test_canvas_tap_routes_value_as_command(tmp_path):
 
     bridge._coordinator = _FakeCoordinator()
     await bridge._handle_a2ui_event(
-        ws, {"surface_id": "dashboard", "event": "canvas", "value": "open kiro"}
+        ws, {"surface_id": "dashboard", "event": "canvas", "value": "open vscode"}
     )
     await asyncio.sleep(0)
     assert len(routed) == 1
-    assert routed[0].text == "open kiro"
+    assert routed[0].text == "open vscode"
     assert routed[0].source == "voice"
 
 

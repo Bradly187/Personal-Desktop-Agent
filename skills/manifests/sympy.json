@@ -1,0 +1,52 @@
+{
+  "skill_id": "sympy",
+  "display_name": "Symbolic math (SymPy)",
+  "enabled": true,
+  "transport": "stdio",
+  "server": {
+    "command": "python",
+    "args": ["-m", "skills.servers.sympy_server"]
+  },
+  "tools": {
+    "allow": ["solve_equation", "integrate_expression", "differentiate_expression", "simplify_expression", "factor_expression", "evaluate_numeric", "verify"],
+    "send_tools": []
+  },
+  "intents": {
+    "solve_equation": {
+      "keywords": ["solve the equation", "find the roots of", "what are the roots of"],
+      "tool": "solve_equation",
+      "send": false,
+      "plan": true
+    },
+    "integrate_expression": {
+      "keywords": ["the integral of", "integrate the function", "antiderivative of"],
+      "tool": "integrate_expression",
+      "send": false,
+      "plan": true
+    },
+    "differentiate_expression": {
+      "keywords": ["the derivative of", "differentiate the function", "take the derivative of"],
+      "tool": "differentiate_expression",
+      "send": false,
+      "plan": true
+    },
+    "simplify_expression": {
+      "keywords": ["simplify the expression"],
+      "tool": "simplify_expression",
+      "send": false,
+      "plan": true
+    },
+    "factor_expression": {
+      "keywords": ["factor the polynomial", "factor the expression"],
+      "tool": "factor_expression",
+      "send": false,
+      "plan": true
+    },
+    "evaluate_numeric": {
+      "keywords": ["evaluate numerically", "compute the value of"],
+      "tool": "evaluate_numeric",
+      "send": false,
+      "plan": true
+    }
+  }
+}

@@ -44,7 +44,7 @@ def test_mishearing_aiden_routes_command():
 
 
 def test_clean_wake_still_works():
-    assert _match_and_strip("Hey agent, open kiro") == "open kiro"
+    assert _match_and_strip("Hey agent, open vscode") == "open vscode"
 
 
 def test_no_wake_phrase_discarded():

@@ -24,7 +24,7 @@ struct VoiceProfilingSheet: View {
         ("scroll up",         "Two clear words"),
         ("screenshot",        "One long word — say it at your normal pace"),
         ("close",             "Short — don't whisper it"),
-        ("open cairo",        "'Cairo' = Kiro IDE"),
+        ("open cairo",        "'Cairo' → VS Code (phonetic alias)"),
         ("open chrome",       "App name after 'open'"),
         ("type hello",        "Two words, normal volume"),
         ("hotkey control c",  "Three words — say all three"),

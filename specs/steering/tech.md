@@ -89,7 +89,7 @@ pip install -r requirements.txt
 python mcp_server/desktop_mcp_server.py
 
 # Run the full pipeline
-python main.py [--port 8765] [--debug] [--safe-mode] [--viewer] [--kiro]
+python main.py [--port 8765] [--debug] [--safe-mode] [--viewer] [--vscode]
 
 # Run with llama.cpp backend
 python main.py --backend llamacpp

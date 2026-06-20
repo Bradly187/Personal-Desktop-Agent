@@ -119,7 +119,7 @@ These cannot be moved to local models without significant architectural changes:
 - [x] Update `~/.continue/config.yaml` with full fleet + slash commands (done)
 - [x] VisionGrounder `backend="ollama"` — default now, Anthropic fallback preserved
 - [x] Chatterbox TTS activated in `approval_config.json`
-- [ ] First-time codebase index — open Continue.dev in Kiro, type `@codebase` once to trigger index (~2 min for full repo)
+- [ ] First-time codebase index — open Continue.dev in VS Code, type `@codebase` once to trigger index (~2 min for full repo)
 - [ ] Test autocomplete latency — if keypress latency > 800ms with qwen3-coder:30b, switch autocomplete model to `llama3.2:3b` in config.yaml
 
 ---

@@ -1,5 +1,10 @@
 # URGENT FIXES COMPLETED — 2026-06-18
 
+> **⚠️ Historical (2026-06-18).** The laptop compute cluster was **excised on 2026-06-19** (#118):
+> `remote_whisper_service.py`, `remote_whisper_client.py`, `remote_indexer_service.py`, and
+> `core/cluster_config.py` no longer exist. The agent is single-machine local-only; the fixes
+> recorded below applied to that now-removed infrastructure.
+
 ## Two CRITICAL Network Security Gaps Fixed
 
 ### Summary

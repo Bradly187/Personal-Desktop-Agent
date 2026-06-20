@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from adaptive.continuous_trainer import ContinuousTrainer
     from storage.db import AgentDB
     from core.hybrid_coordinator import HybridCoordinator
-    from inference.kiro_client import KiroClient
+    from inference.bridge_client import BridgeClient
     from mcp_server.tools import screen as screen_tools
 
 log = logging.getLogger(__name__)
@@ -161,6 +161,12 @@ class AgentStep:
     # file instead of blindly deleting it.
     comp_args: Optional[str] = None
 
+    # --- New fields for saga integrity ---
+    run_id: Optional[int] = None
+    step_num: Optional[int] = None
+    db_id: Optional[int] = None
+    comp_id: Optional[int] = None
+
 
 _DEPS_PATTERN = re.compile(
     r"(?:after|deps|depends\s+on)\s*[:=]?\s*([\d,\s&and]+)", re.IGNORECASE
@@ -195,6 +201,29 @@ class AgentResult:
 # ---------------------------------------------------------------------------
 # Plan parser
 # ---------------------------------------------------------------------------
+
+def _extract_json_obj(text: str) -> dict:
+    """Best-effort extraction of a single JSON object from model text.
+
+    Tolerates a ```json code fence and surrounding prose by taking the span
+    from the first '{' to the last '}'. Returns {} when nothing parses (the
+    caller then skips — e.g. CAS verification degrades to no-op). Never raises.
+    """
+    if not text:
+        return {}
+    s = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
+    if fence:
+        s = fence.group(1).strip()
+    a, b = s.find("{"), s.rfind("}")
+    if a == -1 or b == -1 or b <= a:
+        return {}
+    try:
+        obj = json.loads(s[a:b + 1])
+        return obj if isinstance(obj, dict) else {}
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
 
 def _parse_plan_json(text: str) -> list[AgentStep]:
     """Parse a structured-output (Ollama `format`) plan response into steps.
@@ -343,7 +372,7 @@ class DevAgent:
         self._context: list[str] = session_context or []
         self._results_log: list[AgentResult] = []  # kept for get_last_result()
         self._indexer: Optional["CodebaseIndexer"] = None   # set via set_indexer()
-        self._kiro: Optional["KiroClient"] = None            # set via set_kiro()
+        self._bridge: Optional["BridgeClient"] = None            # set via set_bridge()
         self._scheduler = None                               # set via set_scheduler()
         self._memory = None                                  # set via set_memory()
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
@@ -455,9 +484,9 @@ class DevAgent:
         """Wire a CodebaseIndexer for RAG context injection at plan/query time."""
         self._indexer = indexer
 
-    def set_kiro(self, kiro: "KiroClient") -> None:
-        """Wire a KiroClient for IDE context (cursor, file, git, diagnostics)."""
-        self._kiro = kiro
+    def set_bridge(self, bridge: "BridgeClient") -> None:
+        """Wire a BridgeClient for IDE context (cursor, file, git, diagnostics)."""
+        self._bridge = bridge
 
     def set_scheduler(self, scheduler) -> None:
         """Wire AccessibilityScheduler for submitting background sub-tasks at DEV_AGENT priority."""
@@ -589,6 +618,21 @@ class DevAgent:
                 screenshot_b64=screenshot_b64,
                 context=extra_ctx,
             )
+
+        # Math answers are always verified against the CAS (SymPy): the model's
+        # free-form result is independently recomputed and a one-line verdict is
+        # appended. Runs in both the stream and single-shot paths (converged
+        # here); for the chat UI the verdict is streamed as a trailing token.
+        # Never lets a verification failure break the answer. Opt out with
+        # DA_MATH_CAS_VERIFY=0.
+        if (domain == "math" and router_result.ok and router_result.text
+                and os.environ.get("DA_MATH_CAS_VERIFY", "1") != "0"):
+            note = await self._verify_math_with_cas(text, router_result.text)
+            if note:
+                block = f"\n\n{note}"
+                router_result.text += block
+                if trace_id and self._event_bus is not None:
+                    await self._publish_live(TOPIC_CHAT_TOKEN, {"text": block})
 
         self._push_context(f"User: {text}\nAssistant ({router_result.model}): {router_result.text[:200]}")
 
@@ -859,18 +903,14 @@ class DevAgent:
         # half-done destructive work. Runs once, only if a terminal path above
         # didn't already compensate.
         if cancelled and not compensated:
-            _incomplete = await self._run_compensations(run_id, triggered_by="user_cancel")
             # A user cancel is deliberate and does NOT itself escalate. But a
             # compensation that FAILED or was SKIPPED during that rollback (E3/E5)
             # is a durable-integrity problem the human must see — a half-undone
-            # destructive plan left in an unknown state. So an incomplete rollback
-            # always reaches the review queue, even though the cancel did not.
-            # _record_escalation persists to the JSONL sidecar if the DB is down.
-            if _incomplete:
-                await self._record_escalation(
-                    run_id, goal, "compensation_failed", None, replans,
-                    incomplete=_incomplete,
-                )
+            # destructive plan left in an unknown state. _run_compensations
+            # self-escalates each incomplete rollback (reason 'compensation_failed')
+            # to the review queue, so the deliberate cancel stays silent while an
+            # incomplete rollback still reaches a human, even when the DB is down.
+            await self._run_compensations(run_id, triggered_by="user_cancel")
             compensated = True
 
         # Step 3: Reflect — summarise outcomes for the user.
@@ -1299,6 +1339,25 @@ class DevAgent:
             return "REVERT_TERMINAL", step.args or step.body or None
         return None, None
 
+    async def _pre_register_step(self, step: "AgentStep") -> None:
+        """S2.3: Insert the step early so snapshot compensations have a step_id."""
+        db = self._db()
+        if not db or not getattr(db, "available", False) or step.run_id is None or step.step_num is None:
+            return
+        if step.db_id is not None:
+            return
+        comp_action, comp_args = self._compensation_for(step)
+        try:
+            step.db_id = await db.insert_agent_step(
+                run_id=step.run_id, step_num=step.step_num, action=step.action,
+                args=step.args or None, body=step.body or None,
+                result=None, success=None, latency_ms=0.0,
+                compensation_action=comp_action,
+                compensation_args=comp_args,
+            )
+        except Exception as exc:
+            log.debug("DevAgent._pre_register_step failed: %s", exc)
+
     async def _persist_step(self, run_id: int, step_num: int, step: "AgentStep") -> None:
         # Publish step.failed (best-effort, independent of DB persistence) so
         # observer agents (R-1) and event rules react even if the DB is down.
@@ -1316,19 +1375,28 @@ class DevAgent:
                 log.debug("DevAgent: step.failed publish failed: %s", _pub_exc)
         # Live DAG: mark this node done (success or fail) for the chat UI. Single
         # chokepoint for both the sequential and DAG-wave execution paths.
-        await self._emit_step_completed(step, step_num)
+        if step.success is not None:
+            await self._emit_step_completed(step, step_num)
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
             return
         comp_action, comp_args = self._compensation_for(step)
         try:
-            step_id = await db.insert_agent_step(
-                run_id=run_id, step_num=step_num, action=step.action,
-                args=step.args or None, body=step.body or None,
-                result=step.result, success=step.success, latency_ms=step.latency_ms,
-                compensation_action=comp_action,
-                compensation_args=comp_args,
-            )
+            if step.db_id is not None:
+                await db.update_agent_step(
+                    step.db_id, result=step.result, success=step.success, latency_ms=step.latency_ms
+                )
+                step_id = step.db_id
+            else:
+                step_id = await db.insert_agent_step(
+                    run_id=run_id, step_num=step_num, action=step.action,
+                    args=step.args or None, body=step.body or None,
+                    result=step.result, success=step.success, latency_ms=step.latency_ms,
+                    compensation_action=comp_action,
+                    compensation_args=comp_args,
+                )
+                step.db_id = step_id
+
             # Register a saga compensation row for every successful step that
             # has a defined reverse action, so they can be unwound on failure.
             # E6: a WRITE_FILE that FAILED may still have PARTIALLY modified the
@@ -1340,11 +1408,12 @@ class DevAgent:
                     and step.comp_args):
                 register = True
             if register and comp_action and step_id is not None:
-                await db.insert_saga_compensation(
-                    run_id=run_id, step_id=step_id,
-                    compensation_action=comp_action,
-                    compensation_args=comp_args,
-                )
+                if step.comp_id is None:
+                    step.comp_id = await db.insert_saga_compensation(
+                        run_id=run_id, step_id=step_id,
+                        compensation_action=comp_action,
+                        compensation_args=comp_args,
+                    )
         except Exception as exc:
             log.debug("DevAgent._persist_step failed: %s", exc)
 
@@ -1360,7 +1429,11 @@ class DevAgent:
         later destructive step) then goes through per-op confirmation.
         """
         new_steps = await self._replan(goal, executed, remaining)
-        if not new_steps:
+        # S2.5 / E18: Planner honesty. A replan that yields only EXPLAIN steps
+        # means it cannot proceed. Filter them out so it parses to zero real steps.
+        # This will return None and properly halt the plan instead of a false success.
+        real_steps = [s for s in new_steps if s.action != "EXPLAIN"]
+        if not real_steps:
             return None
         injected = {
             s.action.upper() for s in new_steps
@@ -1567,6 +1640,10 @@ class DevAgent:
                             cid, "skipped",
                             error="no backup — overwritten file left in place",
                             finished=True)
+                        await self._record_escalation(
+                            run_id, "Saga rollback", "compensation_failed",
+                            caction, 0, incomplete=1,
+                        )
                         continue
                 elif caction == "DELETE_FILE" and cargs:
                     # Legacy/back-compat (no pre-write snapshot was captured).
@@ -1583,6 +1660,10 @@ class DevAgent:
                 incomplete += 1
                 log.error("DevAgent: saga compensation %s failed: %s", caction, exc)
                 await db.update_saga_compensation(cid, "failed", error=str(exc), finished=True)
+                await self._record_escalation(
+                    run_id, "Saga rollback", "compensation_failed",
+                    caction, 0, incomplete=1,
+                )
         if incomplete:
             log.warning("DevAgent: %d compensation(s) did not roll back cleanly for run %d",
                         incomplete, run_id)
@@ -2225,6 +2306,70 @@ class DevAgent:
         except Exception as exc:
             log.debug("Skill audit write failed: %s", exc)
 
+    # ---------------------------------------------------------------------- #
+    # Math CAS verification
+    # ---------------------------------------------------------------------- #
+
+    async def _verify_math_with_cas(self, question: str, answer: str) -> str:
+        """Verify a math answer against the SymPy CAS.
+
+        Returns a one-line verdict block to append to the answer, or "" when
+        nothing is CAS-checkable (proofs, conceptual answers) or the sympy skill
+        is not loaded. Never raises — verification must never break the answer.
+        """
+        reg = self._skill_registry
+        if reg is None or not reg.tool_schema("sympy", "verify"):
+            return ""
+        try:
+            spec = await self._extract_cas_check(question, answer)
+            if not spec or not spec.get("kind"):
+                return ""
+            args = {
+                "kind": str(spec.get("kind", "")),
+                "expression": str(spec.get("expression", "") or ""),
+                "variable": str(spec.get("variable") or "x"),
+                "claimed": str(spec.get("claimed") or ""),
+                "lower": str(spec.get("lower") or ""),
+                "upper": str(spec.get("upper") or ""),
+            }
+            if not args["expression"]:
+                return ""
+            step = AgentStep(action="SKILL_QUERY",
+                             args=f"sympy verify {json.dumps(args)}")
+            verdict = (await self._execute_skill_step(step) or "").strip()
+            if not verdict or verdict.startswith("No CAS-checkable"):
+                return ""
+            return f"**SymPy verification:** {verdict}"
+        except Exception as exc:
+            log.debug("math CAS verification skipped: %s", exc)
+            return ""
+
+    async def _extract_cas_check(self, question: str, answer: str) -> dict:
+        """Reduce a free-form math answer to one machine-checkable CAS spec via
+        the LOCAL general model (no thinking trace, keeps it cheap/parseable)."""
+        prompt = (
+            "You convert a solved math problem into ONE machine-checkable SymPy "
+            "verification. Output ONLY a JSON object, no other text.\n"
+            "Keys:\n"
+            '  "kind": one of "solve","integrate","differentiate","simplify",'
+            '"factor","evaluate" — or null if the problem is a proof or '
+            "conceptual answer with no single closed-form result to check.\n"
+            '  "expression": the core expression or equation, SymPy-parseable '
+            "(use ** for powers, * for multiplication; for solve include the "
+            "full equation).\n"
+            '  "variable": the main variable (default "x").\n'
+            '  "claimed": the answer\'s final result as a SymPy-parseable '
+            "expression (for solve: comma-separated roots; for a definite "
+            "integral: the numeric value), or null if unclear.\n"
+            '  "lower","upper": the integration bounds for a definite integral, '
+            "else null.\n\n"
+            f"Problem: {question}\n\nProposed answer:\n{answer[:1500]}"
+        )
+        r = await self._router.infer(domain="general", user_text=prompt)
+        if not getattr(r, "ok", False) or not getattr(r, "text", ""):
+            return {}
+        return _extract_json_obj(r.text)
+
     async def _handle_skill(self, text: str) -> "AgentResult":
         """Single-turn skill path: resolve the intent, build args, execute, and
         (for reads) speak the result. Used when the classifier routes a short
@@ -2688,14 +2833,14 @@ class DevAgent:
     async def _git_context(self) -> Optional[str]:
         """Fetch git state for plan prompt injection.
 
-        Tries KiroClient first (richer VS Code git data), falls back to
+        Tries BridgeClient first (richer VS Code git data), falls back to
         subprocess git commands directly.
         """
-        # Try Kiro first
-        if self._kiro is not None:
-            git = await self._kiro.get_git_context()
+        # Try Bridge first
+        if self._bridge is not None:
+            git = await self._bridge.get_git_context()
             if git and "error" not in git:
-                return self._kiro.format_git_context_for_prompt(git)
+                return self._bridge.format_git_context_for_prompt(git)
 
         # Subprocess fallback
         try:
@@ -2888,8 +3033,8 @@ class DevAgent:
                 else "not wired" if self._indexer is None
                 else "unavailable"
             ),
-            "kiro_bridge": (
-                self._kiro.get_status() if self._kiro is not None else "not wired"
+            "ide_bridge": (
+                self._bridge.get_status() if self._bridge is not None else "not wired"
             ),
             "plan": self.get_plan_status(),
         }

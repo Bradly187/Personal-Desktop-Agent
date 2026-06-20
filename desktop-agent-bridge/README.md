@@ -1,4 +1,4 @@
-# Desktop Agent Bridge — Kiro/VS Code Extension
+# Desktop Agent Bridge — VS Code Extension
 
 Exposes a WebSocket server on `ws://127.0.0.1:8767` so the Personal Desktop Agent
 Python backend can read IDE state and send edit commands without screen-scraping.
@@ -20,19 +20,19 @@ Python backend can read IDE state and send edit commands without screen-scraping
 ### Option A — Development install (recommended)
 
 ```bash
-cd kiro-extension
+cd desktop-agent-bridge
 npm install
 npm run compile
 
-# Install into Kiro/VS Code
+# Install into VS Code
 code --install-extension .
-# or: copy kiro-extension/ to ~/.vscode/extensions/desktop-agent-bridge-0.1.0/
+# or: copy desktop-agent-bridge/ to ~/.vscode/extensions/desktop-agent-bridge-0.1.0/
 ```
 
 ### Option B — VSIX package
 
 ```bash
-cd kiro-extension
+cd desktop-agent-bridge
 npm install -g @vscode/vsce
 npm install
 npm run compile
@@ -42,13 +42,13 @@ vsce package
 
 ## Usage
 
-The extension activates automatically when VS Code/Kiro starts. Look for the
+The extension activates automatically when VS Code starts. Look for the
 status bar item in the bottom-right corner: `⊙ Agent: 0`.
 
-Start the Python backend with `--kiro` to connect:
+Start the Python backend with `--vscode` to connect:
 
 ```bash
-python main.py --kiro [other flags...]
+python main.py --vscode [other flags...]
 ```
 
 The status bar updates to `🔌 Agent: 1` when the Python backend connects.

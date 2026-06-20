@@ -1,6 +1,6 @@
-"""inference.kiro_client.py — Python client for the Kiro/VS Code Desktop Agent Bridge extension.
+"""inference.bridge_client.py — Python client for the VS Code Desktop Agent Bridge extension.
 
-The companion TypeScript extension (kiro-extension/) runs a WebSocket server on
+The companion TypeScript extension (desktop-agent-bridge/) runs a WebSocket server on
 localhost:8767 that exposes IDE state and edit commands to the Python pipeline.
 
 This client is designed to be:
@@ -9,20 +9,20 @@ This client is designed to be:
   - Thread-safe: uses asyncio; call from the event loop (DevAgent, plan_and_run)
 
 Wire into DevAgent:
-    kiro = KiroClient()
-    dev_agent.set_kiro(kiro)
+    bridge = BridgeClient()
+    dev_agent.set_bridge(bridge)
 
 Wire into main.py:
-    if args.kiro:
-        kiro = KiroClient()
-        dev_agent.set_kiro(kiro)
+    if args.vscode:
+        bridge = BridgeClient()
+        dev_agent.set_bridge(bridge)
 
 Usage:
-    git = await kiro.get_git_context()
+    git = await bridge.get_git_context()
     # git = {branch, commit, ahead, behind, staged, unstaged}
 
-    await kiro.open_file("path/to/foo.py", line=42)
-    diags = await kiro.get_diagnostics()
+    await bridge.open_file("path/to/foo.py", line=42)
+    diags = await bridge.get_diagnostics()
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ _CONNECT_TIMEOUT = 2.0   # seconds — fast fail if extension not running
 _REQUEST_TIMEOUT = 5.0   # seconds per request
 
 
-class KiroClient:
-    """Async WebSocket client for the Kiro/VS Code bridge extension.
+class BridgeClient:
+    """Async WebSocket client for the VS Code bridge extension.
 
     All public methods are safe to call when the extension is not running —
     they return None and log a DEBUG message rather than raising.
@@ -145,13 +145,13 @@ class KiroClient:
                 timeout=_REQUEST_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            log.debug("KiroClient: request %r timed out", action)
+            log.debug("BridgeClient: request %r timed out", action)
             self._available = False
             self._last_check = time.monotonic()
             self._ws = None
             return None
         except Exception as exc:
-            log.debug("KiroClient: request %r failed: %s", action, exc)
+            log.debug("BridgeClient: request %r failed: %s", action, exc)
             self._available = False
             self._last_check = time.monotonic()
             self._ws = None
@@ -162,7 +162,7 @@ class KiroClient:
         try:
             import websockets  # type: ignore[import-untyped]
         except ImportError:
-            log.debug("KiroClient: websockets not installed (pip install websockets)")
+            log.debug("BridgeClient: websockets not installed (pip install websockets)")
             self._available = False
             return None
 
@@ -190,11 +190,11 @@ class KiroClient:
                     )
                     self._available = True
                     self._last_check = time.monotonic()
-                    log.info("KiroClient: connected to %s", self._uri)
+                    log.info("BridgeClient: connected to %s", self._uri)
                 except Exception as exc:
                     self._available = False
                     self._last_check = time.monotonic()
-                    log.debug("KiroClient: cannot connect to %s: %s", self._uri, exc)
+                    log.debug("BridgeClient: cannot connect to %s: %s", self._uri, exc)
                     return None
 
             # Send request
@@ -208,7 +208,7 @@ class KiroClient:
 
             if not resp.get("ok", False):
                 error = resp.get("error", "unknown error")
-                log.warning("KiroClient: %r error: %s", action, error)
+                log.warning("BridgeClient: %r error: %s", action, error)
                 return None
 
             return resp.get("data")

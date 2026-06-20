@@ -1,5 +1,9 @@
 # Handoff Document: Remaining Critical Gaps (2026-06-18)
 
+> **⚠️ Partially moot (2026-06-18).** The laptop compute cluster was **excised on 2026-06-19**
+> (#118) — any gap below referencing `remote_indexer_service.py` / `remote_whisper_*` no longer
+> applies (those files were deleted; the agent is single-machine local-only).
+
 ## Overview
 
 Two HIGH-priority findings remain from the comprehensive security/performance/observability audit conducted on 2026-06-18. Both are well-scoped, have clear implementation sketches, and are ready for pickup.

@@ -1,5 +1,11 @@
 # Technical Design: Sensor Refinement
 
+> **⚠️ Partially superseded.** Eye-gaze and head-pose control were removed 2026-05-30 (the
+> standard iPad lacks TrueDepth). **Only the tilt sensor remains active** — the GazeTracker /
+> HeadTracker pipelines, filters, `gaze_delta`/`head_pose` message types, and `sensor_switch`
+> `gaze|head` options described below are **no longer present**. See `specs/ipad-sensor-focus/`
+> for the current design.
+
 ## Overview
 
 This design replaces ad-hoc EMA smoothing and hard dead zones across all three cursor-driving sensors (tilt, gaze, head) with research-backed signal processing: adaptive 1-Euro filtering, power-curve transfer functions, smooth dead zone ramps, gyro bias calibration, ratcheting, saccade suppression, and a mutual-exclusion toggle system. The implementation spans both the iPad-side Swift code (pre-filtering for gaze and head) and the PC-side Python Fusion_Engine (tilt processing, transfer functions, cursor output).

@@ -49,9 +49,9 @@ class TestDetectApp:
         from desktop.ui_automation import _detect_app
         assert _detect_app("chrome.exe") == "Chrome"
 
-    def test_kiro(self):
+    def test_cursor(self):
         from desktop.ui_automation import _detect_app
-        assert _detect_app("Kiro.exe") == "Kiro IDE"
+        assert _detect_app("Cursor.exe") == "Cursor IDE"
 
     def test_windows_terminal(self):
         from desktop.ui_automation import _detect_app

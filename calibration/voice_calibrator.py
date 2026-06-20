@@ -52,7 +52,7 @@ FULL_PHRASES: list[dict] = [
     {"expected": "scroll up",              "category": "verb",       "instruction": "scroll up"},
     {"expected": "close",                  "category": "verb",       "instruction": "close"},
     {"expected": "screenshot",             "category": "verb",       "instruction": "screenshot"},
-    {"expected": "open kiro",              "category": "app",        "instruction": "open Kiro"},
+    {"expected": "open notepad",           "category": "app",        "instruction": "open Notepad"},
     {"expected": "open chrome",            "category": "app",        "instruction": "open Chrome"},
     {"expected": "open terminal",          "category": "app",        "instruction": "open terminal"},
     {"expected": "open vs code",           "category": "app",        "instruction": "open VS Code"},
@@ -76,7 +76,7 @@ FULL_PHRASES: list[dict] = [
 QUICK_PHRASES: list[dict] = [p for p in FULL_PHRASES
                               if p["expected"] in (
                                   "hey agent", "click", "scroll down",
-                                  "open kiro", "close",
+                                  "open vs code", "close",
                               )]
 
 CONDITION_DISPLAY: dict[str, str] = {
