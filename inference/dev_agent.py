@@ -44,7 +44,12 @@ from core.events import (
     TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
     TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
 )
-from inference.edit_format import EditApplier
+from inference.edit_format import (
+    HASHLINE,
+    HASHLINE_PROMPT_INSTRUCTIONS,
+    EditApplier,
+    render_hashline,
+)
 from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
@@ -721,6 +726,17 @@ class DevAgent:
         git_ctx = await self._git_context()
         if git_ctx:
             extra_ctx = f"{git_ctx}\n\n{extra_ctx}" if extra_ctx else git_ctx
+
+        # If the plan model edits in hashline, teach it the format up front so
+        # its WRITE_FILE bodies are edit ops, not whole files (edit-format-aci
+        # R3.2 prompt side). Only for hashline models — whole_file is untouched.
+        if self._router.edit_format_for(
+            self._router.select_profile("plan").name
+        ) == HASHLINE:
+            extra_ctx = (
+                f"{HASHLINE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
+                if extra_ctx else HASHLINE_PROMPT_INSTRUCTIONS
+            )
 
         plan_result = await self._router.infer(
             domain="plan",
@@ -2098,7 +2114,13 @@ class DevAgent:
 
         if action == "READ_FILE":
             path_str = step.args or step.body
-            return await asyncio.to_thread(self._read_file, path_str.strip())
+            text = await asyncio.to_thread(self._read_file, path_str.strip())
+            # When the plan model edits in hashline, anchor the view with
+            # line:hash prefixes so its WRITE_FILE ops can reference them
+            # (specs/edit-format-aci R4). Whole_file models see raw text.
+            if self._router.edit_format_for(self._active_plan_model) == HASHLINE:
+                text = render_hashline(text)
+            return text
 
         if action == "GREP":
             # args format: "PATTERN [PATH]"  — path optional, defaults to project root

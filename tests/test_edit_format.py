@@ -10,13 +10,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from inference.dev_agent import DevAgent
+from inference.dev_agent import AgentStep, DevAgent
 from inference.edit_format import (
     EditApplier,
     EditError,
     HASHLINE,
     UDIFF,
     WHOLE_FILE,
+    hash_line,
+    render_hashline,
 )
 
 GOOD_PY = "def f(x):\n    return x + 1\n"
@@ -90,12 +92,11 @@ def test_r3_3_unknown_format_falls_back_to_whole_file(caplog):
     assert any("falling back" in r.message for r in caplog.records)
 
 
-@pytest.mark.parametrize("fmt", [UDIFF, HASHLINE])
-def test_r3_3_reserved_formats_degrade_until_implemented(fmt, caplog):
-    """R3.3: reserved (not-yet-implemented) formats degrade to whole_file."""
+def test_r3_3_reserved_udiff_degrades_until_implemented(caplog):
+    """R3.3: the not-yet-implemented udiff format degrades to whole_file."""
     applier = EditApplier()
     with caplog.at_level("WARNING"):
-        out = applier.apply("", GOOD_PY, edit_format=fmt, path="mod.py")
+        out = applier.apply("", GOOD_PY, edit_format=UDIFF, path="mod.py")
     assert out == GOOD_PY
     assert any("not yet implemented" in r.message for r in caplog.records)
 
@@ -195,6 +196,164 @@ def test_r3_1_config_override_wins(monkeypatch):
     )
     router = mr.ModelRouter()
     assert router.edit_format_for("qwen3-coder:30b") == "hashline"
+
+
+# --- R4: hashline format ------------------------------------------------------
+
+SAMPLE = "def f(x):\n    return x + 1\n\nclass C:\n    pass\n"
+
+
+def _op(verb, lineno, content_lines, text):
+    """Build one @@ hashline op, taking the hash from `text`'s actual line."""
+    line = text.split("\n")[lineno - 1]
+    header = f"@@ {verb} {lineno}:{hash_line(line)}"
+    return "\n".join([header, *content_lines])
+
+
+def test_r4_hash_line_is_whitespace_insensitive():
+    """R4: the anchor hash is computed on stripped content (handoff §7)."""
+    assert hash_line("    return x  ") == hash_line("return x")
+    assert len(hash_line("anything")) == 2
+
+
+def test_r4_render_hashline_shape():
+    """R4: render is 'lineno:hash|content', hash agreeing with hash_line."""
+    rendered = render_hashline("alpha\nbeta")
+    lines = rendered.split("\n")
+    assert lines[0] == f"1:{hash_line('alpha')}|alpha"
+    assert lines[1] == f"2:{hash_line('beta')}|beta"
+
+
+def test_r4_replace_applies_at_anchor():
+    """R4.1: a REPLACE op swaps the anchored line."""
+    applier = EditApplier()
+    payload = _op("REPLACE", 2, ["    return x + 2"], SAMPLE)
+    out = applier.apply(SAMPLE, payload, edit_format=HASHLINE, path="mod.py")
+    assert out == SAMPLE.replace("return x + 1", "return x + 2")
+
+
+def test_r4_delete_removes_anchored_line():
+    """R4.1: a DELETE op drops the anchored line (here the blank separator)."""
+    applier = EditApplier()
+    payload = _op("DELETE", 3, [], SAMPLE)  # the blank line between f and C
+    out = applier.apply(SAMPLE, payload, edit_format=HASHLINE, path="mod.py")
+    assert "return x + 1\nclass C:" in out  # blank separator gone
+    assert "    pass" in out                # rest intact
+
+
+def test_r4_insert_after_and_before():
+    """R4.1: INSERT_AFTER / INSERT_BEFORE add lines without removing the anchor."""
+    applier = EditApplier()
+    after = applier.apply(
+        SAMPLE, _op("INSERT_AFTER", 1, ['    """doc"""'], SAMPLE),
+        edit_format=HASHLINE, path="mod.py",
+    )
+    assert after.split("\n")[1] == '    """doc"""'
+    assert after.split("\n")[0] == "def f(x):"
+
+    before = applier.apply(
+        SAMPLE, _op("INSERT_BEFORE", 4, ["# a class"], SAMPLE),
+        edit_format=HASHLINE, path="mod.py",
+    )
+    assert "# a class\nclass C:" in before
+
+
+def test_r2_1_stale_anchor_rejected_with_diagnostic():
+    """R2.1/R4: a wrong hash → mismatch EditError naming the stale anchor."""
+    applier = EditApplier()
+    # Anchor line 2 but with a deliberately wrong hash.
+    payload = "@@ REPLACE 2:zz\n    return x + 2".replace("zz", "ff")
+    # Ensure 'ff' is actually wrong for line 2.
+    if hash_line(SAMPLE.split("\n")[1]) == "ff":
+        payload = payload.replace("2:ff", "2:00")
+    with pytest.raises(EditError) as ei:
+        applier.apply(SAMPLE, payload, edit_format=HASHLINE, path="pkg/mod.py")
+    assert ei.value.reason == "mismatch"
+    assert "stale" in str(ei.value)
+    assert "pkg/mod.py" in str(ei.value)
+
+
+def test_r4_2_fuzzy_relocates_shifted_anchor():
+    """R4.2: when lines shifted, a nearby line with the matching hash relocates."""
+    applier = EditApplier()
+    text = "a\nb\nc\n"
+    payload = _op("REPLACE", 2, ["B"], text)  # anchored on "b" at line 2
+    shifted = "x\n" + text                      # "b" is now at line 3
+    out = applier.apply(shifted, payload, edit_format=HASHLINE, path="f.txt")
+    assert out == "x\na\nB\nc\n"
+
+
+def test_r4_3_overlapping_edits_rejected():
+    """R4.3: two edits resolving to the same line fail atomically."""
+    applier = EditApplier()
+    payload = (
+        _op("REPLACE", 2, ["    return x + 2"], SAMPLE)
+        + "\n"
+        + _op("INSERT_AFTER", 2, ["    # note"], SAMPLE)
+    )
+    with pytest.raises(EditError) as ei:
+        applier.apply(SAMPLE, payload, edit_format=HASHLINE, path="mod.py")
+    assert ei.value.reason == "overlap"
+
+
+def test_r4_3_bottom_up_multi_edit_no_anchor_shift():
+    """R4.3: a multi-line replace earlier must not shift a later anchor."""
+    applier = EditApplier()
+    text = "1\n2\n3\n4\n5\n"
+    payload = (
+        _op("REPLACE", 2, ["2a", "2b"], text)   # grows the file
+        + "\n"
+        + _op("REPLACE", 4, ["4x"], text)        # later anchor must still hit "4"
+    )
+    out = applier.apply(text, payload, edit_format=HASHLINE, path="f.txt")
+    assert out == "1\n2a\n2b\n3\n4x\n5\n"
+
+
+def test_r4_no_parseable_ops_rejected():
+    """R4: a hashline payload with no @@ headers is a mismatch EditError."""
+    applier = EditApplier()
+    with pytest.raises(EditError) as ei:
+        applier.apply(SAMPLE, "just some prose", edit_format=HASHLINE, path="mod.py")
+    assert ei.value.reason == "mismatch"
+    assert "no parseable edit ops" in str(ei.value)
+
+
+def test_r4_lint_gate_runs_after_hashline_apply():
+    """R1+R4: a hashline edit that yields invalid Python is rejected by the lint."""
+    applier = EditApplier()
+    good = "def f(x):\n    return x + 1\n"
+    payload = _op("REPLACE", 2, ["    return x +"], good)  # dangling → SyntaxError
+    with pytest.raises(EditError) as ei:
+        applier.apply(good, payload, edit_format=HASHLINE, path="mod.py")
+    assert ei.value.reason == "syntax"
+
+
+def test_r4_prompt_instructions_describe_the_ops():
+    """R4: the hashline prompt block names every op so the model can emit them."""
+    from inference.edit_format import HASHLINE_PROMPT_INSTRUCTIONS as instr
+    for marker in ("@@ REPLACE", "@@ DELETE", "@@ INSERT_AFTER", "@@ INSERT_BEFORE"):
+        assert marker in instr
+
+
+# --- R4: READ_FILE hashline rendering (DevAgent wiring) ------------------------
+
+async def test_r4_read_file_renders_hashline_for_hashline_model(tmp_path):
+    """R4: a hashline plan model gets line:hash-anchored READ_FILE output."""
+    agent = _dev_agent(edit_format="hashline")
+    agent._active_plan_model = "qwen3-coder:30b"
+    f = tmp_path / "m.py"
+    f.write_text("alpha\nbeta\n", encoding="utf-8")
+    out = await agent._execute_step(AgentStep(action="READ_FILE", args=str(f)))
+    assert out == render_hashline("alpha\nbeta\n")
+
+
+async def test_r4_read_file_raw_for_whole_file_model(tmp_path):
+    """R3.1: a whole_file model gets raw READ_FILE output (no anchors)."""
+    agent = _dev_agent(edit_format="whole_file")
+    f = tmp_path / "m.py"
+    f.write_text("alpha\nbeta\n", encoding="utf-8")
+    out = await agent._execute_step(AgentStep(action="READ_FILE", args=str(f)))
+    assert out == "alpha\nbeta\n"
 
 
 def test_r3_1_profile_default_honored_when_set(monkeypatch):

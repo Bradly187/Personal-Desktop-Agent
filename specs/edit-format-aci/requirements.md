@@ -46,10 +46,12 @@ before it persists and rejects with a diagnostic message on failure; (b) add an
 The path sandbox (`_path_in_scope`, realpath-based) is already solid and is out of
 scope here.
 
-**Status:** In Progress — tasks 1+2+3 landed (lint gate + wiring + the per-model
-`edit_format` knob/config/resolver + tests). Default is `whole_file` everywhere —
-behavior is byte-identical to legacy for any valid edit. Remaining: the structured
-format itself (task 4) and the A/B eval (task 6).
+**Status:** In Progress — tasks 1–4 landed (lint gate + per-model `edit_format`
+knob + the **hashline** structured format end-to-end: applier with layered
+matcher + atomic batch, READ_FILE anchoring, plan-prompt instructions). Default is
+`whole_file` everywhere — byte-identical to legacy; hashline activates only when a
+model is configured for it. Remaining: the A/B eval (task 6) and docs (task 7).
+The `udiff` format is still reserved (degrades to whole_file).
 **Owner / author session:** Claude Code (Opus 4.8)
 **Related:** `../trajectory-reduction/` (sibling DevAgent token-economics work;
 both touch the plan→execute→replan loop), `../accessibility-agent/` (DevAgent
@@ -243,11 +245,16 @@ Each acceptance criterion in §3 maps to at least one test above.
       instruction block at infer time) lands with task 4 — there is no second
       instruction block to render until a structured format exists; whole_file's
       instruction is already in `_PLAN_PROMPT`.*
-- [ ] 4. Implement one structured format (`udiff` no-line-number or `hashline`) +
-      layered matcher + atomic batch — satisfies R2.1, R2.3, R4.1–R4.3.
-- [~] 5. `tests/test_edit_format.py` — 14 tests covering R1.2/R1.3, R2.2, R3.1/R3.3,
-      R1.4, plus validator-injection seam. R2.1 (mismatch suggestion) + R4 tests
-      land with task 4.
+- [x] 4. Implement **hashline** end-to-end — `EditApplier._apply_hashline`
+      (`@@ <OP> <line>:<hash>` ops), `hash_line`/`render_hashline`, layered matcher
+      (exact line:hash → fuzzy ±5 with ambiguity rejection), atomic bottom-up
+      batch with overlap rejection; READ_FILE renders anchors and the plan prompt
+      gets `HASHLINE_PROMPT_INSTRUCTIONS` when the model uses hashline — satisfies
+      R2.1, R2.3, R4.1–R4.3. (`udiff` still reserved → degrades to whole_file.)
+- [x] 5. `tests/test_edit_format.py` — 32 tests covering R1.2/R1.3, R2.2, R3.1/R3.2/
+      R3.3, R1.4, the validator-injection seam, and the full hashline surface
+      (render, whitespace-insensitive hash, each op, stale/fuzzy/overlap/bottom-up,
+      lint-after-apply, READ_FILE rendering).
 - [ ] 6. Eval: A/B `whole_file` vs structured on a SWE-bench-Verified subset; lock
       baseline. **Gate before flipping any default.**
 - [ ] 7. Update `CLAUDE.md` (WRITE_FILE gotcha + Key Files) and the file-map if the
