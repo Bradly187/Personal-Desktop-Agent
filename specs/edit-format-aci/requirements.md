@@ -46,10 +46,10 @@ before it persists and rejects with a diagnostic message on failure; (b) add an
 The path sandbox (`_path_in_scope`, realpath-based) is already solid and is out of
 scope here.
 
-**Status:** In Progress — tasks 1+2 landed (lint gate + wiring + tests, R1/R2
-syntax-path + R3.1/R3.3). Structured format (task 4), per-model knob plumbing
-(task 3), and the A/B eval (task 6) remain. Default is `whole_file` everywhere —
-behavior is byte-identical to legacy for any valid edit.
+**Status:** In Progress — tasks 1+2+3 landed (lint gate + wiring + the per-model
+`edit_format` knob/config/resolver + tests). Default is `whole_file` everywhere —
+behavior is byte-identical to legacy for any valid edit. Remaining: the structured
+format itself (task 4) and the A/B eval (task 6).
 **Owner / author session:** Claude Code (Opus 4.8)
 **Related:** `../trajectory-reduction/` (sibling DevAgent token-economics work;
 both touch the plan→execute→replan loop), `../accessibility-agent/` (DevAgent
@@ -233,10 +233,16 @@ Each acceptance criterion in §3 maps to at least one test above.
 - [x] 2. Wire `EditApplier.apply` into `_execute_step` WRITE_FILE branch (via
       `_apply_edit`), preserving `_confirm_destructive_op` + `_snapshot_for_write`;
       reject → diagnostic step result, no write — satisfies R1.4, R2.2, R2.4.
-- [ ] 3. Add `ModelProfile.edit_format` + config plumbing + `_PLAN_PROMPT` branch;
-      default `whole_file` byte-identical — satisfies R3.1–R3.4. *(EditApplier
-      already takes the `edit_format` arg; `_apply_edit` hardcodes `whole_file`
-      pending this task.)*
+- [x] 3. Add `ModelProfile.edit_format` + config plumbing + per-model resolver;
+      default `whole_file` byte-identical — satisfies R3.1, R3.3, R3.4 and R3.2's
+      *application* path. `ModelRouter.edit_format_for(model_name)` resolves
+      config-override → profile-default → `whole_file`; `DevAgent` captures the
+      plan model (`_active_plan_model`) and `_apply_edit` applies its format.
+      Config block `edit_format_aci.per_model` in `~/.claude/ipad_bridge/config.json`.
+      *The `_PLAN_PROMPT` per-format **rendering** (swapping the WRITE_FILE
+      instruction block at infer time) lands with task 4 — there is no second
+      instruction block to render until a structured format exists; whole_file's
+      instruction is already in `_PLAN_PROMPT`.*
 - [ ] 4. Implement one structured format (`udiff` no-line-number or `hashline`) +
       layered matcher + atomic batch — satisfies R2.1, R2.3, R4.1–R4.3.
 - [~] 5. `tests/test_edit_format.py` — 14 tests covering R1.2/R1.3, R2.2, R3.1/R3.3,

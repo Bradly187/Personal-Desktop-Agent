@@ -23,6 +23,13 @@ GOOD_PY = "def f(x):\n    return x + 1\n"
 BAD_PY = "def f(x):\n    return x +\n"  # dangling operator → SyntaxError
 
 
+def _dev_agent(edit_format="whole_file"):
+    """A DevAgent whose router resolves a fixed edit_format (no model loaded)."""
+    agent = DevAgent(router=MagicMock())
+    agent._router.edit_format_for = MagicMock(return_value=edit_format)
+    return agent
+
+
 # --- R1.2 / R1.3: lint gate ---------------------------------------------------
 
 def test_r1_2_rejects_invalid_python_with_editerror():
@@ -121,7 +128,7 @@ def test_r1_4_apply_edit_leaves_existing_file_untouched_on_reject(tmp_path):
     The DevAgent WRITE_FILE branch calls _apply_edit BEFORE snapshot/write, so a
     raise here means no snapshot is taken and no bytes are written (fail-closed).
     """
-    agent = DevAgent(router=MagicMock())
+    agent = _dev_agent()
     target = tmp_path / "mod.py"
     target.write_text(GOOD_PY, encoding="utf-8")
 
@@ -134,7 +141,7 @@ def test_r1_4_apply_edit_leaves_existing_file_untouched_on_reject(tmp_path):
 
 def test_r1_apply_edit_returns_text_for_valid_edit(tmp_path):
     """R1: a valid _apply_edit returns the new text (caller then writes it)."""
-    agent = DevAgent(router=MagicMock())
+    agent = _dev_agent()
     target = tmp_path / "mod.py"
     target.write_text("old\n", encoding="utf-8")
 
@@ -146,8 +153,60 @@ def test_r1_apply_edit_returns_text_for_valid_edit(tmp_path):
 
 def test_r1_apply_edit_handles_new_file(tmp_path):
     """R1: _apply_edit on a non-existent path reads '' as current, returns body."""
-    agent = DevAgent(router=MagicMock())
+    agent = _dev_agent()
     target = tmp_path / "new.py"
     out = agent._apply_edit(str(target), GOOD_PY)
     assert out == GOOD_PY
     assert not target.exists()  # _apply_edit does not create the file
+
+
+def test_r3_2_apply_edit_uses_active_plan_model_format(tmp_path):
+    """R3.2: _apply_edit resolves the format from the active plan model name."""
+    agent = _dev_agent()
+    agent._active_plan_model = "qwen3-coder:30b"
+    target = tmp_path / "mod.py"
+    agent._apply_edit(str(target), GOOD_PY)
+    agent._router.edit_format_for.assert_called_once_with("qwen3-coder:30b")
+
+
+# --- R3.1: ModelRouter.edit_format_for resolution -----------------------------
+
+def test_r3_1_resolver_defaults_to_whole_file_for_known_model():
+    """R3.1: a profile with no override resolves to its edit_format default."""
+    from inference.model_router import ModelRouter
+    router = ModelRouter()
+    # qwen3-coder:30b is the plan profile's model; default field is whole_file.
+    assert router.edit_format_for("qwen3-coder:30b") == "whole_file"
+
+
+def test_r3_1_resolver_unknown_model_falls_back_to_whole_file():
+    """R3.1 step 3: an unrecognized model name resolves to whole_file."""
+    from inference.model_router import ModelRouter
+    router = ModelRouter()
+    assert router.edit_format_for("not-a-real-model") == "whole_file"
+    assert router.edit_format_for("") == "whole_file"
+
+
+def test_r3_1_config_override_wins(monkeypatch):
+    """R3.1 step 1: a config per_model override beats the profile default."""
+    import inference.model_router as mr
+    monkeypatch.setattr(
+        mr, "_EDIT_FORMAT_OVERRIDES", {"qwen3-coder:30b": "hashline"}
+    )
+    router = mr.ModelRouter()
+    assert router.edit_format_for("qwen3-coder:30b") == "hashline"
+
+
+def test_r3_1_profile_default_honored_when_set(monkeypatch):
+    """R3.1 step 2: a profile whose edit_format is set is returned (no override).
+
+    Uses deepseek-r1:8b (math), whose name is unique to one profile — avoids the
+    qwen3-coder:30b collision (shared by the code + plan profiles).
+    """
+    import inference.model_router as mr
+    router = mr.ModelRouter()
+    router._profiles["math"].edit_format = "udiff"
+    try:
+        assert router.edit_format_for("deepseek-r1:8b") == "udiff"
+    finally:
+        router._profiles["math"].edit_format = "whole_file"

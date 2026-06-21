@@ -393,6 +393,10 @@ class DevAgent:
         # Both are safe single-plan state because _plan_lock serializes plans.
         self._active_trace_id: str = ""
         self._step_seq: dict[int, int] = {}
+        # Actual model that produced the in-flight plan — resolves the WRITE_FILE
+        # edit_format for _apply_edit (specs/edit-format-aci R3). Per-plan state,
+        # safe because _plan_lock serializes plans. "" → whole_file default.
+        self._active_plan_model: str = ""
 
         # Goal-level authorization state (reset after each plan)
         self._plan_authorized: bool = False
@@ -733,6 +737,10 @@ class DevAgent:
                 error=plan_result.error,
                 total_latency_ms=(time.monotonic() - t0) * 1000,
             )
+
+        # Record which model produced the plan so WRITE_FILE steps apply the
+        # edit format configured for it (specs/edit-format-aci R3.2).
+        self._active_plan_model = plan_result.model
 
         # Prefer structured JSON (Ollama `format` on the plan profile) — it
         # eliminates the free-text body-collision / arg-truncation bugs. Fall
@@ -1986,6 +1994,7 @@ class DevAgent:
         self._current_goal = None
         self._current_step = 0
         self._total_steps = 0
+        self._active_plan_model = ""
 
     async def _reflect(
         self, goal: str, steps: list[AgentStep], model: str
@@ -2505,20 +2514,19 @@ class DevAgent:
         """Resolve a WRITE_FILE payload to its final file text, lint-gated.
 
         Reads the current file (if it exists) and runs the payload through the
-        EditApplier for the active edit format. Raises ``EditError`` if the
-        result fails validation — the caller never writes on failure
-        (specs/edit-format-aci R1). Returns the text to write on success.
-
-        The per-model edit_format knob is task 3; until then every model uses
-        ``whole_file`` (byte-identical to the legacy path for valid edits).
+        EditApplier for the active edit format — the format configured for the
+        model that produced the plan (specs/edit-format-aci R3). Raises
+        ``EditError`` if the result fails validation — the caller never writes
+        on failure (R1). Returns the text to write on success.
         """
+        edit_format = self._router.edit_format_for(self._active_plan_model)
         path = Path(path_str.strip().strip("'\""))
         current = (
             path.read_text(encoding="utf-8", errors="replace")
             if path.exists() else ""
         )
         return self._edit_applier.apply(
-            current, body, edit_format="whole_file", path=str(path)
+            current, body, edit_format=edit_format, path=str(path)
         )
 
     @staticmethod
