@@ -92,21 +92,35 @@ action it meant to take.
 5. IF repair is exhausted, THEN THE DevAgent SHALL fail safe — halt / CLARIFY and
    execute NOTHING, never run a partial or guessed plan (AGENTS.md #4).
 
-### Requirement 2: Constrain the cloud plan path
+### Requirement 2: Constrain the cloud plan path — DEFERRED (no current surface)
 
-**User Story:** As Brad, I want the cloud planner held to the same plan schema as
-the local one, so a Bedrock plan can't emit malformed JSON the parser has to guess
-at.
+> **Finding (2026-06-21, verified against the code):** there is no executable
+> cloud plan path to constrain. `DevAgent.plan_and_run` generates executable plans
+> only via `ModelRouter.infer` ([inference/model_router.py:1060](../../inference/model_router.py)),
+> which routes to **vLLM/Ollama only — no cloud branch** (the local path already
+> carries the `format=_PLAN_JSON_SCHEMA` grammar constraint). The cloud agent
+> (`CloudDevAgent`) is reached on a *separate* coordinator branch
+> ([core/hybrid_coordinator.py:1068](../../core/hybrid_coordinator.py)) that calls
+> `CloudDevAgent.run(...)` and returns `"steps": 0` — its `domain="plan"` output is
+> **advisory numbered text shown to the user, never parsed into executable steps**.
+>
+> Therefore the R2 premise ("a Bedrock plan the parser has to guess at") does not
+> occur. Forcing that advisory text into JSON would *regress* its readability for
+> zero execution benefit. And R1's auto-repair is **backend-agnostic** — if a
+> future change ever routes a cloud-generated plan into `_acquire_plan_steps`, the
+> repair loop already covers malformed JSON with no R2-specific code.
+>
+> **R2 is deferred until/unless the architecture makes the cloud an
+> executable-plan source.** Re-open this requirement then; do not add speculative
+> tool-use plumbing now (AGENTS.md #10 — no untested dead code).
 
-#### Acceptance Criteria
-1. WHEN the active plan model is a cloud (Bedrock) model AND the backend supports
-   structured output, THE planner SHALL constrain the plan response to the plan
-   schema at decode time (tool-use / JSON mode), the cloud analogue of the local
-   `format=` guarantee.
-2. IF the cloud backend does not support structured output for the active model,
-   THEN THE planner SHALL degrade to the current free-text response and rely on R1
-   auto-repair — never crash, never block (AGENTS.md degrade-gracefully).
-3. THE local plan path (`format=_PLAN_JSON_SCHEMA`) SHALL be unchanged.
+#### Acceptance Criteria (deferred)
+1. ~~constrain the cloud plan response at decode time~~ — N/A: no executable cloud
+   plan path exists (see finding above).
+2. THE local plan path (`format=_PLAN_JSON_SCHEMA`) SHALL remain unchanged (met —
+   R2 added nothing).
+3. IF a future change routes a cloud plan into the executor, THEN R1 auto-repair
+   SHALL cover malformed output (already true — backend-agnostic).
 
 ### Requirement 3: Flag-gated, observable, eval-gated
 
@@ -203,15 +217,24 @@ Each criterion in §3 maps to at least one test/eval above.
       (structured → regex → repair → EXPLAIN fail-safe); `DA_PLAN_REPAIR` (default
       OFF) + `DA_PLAN_REPAIR_MAX` (default 1) instance flags — satisfies R1.2, R1.4,
       R1.5, R3.1, and R3.2 (the repair re-infer emits its own inference span).
-- [ ] 4. Cloud structured-output path in `core/cloud_backend.py` + `ModelRouter`
-      selection for the plan domain; degrade to free-text when unsupported —
-      satisfies R2.1–R2.3. **(pending)**
+- [~] 4. Cloud structured-output path — **DEFERRED (no current surface).** Verified
+      the executable plan path (`plan_and_run` → `ModelRouter.infer`) is local-only
+      (vLLM/Ollama, already `format=`-constrained); the cloud agent's plan output
+      is advisory text (`steps: 0`), never parsed for execution. R1 is
+      backend-agnostic, so a future cloud-executable plan is already covered. No
+      code added (AGENTS.md #10). See R2 finding.
 - [~] 5. Config plumbing — env flags done (instance attrs, test-overridable);
       config-file (`dev_agent_plan_contract.*`) mapping + audit-log drop events
       pending. R3.1/R3.2 met via env flags + inference span; WARNING surfaces drops.
-- [x] 5t. `tests/test_plan_contract.py` — 14 tests over R1.1/R1.2/R1.3/R1.4/R1.5/
-      R3.1 + regex-rescue + back-compat wrapper. Eval cases (§5) + baseline lock
-      pending (task 6).
-- [ ] 6. Eval cases under `evals/suites/` + lock baseline. **Gate before flipping
-      defaults** — satisfies R3.3. **(pending)**
-- [ ] 7. Docs: "plan-contract auto-repair" note in `CLAUDE.md` Known Gotchas.
+- [x] 5t. `tests/test_plan_contract.py` — 13 tests over R1.1/R1.2/R1.3/R1.4/R1.5/
+      R3.1 + regex-rescue + back-compat wrapper.
+- [x] 6. **Model-free eval shipped + baseline locked.** `evals/plan_contract.py`
+      (self-contained, like `evals/token_budget.py`) runs the REAL
+      `_acquire_plan_steps` over `evals/suites/plan_contract.jsonl` (8 scripted
+      scenarios: recover-unknown-verb / truncated-JSON / empty → recovery,
+      unrecoverable → fail-safe-empty, regex-rescue, clean, disabled, bounded),
+      scoring recovered-actions + re-prompt-count deterministically. Baseline
+      `evals/baselines/plan_contract.json` locked at `exact_acc=1.0` (tol 0.0;
+      deterministic — any regression is a real bug). `--check` is the gate; 6
+      CI-safe scorer tests (`tests/test_evals_plan_contract.py`). Satisfies R3.3.
+- [x] 7. Docs: "plan-contract auto-repair" note added to `CLAUDE.md` Known Gotchas.

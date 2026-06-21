@@ -1,0 +1,11 @@
+{
+  "suite": "plan_contract",
+  "mode": "plan_contract",
+  "recorded_at": "2026-06-21T18:30:48",
+  "model": "none (model-free, deterministic)",
+  "tolerance": 0.0,
+  "n": 8,
+  "exact_acc": 1.0,
+  "correct": 8,
+  "failures": 0
+}

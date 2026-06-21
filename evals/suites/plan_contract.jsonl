@@ -1,0 +1,16 @@
+# Plan-contract auto-repair eval (specs/dev-agent-plan-contract R1). Model-free:
+# each case scripts the planner's successive responses and asserts the real
+# DevAgent._acquire_plan_steps recovers the right plan (or fails safe to empty)
+# with the expected number of corrective re-prompts. `responses[0]` is the initial
+# plan; `responses[1:]` are returned on successive repair re-infers.
+#
+# Fields: id, responses[], repair(bool), max_repairs(int), expect_actions[],
+#         expect_calls(int), tags[]
+{"id": "recover_unknown_verb", "responses": ["{\"steps\":[{\"action\":\"WRITE_FILE\",\"args\":\"a.py\"},{\"action\":\"NOPE\"}]}", "{\"steps\":[{\"action\":\"WRITE_FILE\",\"args\":\"a.py\"},{\"action\":\"RUN_TERMINAL\",\"args\":\"pytest\"}]}"], "repair": true, "max_repairs": 1, "expect_actions": ["WRITE_FILE", "RUN_TERMINAL"], "expect_calls": 1, "tags": ["recover", "unknown_verb"]}
+{"id": "recover_truncated_json", "responses": ["{\"steps\":[{\"action\":\"WRITE_FILE\",\"args\":\"a.py\"}", "{\"steps\":[{\"action\":\"WRITE_FILE\",\"args\":\"a.py\"}]}"], "repair": true, "max_repairs": 1, "expect_actions": ["WRITE_FILE"], "expect_calls": 1, "tags": ["recover", "truncated"]}
+{"id": "recover_empty_response", "responses": ["totally unparseable prose", "{\"steps\":[{\"action\":\"EXPLAIN\"}]}"], "repair": true, "max_repairs": 1, "expect_actions": ["EXPLAIN"], "expect_calls": 1, "tags": ["recover", "empty"]}
+{"id": "unrecoverable_failsafe_empty", "responses": ["{\"steps\":[{\"action\":\"NOPE\"}]}", "{\"steps\":[{\"action\":\"NOPE\"}]}", "{\"steps\":[{\"action\":\"NOPE\"}]}"], "repair": true, "max_repairs": 2, "expect_actions": [], "expect_calls": 2, "tags": ["failsafe", "bounded"]}
+{"id": "regex_rescue_no_repair", "responses": ["WRITE_FILE a.py\nprint('hi')\nRUN_TERMINAL pytest -q"], "repair": true, "max_repairs": 1, "expect_actions": ["WRITE_FILE", "RUN_TERMINAL"], "expect_calls": 0, "tags": ["regex_fallback"]}
+{"id": "clean_plan_no_repair", "responses": ["{\"steps\":[{\"action\":\"WRITE_FILE\",\"args\":\"a.py\"}]}"], "repair": true, "max_repairs": 1, "expect_actions": ["WRITE_FILE"], "expect_calls": 0, "tags": ["clean"]}
+{"id": "disabled_keeps_partial_no_repair", "responses": ["{\"steps\":[{\"action\":\"WRITE_FILE\",\"args\":\"a.py\"},{\"action\":\"NOPE\"}]}"], "repair": false, "max_repairs": 1, "expect_actions": ["WRITE_FILE"], "expect_calls": 0, "tags": ["disabled", "default"]}
+{"id": "bounded_one_then_stop", "responses": ["{\"steps\":[{\"action\":\"NOPE\"}]}", "{\"steps\":[{\"action\":\"NOPE\"}]}"], "repair": true, "max_repairs": 1, "expect_actions": [], "expect_calls": 1, "tags": ["failsafe", "bounded"]}
