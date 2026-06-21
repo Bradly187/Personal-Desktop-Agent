@@ -133,6 +133,67 @@ def test_geocode_and_save(tmp_path):
     assert cfg["lat"] == 30.27 and cfg["lon"] == -97.74
 
 
+def _fake_geo(by_name):
+    """URL-aware fake geocoder: maps the lowercased `name=` query to a results
+    list, mimicking Open-Meteo (0 hits for a 'City State' combined string)."""
+    from urllib.parse import urlparse, parse_qs
+
+    def fake(url):
+        name = (parse_qs(urlparse(url).query).get("name", [""])[0]).lower()
+        return {"results": by_name.get(name, [])}
+    return fake
+
+
+_MARLINS = [
+    {"latitude": 31.30, "longitude": -96.89, "name": "Marlin", "admin1": "Texas"},
+    {"latitude": 47.40, "longitude": -118.98, "name": "Marlin", "admin1": "Washington"},
+]
+
+
+@pytest.mark.parametrize("query", ["Marlin Texas", "Marlin, Texas", "Marlin TX", "marlin,texas"])
+def test_geocode_strips_trailing_state(tmp_path, query):
+    """'City State' / 'City, ST' geocodes the bare city and disambiguates by
+    state — the real Open-Meteo failure mode (0 hits for the combined string)."""
+    cfg_path = tmp_path / "weather.json"
+    # Combined "marlin texas" returns nothing (as the live API does); bare
+    # "marlin" returns both candidates.
+    out = ws._geocode_and_save(query, cfg_path, fetch=_fake_geo({"marlin": _MARLINS}))
+    assert "Marlin, Texas" in out
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert cfg["lat"] == 31.30 and cfg["place"] == "Marlin, Texas"
+
+
+def test_geocode_disambiguates_by_state(tmp_path):
+    """The state hint selects the right same-named town, not the first result."""
+    out = ws._geocode_and_save("Marlin Washington", tmp_path / "w.json",
+                               fetch=_fake_geo({"marlin": _MARLINS}))
+    assert "Marlin, Washington" in out
+
+
+def test_geocode_no_hint_picks_first(tmp_path):
+    """Bare city with no state falls back to the geocoder's top (relevance) hit."""
+    out = ws._geocode_and_save("Marlin", tmp_path / "w.json",
+                               fetch=_fake_geo({"marlin": _MARLINS}))
+    assert "Marlin, Texas" in out
+
+
+def test_geocode_unknown_suffix_retries_first_token(tmp_path):
+    """A trailing word that isn't a US state still resolves via a first-token
+    retry when the combined query returns nothing."""
+    out = ws._geocode_and_save("Marlin Township", tmp_path / "w.json",
+                               fetch=_fake_geo({"marlin": _MARLINS}))  # "marlin township" → []
+    assert "Marlin, Texas" in out
+
+
+def test_split_place_hint():
+    assert ws._split_place_hint("Marlin, Texas") == ("Marlin", "Texas")
+    assert ws._split_place_hint("Marlin Texas") == ("Marlin", "Texas")
+    assert ws._split_place_hint("Marlin TX") == ("Marlin", "Texas")
+    assert ws._split_place_hint("New York NY") == ("New York", "New York")
+    assert ws._split_place_hint("North Las Vegas Nevada") == ("North Las Vegas", "Nevada")
+    assert ws._split_place_hint("Marlin") == ("Marlin", None)
+
+
 def test_current_weather_includes_pressure_drop():
     cfg = {"lat": 1, "lon": 2, "place": "Austin, Texas"}
     fake = lambda url: {
