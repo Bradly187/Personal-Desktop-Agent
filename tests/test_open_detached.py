@@ -81,3 +81,18 @@ def test_reap_survives_poll_error(monkeypatch):
     monkeypatch.setattr(ce.subprocess, "Popen", lambda argv, **k: _FakeProc(alive=True))
     ce._launch_detached(["app"])     # must not raise
     assert len(ce._launched_procs) == 1
+
+
+# --- Known-app registry: "open terminal" → PowerShell --------------------------
+
+@pytest.mark.parametrize("alias", ["terminal", "powershell", "power shell"])
+def test_terminal_aliases_resolve_to_powershell(alias):
+    """'open terminal' (and the explicit powershell aliases) launch PowerShell,
+    not Windows Terminal."""
+    exe = ce._KNOWN_APPS.get(alias)
+    assert exe and exe.lower().endswith("powershell.exe")
+
+
+def test_windows_terminal_alias_unchanged():
+    """The literal 'windows terminal' still maps to the Windows Terminal app."""
+    assert ce._KNOWN_APPS["windows terminal"].lower().endswith("wt.exe")

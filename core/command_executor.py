@@ -244,8 +244,11 @@ _KNOWN_APPS: dict[str, str] = {
     "vscode":           r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
     "visual studio code": r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
     "code":             r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    # Terminal
-    "terminal":         r"C:\Users\bradt\AppData\Local\Microsoft\WindowsApps\wt.exe",
+    # Terminal — "terminal" opens PowerShell (Brad's preference); the literal
+    # "windows terminal" still launches the Windows Terminal app (wt.exe).
+    "terminal":         r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+    "powershell":       r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+    "power shell":      r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
     "windows terminal": r"C:\Users\bradt\AppData\Local\Microsoft\WindowsApps\wt.exe",
     # Chrome
     "chrome":           r"C:\Program Files\Google\Chrome\Application\chrome.exe",
