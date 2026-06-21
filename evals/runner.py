@@ -384,6 +384,119 @@ def run_ablation_suite(cases: list, build_no_rag, build_with_rag, *,
     return asyncio.run(_run_all())
 
 
+# --------------------------------------------------------------------------- #
+# Edit-format A/B (specs/edit-format-aci task 6)
+# --------------------------------------------------------------------------- #
+
+def _strip_code_fences(text: str) -> str:
+    """Drop a leading/trailing ```lang fence the model wrapped its answer in.
+
+    Models reflexively fence file content; the whole_file applier writes the body
+    verbatim, so an un-stripped fence would corrupt every file. Only strips when
+    the whole reply is one fenced block (conservative)."""
+    s = (text or "").strip()
+    if not s.startswith("```"):
+        return text
+    lines = s.split("\n")
+    # first line is ``` or ```python; drop it and a trailing ``` if present.
+    lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _edit_ab_prompts(arm: str, path: str, base_text: str, instruction: str):
+    """Build the (system, user) prompt for one arm, reusing the REAL production
+    instruction text (the whole_file convention and HASHLINE_PROMPT_INSTRUCTIONS)
+    so the eval measures the format the live DevAgent actually ships."""
+    from inference.edit_format import HASHLINE, render_hashline, HASHLINE_PROMPT_INSTRUCTIONS
+
+    if arm == HASHLINE:
+        system = (
+            HASHLINE_PROMPT_INSTRUCTIONS
+            + "\n\nOutput ONLY the @@ edit ops (and their content lines). "
+            "No prose, no markdown fences, no JSON."
+        )
+        user = (
+            f"File: {path} (each line shown as `lineno:hash|content`):\n\n"
+            f"{render_hashline(base_text)}\n\n"
+            f"Task: {instruction}\n\n"
+            f"Return only the @@ edit ops needed."
+        )
+    else:  # whole_file (legacy default)
+        system = (
+            "You are editing a source file. Output the COMPLETE updated contents "
+            "of the file and nothing else — every line that should remain must be "
+            "present. No explanations, no markdown fences, no JSON."
+        )
+        user = (
+            f"File: {path}\n\n{base_text}\n\n"
+            f"Task: {instruction}\n\n"
+            f"Return the complete updated file."
+        )
+    return system, user
+
+
+def run_edit_ab_suite(cases: list, infer_text: TextFn, *, arms=None,
+                      timeout_s: float = 90.0):
+    """Edit-format A/B: hold the model fixed, swap only the WRITE_FILE format.
+
+    For each case and each arm (whole_file, hashline) this prompts the SAME model
+    with that format's real production instructions, then applies the reply through
+    the production ``EditApplier`` (which also runs the lint gate). Scoring is
+    deterministic (``evals.edit_ab.score_edit_ab``). Returns an EditABReport whose
+    headline is the per-arm correct-rate and the hashline-minus-whole_file delta.
+
+    Fails safe like the other model-backed runners: a model/backend error on an
+    arm becomes that arm's apply_error, and an all-errored run is reported (the CLI
+    turns it into an exit-2 skip) rather than a false baseline.
+    """
+    from inference.edit_format import EditApplier, EditError
+    from evals.edit_ab import ArmOutcome, score_edit_ab, aggregate_edit_ab
+
+    arm_list = list(arms) if arms else ["whole_file", "hashline"]
+    applier = EditApplier()
+
+    async def _run_arm(case, arm) -> ArmOutcome:
+        path = str(case.fixture_path())
+        base = case.base_text()
+        system, user = _edit_ab_prompts(arm, path, base, case.instruction)
+        t0 = time.monotonic()
+        try:
+            reply = await asyncio.wait_for(infer_text(system, user), timeout_s)
+        except Exception as exc:
+            return ArmOutcome(arm=arm, ok=False, reason="io",
+                              message=f"{type(exc).__name__}: {exc}",
+                              latency_ms=(time.monotonic() - t0) * 1000)
+        lat = (time.monotonic() - t0) * 1000
+        if _is_backend_error(reply):
+            return ArmOutcome(arm=arm, ok=False, reason="io",
+                              message=reply.strip()[:120], latency_ms=lat)
+        body = _strip_code_fences(reply)
+        try:
+            new_text = applier.apply(base, body, edit_format=arm, path=path)
+            return ArmOutcome(arm=arm, ok=True, text=new_text,
+                              body_len=len(body), latency_ms=lat)
+        except EditError as ee:
+            return ArmOutcome(arm=arm, ok=False, reason=ee.reason,
+                              message=str(ee), body_len=len(body), latency_ms=lat)
+        except Exception as exc:
+            return ArmOutcome(arm=arm, ok=False, reason="error",
+                              message=f"{type(exc).__name__}: {exc}",
+                              body_len=len(body), latency_ms=lat)
+
+    async def _run_all():
+        results = []
+        for case in cases:
+            outcomes = {}
+            for arm in arm_list:
+                outcomes[arm] = await _run_arm(case, arm)
+            results.append(score_edit_ab(case, outcomes))
+        return aggregate_edit_ab(results)
+
+    return asyncio.run(_run_all())
+
+
 def replan_predictor(infer_text: TextFn, *, timeout_s: float = 60.0):
     """Build a plan_fn for the REPLAN (recovery) eval.
 

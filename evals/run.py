@@ -162,6 +162,19 @@ async def _build_dev_agent_with_rag():
     return agent
 
 
+def _run_edit_ab(args):
+    from evals.edit_ab import load_edit_ab_suite
+    from evals.runner import run_edit_ab_suite
+    cases = load_edit_ab_suite(args.suite)
+    if not cases:
+        print("no cases to run", file=sys.stderr)
+        return None
+    _, infer_text = _infer_text(args.model)
+    print(f"edit-format A/B: model={args.model or 'default'} "
+          f"arms=whole_file vs hashline  n={len(cases)}")
+    return run_edit_ab_suite(cases, infer_text, timeout_s=args.timeout)
+
+
 def _run_ablation(args):
     from evals.ablation import load_ablation_suite
     from evals.runner import run_ablation_suite
@@ -186,6 +199,24 @@ def _print_ablation(report, *, show: int = 20) -> None:
         if r.error:
             line += f"  {r.error[:60]}"
         print(line)
+
+
+def _print_edit_ab(report) -> None:
+    print(report.summary())
+    print("\nper case (arm: applied/lint/intent/preserved -> correct):")
+    for r in report.results:
+        if r.error:
+            print(f"  ERR [{r.case_id}] {r.error[:70]}")
+            continue
+        print(f"  [{r.case_id}]")
+        for arm, s in r.arms.items():
+            flag = "OK " if s.correct else "XX "
+            bits = (f"applied={int(s.applied)} lint={int(s.lint_ok)} "
+                    f"intent={int(s.intent_ok)} preserved={int(s.preserved)}")
+            line = f"     {flag}{arm:<11} {bits}  {s.latency_ms:.0f}ms"
+            if not s.correct and s.note:
+                line += f"  :: {s.note}"
+            print(line)
 
 
 def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
@@ -218,14 +249,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--suite", required=True, help="suite name (evals/suites/<name>.jsonl)")
     ap.add_argument("--mode",
                     choices=["single", "trajectory", "judge", "execution",
-                             "ablation", "replan"],
+                             "ablation", "replan", "edit_ab"],
                     default="single",
                     help="execution = run the goal through the LIVE DevAgent and "
                          "score the executed trajectory (read-only suites only); "
                          "ablation = run each goal WITH vs WITHOUT the codebase "
                          "indexer and score grounding (anchor recall) delta; "
                          "replan = score recovery from a failure via the production "
-                         "build_replan_prompt (DA_TRAJECTORY_REDUCE toggles compaction)")
+                         "build_replan_prompt (DA_TRAJECTORY_REDUCE toggles compaction); "
+                         "edit_ab = A/B the WRITE_FILE edit format (whole_file vs "
+                         "hashline) on the same fixed model, applied through the real "
+                         "EditApplier + lint gate (specs/edit-format-aci task 6)")
     ap.add_argument("--predictor",
                     choices=["command", "slots", "router", "skill_trigger"],
                     default="command",
@@ -247,7 +281,8 @@ def main(argv: list[str] | None = None) -> int:
 
     runner = {"single": _run_single, "trajectory": _run_trajectory,
               "judge": _run_judge, "execution": _run_execution,
-              "ablation": _run_ablation, "replan": _run_replan}[args.mode]
+              "ablation": _run_ablation, "replan": _run_replan,
+              "edit_ab": _run_edit_ab}[args.mode]
     report = runner(args)
     if report is None:
         return 2
@@ -264,6 +299,8 @@ def main(argv: list[str] | None = None) -> int:
                          indent=2))
     elif args.mode == "ablation":
         _print_ablation(report)
+    elif args.mode == "edit_ab":
+        _print_edit_ab(report)
     else:
         _print_report(report, args.mode)
 

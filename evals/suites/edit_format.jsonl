@@ -1,0 +1,20 @@
+# edit_format — the edit-format A/B payoff experiment (specs/edit-format-aci task 6).
+#
+# Holds the MODEL FIXED and swaps ONLY the WRITE_FILE edit format (whole_file vs
+# hashline), then applies the model's output through the REAL production
+# EditApplier (same instructions, renderer, and lint gate the live DevAgent uses).
+# Run with `--mode edit_ab`. Tier-2 / on-demand — not a CI gate.
+#
+# Each case is a self-contained SWE-bench-Verified-style micro-edit on a fixture
+# file under evals/fixtures/edit_format/. Scoring is deterministic and model-free:
+#   applied   — EditApplier returned text (no EditError: stale/unparseable/overlap)
+#   lint_ok   — the result passes the .py ast.parse gate (R1)
+#   intent    — every `expect_contains` present AND every `expect_absent` gone
+#   preserved — every `preserve` snippet survives (the silent-elision detector)
+#   correct   — applied AND lint_ok AND intent AND preserved
+# The headline is the per-arm correct-rate and the hashline-minus-whole_file delta.
+{"id": "ef-calc-divide", "suite": "edit_format", "fixture": "calculator.py", "instruction": "Add a `divide(self, a, b)` method to the Calculator class that returns a / b but raises ValueError('cannot divide by zero') when b == 0. Like the other operations it must call self._record with the op label 'divide(a, b)' so the result updates memory and history.", "expect_contains": ["def divide", "ValueError", "_record"], "expect_absent": [], "preserve": ["def add", "def subtract", "def multiply", "def _record", "def clear", "def last", "self.history"], "tags": ["edit_format", "add_method"]}
+{"id": "ef-temp-bugfix", "suite": "edit_format", "fixture": "temperature.py", "instruction": "There is a bug in celsius_to_fahrenheit: it multiplies by 9/4 but the correct Celsius-to-Fahrenheit formula multiplies by 9/5. Fix only that line so it computes c * 9 / 5 + 32.", "expect_contains": ["c * 9 / 5 + 32"], "expect_absent": ["c * 9 / 4 + 32"], "preserve": ["def fahrenheit_to_celsius", "def celsius_to_kelvin", "def kelvin_to_celsius", "def fahrenheit_to_kelvin", "def kelvin_to_fahrenheit"], "tags": ["edit_format", "bugfix"]}
+{"id": "ef-inv-total-value", "suite": "edit_format", "fixture": "inventory.py", "instruction": "Add a `total_value(self)` method to the Inventory class that returns the sum of quantity * unit_price across all items in self._items (a float; 0.0 when empty).", "expect_contains": ["def total_value", "unit_price"], "expect_absent": [], "preserve": ["def add_item", "def remove_item", "def restock", "def sell", "def get", "def count", "def low_stock", "def skus"], "tags": ["edit_format", "add_method", "long_file"]}
+{"id": "ef-textstats-bugfix", "suite": "edit_format", "fixture": "text_stats.py", "instruction": "word_count has a bug: it uses text.split(\" \") which counts empty strings from repeated or edge whitespace. Fix it to use text.split() with no arguments, which collapses runs of whitespace.", "expect_contains": ["text.split()"], "expect_absent": ["text.split(\" \")"], "preserve": ["def char_count", "def line_count", "def longest_word"], "tags": ["edit_format", "bugfix"]}
+{"id": "ef-validators-port", "suite": "edit_format", "fixture": "validators.py", "instruction": "Add an `is_valid_port(value)` function that returns True only when value is an int (not a bool) in the inclusive range 1 to 65535, and False otherwise.", "expect_contains": ["def is_valid_port", "65535"], "expect_absent": [], "preserve": ["def is_valid_email", "def is_non_empty", "def is_in_range", "def is_valid_username", "_EMAIL_RE"], "tags": ["edit_format", "add_function"]}

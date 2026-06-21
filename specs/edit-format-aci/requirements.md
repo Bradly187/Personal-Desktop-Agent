@@ -46,11 +46,16 @@ before it persists and rejects with a diagnostic message on failure; (b) add an
 The path sandbox (`_path_in_scope`, realpath-based) is already solid and is out of
 scope here.
 
-**Status:** In Progress — tasks 1–4 landed (lint gate + per-model `edit_format`
+**Status:** In Progress — tasks 1–6 landed (lint gate + per-model `edit_format`
 knob + the **hashline** structured format end-to-end: applier with layered
-matcher + atomic batch, READ_FILE anchoring, plan-prompt instructions). Default is
+matcher + atomic batch, READ_FILE anchoring, plan-prompt instructions + worked
+example; **+ the `--mode edit_ab` A/B eval, baseline locked**). Default is
 `whole_file` everywhere — byte-identical to legacy; hashline activates only when a
-model is configured for it. Remaining: the A/B eval (task 6) and docs (task 7).
+model is configured for it. The A/B (task 6) found correctness parity + a ~9.5×
+output-size / ~2× latency win for hashline on a small subset, and caught/fixed an
+ACI prompt defect along the way — but the default is intentionally NOT flipped yet
+(parity, not a correctness win; subset too easy to stress elision). Remaining:
+docs (task 7), and — before any default flip — a larger/longer-file subset.
 The `udiff` format is still reserved (degrades to whole_file).
 **Owner / author session:** Claude Code (Opus 4.8)
 **Related:** `../trajectory-reduction/` (sibling DevAgent token-economics work;
@@ -255,8 +260,40 @@ Each acceptance criterion in §3 maps to at least one test above.
       R3.3, R1.4, the validator-injection seam, and the full hashline surface
       (render, whitespace-insensitive hash, each op, stale/fuzzy/overlap/bottom-up,
       lint-after-apply, READ_FILE rendering).
-- [ ] 6. Eval: A/B `whole_file` vs structured on a SWE-bench-Verified subset; lock
-      baseline. **Gate before flipping any default.**
+- [x] 6. Eval: A/B `whole_file` vs structured on a SWE-bench-Verified-style subset;
+      lock baseline. **Gate before flipping any default.** Shipped `evals/` `--mode
+      edit_ab` (`evals/edit_ab.py` scorer + `runner.run_edit_ab_suite` +
+      `evals/suites/edit_format.jsonl` over `evals/fixtures/edit_format/`): holds the
+      model fixed, swaps only the format, applies through the REAL `EditApplier` +
+      lint gate; deterministic model-free scoring (applied/lint/intent/preserved →
+      correct, with a silent-elision detector). 10 CI-safe scorer tests
+      (`tests/test_evals_edit_ab.py`). **Result (qwen3-coder:30b, n=5, baseline
+      locked):** whole_file 100% vs hashline 100% (Δ0) — correctness *parity* — but
+      hashline emits ~9.5× less (117 vs 1117 mean chars) at ~½ latency (625 vs
+      1282 ms p50), 0 elision/lint/apply errors. The subset is small/easy (no
+      whole_file elision occurred), so it shows the efficiency win, not yet hashline's
+      correctness edge on long files. **The eval also caught + fixed an ACI defect:**
+      qwen3-coder initially scored 0% on hashline because it copied the READ_FILE
+      `lineno:hash|content` *render* into the op header (`@@ REPLACE 15:a9|code`);
+      adding a worked example + "display only" warning to `HASHLINE_PROMPT_INSTRUCTIONS`
+      took it 0%→100% (hashline-only injection; whole_file byte-identical).
+      **Default NOT flipped — parity not a correctness win; recommend a larger,
+      longer-file subset before enabling hashline per-model.**
+      **Hard subset added + locked** (`evals/suites/edit_format_hard.jsonl` over 5
+      long ~120-180-line fixtures, small targeted edits, `preserve` naming nearly
+      every def to force the elision detector). **Result (qwen3-coder:30b, n=5,
+      warm, baseline locked, tol 0.25):** whole_file **100%** vs hashline **80%**
+      (Δ-0.2). Decisive: **(1) silent elision — whole_file's theorized weakness —
+      did NOT occur on either subset (0/0) even at ~180 lines**; the 30B model
+      re-emits long files faithfully. **(2)** hashline's single miss was a format
+      slip (a stray trailing `85:00` half-anchor became insert content → invalid
+      Python), **caught by the lint gate (fail-closed, no corruption)** — R1
+      earning its keep. **(3)** hashline still ~23× less output (112 vs 2592 chars)
+      at ~4× lower latency (720 vs 3075 ms). **Net gate verdict: keep whole_file
+      default for qwen3-coder:30b — hashline is an efficiency win, not a correctness
+      win, and is slightly more error-prone at the op format.** Enable hashline only
+      where output cost/latency dominates, and only after the format reliability
+      improves (more few-shot / a lint-reject retry — production already replans).
 - [ ] 7. Update `CLAUDE.md` (WRITE_FILE gotcha + Key Files) and the file-map if the
       surface changed.
 ```

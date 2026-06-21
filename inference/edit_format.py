@@ -125,17 +125,29 @@ _DEFAULT_VALIDATORS: dict[str, Callable[[str, str], None]] = {
 # the default plan prompt is byte-identical.
 HASHLINE_PROMPT_INSTRUCTIONS = """\
 EDIT FORMAT — HASHLINE (overrides the default WRITE_FILE convention):
-- READ_FILE returns each line as `<lineno>:<hash>|<content>`. The hash is a short
-  fingerprint of the line; use it to anchor edits — never retype surrounding code.
+- READ_FILE returns each line as `<lineno>:<hash>|<content>`. That `|<content>`
+  is DISPLAY ONLY so you can read the file — it is NOT the edit syntax.
 - To change a file, emit a WRITE_FILE step whose body is one or more edit ops.
-  Each op is a header line plus (for REPLACE / INSERT) its new content:
+  Each op is a HEADER LINE BY ITSELF, then (for REPLACE / INSERT) the new content
+  on the FOLLOWING lines. The header ends right after `<line>:<hash>` — never put
+  code or a `|` after the hash on the header line:
     @@ REPLACE <line>:<hash>        replace that one line with the lines below
-    @@ DELETE <line>:<hash>         delete that line (no content)
+    @@ DELETE <line>:<hash>         delete that line (no content lines)
     @@ INSERT_AFTER <line>:<hash>   insert the lines below after that line
     @@ INSERT_BEFORE <line>:<hash>  insert the lines below before that line
-- Copy the `<line>:<hash>` anchor EXACTLY from the most recent READ_FILE output.
+- Copy the `<line>:<hash>` anchor EXACTLY from the most recent READ_FILE output,
+  taking the hash that belongs to the line you actually want to change.
   If an anchor is stale (the file changed), the edit is rejected — READ_FILE again.
-- One op per line; do not target the same line twice in one WRITE_FILE."""
+- One op per anchored line; do not target the same line twice in one WRITE_FILE.
+
+Worked example — READ_FILE showed:
+    14:7c|    # BUG: off by one
+    15:a9|    return n - 1
+To fix line 15, the WRITE_FILE body is EXACTLY:
+    @@ REPLACE 15:a9
+        return n
+(The header is its own line; the replacement code is on the next line. Do NOT
+write `@@ REPLACE 15:a9|    return n`.)"""
 
 
 def hash_line(content: str) -> str:
