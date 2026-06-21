@@ -23,7 +23,9 @@
       "send": false
     },
     "set_location": {
-      "keywords": ["set my location to", "change my location to"],
+      "keywords": ["set my location to", "change my location to",
+                   "set location to", "change location to",
+                   "my location is", "i live in"],
       "tool": "set_location",
       "send": false
     }

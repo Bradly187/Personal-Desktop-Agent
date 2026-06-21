@@ -39,6 +39,44 @@ _WMO = {
 }
 
 
+# US states + DC, name and postal abbreviation → canonical name. Used to peel a
+# trailing region hint off a query ("Marlin Texas" / "Marlin, TX") so the bare
+# city geocodes (Open-Meteo's geocoder returns 0 hits for "City State") and the
+# hint disambiguates between same-named towns in different states.
+_US_STATES = {
+    "alabama": "Alabama", "al": "Alabama", "alaska": "Alaska", "ak": "Alaska",
+    "arizona": "Arizona", "az": "Arizona", "arkansas": "Arkansas", "ar": "Arkansas",
+    "california": "California", "ca": "California", "colorado": "Colorado", "co": "Colorado",
+    "connecticut": "Connecticut", "ct": "Connecticut", "delaware": "Delaware", "de": "Delaware",
+    "florida": "Florida", "fl": "Florida", "georgia": "Georgia", "ga": "Georgia",
+    "hawaii": "Hawaii", "hi": "Hawaii", "idaho": "Idaho", "id": "Idaho",
+    "illinois": "Illinois", "il": "Illinois", "indiana": "Indiana", "in": "Indiana",
+    "iowa": "Iowa", "ia": "Iowa", "kansas": "Kansas", "ks": "Kansas",
+    "kentucky": "Kentucky", "ky": "Kentucky", "louisiana": "Louisiana", "la": "Louisiana",
+    "maine": "Maine", "me": "Maine", "maryland": "Maryland", "md": "Maryland",
+    "massachusetts": "Massachusetts", "ma": "Massachusetts", "michigan": "Michigan", "mi": "Michigan",
+    "minnesota": "Minnesota", "mn": "Minnesota", "mississippi": "Mississippi", "ms": "Mississippi",
+    "missouri": "Missouri", "mo": "Missouri", "montana": "Montana", "mt": "Montana",
+    "nebraska": "Nebraska", "ne": "Nebraska", "nevada": "Nevada", "nv": "Nevada",
+    "new hampshire": "New Hampshire", "nh": "New Hampshire",
+    "new jersey": "New Jersey", "nj": "New Jersey",
+    "new mexico": "New Mexico", "nm": "New Mexico", "new york": "New York", "ny": "New York",
+    "north carolina": "North Carolina", "nc": "North Carolina",
+    "north dakota": "North Dakota", "nd": "North Dakota", "ohio": "Ohio", "oh": "Ohio",
+    "oklahoma": "Oklahoma", "ok": "Oklahoma", "oregon": "Oregon", "or": "Oregon",
+    "pennsylvania": "Pennsylvania", "pa": "Pennsylvania",
+    "rhode island": "Rhode Island", "ri": "Rhode Island",
+    "south carolina": "South Carolina", "sc": "South Carolina",
+    "south dakota": "South Dakota", "sd": "South Dakota", "tennessee": "Tennessee", "tn": "Tennessee",
+    "texas": "Texas", "tx": "Texas", "utah": "Utah", "ut": "Utah",
+    "vermont": "Vermont", "vt": "Vermont", "virginia": "Virginia", "va": "Virginia",
+    "washington": "Washington", "wa": "Washington",
+    "west virginia": "West Virginia", "wv": "West Virginia",
+    "wisconsin": "Wisconsin", "wi": "Wisconsin", "wyoming": "Wyoming", "wy": "Wyoming",
+    "district of columbia": "Washington", "dc": "Washington",
+}
+
+
 def _config_path() -> Path:
     return Path(os.environ.get("DA_WEATHER_CONFIG") or
                 (Path.home() / ".claude" / "skills" / "weather.json"))
@@ -64,17 +102,60 @@ def _load_location(path: Path) -> dict | None:
 # Plain logic (unit-testable with a fake fetch)
 # ---------------------------------------------------------------------------
 
+def _split_place_hint(place: str) -> tuple[str, str | None]:
+    """Peel a trailing US state/region off a place string.
+
+    'Marlin, Texas' / 'Marlin Texas' / 'Marlin TX' → ('Marlin', 'Texas');
+    'Marlin' → ('Marlin', None). The geocoder is queried with the bare city
+    (the combined form returns 0 hits); the hint disambiguates candidates.
+    """
+    place = (place or "").strip().strip(",").strip()
+    # Comma form: 'City, State' (optionally '…, Country' — keep the first tail).
+    if "," in place:
+        head, _, tail = place.partition(",")
+        tail = tail.split(",")[0].strip()
+        hint = _US_STATES.get(tail.lower())
+        return head.strip() or place, (hint or (tail or None))
+    # Space form: a trailing 2- or 1-word US state name/abbreviation.
+    toks = place.split()
+    for n in (2, 1):
+        if len(toks) > n and " ".join(toks[-n:]).lower() in _US_STATES:
+            return " ".join(toks[:-n]).strip(), _US_STATES[" ".join(toks[-n:]).lower()]
+    return place, None
+
+
+def _geo_search(name: str, *, count: int = 5, fetch=_http_json) -> list:
+    qs = urllib.parse.urlencode({"name": name, "count": count})
+    return fetch(f"{_GEO_API}?{qs}").get("results") or []
+
+
+def _best_match(results: list, hint: str | None) -> dict:
+    """Pick the candidate whose region matches the hint, else the first (the
+    geocoder already orders by relevance/population)."""
+    if hint:
+        h = hint.lower()
+        for r in results:
+            if (r.get("admin1") or "").lower() == h or (r.get("country_code") or "").lower() == h:
+                return r
+    return results[0]
+
+
 def _geocode_and_save(place: str, path: Path, *, fetch=_http_json) -> str:
-    qs = urllib.parse.urlencode({"name": place, "count": 1})
+    raw = (place or "").strip()
+    name, hint = _split_place_hint(raw)
     try:
-        results = fetch(f"{_GEO_API}?{qs}").get("results") or []
+        results = _geo_search(name, fetch=fetch)
+        # Bare combined string with no recognized state and no results: retry on
+        # the first token only (best-effort — e.g. an unfamiliar region suffix).
+        if not results and hint is None and " " in name:
+            results = _geo_search(name.split()[0], fetch=fetch)
     except Exception as exc:
         return f"Location lookup failed: {exc}"
     if not results:
-        return f"I couldn't find a place called {place!r}."
-    r = results[0]
+        return f"I couldn't find a place called {raw!r}."
+    r = _best_match(results, hint)
     cfg = {"lat": r["latitude"], "lon": r["longitude"],
-           "place": f"{r.get('name', place)}, {r.get('admin1', '')}".rstrip(", ")}
+           "place": f"{r.get('name', name)}, {r.get('admin1', '')}".rstrip(", ")}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg), encoding="utf-8")
     return f"Location set to {cfg['place']}."
