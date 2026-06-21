@@ -231,25 +231,52 @@ def _extract_json_obj(text: str) -> dict:
         return {}
 
 
-def _parse_plan_json(text: str) -> list[AgentStep]:
-    """Parse a structured-output (Ollama `format`) plan response into steps.
+@dataclass
+class DroppedStep:
+    """A step the structured parse could not accept (specs/dev-agent-plan-contract)."""
+    index: int          # 1-based position in the model's `steps` array
+    raw_action: str     # what the model emitted (may be "")
+    reason: str         # "unknown action" | "not an object"
 
-    Expects `{"steps": [{action, args, body, after}, ...]}` (the plan profile's
-    json_schema). Raises (json.JSONDecodeError / ValueError) on anything that
-    isn't a valid step array so the caller can fall back to the regex parser —
-    this is the structured replacement for the body-collision-prone free-text
-    parse. Unknown verbs are skipped (the schema enum should prevent them).
+
+@dataclass
+class PlanParseReport:
+    """Outcome of a structured plan parse, recording drops instead of swallowing.
+
+    `parsed_ok` is True when the response was a JSON object with a `steps` array
+    (even if some items were dropped); False means the caller should try the
+    regex fallback. `dropped` names every item that didn't make it into `steps`.
     """
-    data = json.loads(text)
+    steps: list[AgentStep]
+    dropped: list[DroppedStep]
+    parsed_ok: bool
+
+
+def _parse_plan_json_report(text: str) -> PlanParseReport:
+    """Structured-output (Ollama `format`) plan parse that RECORDS dropped steps
+    instead of silently skipping them (specs/dev-agent-plan-contract R1.1).
+
+    Expects `{"steps": [{action, args, body, after}, ...]}`. Returns
+    `parsed_ok=False` (not a raise) when the text isn't an object with a `steps`
+    array, so the caller can fall back to the regex parser. Unknown-action /
+    malformed items are appended to `dropped` rather than vanishing. Never raises.
+    """
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return PlanParseReport(steps=[], dropped=[], parsed_ok=False)
     raw_steps = data.get("steps") if isinstance(data, dict) else data
     if not isinstance(raw_steps, list):
-        raise ValueError("plan JSON has no 'steps' array")
+        return PlanParseReport(steps=[], dropped=[], parsed_ok=False)
     steps: list[AgentStep] = []
-    for item in raw_steps:
+    dropped: list[DroppedStep] = []
+    for idx, item in enumerate(raw_steps, 1):
         if not isinstance(item, dict):
+            dropped.append(DroppedStep(index=idx, raw_action="", reason="not an object"))
             continue
         action = str(item.get("action", "")).strip().upper()
         if action not in _PLAN_ACTIONS:
+            dropped.append(DroppedStep(index=idx, raw_action=action, reason="unknown action"))
             continue
         args = str(item.get("args", "") or "").strip()
         body = str(item.get("body", "") or "")
@@ -257,7 +284,40 @@ def _parse_plan_json(text: str) -> list[AgentStep]:
         deps = sorted({int(d) for d in after if isinstance(d, (int, float, str))
                        and str(d).strip().lstrip("-").isdigit()})
         steps.append(AgentStep(action=action, args=args, body=body, deps=deps))
-    return steps
+    return PlanParseReport(steps=steps, dropped=dropped, parsed_ok=True)
+
+
+def _parse_plan_json(text: str) -> list[AgentStep]:
+    """Back-compat wrapper: parse into steps, raising on a non-step-array response
+    so the caller falls back to the regex parser. Unknown verbs are dropped (see
+    `_parse_plan_json_report` for the drop-recording variant used by auto-repair)."""
+    report = _parse_plan_json_report(text)
+    if not report.parsed_ok:
+        raise ValueError("plan JSON has no 'steps' array")
+    return report.steps
+
+
+def _build_plan_repair_prompt(report: PlanParseReport) -> str:
+    """Corrective message naming what failed in the previous plan, for a bounded
+    re-prompt (specs/dev-agent-plan-contract R1.2/R1.3). Reuses `_PLAN_ACTIONS`
+    as the single source of valid verbs so it can't drift from the schema."""
+    valid = ", ".join(sorted(_PLAN_ACTIONS))
+    problems: list[str] = []
+    for d in report.dropped:
+        if d.reason == "unknown action":
+            problems.append(f'- step {d.index} used an unknown action "{d.raw_action}"')
+        else:
+            problems.append(f"- step {d.index} was malformed ({d.reason})")
+    if not report.steps and not report.dropped:
+        problems.append("- no valid \"steps\" array was found in your response")
+    problem_block = "\n".join(problems) or "- the plan could not be fully parsed"
+    return (
+        "Your previous plan could not be fully parsed and was NOT executed:\n"
+        f"{problem_block}\n\n"
+        'Re-emit the COMPLETE plan as a JSON object of the form '
+        '{"steps": [{"action": <ACTION>, "args": "...", "body": "...", "after": [n]}]}. '
+        f"Use ONLY these actions: {valid}. Include every step you intend to run."
+    )
 
 
 def _parse_plan(text: str) -> list[AgentStep]:
@@ -387,6 +447,20 @@ class DevAgent:
         # Edit-format ACI: lint-gates + applies WRITE_FILE edits before they
         # touch disk (specs/edit-format-aci). Stateless; default whole_file.
         self._edit_applier = EditApplier()
+
+        # Plan-contract auto-repair (specs/dev-agent-plan-contract). When the
+        # planner drops steps (unknown verb) or returns nothing parseable,
+        # re-prompt the model with a corrective message instead of silently
+        # dropping the step. Default OFF (env DA_PLAN_REPAIR) until the eval
+        # baseline locks; bounded by DA_PLAN_REPAIR_MAX (default 1) so it can't
+        # spin. Instance attrs so tests can flip them without env.
+        self._plan_repair_enabled: bool = os.environ.get(
+            "DA_PLAN_REPAIR", "0").strip().lower() in ("1", "true", "on", "yes")
+        try:
+            self._plan_repair_max: int = max(
+                0, int(os.environ.get("DA_PLAN_REPAIR_MAX", "1")))
+        except ValueError:
+            self._plan_repair_max = 1
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -679,6 +753,60 @@ class DevAgent:
     # Plan → Execute → Reflect loop
     # ---------------------------------------------------------------------- #
 
+    async def _acquire_plan_steps(self, goal, plan_result, extra_ctx):
+        """Parse the planner response into steps, auto-repairing dropped/empty
+        plans (specs/dev-agent-plan-contract R1).
+
+        Structured parse → regex fallback. When the structured parse dropped a
+        step or produced nothing AND the regex fallback didn't rescue a full
+        plan, re-prompt the planner up to `_plan_repair_max` times with a
+        corrective message naming the failure. Returns `(steps, plan_result)`
+        where `plan_result` is the final (possibly repaired) planner response so
+        the EXPLAIN fail-safe and `_active_plan_model` reflect what actually ran.
+        With repair disabled (default) this is the legacy parse path plus a
+        WARNING when steps are silently dropped — never a silent skip.
+        """
+        attempts = 0
+        while True:
+            report = _parse_plan_json_report(plan_result.text)
+            steps = report.steps
+            used_regex = False
+            if not report.parsed_ok or not steps:
+                regex_steps = _parse_plan(plan_result.text)
+                if regex_steps:
+                    steps = regex_steps
+                    used_regex = True
+
+            need_repair = (
+                self._plan_repair_enabled
+                and attempts < self._plan_repair_max
+                and not used_regex
+                and bool(report.dropped or not steps)
+            )
+            if not need_repair:
+                if report.dropped and not used_regex:
+                    log.warning(
+                        "DevAgent: plan parse dropped %d step(s): %s",
+                        len(report.dropped),
+                        "; ".join(f"#{d.index} {d.raw_action or d.reason!r}"
+                                  for d in report.dropped),
+                    )
+                return steps, plan_result
+
+            attempts += 1
+            log.info("DevAgent: plan auto-repair %d/%d — %d dropped, %d parsed",
+                     attempts, self._plan_repair_max, len(report.dropped), len(steps))
+            corrective = _build_plan_repair_prompt(report)
+            repair_ctx = f"{corrective}\n\n{extra_ctx}" if extra_ctx else corrective
+            # The re-infer emits its own inference span (tokens/cost) — R3.2.
+            repaired = await self._router.infer(
+                domain="plan", user_text=goal, context=repair_ctx)
+            if not repaired.ok:
+                log.warning("DevAgent: plan auto-repair inference failed (%s) — "
+                            "using prior parse", repaired.error)
+                return steps, plan_result
+            plan_result = repaired
+
     async def plan_and_run(self, goal: str, trace_id: str = "") -> AgentResult:
         """Decompose a complex goal into steps and execute them sequentially.
 
@@ -761,17 +889,15 @@ class DevAgent:
         # Prefer structured JSON (Ollama `format` on the plan profile) — it
         # eliminates the free-text body-collision / arg-truncation bugs. Fall
         # back to the regex parser when JSON parsing fails (older Ollama /
-        # vLLM / remote backends that don't honor `format`).
-        try:
-            steps = _parse_plan_json(plan_result.text)
-        except Exception as _json_exc:
-            log.debug("DevAgent: plan JSON parse failed (%s) — regex fallback", _json_exc)
-            steps = []
+        # vLLM / remote backends that don't honor `format`). When auto-repair is
+        # enabled (specs/dev-agent-plan-contract), a dropped/empty plan is
+        # re-prompted instead of silently degraded; `plan_result` may be replaced
+        # by the repaired response.
+        steps, plan_result = await self._acquire_plan_steps(goal, plan_result, extra_ctx)
         if not steps:
-            steps = _parse_plan(plan_result.text)
-        if not steps:
-            # Planner returned neither valid JSON nor a parseable plan — treat
-            # the whole response as a single EXPLAIN step.
+            # Planner returned neither valid JSON nor a parseable plan, and repair
+            # (if any) didn't recover one — fail safe: surface the response as a
+            # single read-only EXPLAIN, never a guessed action (R1.5).
             steps = [AgentStep(action="EXPLAIN", body=plan_result.text)]
 
         log.info("DevAgent: plan has %d steps", len(steps))
