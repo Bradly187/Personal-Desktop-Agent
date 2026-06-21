@@ -87,3 +87,14 @@ def test_kill_process_tree_terminates_live_process():
 def test_kill_process_tree_no_such_pid_is_noop():
     # A pid that does not exist must not raise.
     kill_process_tree(2_000_000_000)
+
+
+def test_run_capped_closes_stdin_by_default():
+    # stdin defaults to DEVNULL: a child reading stdin sees immediate EOF and
+    # exits fast instead of blocking until the timeout. read() → '' proves it.
+    r = run_capped(
+        [sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"],
+        timeout=10, capture_output=True, text=True,
+    )
+    assert r.returncode == 0
+    assert "''" in (r.stdout or "")
