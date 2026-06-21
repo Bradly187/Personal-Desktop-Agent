@@ -79,11 +79,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Optional
 
 from inference import bridge_protocol
@@ -315,6 +317,11 @@ class ModelProfile:
     # the plan profile so the planner emits a parseable step array instead of
     # free text (eliminates the regex body-collision / arg-truncation bug class).
     json_schema: Optional[dict] = None
+    # Edit-format ACI knob (specs/edit-format-aci). Selects how this model's
+    # WRITE_FILE edits are expressed/applied: "whole_file" (default, legacy),
+    # "udiff", or "hashline". Resolved per actual model name via
+    # ModelRouter.edit_format_for() — config overrides this profile default.
+    edit_format: str = "whole_file"
 
     def __str__(self) -> str:
         think_flag = " [thinking]" if self.thinking else ""
@@ -437,6 +444,40 @@ _LIGHT_MODELS: frozenset[str] = frozenset({
     # remain evictable so a heavy 30B specialist (qwen3-coder/qwen3-vl) can load on demand.
     "gemma4:e4b-it-qat",
 })
+
+
+# ---------------------------------------------------------------------------
+# Edit-format ACI config (specs/edit-format-aci)
+# ---------------------------------------------------------------------------
+
+# Same config file the bridge / CommandExecutor read (writable_roots etc.).
+_BRIDGE_CONFIG_PATH = Path(os.path.expanduser("~/.claude/ipad_bridge/config.json"))
+
+
+def _load_edit_format_overrides() -> dict[str, str]:
+    """Per-model edit_format overrides from config (specs/edit-format-aci R3.4).
+
+    Reads ``edit_format_aci.per_model`` ({model_name: format}) from
+    ``~/.claude/ipad_bridge/config.json``. Absent / malformed config → ``{}``
+    (every model keeps its ModelProfile.edit_format default — i.e. whole_file).
+    Loaded once at import; restart to pick up a config change (matches the
+    writable-roots loader). Never raises — config problems degrade to no
+    override (AGENTS.md degrade-gracefully).
+    """
+    try:
+        if not _BRIDGE_CONFIG_PATH.exists():
+            return {}
+        cfg = json.loads(_BRIDGE_CONFIG_PATH.read_text(encoding="utf-8"))
+        block = cfg.get("edit_format_aci") or {}
+        per_model = block.get("per_model") or {}
+        if isinstance(per_model, dict):
+            return {str(k): str(v) for k, v in per_model.items()}
+    except (OSError, ValueError, AttributeError) as exc:
+        log.warning("edit_format_aci config unreadable (%s) — no overrides", exc)
+    return {}
+
+
+_EDIT_FORMAT_OVERRIDES: dict[str, str] = _load_edit_format_overrides()
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +921,33 @@ class ModelRouter:
                 continue
             roster.extend(chain)
         return roster
+
+    def edit_format_for(self, model_name: str) -> str:
+        """Resolve the WRITE_FILE edit format for an actual model name.
+
+        Resolution order (specs/edit-format-aci R3.1):
+          1. config override (``edit_format_aci.per_model[model_name]``),
+          2. the ModelProfile-by-name's ``edit_format`` default,
+          3. ``"whole_file"`` (the safe legacy default).
+
+        Keyed by model *name* (not profile/domain) because the plan fallback
+        chain can select a model whose profile belongs to another domain — the
+        name is the stable identity of what actually produced the edit.
+
+        Note: a name shared by two profiles (qwen3-coder:30b is both the code and
+        plan profile) resolves to the first match's default. That is benign — all
+        profile defaults are whole_file and the config override (step 1, keyed by
+        the same unambiguous name) is the authoritative per-model knob.
+        """
+        override = _EDIT_FORMAT_OVERRIDES.get(model_name)
+        if override:
+            return override
+        profile = next(
+            (p for p in self._profiles.values() if p.name == model_name), None
+        )
+        if profile is not None:
+            return profile.edit_format
+        return "whole_file"
 
     def _apply_override(self, domain: str, free_gb: float) -> Optional["ModelProfile"]:
         """Return an override profile if the user pinned a model, else None.

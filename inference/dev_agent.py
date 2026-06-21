@@ -44,6 +44,12 @@ from core.events import (
     TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
     TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
 )
+from inference.edit_format import (
+    HASHLINE,
+    HASHLINE_PROMPT_INSTRUCTIONS,
+    EditApplier,
+    render_hashline,
+)
 from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
@@ -378,6 +384,9 @@ class DevAgent:
         self._confirm_whisper = None       # WhisperModel cached for _confirm_destructive_op()
         self._skill_registry = None        # SkillRegistry | None (set via set_skill_registry)
         self._personal_kb = None           # PersonalKB | None (set via set_personal_kb)
+        # Edit-format ACI: lint-gates + applies WRITE_FILE edits before they
+        # touch disk (specs/edit-format-aci). Stateless; default whole_file.
+        self._edit_applier = EditApplier()
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -389,6 +398,10 @@ class DevAgent:
         # Both are safe single-plan state because _plan_lock serializes plans.
         self._active_trace_id: str = ""
         self._step_seq: dict[int, int] = {}
+        # Actual model that produced the in-flight plan — resolves the WRITE_FILE
+        # edit_format for _apply_edit (specs/edit-format-aci R3). Per-plan state,
+        # safe because _plan_lock serializes plans. "" → whole_file default.
+        self._active_plan_model: str = ""
 
         # Goal-level authorization state (reset after each plan)
         self._plan_authorized: bool = False
@@ -714,6 +727,17 @@ class DevAgent:
         if git_ctx:
             extra_ctx = f"{git_ctx}\n\n{extra_ctx}" if extra_ctx else git_ctx
 
+        # If the plan model edits in hashline, teach it the format up front so
+        # its WRITE_FILE bodies are edit ops, not whole files (edit-format-aci
+        # R3.2 prompt side). Only for hashline models — whole_file is untouched.
+        if self._router.edit_format_for(
+            self._router.select_profile("plan").name
+        ) == HASHLINE:
+            extra_ctx = (
+                f"{HASHLINE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
+                if extra_ctx else HASHLINE_PROMPT_INSTRUCTIONS
+            )
+
         plan_result = await self._router.infer(
             domain="plan",
             user_text=goal,
@@ -729,6 +753,10 @@ class DevAgent:
                 error=plan_result.error,
                 total_latency_ms=(time.monotonic() - t0) * 1000,
             )
+
+        # Record which model produced the plan so WRITE_FILE steps apply the
+        # edit format configured for it (specs/edit-format-aci R3.2).
+        self._active_plan_model = plan_result.model
 
         # Prefer structured JSON (Ollama `format` on the plan profile) — it
         # eliminates the free-text body-collision / arg-truncation bugs. Fall
@@ -1982,6 +2010,7 @@ class DevAgent:
         self._current_goal = None
         self._current_step = 0
         self._total_steps = 0
+        self._active_plan_model = ""
 
     async def _reflect(
         self, goal: str, steps: list[AgentStep], model: str
@@ -2043,13 +2072,19 @@ class DevAgent:
                 f"Approve writing file {target[:60]}?"
             ):
                 return "WRITE_FILE cancelled by user"
+            # Lint-gate + format-aware apply BEFORE snapshot/write so a
+            # syntactically broken edit fails closed (file untouched) and the
+            # loop replans with a diagnostic (specs/edit-format-aci R1, R2).
+            # An EditError raised here marks the step failed (WRITE_FILE is
+            # non-retryable) → replan; nothing is snapshotted or written.
+            new_text = await asyncio.to_thread(self._apply_edit, step.args, step.body)
             # Snapshot BEFORE writing so a saga rollback restores an overwritten
             # file instead of deleting it. Captured even though we're about to
             # write — if the write fails, no compensation is registered anyway.
             step.comp_args = json.dumps(await asyncio.to_thread(
                 self._snapshot_for_write, step.args
             ))
-            return await asyncio.to_thread(self._write_file, step.args, step.body)
+            return await asyncio.to_thread(self._write_file, step.args, new_text)
 
         if action == "RUN_TERMINAL":
             cmd = step.args or step.body
@@ -2079,7 +2114,13 @@ class DevAgent:
 
         if action == "READ_FILE":
             path_str = step.args or step.body
-            return await asyncio.to_thread(self._read_file, path_str.strip())
+            text = await asyncio.to_thread(self._read_file, path_str.strip())
+            # When the plan model edits in hashline, anchor the view with
+            # line:hash prefixes so its WRITE_FILE ops can reference them
+            # (specs/edit-format-aci R4). Whole_file models see raw text.
+            if self._router.edit_format_for(self._active_plan_model) == HASHLINE:
+                text = render_hashline(text)
+            return text
 
         if action == "GREP":
             # args format: "PATTERN [PATH]"  — path optional, defaults to project root
@@ -2490,6 +2531,25 @@ class DevAgent:
     # ---------------------------------------------------------------------- #
     # Dev action implementations
     # ---------------------------------------------------------------------- #
+
+    def _apply_edit(self, path_str: str, body: str) -> str:
+        """Resolve a WRITE_FILE payload to its final file text, lint-gated.
+
+        Reads the current file (if it exists) and runs the payload through the
+        EditApplier for the active edit format — the format configured for the
+        model that produced the plan (specs/edit-format-aci R3). Raises
+        ``EditError`` if the result fails validation — the caller never writes
+        on failure (R1). Returns the text to write on success.
+        """
+        edit_format = self._router.edit_format_for(self._active_plan_model)
+        path = Path(path_str.strip().strip("'\""))
+        current = (
+            path.read_text(encoding="utf-8", errors="replace")
+            if path.exists() else ""
+        )
+        return self._edit_applier.apply(
+            current, body, edit_format=edit_format, path=str(path)
+        )
 
     @staticmethod
     def _write_file(path_str: str, content: str) -> str:

@@ -1,0 +1,23 @@
+{
+  "suite": "edit_format_hard",
+  "mode": "edit_ab",
+  "recorded_at": "2026-06-21T04:59:05",
+  "model": "qwen3-coder:30b",
+  "tolerance": 0.25,
+  "n": 5,
+  "whole_file_rate": 1.0,
+  "hashline_rate": 0.8,
+  "mean_delta": -0.2,
+  "exact_acc": 1.0,
+  "errors": 0,
+  "whole_file_elision_failures": 0,
+  "whole_file_lint_rejections": 0,
+  "whole_file_apply_errors": 0,
+  "whole_file_p50_latency_ms": 3074.6,
+  "whole_file_mean_body_len": 2592.2,
+  "hashline_elision_failures": 0,
+  "hashline_lint_rejections": 1,
+  "hashline_apply_errors": 0,
+  "hashline_p50_latency_ms": 720.2,
+  "hashline_mean_body_len": 111.6
+}
