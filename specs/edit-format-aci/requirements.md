@@ -46,17 +46,18 @@ before it persists and rejects with a diagnostic message on failure; (b) add an
 The path sandbox (`_path_in_scope`, realpath-based) is already solid and is out of
 scope here.
 
-**Status:** In Progress — tasks 1–6 landed (lint gate + per-model `edit_format`
-knob + the **hashline** structured format end-to-end: applier with layered
-matcher + atomic batch, READ_FILE anchoring, plan-prompt instructions + worked
-example; **+ the `--mode edit_ab` A/B eval, baseline locked**). Default is
-`whole_file` everywhere — byte-identical to legacy; hashline activates only when a
-model is configured for it. The A/B (task 6) found correctness parity + a ~9.5×
-output-size / ~2× latency win for hashline on a small subset, and caught/fixed an
-ACI prompt defect along the way — but the default is intentionally NOT flipped yet
-(parity, not a correctness win; subset too easy to stress elision). Remaining:
-docs (task 7), and — before any default flip — a larger/longer-file subset.
-The `udiff` format is still reserved (degrades to whole_file).
+**Status:** Done — all 7 tasks landed (lint gate + per-model `edit_format` knob +
+the **hashline** structured format end-to-end: applier with layered matcher +
+atomic batch, READ_FILE anchoring, plan-prompt instructions + worked example; the
+`--mode edit_ab` A/B eval with easy + hard subsets, baselines locked; docs). Default
+is `whole_file` everywhere — byte-identical to legacy; hashline activates only when a
+model is configured for it. The A/B verdict (tasks 6) **keeps `whole_file` default**:
+silent elision did not occur even on ~180-line files, whole_file led on correctness
+(100% vs 80% hard subset), and hashline's gain is purely efficiency (~9–23× less
+output, ~2–4× faster) — an opt-in cost play, not a correctness upgrade. Follow-ups
+(out of this spec): enable hashline per-model where cost/latency dominates after the
+op-format reliability improves; implement `udiff` (still reserved → degrades to
+whole_file).
 **Owner / author session:** Claude Code (Opus 4.8)
 **Related:** `../trajectory-reduction/` (sibling DevAgent token-economics work;
 both touch the plan→execute→replan loop), `../accessibility-agent/` (DevAgent
@@ -294,6 +295,8 @@ Each acceptance criterion in §3 maps to at least one test above.
       win, and is slightly more error-prone at the op format.** Enable hashline only
       where output cost/latency dominates, and only after the format reliability
       improves (more few-shot / a lint-reject retry — production already replans).
-- [ ] 7. Update `CLAUDE.md` (WRITE_FILE gotcha + Key Files) and the file-map if the
-      surface changed.
+- [x] 7. Docs: added the **WRITE_FILE lint-gate + per-model edit-format** gotcha to
+      `CLAUDE.md` (lint gate fail-closed, `edit_format_for` resolution, default
+      `whole_file`, hashline opt-in, the task-6 gate verdict) and an
+      `inference/edit_format.py` row to `docs/file-map.md`.
 ```
