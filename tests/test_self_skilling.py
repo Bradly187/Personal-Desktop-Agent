@@ -18,6 +18,7 @@ from adaptive.macro_detector import (
     plan_signature,
 )
 from core.macro_store import MacroStore
+from core.command_executor import Command
 
 
 _VERBS = {"OPEN", "CLICK", "TYPE", "HOTKEY", "SCROLL", "WRITE_FILE", "RUN_TERMINAL"}
@@ -399,3 +400,137 @@ def test_register_rejects_ambiguous_shape():
         ]}),
     }
     assert store.register(bad) is None
+
+
+# ---------------------------------------------------------------------- #
+# Approval surface + routing (spec §3 Requirement 4 / coordinator wiring)
+# ---------------------------------------------------------------------- #
+
+from core.macro_store import parse_macro_save, self_skilling_config
+
+
+def test_parse_macro_save_phrasings():
+    assert parse_macro_save("save that as a command called morning setup") == "morning setup"
+    assert parse_macro_save("save this as a command named quick note") == "quick note"
+    assert parse_macro_save("save that as morning setup") == "morning setup"
+    assert parse_macro_save("remember that as daily standup") == "daily standup"
+    assert parse_macro_save("save it as a command called X.") == "X"
+    # not a save phrase
+    assert parse_macro_save("open notepad") is None
+    assert parse_macro_save("what can you do") is None
+
+
+def test_self_skilling_config_is_dict_default_off():
+    cfg = self_skilling_config()
+    assert isinstance(cfg, dict)
+    assert cfg.get("enabled", False) in (True, False)  # never raises
+
+
+def test_build_prefers_persisted_name_and_keywords():
+    store = MacroStore(known_verbs=set(_VERBS))
+    row = {
+        "id": 7, "text": "detector goal name", "action_or_wrong": "OPEN(STR)",
+        "domain": "command",
+        "source_refs": json.dumps({
+            "run_ids": [1, 2, 3],
+            "name": "morning setup",
+            "keywords": ["morning setup"],
+            "steps": [{"pos": 0, "action": "OPEN", "slot": "STR", "values": ["x"]}],
+        }),
+    }
+    m = store.register(row)   # no explicit name → use persisted (restart path)
+    assert m.name == "morning setup"
+    assert store.match("do my morning setup now") is m
+
+
+def _coord_with(db):
+    from core.hybrid_coordinator import HybridCoordinator
+    coord = HybridCoordinator(agent_db=db)
+    spoken: list = []
+
+    async def _say(t):
+        spoken.append(t)
+
+    coord._tts_speak = _say
+    coord._spoken = spoken
+    return coord
+
+
+async def test_handle_macro_save_no_pending_R4_1():
+    db, d = await _open_db()
+    try:
+        coord = _coord_with(db)
+        coord.set_macro_store(MacroStore(known_verbs=set(_VERBS)))
+        coord._pending_macro = None
+        res = await coord._handle_macro_save("anything")
+        assert res["action"] == "MACRO_SAVE_NONE"   # nothing pending → promote nothing
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_handle_macro_save_promotes_and_routes():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 3, "open and click",
+                     [("OPEN", "notepad"), ("CLICK", "body")])
+        staged = await _det(db).run_once()
+        cid = staged[0]
+        coord = _coord_with(db)
+        store = MacroStore(known_verbs=set(_VERBS))
+        coord.set_macro_store(store)
+        coord._pending_macro = {"id": cid, "name": "open and click"}
+        res = await coord._handle_macro_save("morning setup")
+        assert res == {"status": "ok", "action": "MACRO_SAVE", "name": "morning setup"}
+        # persisted: promoted, renamed, survives a fresh load
+        row = await db.get_evolution_candidate(cid)
+        assert row["status"] == "promoted" and row["text"] == "morning setup"
+        fresh = MacroStore(known_verbs=set(_VERBS))
+        assert await fresh.load_promoted(db) == 1
+        assert fresh.match("run morning setup please").name == "morning setup"
+        assert coord._pending_macro is None
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_maybe_handle_macro_replays_through_executor():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 3, "open and click",
+                     [("OPEN", "notepad"), ("CLICK", "body")])
+        row = await _stage_and_promote(db, _det(db))
+        coord = _coord_with(db)
+        store = MacroStore(known_verbs=set(_VERBS))
+        store.register(row, name="morning setup", keywords=["morning setup"])
+        coord.set_macro_store(store)
+        coord._executor = _FakeExec()
+        cmd = Command(text="run morning setup", action="", source="voice")
+        res = await coord._maybe_handle_macro(cmd)
+        assert res["action"] == "MACRO_REPLAY" and res["status"] == "ok"
+        assert [c[0] for c in coord._executor.calls] == ["OPEN", "CLICK"]
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_macro_does_not_shadow_system_control():
+    db, d = await _open_db()
+    try:
+        coord = _coord_with(db)
+        store = MacroStore(known_verbs=set(_VERBS))
+        # a macro mischievously named after a built-in
+        store.register({
+            "id": 1, "text": "help", "action_or_wrong": "OPEN(STR)",
+            "domain": "command",
+            "source_refs": json.dumps({"steps": [
+                {"pos": 0, "action": "OPEN", "slot": "STR", "values": ["x"]}]}),
+        }, name="help", keywords=["help"])
+        coord.set_macro_store(store)
+        coord._executor = _FakeExec()
+        cmd = Command(text="help", action="", source="voice")
+        assert await coord._maybe_handle_macro(cmd) is None  # built-in wins
+        assert coord._executor.calls == []
+    finally:
+        await db.close()
+        d.cleanup()

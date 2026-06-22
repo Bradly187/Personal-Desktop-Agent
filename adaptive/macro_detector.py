@@ -89,11 +89,16 @@ class MacroDetector:
         lookback_s: float = 30 * 86400.0,
         run_limit: int = 500,
         interval_s: float = 3600.0,
+        on_staged=None,
     ) -> None:
         self._db = agent_db
         self._twin = twin_state
         self._skills = skill_registry
         self._known_verbs = known_verbs
+        # async callback(list[dict]) invoked with the just-staged candidate
+        # summaries ({id,name,signature}) so the agent can announce them. Never
+        # promotes anything — announcement only (spec R4 fail-safe).
+        self._on_staged = on_staged
         self._min_occ = max(2, int(min_occurrences))
         self._min_steps = max(2, int(min_steps))
         self._similarity = float(similarity)
@@ -160,6 +165,7 @@ class MacroDetector:
             return []
         clusters = self._cluster(runs)
         staged: list[int] = []
+        summaries: list[dict] = []
         for signature, members in sorted(clusters.items()):
             if len({m["id"] for m in members}) < self._min_occ:
                 continue
@@ -168,6 +174,14 @@ class MacroDetector:
             cid = await self._stage(signature, members)
             if cid:
                 staged.append(cid)
+                goal = Counter(m.get("goal", "") for m in members).most_common(1)[0][0]
+                summaries.append({"id": cid, "name": goal or signature,
+                                  "signature": signature})
+        if summaries and self._on_staged is not None:
+            try:
+                await self._on_staged(summaries)
+            except Exception as exc:   # announcement must never break detection
+                log.debug("MacroDetector on_staged callback failed: %s", exc)
         return staged
 
     async def _flare_active(self) -> bool:

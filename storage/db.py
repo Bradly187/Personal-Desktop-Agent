@@ -2940,6 +2940,44 @@ class AgentDB:
         except Exception as exc:
             log.warning("AgentDB.set_evolution_candidate_status failed: %s", exc)
 
+    async def get_evolution_candidate(self, candidate_id: int) -> Optional[dict]:
+        """One candidate row by id (None if absent)."""
+        if not self._conn:
+            return None
+        try:
+            async with self._conn.execute(
+                """SELECT id, ts, kind, domain, text, action_or_wrong, reason,
+                          source_refs, eval_delta, status, decided_ts
+                   FROM self_evolution_candidates WHERE id = ?""",
+                (candidate_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+        except Exception as exc:
+            log.warning("AgentDB.get_evolution_candidate failed: %s", exc)
+            return None
+
+    async def promote_macro_candidate(
+        self, candidate_id: int, name: str, source_refs: str
+    ) -> None:
+        """Promote a macro candidate with the user-chosen name persisted.
+
+        Self-skilling rung 2: the human approval ("save that as a command called
+        X") supplies the name + keywords, written into `text` and `source_refs`
+        so MacroStore.load_promoted reconstructs the user's macro on restart.
+        """
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "UPDATE self_evolution_candidates SET status='promoted', "
+                "decided_ts = ?, text = ?, source_refs = ? WHERE id = ?",
+                (time.time(), name, source_refs, candidate_id),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            log.warning("AgentDB.promote_macro_candidate failed: %s", exc)
+
     # ---------------------------------------------------------------------- #
     # Hotwords
     # ---------------------------------------------------------------------- #

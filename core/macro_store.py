@@ -17,10 +17,47 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+# "save that as a command called X" / "save this as X" / "remember that as X"
+_SAVE_RE = re.compile(
+    r"\b(?:save|remember)\s+(?:that|this|it)(?:\s+macro)?\s+as\s+"
+    r"(?:an?\s+)?(?:command\s+(?:called|named)\s+)?(?P<name>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_macro_save(text: str) -> Optional[str]:
+    """Extract the macro name from an approval utterance, else None.
+
+    This phrase IS the human approval (spec R4) — only an explicit save promotes
+    a detected macro; silence promotes nothing.
+    """
+    m = _SAVE_RE.search((text or "").strip())
+    if not m:
+        return None
+    name = m.group("name").strip(" \t\n.,!?;:\"'")
+    return name or None
+
+
+def self_skilling_config() -> dict:
+    """The ``self_skilling`` config block. Default: disabled (ship behind a flag
+    until the eval baseline locks — spec §4)."""
+    default = {"enabled": False}
+    try:
+        cfg_path = Path.home() / ".claude" / "ipad_bridge" / "config.json"
+        if not cfg_path.exists():
+            return default
+        block = json.loads(cfg_path.read_text(encoding="utf-8")).get("self_skilling")
+        return block if isinstance(block, dict) else default
+    except Exception as exc:
+        log.debug("self_skilling config unreadable (%s)", exc)
+        return default
 
 
 @dataclass
@@ -100,12 +137,18 @@ class MacroStore:
                 "arg": values[0] if len(values) == 1 else None,
                 "param": len(values) > 1,
             })
-        macro_name = (name or candidate.get("text") or candidate.get("action_or_wrong") or "macro").strip()
+        # Prefer an explicit name/keywords (fresh approval), else the persisted
+        # ones in source_refs (restart), else the candidate text.
+        macro_name = (
+            name or refs.get("name") or candidate.get("text")
+            or candidate.get("action_or_wrong") or "macro"
+        ).strip()
+        kw = keywords or refs.get("keywords") or [macro_name.lower()]
         return Macro(
             name=macro_name,
             signature=candidate.get("action_or_wrong", ""),
             steps=steps,
-            keywords=[k.lower() for k in (keywords or [macro_name.lower()])],
+            keywords=[k.lower() for k in kw],
             domain=candidate.get("domain", "command"),
             candidate_id=candidate.get("id"),
         )
