@@ -772,6 +772,34 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         log.warning("PersonalKB: failed to start (%s) — personal search disabled", _kb_exc)
         personal_kb = None
 
+    # ── Self-skilling rung 2: macro detection + replay ─────────────────────
+    # Mines recurring successful plans offline and stages them as macro
+    # candidates; a voice "save that as a command called X" promotes one. The
+    # detector runs in a supervised background task (never the 60 Hz loop) and
+    # skips during a flare. Default OFF — set self_skilling.enabled in
+    # ~/.claude/ipad_bridge/config.json. Spec: specs/self-skilling/.
+    macro_detector = None
+    try:
+        from core.macro_store import MacroStore, self_skilling_config
+        _ss_cfg = self_skilling_config()
+        if _ss_cfg.get("enabled", False):
+            from adaptive.macro_detector import MacroDetector
+            macro_store = MacroStore(skill_registry=skill_registry)
+            await macro_store.load_promoted(agent_db)
+            coordinator.set_macro_store(macro_store)
+            _mcfg = _ss_cfg.get("macro", {}) or {}
+            macro_detector = MacroDetector(
+                agent_db, twin_state=twin_state, skill_registry=skill_registry,
+                min_occurrences=int(_mcfg.get("min_occurrences", 4)),
+                similarity=float(_mcfg.get("similarity", 0.9)),
+                on_staged=coordinator.note_pending_macro,
+            )
+            await macro_detector.start()
+            log.info("Self-skilling (macros) enabled")
+    except Exception as _ss_exc:
+        log.warning("Self-skilling: failed to start (%s) — macros disabled", _ss_exc)
+        macro_detector = None
+
     # Wire MemoryManager into all storage-writing components
     coordinator.set_memory(memory)
     dev_agent.set_memory(memory)
@@ -1285,6 +1313,10 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             await t
         except (asyncio.CancelledError, Exception):
             pass
+
+    # Stop the self-skilling macro detector (supervised background task)
+    if macro_detector is not None:
+        await macro_detector.stop()
 
     # Stop skill MCP-client sessions (tear down their stdio subprocesses)
     if skill_registry is not None:

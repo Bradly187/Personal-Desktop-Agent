@@ -461,6 +461,9 @@ class HybridCoordinator:
         self._dev_agent = dev_agent
         self._skill_registry = None     # SkillRegistry | None — voice 'help' listing
         self._personal_kb = None        # PersonalKB | None — voice 'index my notes'
+        self._macro_store = None        # MacroStore | None — self-skilling rung 2
+        self._pending_macro = None      # {id, name} — last detected macro awaiting
+                                        # "save that as ..." approval (R4 fail-safe)
         self._agent_db = agent_db
         self._session_id = session_id
         self._content_filter = content_filter
@@ -547,6 +550,85 @@ class HybridCoordinator:
     def set_personal_kb(self, kb) -> None:
         """Wire the PersonalKB for the voice 'index my notes' command."""
         self._personal_kb = kb
+
+    def set_macro_store(self, store) -> None:
+        """Wire the MacroStore for self-skilling rung 2 (macro routing/replay)."""
+        self._macro_store = store
+
+    async def note_pending_macro(self, summaries: list) -> None:
+        """Detector callback: a macro was detected — announce it and arm the
+        "save that as ..." approval. Announcement only; nothing is enabled here
+        (spec R4 fail-safe-DENY — only an explicit save promotes)."""
+        if not summaries:
+            return
+        latest = summaries[-1]
+        self._pending_macro = {"id": latest["id"], "name": latest.get("name", "")}
+        await self._tts_speak(
+            "I noticed you often repeat a series of steps. To save it as a "
+            "command, say: save that as a command called, then a name."
+        )
+
+    async def _maybe_handle_macro(self, cmd) -> Optional[dict]:
+        """Route a voice utterance to the macro subsystem, else None.
+
+        A "save that as ..." approval always wins (it's the human-approval edge,
+        spec R4). A macro replay never shadows a built-in system-control phrase.
+        """
+        from core.macro_store import parse_macro_save
+        name = parse_macro_save(cmd.text)
+        if name is not None:
+            return await self._handle_macro_save(name)
+        if _is_system_control_voice(cmd):
+            return None
+        macro = self._macro_store.match(cmd.text)
+        if macro is not None:
+            return await self._handle_macro_replay(macro, cmd)
+        return None
+
+    async def _handle_macro_save(self, name: str) -> dict:
+        """Promote the pending detected macro under the user-chosen name.
+
+        Fail-safe: with nothing pending (no detection, or already saved/ignored),
+        this promotes nothing (spec R4.1/R4.2)."""
+        pending = self._pending_macro
+        if not pending:
+            await self._tts_speak("I don't have a suggested command to save right now.")
+            return {"status": "ok", "action": "MACRO_SAVE_NONE"}
+        row = None
+        if self._agent_db and getattr(self._agent_db, "available", False):
+            row = await self._agent_db.get_evolution_candidate(pending["id"])
+        if not row:
+            self._pending_macro = None
+            await self._tts_speak("Sorry, I couldn't find that suggestion anymore.")
+            return {"status": "ok", "action": "MACRO_SAVE_MISSING"}
+        macro = self._macro_store.register(row, name=name, keywords=[name.lower()])
+        if macro is None:
+            await self._tts_speak("Sorry, I couldn't save that one.")
+            return {"status": "ok", "action": "MACRO_SAVE_FAILED"}
+        import json as _json
+        try:
+            refs = _json.loads(row.get("source_refs") or "{}")
+        except (ValueError, TypeError):
+            refs = {}
+        refs["name"] = name
+        refs["keywords"] = [name.lower()]
+        await self._agent_db.promote_macro_candidate(row["id"], name, _json.dumps(refs))
+        self._pending_macro = None
+        await self._tts_speak(f"Saved. Say {name} to run it.")
+        return {"status": "ok", "action": "MACRO_SAVE", "name": name}
+
+    async def _handle_macro_replay(self, macro, cmd) -> dict:
+        """Replay a matched macro through the executor (every gate still fires)."""
+        result = await self._macro_store.replay(macro, self._executor)
+        status = (result or {}).get("status")
+        if status == "clarify":
+            await self._tts_speak(
+                "I couldn't run that command. " + result.get("reason", ""))
+        elif status == "error":
+            await self._tts_speak(
+                f"The command stopped at step {result.get('step', 0) + 1}.")
+        return {"status": status or "error", "action": "MACRO_REPLAY",
+                "macro": macro.name, "result": result}
 
     def set_cloud_dev_agent(
         self,
@@ -1000,6 +1082,15 @@ class HybridCoordinator:
                 log.info("HybridCoordinator: de-glued command verb %r -> %r",
                          cmd.text, deglued)
                 cmd.text = deglued
+
+        # --- Self-skilling rung 2: macro replay + "save that as ..." approval ---
+        # Runs before the dev pre-gate so a saved macro routes by its own name
+        # rather than being classified to an LLM. Voice-only; built-in
+        # system-control phrases still take priority (see _maybe_handle_macro).
+        if self._macro_store is not None and cmd.source in ("voice", "voice_local"):
+            macro_result = await self._maybe_handle_macro(cmd)
+            if macro_result is not None:
+                return macro_result
 
         # --- Dev-agent pre-gate: intercept non-command domains ---
         # Skip for voice system-control keywords so they reach the keyword block
