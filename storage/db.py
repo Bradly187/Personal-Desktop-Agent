@@ -1964,6 +1964,57 @@ class AgentDB:
             log.warning("AgentDB.get_interrupted_runs failed: %s", exc)
             return []
 
+    async def get_successful_runs_with_steps(
+        self, *, since: float = 0.0, min_steps: int = 2, limit: int = 500
+    ) -> list[dict]:
+        """Successful agent runs with their ordered step trajectory.
+
+        The raw material for MacroDetector (self-skilling rung 2): each returned
+        dict is {id, goal, domain, ts, steps:[{step_num, action, args, body,
+        success}, ...]} with steps ordered by step_num. Only runs with
+        success=1 and at least `min_steps` steps are returned — a 1-step "macro"
+        is just a single verb and carries no composition worth saving. Read-only;
+        intended to be called off the hot path by the offline detector.
+        """
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT id, goal, domain, ts FROM agent_runs
+                   WHERE success = 1 AND ts >= ? AND step_count >= ?
+                   ORDER BY ts DESC LIMIT ?""",
+                (since, min_steps, limit),
+            ) as cur:
+                runs = [dict(r) for r in await cur.fetchall()]
+            if not runs:
+                return []
+            ids = [r["id"] for r in runs]
+            placeholders = ",".join("?" * len(ids))
+            steps_by_run: dict[int, list[dict]] = {rid: [] for rid in ids}
+            async with self._conn.execute(
+                f"""SELECT run_id, step_num, action, args, body, success
+                    FROM agent_steps WHERE run_id IN ({placeholders})
+                    ORDER BY run_id, step_num ASC""",
+                tuple(ids),
+            ) as cur:
+                for r in await cur.fetchall():
+                    row = dict(r)
+                    steps_by_run.setdefault(row["run_id"], []).append({
+                        "step_num": row["step_num"], "action": row["action"],
+                        "args": row["args"], "body": row["body"],
+                        "success": row["success"],
+                    })
+            out = []
+            for run in runs:
+                steps = steps_by_run.get(run["id"], [])
+                if len(steps) >= min_steps:
+                    run["steps"] = steps
+                    out.append(run)
+            return out
+        except Exception as exc:
+            log.warning("AgentDB.get_successful_runs_with_steps failed: %s", exc)
+            return []
+
     # ---------------------------------------------------------------------- #
     # Durable goal backlog (gap D)
     # ---------------------------------------------------------------------- #
@@ -2848,18 +2899,27 @@ class AgentDB:
             return None
 
     async def get_evolution_candidates(
-        self, status: str = "proposed", limit: int = 100
+        self, status: str = "proposed", limit: int = 100,
+        kind: Optional[str] = None,
     ) -> list[dict]:
+        """Staged candidates in `status`. Pass `kind` (e.g. 'macro',
+        'skill_proposal') to filter to one candidate type; None = all kinds
+        (back-compat with the example/counterexample callers)."""
         if not self._conn:
             return []
         try:
-            async with self._conn.execute(
-                """SELECT id, ts, kind, domain, text, action_or_wrong, reason,
-                          source_refs, eval_delta, status, decided_ts
-                   FROM self_evolution_candidates
-                   WHERE status = ? ORDER BY ts DESC LIMIT ?""",
-                (status, limit),
-            ) as cur:
+            sql = (
+                "SELECT id, ts, kind, domain, text, action_or_wrong, reason, "
+                "source_refs, eval_delta, status, decided_ts "
+                "FROM self_evolution_candidates WHERE status = ?"
+            )
+            params: list = [status]
+            if kind is not None:
+                sql += " AND kind = ?"
+                params.append(kind)
+            sql += " ORDER BY ts DESC LIMIT ?"
+            params.append(limit)
+            async with self._conn.execute(sql, tuple(params)) as cur:
                 return [dict(r) for r in await cur.fetchall()]
         except Exception as exc:
             log.warning("AgentDB.get_evolution_candidates failed: %s", exc)
