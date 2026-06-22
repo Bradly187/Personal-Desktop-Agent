@@ -199,17 +199,25 @@ _DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/](.*)$")
 _wsl_avail_cache: "dict[str, bool]" = {}
 
 
+_WSL_DEFAULT_CONFIG: dict = {"enabled": True, "distro": "Ubuntu",
+                             "unknown_command_policy": "native"}
+
+
 def _wsl_routing_config() -> dict:
-    """Read the ``wsl_terminal_routing`` config block (default {} → disabled)."""
+    """Read the ``wsl_terminal_routing`` config block.
+
+    Default (no file / no block): routing ON with distro=Ubuntu after the smoke
+    gate passed 2026-06-21 (R4.1). Set ``enabled: false`` to opt out.
+    """
     try:
         cfg_path = Path.home() / ".claude" / "ipad_bridge" / "config.json"
         if not cfg_path.exists():
-            return {}
+            return _WSL_DEFAULT_CONFIG
         block = json.loads(cfg_path.read_text(encoding="utf-8")).get("wsl_terminal_routing")
-        return block if isinstance(block, dict) else {}
+        return block if isinstance(block, dict) else _WSL_DEFAULT_CONFIG
     except Exception as exc:                          # never let config break a run
         log.debug("wsl_terminal_routing config unreadable (%s)", exc)
-        return {}
+        return _WSL_DEFAULT_CONFIG
 
 
 def to_wsl_path(win_path: Optional[str]) -> Optional[str]:

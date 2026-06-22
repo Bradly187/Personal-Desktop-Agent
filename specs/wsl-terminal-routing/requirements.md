@@ -242,9 +242,10 @@ Each criterion in §3 maps to at least one test/eval above.
       argv build, decision order (disabled/posix/unsafe/untranslatable/unavailable →
       native; safe → wsl+bwrap binding the translated dir, network honored), and
       run_sandboxed integration + default-disabled.
-- [ ] 6. Eval/smoke with routing ON on a WSL box; lock baseline. **Gate the default
-      flip** — R4.1. **(pending — needs a WSL-equipped box; the unit suite mocks
-      `wsl.exe`.)**
+- [x] 6. Eval/smoke with routing ON on a WSL box; lock baseline. **Gate the default
+      flip** — R4.1. **DONE 2026-06-21**: smoke gate ran on Brad's Windows host
+      (Ubuntu WSL, bwrap 0.9.0); all 12 criteria GREEN (R1.1/R1.2/R2.1/R2.2/R3.1/R3.3).
+      Script: `tests/smoke_wsl_gate.py`. Default flipped to ON in same commit.
 - [x] 7. Docs: `CLAUDE.md` sandbox gotcha updated (Windows jails via WSL when
       enabled). **Merge note:** WS-1 (`feat/sandbox-interactive-hardening`) also
       edits `run_sandboxed`; when both land, thread WS-1's `stdin=DEVNULL` +
