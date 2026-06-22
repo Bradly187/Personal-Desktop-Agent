@@ -22,7 +22,9 @@ Related: `../dev-agent-critic/` (Critic+Tester reused as the codegen gate),
 `../edit-format-aci/` (lint gate reused pre-write), the existing
 `self_evolution_candidates` lifecycle.
 
-**Status:** Draft
+**Status:** In Progress — rung 2 (macros) implemented on `feat/self-skilling-macros`
+(R1 + R5; flag `self_skilling.enabled`, default OFF; eval baseline locked
+`exact_acc=1.0`). Rung 3 (R2–R4) not yet started; rung 4 remains a non-goal.
 **Owner / author session:** Claude Code
 
 ---
@@ -231,15 +233,20 @@ self_skilling:
 
 ## 6. Tasks
 
-- [ ] 1. `MacroDetector` offline miner + macro staging — satisfies R1.1–R1.5
+- [x] 1. `MacroDetector` offline miner + macro staging — satisfies R1.1–R1.5
+      *(adaptive/macro_detector.py; + DB helpers get_successful_runs_with_steps /
+      get_evolution_candidates(kind=))*
 - [ ] 2. `GapDetector` offline miner + gap/macro arbitration — satisfies R2.1–R2.4
+      *(rung 3 — deferred behind task 8 gate)*
 - [ ] 3. `SkillProposer` drafting through lint→Critic→Tester, scope-pinned to
-      `skills/` — satisfies R3.1–R3.5
+      `skills/` — satisfies R3.1–R3.5 *(rung 3 — deferred)*
 - [ ] 4. Approval surface: chip + `enabled.json` write + `start_skill()` hot-load;
-      reject/timeout → `rejected` — satisfies R4.1–R4.6
-- [ ] 5. Macro promotion + safe replay through `CommandExecutor` — satisfies R5.1–R5.3
-- [ ] 6. Eval suite + `tests/test_self_skilling.py` (one per criterion) — §5
-- [ ] 7. Update `CLAUDE.md` (Known Gotchas: new flag `self_skilling`, default OFF)
-      + `docs/file-map.md` if new modules land
-- [ ] 8. (Sequencing) Ship rung 2 (tasks 1, 5) first; gate rung 3 (tasks 2–4)
-      behind the rung-2 baseline holding in production
+      reject/timeout → `rejected` — satisfies R4.1–R4.6 *(rung 3 — deferred)*
+- [x] 5. Macro promotion + safe replay through `CommandExecutor` — satisfies R5.1–R5.3
+      *(core/macro_store.py; voice approval + main.py wiring; promote_macro_candidate)*
+- [x] 6. Eval suite + `tests/test_self_skilling.py` (one per criterion) — §5
+      *(model-free evals/self_skilling.py, baseline exact_acc=1.0; 25 unit + 5 eval tests)*
+- [x] 7. Update `CLAUDE.md` (Known Gotchas: new flag `self_skilling`, default OFF)
+      + `docs/file-map.md` *(both done)*
+- [~] 8. (Sequencing) Ship rung 2 (tasks 1, 5) first ✅; gate rung 3 (tasks 2–4)
+      behind the rung-2 baseline holding in production *(rung 2 shipped; rung 3 gated)*
