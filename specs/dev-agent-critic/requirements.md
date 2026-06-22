@@ -328,10 +328,13 @@ Each acceptance criterion in §3 maps to at least one test/eval above.
       escalate, never-weakens-deny, bounded revisions, disabled byte-identical) and
       Tester (source selection, pass/fail/skip outcomes, graceful degrade, safe-
       observation wiring, flare-skip, disabled no-op). CI-safe.
-- [ ] 6. Eval: `dev_critic` suite over "plausible-but-wrong edit" fixtures; A/B
+- [x] 6. Eval: `dev_critic` suite over "plausible-but-wrong edit" fixtures; A/B
       on/off; lock baseline. **Gate before flipping any default** — satisfies R4.2.
-      **(pending — model-driven; the Critic's value is whether a real model catches
-      wrong edits, so this needs a GPU run, unlike the deterministic plan-contract
-      eval. Wiring is already unit-covered.)**
+      DONE 2026-06-21: 8 cases (6 correctness + 2 security), all syntactically-valid
+      bugs (lint arm 0%). Critic arm 100% catch rate (qwen3-coder:30b). Baseline locked:
+      `evals/baselines/dev_critic.json` (catch_rate_critic=1.0, tolerance=10%).
+      Harness: `evals/dev_critic.py`, `evals/suites/dev_critic.jsonl`,
+      `evals/fixtures/dev_critic/` (8 fixtures). Integrated in `evals/run.py` as
+      `--mode dev_critic`.
 - [x] 7. Docs: "Critic + Tester loop" gotcha added to `CLAUDE.md` Known Gotchas
       (fail-safe escalation, safe-observation Tester, no new VRAM, default OFF).
