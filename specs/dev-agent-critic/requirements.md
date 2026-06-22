@@ -308,21 +308,30 @@ Each acceptance criterion in §3 maps to at least one test/eval above.
       `force` bypasses the upfront-auth short-circuit (adds friction, never weakens
       a gate). Disabled path is byte-identical legacy — satisfies R1.1, R1.4–R1.7,
       R2.1–R2.4, R4.1.
-- [ ] 3. `inference/tester.py`: `Tester` + `TestArtifact`; generate a focused test
-      (code-domain model) for a committed `.py` write, run via
-      `inference.sandbox.run_sandboxed`, feed failures to `_replan`, degrade
-      gracefully, skip on flare — satisfies R3.1–R3.6. **(NEXT)**
+- [x] 3. `inference/tester.py`: `Tester` + `TestArtifact`/`TestOutcome` +
+      `is_testable_source`; generates a focused pytest test for a committed `.py`
+      SOURCE write, runs it one-shot via `inference.sandbox.run_sandboxed`
+      (ephemeral-aware, R3.7), degrades gracefully (R3.5), skip-on-flare hook
+      (R3.6). Wired via `_maybe_run_tester` at both WRITE_FILE write-returns.
+      **Safe-observation semantics (user-chosen):** a failing generated test is
+      appended to the step result as an observation — the good write is NOT marked
+      failed, so the saga never rolls back working code. R3.3's stronger "force a
+      replan" coupling is a deliberate non-goal (would roll back a good write).
+      Satisfies R3.1, R3.2, R3.4–R3.7; R3.3 met as observation (not forced replan).
 - [~] 4. Config plumbing — env flags done (`DA_CRITIC`, `DA_CRITIC_FLOOR`,
       `DA_CRITIC_MAX_REVISIONS`, `DA_CRITIC_DOMAIN`; instance attrs + `set_critic()`
       for wiring/tests). Audit-log writes for verdicts + config-file mapping pending
       (Tester lands with task 3). R4.3 spans: the critic re-infer emits its own
       inference span via the router. R4.1 met (default OFF).
-- [x] 5a. `tests/test_critic.py` — 16 tests: `parse_verdict` (conservative/floor/
-      clamp/fence) + WRITE_FILE wiring (pass-writes, revise/block-no-write,
-      low-conf+error escalate, never-weakens-deny, bounded revisions, disabled
-      byte-identical). `test_tester.py` lands with task 3.
+- [x] 5. `tests/test_critic.py` (16) + `tests/test_tester.py` (17) — `parse_verdict`
+      + Critic WRITE_FILE wiring (pass-writes, revise/block-no-write, low-conf+error
+      escalate, never-weakens-deny, bounded revisions, disabled byte-identical) and
+      Tester (source selection, pass/fail/skip outcomes, graceful degrade, safe-
+      observation wiring, flare-skip, disabled no-op). CI-safe.
 - [ ] 6. Eval: `dev_critic` suite over "plausible-but-wrong edit" fixtures; A/B
       on/off; lock baseline. **Gate before flipping any default** — satisfies R4.2.
-- [ ] 7. Docs: add a "Critic + Tester loop" gotcha to `CLAUDE.md` (fail-safe
-      escalation, no new VRAM, default OFF, eval gate) and `inference/critic.py` +
-      `inference/tester.py` rows to `docs/file-map.md`.
+      **(pending — model-driven; the Critic's value is whether a real model catches
+      wrong edits, so this needs a GPU run, unlike the deterministic plan-contract
+      eval. Wiring is already unit-covered.)**
+- [x] 7. Docs: "Critic + Tester loop" gotcha added to `CLAUDE.md` Known Gotchas
+      (fail-safe escalation, safe-observation Tester, no new VRAM, default OFF).

@@ -51,6 +51,7 @@ from inference.edit_format import (
     render_hashline,
 )
 from inference.critic import BLOCK, PASS, REVISE, Critic, CriticVerdict, Finding
+from inference.tester import Tester, is_testable_source
 from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
@@ -412,6 +413,20 @@ class DevAgent:
             if self._critic_enabled else None
         )
         self._critic_revise_counts: dict[str, int] = {}
+
+        # Autonomous Tester loop (specs/dev-agent-critic R3). When ON, a committed
+        # WRITE_FILE to a .py SOURCE file gets a generated pytest test run through
+        # the existing sandbox; the outcome is surfaced as an observation on the
+        # step result (safe-observation — the good write is never rolled back).
+        # Default OFF (DA_TESTER) → no-op. No new model (code domain already loaded).
+        self._tester_enabled: bool = os.environ.get(
+            "DA_TESTER", "0").strip().lower() in ("1", "true", "on", "yes")
+        self._tester: Optional[Tester] = (
+            Tester(router, code_domain=os.environ.get("DA_TESTER_DOMAIN", "code"))
+            if self._tester_enabled else None
+        )
+        # Optional flare/resource gate (R3.6): a callable -> bool; True == skip.
+        self._tester_skip_check = None
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -2043,6 +2058,51 @@ class DevAgent:
         self._critic = critic
         self._critic_enabled = bool(enabled and critic is not None)
 
+    def set_tester(self, tester: Optional[Tester], *, enabled: bool = True,
+                   skip_check=None) -> None:
+        """Wire (or replace) the Tester. `skip_check` is an optional callable -> bool
+        (True == skip, e.g. on a pain-day flare / VRAM eviction — R3.6)."""
+        self._tester = tester
+        self._tester_enabled = bool(enabled and tester is not None)
+        if skip_check is not None:
+            self._tester_skip_check = skip_check
+
+    def _tester_should_skip(self) -> bool:
+        """Best-effort flare/resource gate (R3.6). Defaults to never-skip; a wired
+        check that itself errors fails safe to SKIP (test-gen is non-essential)."""
+        if self._tester_skip_check is None:
+            return False
+        try:
+            return bool(self._tester_skip_check())
+        except Exception:
+            return True
+
+    async def _maybe_run_tester(self, step: AgentStep, write_result: str) -> str:
+        """After a committed WRITE_FILE, optionally generate + run a test and append
+        its outcome to the step result as an observation (specs/dev-agent-critic R3).
+
+        Default OFF → returns `write_result` unchanged. Only fires for `.py` source
+        files; never raises, never blocks, never reports a skip as a pass.
+        """
+        if self._tester is None or not self._tester_enabled:
+            return write_result
+        target = (step.args or "").strip()
+        if not is_testable_source(target):
+            return write_result
+        if self._tester_should_skip():
+            log.info("DevAgent: tester skipped (flare/resource) — %s", target)
+            return write_result
+        try:
+            code = await asyncio.to_thread(self._read_current_for_critic, target)
+            outcome = await self._tester.generate_and_run(
+                goal=self._current_goal or "", path=target, code=code)
+        except Exception as exc:
+            log.warning("DevAgent: tester failed (%s) — skipped", exc)
+            return write_result
+        if outcome.note:
+            return f"{write_result}\n{outcome.note}"
+        return write_result
+
     async def _critic_review(self, step: AgentStep, new_text: str) -> CriticVerdict:
         """Independent review of a lint-passed WRITE_FILE edit (specs/dev-agent-critic).
 
@@ -2177,7 +2237,8 @@ class DevAgent:
                 step.comp_args = json.dumps(await asyncio.to_thread(
                     self._snapshot_for_write, step.args
                 ))
-                return await asyncio.to_thread(self._write_file, step.args, new_text)
+                result = await asyncio.to_thread(self._write_file, step.args, new_text)
+                return await self._maybe_run_tester(step, result)
 
             # ── Critic-enabled path (specs/dev-agent-critic) ────────────────
             # Apply (lint gate) FIRST so the Critic reviews the actual resulting
@@ -2199,7 +2260,8 @@ class DevAgent:
             step.comp_args = json.dumps(await asyncio.to_thread(
                 self._snapshot_for_write, step.args
             ))
-            return await asyncio.to_thread(self._write_file, step.args, new_text)
+            result = await asyncio.to_thread(self._write_file, step.args, new_text)
+            return await self._maybe_run_tester(step, result)
 
         if action == "RUN_TERMINAL":
             cmd = step.args or step.body
