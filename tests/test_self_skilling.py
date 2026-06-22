@@ -17,6 +17,7 @@ from adaptive.macro_detector import (
     classify_arg,
     plan_signature,
 )
+from core.macro_store import MacroStore
 
 
 _VERBS = {"OPEN", "CLICK", "TYPE", "HOTKEY", "SCROLL", "WRITE_FILE", "RUN_TERMINAL"}
@@ -262,3 +263,139 @@ async def test_fuzzy_merge_single_slot_difference():
     finally:
         await db.close()
         d.cleanup()
+
+
+# ---------------------------------------------------------------------- #
+# MacroStore + safe replay (spec §3 Requirement 5)
+# ---------------------------------------------------------------------- #
+
+class _FakeExec:
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self.fail_on = fail_on
+
+    async def execute(self, cmd):
+        idx = len(self.calls)
+        self.calls.append((cmd.action, cmd.text, dict(cmd.params), cmd.source))
+        if self.fail_on is not None and idx == self.fail_on:
+            return {"status": "error", "error": "boom"}
+        return {"status": "ok"}
+
+
+async def _stage_and_promote(db, detector):
+    staged = await detector.run_once()
+    assert len(staged) == 1
+    await db.set_evolution_candidate_status(staged[0], "promoted")
+    rows = await db.get_evolution_candidates(status="promoted", kind="macro")
+    return rows[0]
+
+
+async def test_macro_store_loads_and_routes_R5_1():
+    db, d = await _open_db()
+    try:
+        # identical args → single-value slots → baked-in defaults
+        await _add_n(db, 3, "start my note",
+                     [("OPEN", "notepad"), ("CLICK", "body")])
+        await _stage_and_promote(db, _det(db))
+        store = MacroStore(known_verbs=set(_VERBS))
+        assert await store.load_promoted(db) == 1
+        m = store.match("please start my note now")
+        assert m is not None and m.signature == "OPEN(STR) → CLICK(STR)"
+        assert store.match("totally unrelated") is None
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_replay_dispatches_through_executor_R5_2():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 3, "do my thing",
+                     [("OPEN", "notepad"), ("CLICK", "body")])
+        row = await _stage_and_promote(db, _det(db))
+        store = MacroStore(known_verbs=set(_VERBS))
+        macro = store.register(row)
+        ex = _FakeExec()
+        res = await store.replay(macro, ex)
+        assert res["status"] == "ok" and res["steps_run"] == 2
+        assert [c[0] for c in ex.calls] == ["OPEN", "CLICK"]   # order preserved
+        assert [c[1] for c in ex.calls] == ["notepad", "body"]  # baked defaults
+        assert all(c[3] == "macro" for c in ex.calls)           # routed as macro
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_replay_missing_tool_clarifies_and_runs_nothing_R5_3():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 3, "two verbs",
+                     [("OPEN", "notepad"), ("CLICK", "body")])
+        row = await _stage_and_promote(db, _det(db))
+        # OPEN no longer available at replay time
+        store = MacroStore(known_verbs={"CLICK"})
+        macro = store.register(row)
+        ex = _FakeExec()
+        res = await store.replay(macro, ex)
+        assert res["status"] == "clarify"
+        assert ex.calls == [], "no partial execution when a tool is missing"
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_replay_requires_param_before_running():
+    db, d = await _open_db()
+    try:
+        # differing args → multi-value slot → parameter required
+        await _add_run(db, goal="typed thing", success=True,
+                       steps=[("OPEN", "notepad"), ("TYPE", "hello")])
+        await _add_run(db, goal="typed thing", success=True,
+                       steps=[("OPEN", "notepad"), ("TYPE", "world")])
+        await _add_run(db, goal="typed thing", success=True,
+                       steps=[("OPEN", "notepad"), ("TYPE", "again")])
+        row = await _stage_and_promote(db, _det(db))
+        store = MacroStore(known_verbs=set(_VERBS))
+        macro = store.register(row)
+        assert macro.param_positions == [1], "TYPE slot varies → parameter"
+        ex = _FakeExec()
+        assert (await store.replay(macro, ex))["status"] == "clarify"
+        assert ex.calls == []
+        # supplying the param lets it run
+        ex2 = _FakeExec()
+        res = await store.replay(macro, ex2, params={1: "typed text"})
+        assert res["status"] == "ok"
+        assert ex2.calls[1][1] == "typed text"
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_replay_stops_on_step_error():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 3, "three step",
+                     [("OPEN", "a/b.py"), ("CLICK", "body"), ("HOTKEY", "ctrl+s")])
+        row = await _stage_and_promote(db, _det(db))
+        store = MacroStore(known_verbs=set(_VERBS))
+        macro = store.register(row)
+        ex = _FakeExec(fail_on=1)   # second step errors
+        res = await store.replay(macro, ex)
+        assert res["status"] == "error" and res["steps_run"] == 1
+        assert len(ex.calls) == 2, "stops after the failing step, no further steps"
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+def test_register_rejects_ambiguous_shape():
+    store = MacroStore(known_verbs=set(_VERBS))
+    bad = {
+        "id": 1, "text": "ambiguous", "action_or_wrong": "X → Y",
+        "domain": "command",
+        "source_refs": json.dumps({"run_ids": [1, 2, 3], "steps": [
+            {"pos": 0, "action": "OPEN", "slot": "STR", "values": ["a"]},
+            {"pos": 1, "action": "*", "slot": "STR", "values": ["b"]},
+        ]}),
+    }
+    assert store.register(bad) is None
