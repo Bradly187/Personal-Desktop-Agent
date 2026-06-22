@@ -17,7 +17,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - Open tasks: `specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status (2026-06-19)
+## Current Status (2026-06-22)
 
 > **Schema fact (authoritative):** `agent.db` = **42 tables** at `PRAGMA user_version = 8` (`storage/db.py` is the schema source of truth; v8 added the `commands.resolved_by` CLICK-resolver-tier column); `AnalyticsDB` (DuckDB) holds the **3** `benchmark_*` tables. Table counts in `docs/CHANGELOG.md` are historical (as-of-their-date), not current.
 
