@@ -147,6 +147,7 @@ def test_output_is_capped(monkeypatch):
 def test_run_sandboxed_uses_jail_when_tool_present(monkeypatch):
     """When a tool is detected, run_sandboxed builds the jail argv (mock subprocess)."""
     monkeypatch.setattr(sb, "sandbox_tool", lambda: "bwrap")
+    monkeypatch.setattr(sb, "_wsl_routing_config", lambda: {})  # disable WSL routing; test native bwrap path
     captured = {}
 
     import subprocess as _sp
@@ -164,3 +165,76 @@ def test_run_sandboxed_uses_jail_when_tool_present(monkeypatch):
     assert captured["argv"][0] == "bwrap"
     assert "--unshare-net" in captured["argv"]
     assert captured["kw"].get("capture_output") is True
+
+
+# ---------------------------------------------------------------------------
+# Interactive-hang hardening (../specs/sandbox-interactive-hardening/)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cmd,expected", [
+    # R2.2: apt install/upgrade gets -y injected when no assume-yes present.
+    ("apt-get install vim", "apt-get install -y vim"),
+    ("apt install vim curl", "apt install -y vim curl"),
+    ("sudo apt-get upgrade", "sudo apt-get upgrade -y"),
+    ("apt-get dist-upgrade", "apt-get dist-upgrade -y"),
+    # Idempotent: an existing yes-flag is left untouched.
+    ("apt-get install -y vim", "apt-get install -y vim"),
+    ("apt install --yes vim", "apt install --yes vim"),
+    ("apt-get install --assume-yes vim", "apt-get install --assume-yes vim"),
+    # R2.2: non-apt commands are passed through byte-identical (no blind mutation).
+    ("pip install requests", "pip install requests"),
+    ("npm install", "npm install"),
+    ("pytest -q", "pytest -q"),
+    ("git pull", "git pull"),
+    ("", ""),
+])
+def test_inject_noninteractive_flags(cmd, expected):
+    assert sb.inject_noninteractive_flags(cmd) == expected
+
+
+def test_noninteractive_env_sets_the_vars():
+    # R2.1: the curated non-interactive vars are present.
+    env = sb.noninteractive_env({})
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["DEBIAN_FRONTEND"] == "noninteractive"
+    assert env["PIP_NO_INPUT"] == "1"
+    assert env["PIP_DISABLE_PIP_VERSION_CHECK"] == "1"
+
+
+def test_noninteractive_env_does_not_clobber_user_value():
+    # R2.1: merged with setdefault — a value the user already set wins.
+    env = sb.noninteractive_env({"GIT_TERMINAL_PROMPT": "1", "FOO": "bar"})
+    assert env["GIT_TERMINAL_PROMPT"] == "1"
+    assert env["FOO"] == "bar"
+    assert env["DEBIAN_FRONTEND"] == "noninteractive"   # still added
+
+
+def test_run_sandboxed_passes_devnull_stdin_and_env(monkeypatch):
+    # R1.1 + R2.1: both the fallback and jail branches must close stdin and pass
+    # the non-interactive env into run_capped.
+    import subprocess as _sp
+    captured = {}
+
+    def _fake_run(args, **kw):
+        captured["kw"] = kw
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(sb, "run_capped", _fake_run)
+    monkeypatch.setattr(sb, "sandbox_tool", lambda: None)   # fallback branch
+    r = run_sandboxed("echo hi", timeout=5)
+    assert r.returncode == 0
+    assert captured["kw"].get("stdin") == _sp.DEVNULL
+    assert captured["kw"]["env"]["PIP_NO_INPUT"] == "1"
+
+
+def test_run_sandboxed_stdin_closed_fails_fast(monkeypatch):
+    # R1.2: a command that reads stdin must get immediate EOF (DEVNULL) and
+    # return promptly — NOT block until the wall timeout. Real run_capped,
+    # fallback path; if stdin were a live TTY/pipe this would time out.
+    monkeypatch.setattr(sb, "sandbox_tool", lambda: None)
+    r = run_sandboxed(
+        f'{sys.executable} -c "import sys; print(repr(sys.stdin.read()))"',
+        timeout=10,
+    )
+    assert r.returncode == 0
+    assert "''" in r.stdout        # read() saw EOF immediately, no hang

@@ -174,7 +174,9 @@ def test_run_sandboxed_native_when_wsl_declines(monkeypatch):
     assert r.sandboxed is False and r.returncode == 0                # legacy path unchanged
 
 
-def test_default_config_is_disabled(tmp_path, monkeypatch):
-    # No config file → routing disabled → _maybe_run_wsl is a no-op (byte-identical).
+def test_default_config_is_enabled(tmp_path, monkeypatch):
+    # No config file → default is ON (smoke gate passed 2026-06-21).
     monkeypatch.setattr(sb.Path, "home", classmethod(lambda cls: tmp_path))
-    assert sb._wsl_routing_config() == {}
+    cfg = sb._wsl_routing_config()
+    assert cfg.get("enabled") is True
+    assert cfg.get("distro") == "Ubuntu"

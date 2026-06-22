@@ -128,6 +128,51 @@ def command_needs_network(command: str) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------- #
+# Interactive-hang hardening: make a prompting command fail FAST (stdin=DEVNULL
+# → immediate EOF) instead of blocking on a TTY until the 60 s wall timeout.
+# Mistake-containment, same threat model as the timeout/tree-kill/rlimits above —
+# so it is unconditional (no flag), additive, and never changes the semantics of
+# a command the user already wrote non-interactively.
+# --------------------------------------------------------------------------- #
+
+# Tells common tools not to prompt. Merged with setdefault → never clobbers a
+# value the user already set in their environment.
+_NONINTERACTIVE_ENV: "dict[str, str]" = {
+    "GIT_TERMINAL_PROMPT": "0",          # git never blocks on credentials
+    "DEBIAN_FRONTEND": "noninteractive",  # apt/debconf suppress prompts
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    "PIP_NO_INPUT": "1",                  # pip never prompts
+}
+
+# apt's install/upgrade confirmation is NOT covered by an env var — it needs a
+# flag. Only apt/apt-get and only these verbs are ever rewritten; every other
+# command is passed through byte-identical (no blind mutation).
+_APT_VERB_RE = re.compile(
+    r"\b(apt-get|apt)\s+(install|upgrade|dist-upgrade|full-upgrade|remove|purge)\b")
+_ASSUME_YES_RE = re.compile(r"(?:^|\s)(--yes|--assume-yes|-y)\b")
+
+
+def noninteractive_env(base: Optional[dict] = None) -> dict:
+    """Inherited env + the non-interactive vars (setdefault — user wins)."""
+    env = dict(base if base is not None else os.environ)
+    for k, v in _NONINTERACTIVE_ENV.items():
+        env.setdefault(k, v)
+    return env
+
+
+def inject_noninteractive_flags(command: str) -> str:
+    """Insert `-y` after an apt/apt-get install/upgrade verb when no assume-yes
+    flag is already present. Allowlisted to apt only; returns `command`
+    unchanged for everything else and when a yes-flag is already there
+    (idempotent). Conservative: rewrites only the first such verb."""
+    if not command or not _APT_VERB_RE.search(command):
+        return command
+    if _ASSUME_YES_RE.search(command):
+        return command
+    return _APT_VERB_RE.sub(lambda m: f"{m.group(1)} {m.group(2)} -y", command, count=1)
+
+
 def _project_dir(explicit: Optional[str]) -> str:
     if explicit:
         return str(Path(explicit).resolve())
@@ -321,7 +366,8 @@ def _maybe_run_wsl(command: str, project_dir: str, timeout: float,
     jail = build_sandbox_argv("bwrap", command, wsl_proj, allow_network)
     argv = build_wsl_argv(jail, distro)
     log.info("WSL routing: %.60s → wsl+bwrap (%s)", command, wsl_proj)
-    proc = run_capped(argv, capture_output=True, text=True, timeout=timeout)
+    proc = run_capped(argv, capture_output=True, text=True, timeout=timeout,
+                      env=noninteractive_env(), stdin=subprocess.DEVNULL)
     return SandboxResult(
         stdout=(proc.stdout or "")[:output_cap],
         stderr=(proc.stderr or "")[:output_cap],
@@ -378,6 +424,14 @@ def run_sandboxed(
     tool = sandbox_tool() if _enabled() else None
     preexec = _rlimits if _POSIX else None
 
+    # Interactive-hang hardening: rewrite apt → -y where safe, run with a
+    # non-interactive env, and (via run_capped's DEVNULL default) close stdin so
+    # any prompt gets immediate EOF and fails fast instead of blocking to the
+    # wall timeout. Additive — a command already written non-interactively is
+    # unchanged.
+    command = inject_noninteractive_flags(command)
+    env = noninteractive_env()
+
     # run_capped (not subprocess.run): on a wall-clock timeout it kills the WHOLE
     # process tree, not just the direct child, so a runaway command that forked
     # grandchildren (a shell loop, npm → node) can't leave orphans burning CPU —
@@ -387,6 +441,7 @@ def run_sandboxed(
         argv = build_sandbox_argv(tool, command, proj, allow_network)
         proc = run_capped(
             argv, capture_output=True, text=True, timeout=timeout, preexec_fn=preexec,
+            env=env, stdin=subprocess.DEVNULL,
         )
         sandboxed = True
     else:
@@ -399,7 +454,7 @@ def run_sandboxed(
             _warned_unsandboxed = True
         proc = run_capped(
             command, shell=True, capture_output=True, text=True, timeout=timeout,
-            cwd=proj, preexec_fn=preexec,
+            cwd=proj, preexec_fn=preexec, env=env, stdin=subprocess.DEVNULL,
         )
         sandboxed = False
 
