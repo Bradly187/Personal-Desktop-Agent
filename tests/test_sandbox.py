@@ -147,6 +147,7 @@ def test_output_is_capped(monkeypatch):
 def test_run_sandboxed_uses_jail_when_tool_present(monkeypatch):
     """When a tool is detected, run_sandboxed builds the jail argv (mock subprocess)."""
     monkeypatch.setattr(sb, "sandbox_tool", lambda: "bwrap")
+    monkeypatch.setattr(sb, "_wsl_routing_config", lambda: {})  # disable WSL routing; test native bwrap path
     captured = {}
 
     import subprocess as _sp
