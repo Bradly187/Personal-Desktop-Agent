@@ -6,11 +6,29 @@ existing self_evolution_candidates / agent_runs / agent_steps tables.
 
 Criterion refs are to specs/self-skilling/requirements.md.
 """
+import json
 import os
 import tempfile
 import time
 
 from storage.db import AgentDB
+from adaptive.macro_detector import (
+    MacroDetector,
+    classify_arg,
+    plan_signature,
+)
+
+
+_VERBS = {"OPEN", "CLICK", "TYPE", "HOTKEY", "SCROLL", "WRITE_FILE", "RUN_TERMINAL"}
+
+
+def _det(db, **kw):
+    """A detector with the test verb set and exact (similarity=1.0) clustering
+    unless a test overrides it."""
+    kw.setdefault("known_verbs", set(_VERBS))
+    kw.setdefault("similarity", 1.0)
+    kw.setdefault("min_occurrences", 3)
+    return MacroDetector(db, **kw)
 
 
 async def _open_db():
@@ -121,6 +139,126 @@ async def test_runs_reader_since_filter():
         # a future watermark excludes everything already recorded
         assert await db.get_successful_runs_with_steps(since=time.time() + 1000) == []
         assert len(await db.get_successful_runs_with_steps(since=0.0)) == 1
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+# ---------------------------------------------------------------------- #
+# MacroDetector (spec §3 Requirement 1)
+# ---------------------------------------------------------------------- #
+
+class _FakeTwin:
+    def __init__(self, pain_day_active=False):
+        self._p = pain_day_active
+
+    async def get_snapshot(self):
+        class _S:
+            pain_day_active = self._p
+        return _S()
+
+
+def test_canonicalize_abstracts_literals():
+    assert classify_arg(None) == "∅"
+    assert classify_arg("https://x.com") == "URL"
+    assert classify_arg("src/foo.py") == "PATH"
+    assert classify_arg("notepad.exe") == "PATH"
+    assert classify_arg("42") == "INT"
+    assert classify_arg("notepad") == "STR"
+    sig = plan_signature([{"action": "OPEN", "args": "chrome"},
+                          {"action": "click", "args": "menu"}])
+    assert sig == "OPEN(STR) → CLICK(STR)"
+
+
+async def _add_n(db, n, goal, steps):
+    for _ in range(n):
+        await _add_run(db, goal=goal, success=True, steps=steps)
+
+
+async def test_detects_recurring_plan_R1_1_R1_2():
+    db, d = await _open_db()
+    try:
+        # 3 runs, same shape, different args → one OPEN(STR)→CLICK(STR)→TYPE(STR)
+        await _add_run(db, goal="start a note", success=True,
+                       steps=[("OPEN", "notepad"), ("CLICK", "body"), ("TYPE", "hi")])
+        await _add_run(db, goal="start a note", success=True,
+                       steps=[("OPEN", "chrome"), ("CLICK", "bar"), ("TYPE", "yo")])
+        await _add_run(db, goal="start a note", success=True,
+                       steps=[("OPEN", "vscode"), ("CLICK", "panel"), ("TYPE", "ok")])
+        staged = await _det(db).run_once()
+        assert len(staged) == 1
+        rows = await db.get_evolution_candidates(status="proposed", kind="macro")
+        assert len(rows) == 1
+        assert rows[0]["action_or_wrong"] == "OPEN(STR) → CLICK(STR) → TYPE(STR)"
+        refs = json.loads(rows[0]["source_refs"])
+        assert refs["occurrences"] == 3 and len(refs["run_ids"]) == 3
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_below_threshold_not_staged():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 2, "rare", [("OPEN", "a"), ("CLICK", "b")])
+        assert await _det(db, min_occurrences=3).run_once() == []
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_skips_when_referenced_tool_missing_R1_3():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 3, "uses unknown verb",
+                     [("OPEN", "a"), ("FROBNICATE", "b")])
+        assert await _det(db).run_once() == [], "a missing verb must block staging"
+        assert await db.get_evolution_candidates(status="proposed", kind="macro") == []
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_restage_is_idempotent_R1_4():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 3, "repeat", [("OPEN", "a"), ("CLICK", "b")])
+        det = _det(db)
+        first = await det.run_once()
+        second = await det.run_once()
+        assert first == second, "re-detecting the same macro returns the same row"
+        assert len(await db.get_evolution_candidates(status="proposed", kind="macro")) == 1
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_flare_skips_run_R1_5():
+    db, d = await _open_db()
+    try:
+        await _add_n(db, 4, "flare day", [("OPEN", "a"), ("CLICK", "b")])
+        det = _det(db, twin_state=_FakeTwin(pain_day_active=True))
+        assert await det.run_once() == []
+        assert await db.get_evolution_candidates(status="proposed", kind="macro") == []
+        # same data, no flare → detected
+        ok = _det(db, twin_state=_FakeTwin(pain_day_active=False))
+        assert len(await ok.run_once()) == 1
+    finally:
+        await db.close()
+        d.cleanup()
+
+
+async def test_fuzzy_merge_single_slot_difference():
+    db, d = await _open_db()
+    try:
+        # two shapes differing only in step-1's slot type (STR vs PATH)
+        await _add_n(db, 2, "merge me", [("OPEN", "notepad"), ("CLICK", "body")])
+        await _add_n(db, 2, "merge me", [("OPEN", "src/x.py"), ("CLICK", "body")])
+        # exact clustering: two clusters of 2 → neither meets min_occ=3
+        assert await _det(db, similarity=1.0, min_occurrences=3).run_once() == []
+        # fuzzy: the single-slot diff merges them into one cluster of 4
+        staged = await _det(db, similarity=0.5, min_occurrences=3).run_once()
+        assert len(staged) == 1
     finally:
         await db.close()
         d.cleanup()
