@@ -1,0 +1,11 @@
+{
+  "suite": "self_skilling",
+  "mode": "self_skilling",
+  "recorded_at": "2026-06-22T10:05:49",
+  "model": "none (model-free, deterministic)",
+  "tolerance": 0.0,
+  "n": 8,
+  "exact_acc": 1.0,
+  "correct": 8,
+  "failures": 0
+}
