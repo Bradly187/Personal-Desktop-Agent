@@ -50,6 +50,8 @@ from inference.edit_format import (
     EditApplier,
     render_hashline,
 )
+from inference.critic import BLOCK, PASS, REVISE, Critic, CriticVerdict, Finding
+from inference.tester import Tester, is_testable_source
 from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
@@ -461,6 +463,44 @@ class DevAgent:
                 0, int(os.environ.get("DA_PLAN_REPAIR_MAX", "1")))
         except ValueError:
             self._plan_repair_max = 1
+
+        # Independent code Critic (specs/dev-agent-critic). When ON, a WRITE_FILE
+        # edit that passed the lint gate is reviewed by a fresh-context reviewer
+        # pass on the already-loaded model BEFORE it commits: a non-pass/low-conf
+        # verdict escalates the approval gate; revise/block blocks the write and
+        # drives the replan loop. Default OFF (DA_CRITIC) → byte-identical legacy.
+        # No new model loaded (AGENTS.md #6). Tests inject via set_critic().
+        self._critic_enabled: bool = os.environ.get(
+            "DA_CRITIC", "0").strip().lower() in ("1", "true", "on", "yes")
+        try:
+            self._critic_confidence_floor: float = float(
+                os.environ.get("DA_CRITIC_FLOOR", "0.6"))
+        except ValueError:
+            self._critic_confidence_floor = 0.6
+        try:
+            self._critic_max_revisions: int = max(
+                0, int(os.environ.get("DA_CRITIC_MAX_REVISIONS", "1")))
+        except ValueError:
+            self._critic_max_revisions = 1
+        self._critic: Optional[Critic] = (
+            Critic(router, model_domain=os.environ.get("DA_CRITIC_DOMAIN", "plan"))
+            if self._critic_enabled else None
+        )
+        self._critic_revise_counts: dict[str, int] = {}
+
+        # Autonomous Tester loop (specs/dev-agent-critic R3). When ON, a committed
+        # WRITE_FILE to a .py SOURCE file gets a generated pytest test run through
+        # the existing sandbox; the outcome is surfaced as an observation on the
+        # step result (safe-observation — the good write is never rolled back).
+        # Default OFF (DA_TESTER) → no-op. No new model (code domain already loaded).
+        self._tester_enabled: bool = os.environ.get(
+            "DA_TESTER", "0").strip().lower() in ("1", "true", "on", "yes")
+        self._tester: Optional[Tester] = (
+            Tester(router, code_domain=os.environ.get("DA_TESTER_DOMAIN", "code"))
+            if self._tester_enabled else None
+        )
+        # Optional flare/resource gate (R3.6): a callable -> bool; True == skip.
+        self._tester_skip_check = None
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -2137,6 +2177,115 @@ class DevAgent:
         self._current_step = 0
         self._total_steps = 0
         self._active_plan_model = ""
+        self._critic_revise_counts = {}
+
+    def set_critic(self, critic: Optional[Critic], *, enabled: bool = True) -> None:
+        """Wire (or replace) the Critic and toggle it. Used by main.py and tests."""
+        self._critic = critic
+        self._critic_enabled = bool(enabled and critic is not None)
+
+    def set_tester(self, tester: Optional[Tester], *, enabled: bool = True,
+                   skip_check=None) -> None:
+        """Wire (or replace) the Tester. `skip_check` is an optional callable -> bool
+        (True == skip, e.g. on a pain-day flare / VRAM eviction — R3.6)."""
+        self._tester = tester
+        self._tester_enabled = bool(enabled and tester is not None)
+        if skip_check is not None:
+            self._tester_skip_check = skip_check
+
+    def _tester_should_skip(self) -> bool:
+        """Best-effort flare/resource gate (R3.6). Defaults to never-skip; a wired
+        check that itself errors fails safe to SKIP (test-gen is non-essential)."""
+        if self._tester_skip_check is None:
+            return False
+        try:
+            return bool(self._tester_skip_check())
+        except Exception:
+            return True
+
+    async def _maybe_run_tester(self, step: AgentStep, write_result: str) -> str:
+        """After a committed WRITE_FILE, optionally generate + run a test and append
+        its outcome to the step result as an observation (specs/dev-agent-critic R3).
+
+        Default OFF → returns `write_result` unchanged. Only fires for `.py` source
+        files; never raises, never blocks, never reports a skip as a pass.
+        """
+        if self._tester is None or not self._tester_enabled:
+            return write_result
+        target = (step.args or "").strip()
+        if not is_testable_source(target):
+            return write_result
+        if self._tester_should_skip():
+            log.info("DevAgent: tester skipped (flare/resource) — %s", target)
+            return write_result
+        try:
+            code = await asyncio.to_thread(self._read_current_for_critic, target)
+            outcome = await self._tester.generate_and_run(
+                goal=self._current_goal or "", path=target, code=code)
+        except Exception as exc:
+            log.warning("DevAgent: tester failed (%s) — skipped", exc)
+            return write_result
+        if outcome.note:
+            return f"{write_result}\n{outcome.note}"
+        return write_result
+
+    async def _critic_review(self, step: AgentStep, new_text: str) -> CriticVerdict:
+        """Independent review of a lint-passed WRITE_FILE edit (specs/dev-agent-critic).
+
+        Default OFF → an immediate PASS (no model call), so the WRITE_FILE path is
+        byte-identical to legacy. When ON: reviews the diff on the already-loaded
+        model with a fresh reviewer context; fail-safe on any error (escalate to
+        an explicit confirm, never a silent auto-approve — R1.5); bounds
+        Critic-driven revise cycles per path (R1.7); sets `escalate` for a
+        low-confidence PASS (R2.2).
+        """
+        if self._critic is None or not self._critic_enabled:
+            return CriticVerdict(decision=PASS, confidence=1.0, escalate=False)
+
+        target = (step.args or "").strip()
+        try:
+            current = await asyncio.to_thread(self._read_current_for_critic, target)
+            verdict = await self._critic.review(
+                goal=self._current_goal or "", path=target,
+                old_text=current, new_text=new_text,
+            )
+        except Exception as exc:
+            log.warning("DevAgent: critic review failed (%s) — escalate to confirm "
+                        "(fail-safe)", exc)
+            return CriticVerdict(decision=PASS, confidence=0.0, escalate=True,
+                                 findings=[Finding("info", f"critic error: {exc}", target)])
+
+        # R1.7 — bound revise cycles per path; once exhausted hand to the normal
+        # flow (escalate + allow) so the step can't be revised forever.
+        if verdict.decision == REVISE:
+            n = self._critic_revise_counts.get(target, 0) + 1
+            self._critic_revise_counts[target] = n
+            if n > self._critic_max_revisions:
+                log.info("DevAgent: critic revise budget exhausted for %s — "
+                         "escalate+allow", target)
+                verdict.decision = PASS
+                verdict.escalate = True
+                return verdict
+
+        # R2.2 — a low-confidence PASS still requires an explicit confirm.
+        if verdict.decision == PASS and verdict.confidence < self._critic_confidence_floor:
+            verdict.escalate = True
+        return verdict
+
+    @staticmethod
+    def _read_current_for_critic(path_str: str) -> str:
+        """Current on-disk text for the diff the Critic reviews ('' if new file)."""
+        from pathlib import Path as _P
+        p = _P(path_str.strip().strip("'\""))
+        return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+
+    @staticmethod
+    def _critic_reject_message(step: AgentStep, verdict: CriticVerdict) -> str:
+        """Diagnostic step result for a blocked/revise edit → drives _replan."""
+        target = (step.args or "").strip()
+        return (f"WRITE_FILE to {target[:60]} {verdict.decision} by critic: "
+                f"{verdict.summary()}"
+                + (f" | suggested fix: {verdict.suggested_fix}" if verdict.suggested_fix else ""))
 
     async def _reflect(
         self, goal: str, steps: list[AgentStep], model: str
@@ -2194,23 +2343,51 @@ class DevAgent:
             # short-circuits to approve when the whole plan was explicitly
             # authorized upfront, so an approved plan stays prompt-free.
             target = (step.args or "").strip()
+
+            if self._critic is None or not self._critic_enabled:
+                # ── Legacy path (Critic OFF) — byte-identical to pre-feature ──
+                if not await self._confirm_destructive_op(
+                    f"Approve writing file {target[:60]}?"
+                ):
+                    return "WRITE_FILE cancelled by user"
+                # Lint-gate + format-aware apply BEFORE snapshot/write so a
+                # syntactically broken edit fails closed (file untouched) and the
+                # loop replans with a diagnostic (specs/edit-format-aci R1, R2).
+                # An EditError raised here marks the step failed (WRITE_FILE is
+                # non-retryable) → replan; nothing is snapshotted or written.
+                new_text = await asyncio.to_thread(self._apply_edit, step.args, step.body)
+                # Snapshot BEFORE writing so a saga rollback restores an
+                # overwritten file instead of deleting it. Captured even though
+                # we're about to write — if the write fails, no compensation is
+                # registered anyway.
+                step.comp_args = json.dumps(await asyncio.to_thread(
+                    self._snapshot_for_write, step.args
+                ))
+                result = await asyncio.to_thread(self._write_file, step.args, new_text)
+                return await self._maybe_run_tester(step, result)
+
+            # ── Critic-enabled path (specs/dev-agent-critic) ────────────────
+            # Apply (lint gate) FIRST so the Critic reviews the actual resulting
+            # text; an EditError still fails closed → replan (unchanged). The
+            # Critic runs BEFORE the approval gate so it can escalate it.
+            new_text = await asyncio.to_thread(self._apply_edit, step.args, step.body)
+            verdict = await self._critic_review(step, new_text)
+            if verdict.decision in (REVISE, BLOCK):
+                # No write, no snapshot/compensation — the diagnostic becomes the
+                # step result the replan loop reacts to (R1.4, R1.6, R2.4).
+                return self._critic_reject_message(step, verdict)
+            # PASS: a non-pass-confidence verdict forces an explicit confirm even
+            # for an upfront-authorized plan; it can never WEAKEN an existing gate
+            # (R2.2, R2.3).
             if not await self._confirm_destructive_op(
-                f"Approve writing file {target[:60]}?"
+                f"Approve writing file {target[:60]}?", force=verdict.escalate
             ):
                 return "WRITE_FILE cancelled by user"
-            # Lint-gate + format-aware apply BEFORE snapshot/write so a
-            # syntactically broken edit fails closed (file untouched) and the
-            # loop replans with a diagnostic (specs/edit-format-aci R1, R2).
-            # An EditError raised here marks the step failed (WRITE_FILE is
-            # non-retryable) → replan; nothing is snapshotted or written.
-            new_text = await asyncio.to_thread(self._apply_edit, step.args, step.body)
-            # Snapshot BEFORE writing so a saga rollback restores an overwritten
-            # file instead of deleting it. Captured even though we're about to
-            # write — if the write fails, no compensation is registered anyway.
             step.comp_args = json.dumps(await asyncio.to_thread(
                 self._snapshot_for_write, step.args
             ))
-            return await asyncio.to_thread(self._write_file, step.args, new_text)
+            result = await asyncio.to_thread(self._write_file, step.args, new_text)
+            return await self._maybe_run_tester(step, result)
 
         if action == "RUN_TERMINAL":
             cmd = step.args or step.body
@@ -2787,7 +2964,7 @@ class DevAgent:
         "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR"
     })
 
-    async def _confirm_destructive_op(self, description: str) -> bool:
+    async def _confirm_destructive_op(self, description: str, *, force: bool = False) -> bool:
         """Speak the action description and wait for voice confirmation.
 
         This op is destructive by definition, so it fails SAFE to DENY: only an
@@ -2795,9 +2972,14 @@ class DevAgent:
         Silence, an ambiguous reply, or unavailable TTS/microphone all return
         False — the op is skipped rather than run without clear consent. Mirrors
         the hardened voice approval gate (approval_hook.py, timeout→reject).
+
+        ``force`` bypasses the upfront-plan-authorization short-circuit so the
+        Critic can ESCALATE a risky edit to an explicit confirm (specs/dev-agent-
+        critic R2.2). It only ever ADDS friction — it can never weaken a gate.
         """
-        # If the user already approved the entire plan upfront, skip per-op confirmation
-        if self._plan_authorized:
+        # If the user already approved the entire plan upfront, skip per-op
+        # confirmation — unless a caller (the Critic) forces an explicit confirm.
+        if self._plan_authorized and not force:
             log.info("DevAgent._confirm: skipping (plan authorized) — %s", description)
             return True
 

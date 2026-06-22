@@ -175,6 +175,18 @@ def _run_edit_ab(args):
     return run_edit_ab_suite(cases, infer_text, timeout_s=args.timeout)
 
 
+def _run_dev_critic(args):
+    from evals.dev_critic import load_dev_critic_suite, run_dev_critic_suite, _make_ollama_router
+    cases = load_dev_critic_suite(args.suite)
+    if not cases:
+        print("no cases to run", file=sys.stderr)
+        return None
+    oi, router = _make_ollama_router(args.model)
+    print(f"dev_critic: model={getattr(oi, 'model', None) or args.model or 'default'}  "
+          f"arms=lint vs critic  n={len(cases)}")
+    return run_dev_critic_suite(cases, router, timeout_s=args.timeout)
+
+
 def _run_ablation(args):
     from evals.ablation import load_ablation_suite
     from evals.runner import run_ablation_suite
@@ -249,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--suite", required=True, help="suite name (evals/suites/<name>.jsonl)")
     ap.add_argument("--mode",
                     choices=["single", "trajectory", "judge", "execution",
-                             "ablation", "replan", "edit_ab"],
+                             "ablation", "replan", "edit_ab", "dev_critic"],
                     default="single",
                     help="execution = run the goal through the LIVE DevAgent and "
                          "score the executed trajectory (read-only suites only); "
@@ -282,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     runner = {"single": _run_single, "trajectory": _run_trajectory,
               "judge": _run_judge, "execution": _run_execution,
               "ablation": _run_ablation, "replan": _run_replan,
-              "edit_ab": _run_edit_ab}[args.mode]
+              "edit_ab": _run_edit_ab, "dev_critic": _run_dev_critic}[args.mode]
     report = runner(args)
     if report is None:
         return 2
@@ -301,6 +313,9 @@ def main(argv: list[str] | None = None) -> int:
         _print_ablation(report)
     elif args.mode == "edit_ab":
         _print_edit_ab(report)
+    elif args.mode == "dev_critic":
+        from evals.dev_critic import _print_report as _print_dc
+        _print_dc(report)
     else:
         _print_report(report, args.mode)
 

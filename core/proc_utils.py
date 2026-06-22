@@ -101,6 +101,7 @@ def run_capped(
     cwd: Optional[str] = None,
     env: Optional[dict] = None,
     preexec_fn=None,
+    stdin: Optional[int] = subprocess.DEVNULL,
 ) -> subprocess.CompletedProcess:
     """Like `subprocess.run(..., timeout=timeout)` but kills the whole process
     tree (not just the direct child) when the timeout fires, then re-raises
@@ -108,6 +109,11 @@ def run_capped(
 
     The child runs in its own process group so the tree-kill can reach every
     descendant. `preexec_fn` (POSIX rlimits etc.) is honored on POSIX only.
+
+    `stdin` defaults to `DEVNULL` (not inherited): these are non-interactive
+    agent spawn sites, so a command that reads stdin gets immediate EOF and
+    fails fast instead of blocking on a TTY until the wall timeout. Pass
+    `stdin=None` to restore inheritance for the rare caller that needs it.
     """
     creationflags = 0
     start_new_session = False
@@ -124,6 +130,7 @@ def run_capped(
         shell=shell,
         cwd=cwd,
         env=env,
+        stdin=stdin,
         stdout=stdout,
         stderr=stderr,
         text=text,

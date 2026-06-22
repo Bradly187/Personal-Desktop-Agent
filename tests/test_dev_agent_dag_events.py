@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -62,7 +62,7 @@ def _isolated_goal_session(tmp_path, monkeypatch):
 
 
 def _build_agent(plan_text: str, run_step) -> tuple[DevAgent, _FakeBus]:
-    router = AsyncMock()
+    router = MagicMock()
     router.infer = AsyncMock(return_value=_RR(plan_text))
     agent = DevAgent(router=router)
     bus = _FakeBus()
