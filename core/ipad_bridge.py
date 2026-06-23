@@ -122,9 +122,10 @@ class IPadBridge:
         self._gesture: Optional["GestureProcessor"] = None
         self._whisper: Optional["WhisperStream"] = None
         self._viewer: Optional["SensorViewer"] = None
-        # RealSense L515 HandPointer — absolute cursor via relaxed hand (wired when --realsense)
-        self._hand_pointer: Optional[Any] = None   # sensors.hand_pointer.HandPointer
-        self._thumb_click: Optional[Any] = None    # sensors.hand_pointer.ThumbClick
+        # RealSense L515 HeadPointer — absolute cursor via nose-ray + depth
+        # (wired when --headtrack). Clicking stays on the voice "click" path.
+        self._head_pointer: Optional[Any] = None   # sensors.head_pointer.HeadPointer
+        self._face_tracker: Optional[Any] = None   # sensors.face_tracker.FaceTracker
 
         # DB for persistent iPad log storage (wired by main.py)
         self._agent_db = None
@@ -170,14 +171,16 @@ class IPadBridge:
     def set_viewer(self, viewer: "SensorViewer") -> None:
         self._viewer = viewer
 
-    def set_hand_pointer(self, hand_pointer, thumb_click=None) -> None:
-        """Wire the RealSense L515 HandPointer for absolute cursor positioning.
+    def set_head_pointer(self, head_pointer, face_tracker) -> None:
+        """Wire the RealSense L515 HeadPointer for absolute cursor positioning.
 
-        hand_pointer — HandPointer configured for the active monitor.
-        thumb_click  — optional ThumbClick; thumb-pinch fires CLICK instead of dwell.
+        head_pointer — HeadPointer configured for the active monitor.
+        face_tracker — FaceTracker that turns camera_frame into a HeadSample.
+        Depth comes from the already-wired LiDARReceiver (set_lidar). No click
+        wiring — clicking is the voice "click" path (FusionEngine priority 2).
         """
-        self._hand_pointer = hand_pointer
-        self._thumb_click = thumb_click
+        self._head_pointer = head_pointer
+        self._face_tracker = face_tracker
 
     def set_agent_db(self, agent_db, session_id: int) -> None:
         self._agent_db = agent_db
@@ -398,42 +401,27 @@ class IPadBridge:
                 # Forward landmarks to viewer overlay
                 if self._viewer:
                     self._viewer.on_hand_landmarks(self._gesture.latest_landmarks)
-                # RealSense HandPointer: absolute cursor from the same MediaPipe pass —
-                # no second inference. Landmarks are in [0,1] normalized image space.
-                if self._hand_pointer:
-                    _lms = self._gesture.latest_landmarks
-                    if _lms:
-                        from sensors.hand_pointer import fingertip_centroid
-                        _cen = fingertip_centroid(_lms)
-                        if _cen is not None:
-                            _hold = False
-                            if self._thumb_click:
-                                _tc = self._thumb_click.update(_lms)
-                                # Freeze cursor while thumb is approaching the pinch
-                                # (ratio < 0.95) so the click lands where the user aimed.
-                                _hold = (_tc.get("ratio") is not None
-                                         and _tc["ratio"] < 0.95)
-                                if _tc.get("click") and self._fusion:
-                                    _pos = self._hand_pointer._last
-                                    if _pos:
-                                        self._fusion.on_gesture(Command(
-                                            text="realsense thumb-click",
-                                            action="CLICK",
-                                            source="realsense",
-                                            gaze_coords=(_pos[0], _pos[1]),
-                                        ))
-                            _ev = self._hand_pointer.update(_cen[0], _cen[1], hold=_hold)
-                            if _ev.get("click") and not self._thumb_click and self._fusion:
-                                self._fusion.on_gesture(Command(
-                                    text="realsense dwell-click",
-                                    action="CLICK",
-                                    source="realsense",
-                                    gaze_coords=(_ev["x"], _ev["y"]),
-                                ))
-                    else:
-                        self._hand_pointer.reset()
-            else:
-                log.debug("camera_frame received but GestureProcessor not wired")
+            # RealSense L515 HeadPointer: nose-ray + depth absolute cursor. Runs
+            # independently of the gesture pipeline (own FaceLandmarker pass).
+            # The cursor only MOVES here — clicking is the voice "click" path.
+            if self._face_tracker and self._head_pointer:
+                _hs = self._face_tracker.on_camera_frame(msg)
+                if _hs is not None and _hs.ok:
+                    # Depth at the nose tip from the already-wired LiDARReceiver
+                    # (the L515 sidecar streams aligned depth_frame). None when
+                    # depth is stale/unavailable → HeadPointer falls back to pure
+                    # head orientation.
+                    _depth = None
+                    if self._lidar is not None and _hs.nose_nxy is not None:
+                        try:
+                            _depth = self._lidar.get_depth_at(*_hs.nose_nxy)
+                        except Exception:
+                            _depth = None
+                    self._head_pointer.update(_hs.forward, _hs.nose_nxy, _depth)
+                elif _hs is not None:
+                    self._head_pointer.reset()
+            elif not self._gesture:
+                log.debug("camera_frame received but no consumer wired")
             if self._viewer:
                 self._viewer.on_camera_frame(msg)
             return

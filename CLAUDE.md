@@ -212,6 +212,13 @@ python main.py [--port 8765] [--host 0.0.0.0] [--no-mdns] [--debug] [--safe-mode
 # Measure actual VRAM usage on RTX 5090 (loads all models, prints table, exits)
 python main.py --measure-vram
 
+# RealSense L515 head-pointer cursor (nose-ray + depth; clicking = voice "click")
+python main.py --headtrack            # DA_HEADTRACK=1 env var also works
+#   First calibrate by looking at center + each corner (writes head_pointer_calibration.json):
+python scripts/validate_headtrack.py 8765 --calibrate-corners
+#   Then start the L515 capture sidecar (Python 3.10 venv) in another terminal:
+start_realsense.bat --port 8765       # auto-started by --headtrack if .venv-realsense exists
+
 # MCP server — Claude's desktop control interface (stdio transport)
 python mcp_server/desktop_mcp_server.py
 
@@ -280,6 +287,9 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 | `inference/local_inference.py` | `LocalInference` ABC; `OllamaInference` (default, ~190ms warm wall p50 / ~29ms compute, Ollama 0.30.6), `VLLMInference` (verified in Ubuntu WSL2, vLLM 0.21.0; `--backend vllm`; use `--gpu-memory-utilization 0.65` with Whisper running) |
 | `adaptive/continuous_trainer.py` | Routing threshold adaptation; few-shot ranking; gesture velocity-floor calibration (p10 observed, −30% pain day); delegates all storage to `AgentDB`; holds `gesture_processor=` ref for live threshold push-back |
 | `sensors/lidar_receiver.py` | Decodes depth_frame messages; confidence-map filtering; `get_depth_at()` |
+| `sensors/realsense_publisher.py` | Intel RealSense L515 capture sidecar (Python 3.10 `.venv-realsense`; L515 SDK is gone from pyrealsense2 ≥ 2.55). Aligns depth→color and streams the SAME `camera_frame` + `depth_frame` WS messages the iPad sends, so the pipeline consumes the L515 unchanged. Sensor-agnostic — reused by the head pointer |
+| `sensors/face_tracker.py` | MediaPipe Face Landmarker wrapper over `camera_frame`; emits `HeadSample(forward, nose_nxy)` from the 4×4 facial transformation matrix; graceful-degrade if mediapipe/cv2/`face_landmarker.task` missing. Pairs with `head_pointer.py` |
+| `sensors/head_pointer.py` | L515 **head pointer** — nose-ray + depth → absolute cursor. head-forward (gnomonic-projected) mapped to screen via 4-corner homography (or box fallback); L515 nose depth gives a parallax origin correction so leaning doesn't drift the aim; OneEuro + median smoothing. **No click logic** — clicking is the voice "click" path (FusionEngine priority 2). Wired via `--headtrack`. (Replaced the removed fingertip hand-pointer — too many coupled variables.) Calibrate with `scripts/validate_headtrack.py --calibrate-corners` |
 | `adaptive/behavioral_twin_state.py` | Persistent user behaviour model: `TwinSnapshot`, `PreferenceModel`, `PainDayEngine`; AgentDB + ChromaDB backing; feeds `HybridCoordinator` before every gate decision |
 | `storage/semantic_memory.py` | ChromaDB vector store (all-MiniLM-L6-v2, cosine space) for semantic few-shot retrieval; query results carry a `score` (=1−distance); Jaccard fallback when chromadb unavailable; time-gated `_available` re-probe (gated on `_started_once`); `stop()` releases WAL file handles on Windows |
 | `sensors/one_euro_filter.py` | Casiez 2012 adaptive low-pass filter (1€); used for tilt velocity, tilt position, gaze delta, head tracking — replaces EMA throughout sensor pipelines |

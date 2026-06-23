@@ -881,17 +881,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         )
     profiler.add_drift_callback(_on_drift)
 
-    # ── RealSense L515 HandPointer ────────────────────────────────────────────
+    # ── RealSense L515 HeadPointer (nose-ray + depth → cursor) ────────────────
     _realsense_proc = None
-    if os.environ.get("DA_REALSENSE", "0") != "0" or getattr(args, "realsense", False):
+    if os.environ.get("DA_HEADTRACK", "0") != "0" or getattr(args, "headtrack", False):
         try:
             import json as _rs_json
-            from sensors.hand_pointer import (
-                HandPointer, HandPointerConfig, ThumbClick, ThumbClickConfig,
-            )
+            from sensors.head_pointer import HeadPointer, HeadPointerConfig
+            from sensors.face_tracker import FaceTracker
             _CORNER_ORDER = ("TOP-LEFT", "TOP-RIGHT", "BOTTOM-RIGHT", "BOTTOM-LEFT")
-            _hp_cfg = HandPointerConfig()
-            _cal_path = Path(__file__).parent / "hand_pointer_calibration.json"
+            _hp_cfg = HeadPointerConfig()
+            _cal_path = Path(__file__).parent / "head_pointer_calibration.json"
             if _cal_path.exists():
                 try:
                     with open(_cal_path) as _f:
@@ -899,25 +898,30 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                     _mon_key = f"{sw}x{sh}@0,0"
                     _cal_entry = _cal_data.get("monitors", {}).get(_mon_key)
                     if _cal_entry:
-                        _hp_cfg.in_x0 = float(_cal_entry["in_x0"])
-                        _hp_cfg.in_y0 = float(_cal_entry["in_y0"])
-                        _hp_cfg.in_x1 = float(_cal_entry["in_x1"])
-                        _hp_cfg.in_y1 = float(_cal_entry["in_y1"])
+                        for _k in ("in_x0", "in_y0", "in_x1", "in_y1", "depth_comp",
+                                   "center_u", "center_v"):
+                            if _k in _cal_entry:
+                                setattr(_hp_cfg, _k, float(_cal_entry[_k]))
+                        for _k in ("invert_x", "invert_y"):
+                            if _k in _cal_entry:
+                                setattr(_hp_cfg, _k, bool(_cal_entry[_k]))
                         _cc = _cal_entry.get("corners")
                         if isinstance(_cc, dict) and len(_cc) == 4:
                             _hp_cfg.corners = [
                                 list(map(float, _cc[k])) for k in _CORNER_ORDER
                             ]
-                        _hp_cfg.overshoot = 0.06
-                        log.info("RealSense HandPointer: calibration loaded for %s", _mon_key)
+                        _nr = _cal_entry.get("nose_ref")
+                        if isinstance(_nr, (list, tuple)) and len(_nr) == 2:
+                            _hp_cfg.nose_ref = (float(_nr[0]), float(_nr[1]))
+                        log.info("RealSense HeadPointer: calibration loaded for %s", _mon_key)
                     else:
-                        log.warning("RealSense HandPointer: no calibration for %s — "
-                                    "run validate_realsense.py --calibrate-corners", _mon_key)
+                        log.warning("RealSense HeadPointer: no calibration for %s — "
+                                    "run validate_headtrack.py --calibrate-corners", _mon_key)
                 except Exception as _e:
-                    log.warning("RealSense HandPointer: calibration load error: %s", _e)
+                    log.warning("RealSense HeadPointer: calibration load error: %s", _e)
             else:
-                log.warning("RealSense HandPointer: no calibration file — "
-                            "run validate_realsense.py --calibrate-corners first")
+                log.warning("RealSense HeadPointer: no calibration file — "
+                            "run validate_headtrack.py --calibrate-corners first")
 
             import ctypes as _rs_ct
             _rs_u32 = _rs_ct.windll.user32
@@ -925,29 +929,18 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             def _rs_move(x, y):
                 _rs_u32.SetCursorPos(int(x), int(y))
 
-            _hp_gravity = None
-            if target_cache is not None:
-                def _hp_gravity(x, y, r):
-                    tg = target_cache.nearest(int(x), int(y), r, max_dim=120)
-                    return tg.center() if tg else None
-
-            _thumb_click = (
-                ThumbClick(ThumbClickConfig()) if getattr(args, "thumb_click", False) else None
-            )
-            hand_pointer = HandPointer(
-                sw, sh, _hp_cfg,
-                move_cb=_rs_move,
-                gravity_provider=_hp_gravity,
-            )
-            bridge.set_hand_pointer(hand_pointer, thumb_click=_thumb_click)
+            head_pointer = HeadPointer(sw, sh, _hp_cfg, move_cb=_rs_move)
+            face_tracker = FaceTracker()
+            bridge.set_head_pointer(head_pointer, face_tracker)
             log.info(
-                "RealSense HandPointer active  screen=%dx%d  gravity=%s  click=%s",
-                sw, sh,
-                "ON" if _hp_gravity else "OFF",
-                "thumb-pinch" if _thumb_click else "dwell",
+                "RealSense HeadPointer active  screen=%dx%d  depth_comp=%.2f  "
+                "calibrated=%s  click=voice",
+                sw, sh, _hp_cfg.depth_comp, bool(_hp_cfg.corners),
             )
 
             # Auto-start the capture sidecar (Python 3.10 venv) unless suppressed.
+            # The L515 sidecar streams aligned camera_frame + depth_frame — exactly
+            # what head tracking needs (color for FaceLandmarker, depth for parallax).
             _sidecar_py = Path(__file__).parent / ".venv-realsense" / "Scripts" / "python.exe"
             _sidecar_script = Path(__file__).parent / "sensors" / "realsense_publisher.py"
             if (_sidecar_py.exists() and _sidecar_script.exists()
@@ -967,7 +960,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                 else:
                     log.info("RealSense sidecar: auto-start suppressed (--no-realsense-sidecar)")
         except Exception as _rs_exc:
-            log.warning("RealSense HandPointer setup failed: %s", _rs_exc)
+            log.warning("RealSense HeadPointer setup failed: %s", _rs_exc)
 
     # ── Optional codebase RAG index ────────────────────────────────────────
     indexer = None
@@ -1319,17 +1312,52 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--watch", action="store_true",
                    help="Enable continuous file watcher for incremental RAG re-indexing "
                         "(requires --index-codebase and pip install watchdog)")
-    # ── RealSense L515 hand-pointer ───────────────────────────────────────────
-    p.add_argument("--realsense", action="store_true",
-                   help="Enable RealSense L515 absolute hand-pointer cursor "
-                        "(DA_REALSENSE=1 env var also works); auto-starts the "
-                        ".venv-realsense sidecar if found")
+    # ── RealSense L515 head-pointer (nose-ray + depth → cursor) ───────────────
+    p.add_argument("--headtrack", action="store_true",
+                   help="Enable RealSense L515 absolute head-pointer cursor "
+                        "(nose-ray + depth; DA_HEADTRACK=1 env var also works); "
+                        "auto-starts the .venv-realsense sidecar if found. "
+                        "Clicking is the voice \"click\" command.")
     p.add_argument("--no-realsense-sidecar", action="store_true",
-                   help="With --realsense: wire HandPointer but don't auto-start "
+                   help="With --headtrack: wire HeadPointer but don't auto-start "
                         "the sidecar (run start_realsense.bat manually)")
-    p.add_argument("--thumb-click", action="store_true",
-                   help="With --realsense: use thumb-pinch to click instead of dwell")
     return p.parse_args()
+
+
+def _set_process_dpi_aware() -> None:
+    """Make the process per-monitor DPI aware (Windows only).
+
+    Without this, on a high-DPI display (e.g. a 4K panel at 150% scaling)
+    pyautogui.size() and SetCursorPos operate in DPI-virtualised *logical*
+    coordinates (2560x1440) instead of the true *physical* pixels (3840x2160).
+    The head-pointer calibration (head_pointer_calibration.json) is captured by
+    scripts/validate_headtrack.py, which IS DPI aware, under the physical-pixel
+    key (e.g. "3840x2160@0,0"). If main.py is not DPI aware it looks up the
+    logical key, fails to find the entry, and runs head tracking uncalibrated.
+    Mirrors validate_headtrack._set_dpi_aware so both agree on resolution.
+
+    Must run before any screen-metrics call (pyautogui.size, cursor moves, GUI).
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return
+    except Exception:
+        pass
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        log.warning("Could not set process DPI awareness — head-pointer "
+                    "calibration may not load on a scaled display")
 
 
 def _raise_windows_timer_resolution() -> None:
@@ -1359,6 +1387,7 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    _set_process_dpi_aware()
     _raise_windows_timer_resolution()
 
     # Task 4.2 — early exit path
