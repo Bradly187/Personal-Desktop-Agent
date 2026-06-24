@@ -200,9 +200,18 @@ async def test_revise_budget_is_bounded():
     assert agent._confirm_destructive_op.call_args.kwargs.get("force") is True
 
 
-async def test_disabled_critic_is_byte_identical_legacy_path():
-    # R4.1 — with the Critic OFF, the WRITE_FILE path is the legacy flow:
-    # confirm → apply → snapshot → write, and the critic is never consulted.
+def test_critic_default_on_when_env_unset(monkeypatch):
+    # Regression gate (default flipped ON 2026-06-24, baseline dev_critic.json
+    # catch_rate=1.0). If this fails, the default was silently reverted to OFF.
+    monkeypatch.delenv("DA_CRITIC", raising=False)
+    agent = DevAgent(router=MagicMock())
+    assert agent._critic_enabled is True and agent._critic is not None
+
+
+async def test_disabled_critic_is_byte_identical_legacy_path(monkeypatch):
+    # R4.1 — with the Critic explicitly OFF, the WRITE_FILE path is the legacy
+    # flow: confirm → apply → snapshot → write, and the critic is never consulted.
+    monkeypatch.setenv("DA_CRITIC", "0")
     agent = DevAgent(router=MagicMock())
     assert agent._critic is None and agent._critic_enabled is False
     agent._apply_edit = MagicMock(return_value="NEW")

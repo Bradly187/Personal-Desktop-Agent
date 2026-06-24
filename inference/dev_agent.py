@@ -453,11 +453,13 @@ class DevAgent:
         # Plan-contract auto-repair (specs/dev-agent-plan-contract). When the
         # planner drops steps (unknown verb) or returns nothing parseable,
         # re-prompt the model with a corrective message instead of silently
-        # dropping the step. Default OFF (env DA_PLAN_REPAIR) until the eval
-        # baseline locks; bounded by DA_PLAN_REPAIR_MAX (default 1) so it can't
-        # spin. Instance attrs so tests can flip them without env.
+        # dropping the step. Default ON (env DA_PLAN_REPAIR) as of 2026-06-24 —
+        # the model-free eval baseline is locked (evals/baselines/plan_contract.json,
+        # exact_acc=1.0, deterministic repair); set DA_PLAN_REPAIR=0 for byte-identical
+        # legacy. Bounded by DA_PLAN_REPAIR_MAX (default 1) so it can't spin.
+        # Instance attrs so tests can flip them without env.
         self._plan_repair_enabled: bool = os.environ.get(
-            "DA_PLAN_REPAIR", "0").strip().lower() in ("1", "true", "on", "yes")
+            "DA_PLAN_REPAIR", "1").strip().lower() in ("1", "true", "on", "yes")
         try:
             self._plan_repair_max: int = max(
                 0, int(os.environ.get("DA_PLAN_REPAIR_MAX", "1")))
@@ -468,10 +470,12 @@ class DevAgent:
         # edit that passed the lint gate is reviewed by a fresh-context reviewer
         # pass on the already-loaded model BEFORE it commits: a non-pass/low-conf
         # verdict escalates the approval gate; revise/block blocks the write and
-        # drives the replan loop. Default OFF (DA_CRITIC) → byte-identical legacy.
-        # No new model loaded (AGENTS.md #6). Tests inject via set_critic().
+        # drives the replan loop. Default ON (DA_CRITIC) as of 2026-06-24 — eval
+        # baseline locked (evals/baselines/dev_critic.json, catch_rate=1.0); set
+        # DA_CRITIC=0 for byte-identical legacy. No new model loaded (AGENTS.md #6).
+        # Tests inject via set_critic().
         self._critic_enabled: bool = os.environ.get(
-            "DA_CRITIC", "0").strip().lower() in ("1", "true", "on", "yes")
+            "DA_CRITIC", "1").strip().lower() in ("1", "true", "on", "yes")
         try:
             self._critic_confidence_floor: float = float(
                 os.environ.get("DA_CRITIC_FLOOR", "0.6"))
@@ -492,9 +496,12 @@ class DevAgent:
         # WRITE_FILE to a .py SOURCE file gets a generated pytest test run through
         # the existing sandbox; the outcome is surfaced as an observation on the
         # step result (safe-observation — the good write is never rolled back).
-        # Default OFF (DA_TESTER) → no-op. No new model (code domain already loaded).
+        # Default ON (DA_TESTER) as of 2026-06-24 — gated by the same dev_critic
+        # eval baseline; safe-observation (a failing generated test never rolls back
+        # the good write). Set DA_TESTER=0 to disable. No new model (code domain
+        # already loaded).
         self._tester_enabled: bool = os.environ.get(
-            "DA_TESTER", "0").strip().lower() in ("1", "true", "on", "yes")
+            "DA_TESTER", "1").strip().lower() in ("1", "true", "on", "yes")
         self._tester: Optional[Tester] = (
             Tester(router, code_domain=os.environ.get("DA_TESTER_DOMAIN", "code"))
             if self._tester_enabled else None
