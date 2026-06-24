@@ -12,7 +12,7 @@ flowchart TD
     G0{"Gate 0\nPrivacy Check\nNemoClaw concept"}
     G0_PASS["force local\ngate_that_decided:\ngate0_privacy"]
 
-    BYPASS{"Source in\nbypass set?\ntouch · sound_action\ngaze_dwell · multimodal"}
+    BYPASS{"Source in\nbypass set?\ntouch · multimodal"}
     BYPASS_PASS["run local\ngate_that_decided:\nbypass"]
 
     SKIP1{"Source skips\nGate 1?\nvoice_local"}

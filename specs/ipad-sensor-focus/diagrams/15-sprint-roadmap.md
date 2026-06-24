@@ -12,17 +12,15 @@ block-beta
 
     block:sensors["Sensors (iPad)"]:1
         tilt["Tilt ✅"]
-        gaze["Gaze delta ✅"]
-        head["Head pose ✅"]
         touch["Touch ✅"]
         voice["Voice ✅"]
         gesture["Gesture ✅\n(HandLandmarker)"]
-        lidar["LiDAR ✅"]
+        lidar["Depth ✅\n(RealSense L515)"]
     end
 
     block:pipeline["Pipeline (PC)"]:1
         bridge["IPadBridge ✅"]
-        fusion["FusionEngine ✅\n60Hz / 10-level"]
+        fusion["FusionEngine ✅\n60Hz / 6-level"]
         coord["HybridCoordinator ✅\nGate 0 + 1–4"]
         twin["BehavioralTwinState ✅\nChromaDB live"]
         trainer["ContinuousTrainer ✅"]
@@ -70,7 +68,7 @@ sequenceDiagram
     V->>D: screenshot()
     D-->>V: base64 PNG
     V->>V: Claude claude-sonnet-4-6 vision\n"Where is 'submit button'? Return pixel coords."
-    V-->>C: gaze_coords=(847, 632)
+    V-->>C: coords=(847, 632)
     C->>E: execute(CLICK, coords=(847,632))
     E->>D: pyautogui.click(847, 632)
 ```
@@ -98,7 +96,7 @@ classDiagram
 **Key implementation decisions:**
 - Only invoke vision grounding for `CLICK` and `CLOSE` verbs with a named target (not for `SCROLL`, `TYPE`, `HOTKEY` which don't need coordinates)
 - Cache screenshot + target → coords for 2 seconds to handle rapid re-clicks
-- Fallback chain: vision coords → gaze_coords → Tesseract OCR → screen centre + CLARIFY
+- Fallback chain: vision coords → Tesseract OCR → screen centre + CLARIFY
 - Use `claude-sonnet-4-6` vision (fast, cheap); prompt: structured JSON response `{"x": N, "y": N, "confidence": 0.0–1.0}`
 - Add `GROUNDING_MIN_CONFIDENCE = 0.7`; below threshold, fall through to Tesseract
 

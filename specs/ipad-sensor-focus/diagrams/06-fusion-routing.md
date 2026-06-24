@@ -1,63 +1,48 @@
 # Fusion & Routing Flowcharts — iPad-Focused Architecture
 
+> Source of truth for the priority order: `core/fusion_engine.py` and the
+> "Sensor Priority" section of `CLAUDE.md`. Eye-gaze, head-pose, and mouth-sound
+> control were **removed** (the standard iPad lacks the required TrueDepth sensor);
+> the priority ladder shrank from 10 levels to **6**. Gesture control is KEPT.
+
 ---
 
-## 1. FusionEngine — 10-Level Priority Decision (60 Hz tick)
+## 1. FusionEngine — 6-Level Priority Decision (60 Hz tick)
 
 ```mermaid
 flowchart TD
     Start([tick]) --> R1
 
     R1{"Rule 1\niPad touch command\npending?"}
-    R1 -->|yes| E1["Emit Command\nsource=touch\nbypass all gates"]
+    R1 -->|yes| E1["Emit Command\nsource=touch\nbypass LLM entirely"]
     R1 -->|no| R2
 
-    R2{"Rule 2\nSound action\npending?"}
-    R2 -->|yes| E2["Emit Command\nsource=sound_action\nbypass all gates"]
+    R2{"Rule 2\nVoice 'click' keyword\npending?"}
+    R2 -->|yes| E2["Emit Command\nsource=multimodal\nclick at current cursor\nbypass gates"]
     R2 -->|no| R3
 
-    R3{"Rule 3\nGaze dwell\nfired?"}
-    R3 -->|yes| E3["Emit Command\nsource=gaze_dwell\n_gaze_coords set\nbypass all gates"]
+    R3{"Rule 3\nTilt navigation active?\n(3a absolute position\n3b legacy velocity)"}
+    R3 -->|yes| E3["Map tilt to cursor pos / dx,dy\nSend directly to pyautogui\n(no Command emitted)"]
     R3 -->|no| R4
 
-    R4{"Rule 4\nGaze stable AND\nvoice_local = 'click'?"}
-    R4 -->|yes| E4["Emit Command\nsource=multimodal\n_gaze_coords set\nbypass gates"]
+    R4{"Rule 4\nGesture command\npending?"}
+    R4 -->|yes| E4["Emit Command\nsource=gesture"]
     R4 -->|no| R5
 
-    R5{"Rule 5\nGaze stable AND\ngesture = POINT?"}
-    R5 -->|yes| E5["Emit Command\nsource=multimodal\n_gaze_coords set"]
+    R5{"Rule 5\nOn-device voice keyword\n(Speech Framework) pending?"}
+    R5 -->|yes| E5["Emit Command\nsource=voice_local"]
     R5 -->|no| R6
 
-    R6{"Rule 6\nTilt vector outside\ndead zone?"}
-    R6 -->|yes| E6["Map tilt to dx/dy\nSend directly to\npyautogui.moveRel\n(no Command emitted)"]
-    R6 -->|no| R7
-
-    R7{"Rule 7\nHead pose delta\nactive?"}
-    R7 -->|yes| E7["Map head pose to dx/dy\nSend directly to\npyautogui.moveRel\n(no Command emitted)"]
-    R7 -->|no| R8
-
-    R8{"Rule 8\nGesture command\npending?"}
-    R8 -->|yes| E8["Emit Command\nsource=gesture"]
-    R8 -->|no| R9
-
-    R9{"Rule 9\nOn-device voice\nkeyword pending?"}
-    R9 -->|yes| E9["Emit Command\nsource=voice_local"]
-    R9 -->|no| R10
-
-    R10{"Rule 10\nPC-transcribed\nvoice pending?"}
-    R10 -->|yes| E10["Emit Command\nsource=voice"]
-    R10 -->|no| NONE["return None\n(no command this tick)"]
+    R6{"Rule 6\nPC-transcribed voice\n(Whisper large-v3) pending?"}
+    R6 -->|yes| E6["Emit Command\nsource=voice"]
+    R6 -->|no| NONE["return None\n(no command this tick)"]
 
     E1 --> COORD([Route to HybridCoordinator])
     E2 --> COORD
-    E3 --> COORD
     E4 --> COORD
     E5 --> COORD
-    E8 --> COORD
-    E9 --> COORD
-    E10 --> COORD
-    E6 --> PYAG([pyautogui direct])
-    E7 --> PYAG
+    E6 --> COORD
+    E3 --> PYAG([pyautogui direct])
 ```
 
 ---
@@ -68,12 +53,12 @@ flowchart TD
 flowchart TD
     A([Receive Command]) --> TWIN["BehavioralTwinState.get_snapshot()\nAdjust thresholds if pain_day_active"]
 
-    TWIN --> G0{"Gate 0 — Privacy\nText contains sensitive patterns?\n(password, api_key, SSN, token…)"}
-    G0 -->|sensitive — force local| LOCAL
+    TWIN --> G0{"Gate 0 — Privacy\nText contains sensitive patterns?\n(password, api_key, SSN, token…)\nPersonal-KB query?"}
+    G0 -->|sensitive / personal — force local| LOCAL
     G0 -->|clean| B
 
     B{"source?"}
-    B -->|"touch / sound_action\ngaze_dwell / multimodal"| BYPASS["Bypass all gates\n→ direct local"]
+    B -->|"touch / multimodal (voice-click)"| BYPASS["Bypass all gates\n→ direct local"]
     B -->|"voice_local"| G2
     B -->|"gesture / voice"| G1
 
@@ -90,7 +75,7 @@ flowchart TD
     G2 -->|pass| G3
     G2 -->|fail| CLOUD
 
-    G3{"Gate 3 — VRAM\nvram_free_gb ≥ 8.0 GB"}
+    G3{"Gate 3 — VRAM\nvram_free_gb ≥ 8.0 GB\n(NVML probe off the event loop)"}
     G3 -->|pass| G4
     G3 -->|fail| CLOUD
 
@@ -98,14 +83,14 @@ flowchart TD
     G4 -->|pass| LOCAL
     G4 -->|fail| CLOUD
 
-    LOCAL["LocalInference\nllama3.1:8b default\n~190 ms warm wall p50 (0.30.6)"]
-    CLOUD["CloudInference\nAWS Bedrock Claude Haiku\n(AgentCore deferred)"]
+    LOCAL["LocalInference\nllama3.1:8b default\n(DomainClassifier → specialist via DevAgent)"]
+    CLOUD["CloudInference\nAmazon Bedrock Claude Haiku\n(Bedrock-only; AgentCore deferred)"]
 
     LOCAL --> ACTION["action string"]
     CLOUD --> ACTION
 
     ACTION --> LOG["AgentDB.insert_command()\nagent.db commands table\nroute + gate_that_decided + latency_ms"]
-    LOG --> EXEC["CommandExecutor.execute()\n16 verbs"]
+    LOG --> EXEC["CommandExecutor.execute()\n16 verbs (11 access + 5 dev)"]
     EXEC --> TRAINER["ContinuousTrainer.observe()\nBehavioralTwinState.observe()"]
 ```
 
@@ -121,25 +106,22 @@ flowchart TD
 
     C -->|CLICK| D["ElementFinder.find(target)"]
     C -->|SCROLL| M["pyautogui.scroll\n(direction, amount)"]
-    C -->|TYPE| N["pyautogui.typewrite(text)"]
+    C -->|TYPE| N["pyautogui.typewrite(text)\nASCII-only"]
     C -->|OPEN| O["psutil / subprocess\nlaunch application"]
     C -->|CLOSE| P["ElementFinder.find(target)\nthen close window"]
     C -->|HOTKEY| Q["pyautogui.hotkey(keys)"]
-    C -->|DICTATE| R["Clipboard paste\n(pyperclip + ctrl+v)\nfaster than keystrokes"]
-    C -->|CLARIFY| S["TTS speak question\n(pyttsx3 local\nor Polly cloud)\nno desktop action"]
+    C -->|DICTATE| R["keyboard_paste()\n(win32clipboard + Ctrl+V)\nfull unicode"]
+    C -->|CLARIFY| S["TTS speak question\n(Kokoro local default)\nno desktop action"]
     C -->|INVALID| T["Log WARNING\nreject action"]
 
-    D --> D1{"_gaze_coords\non Command?"}
-    D1 -->|yes — gaze targeting| D2["pyautogui.moveTo\n(gaze_coords)\npyautogui.click()"]
-    D1 -->|no — resolve target| D3{"Found in\naccessibility tree?\n(UI Automation / AT-SPI)"}
+    D --> D3{"Found in\naccessibility tree?\n(UI Automation / AT-SPI)"}
 
     D3 -->|yes| D4["pyautogui.click\n(x, y from BoundingRect)"]
-    D3 -->|no — canvas/Electron| D5["EasyOCR fallback\nRTX 5090\nscreen text matching"]
+    D3 -->|no — canvas/Electron| D5["OCR fallback\nRTX 5090\nscreen text matching"]
     D5 --> D6{"Text match\nfound?"}
     D6 -->|yes| D4
     D6 -->|no| D7["Log WARNING\nfire CLARIFY instead"]
 
-    D2 --> DONE
     D4 --> DONE
     M --> DONE
     N --> DONE
@@ -155,7 +137,7 @@ flowchart TD
 
 ---
 
-## 4. Touch Input Routing — Full Decision Tree
+## 4. Touch / Sensor Input Routing — Decision Tree
 
 ```mermaid
 flowchart TD
@@ -166,18 +148,14 @@ flowchart TD
     B -->|trackpad\ngesture=tap, fingers=2| C3["IPadBridge → pyautogui.rightClick()"]
     B -->|trackpad\ngesture=scroll, fingers=2| C4["IPadBridge → pyautogui.scroll(dy)"]
     B -->|touch_command| D["IPadBridge → FusionEngine.on_touch\nRule 1 — highest priority"]
-    B -->|gaze| E["IPadBridge → FusionEngine gaze buffer\nused by Rules 3/4/5"]
-    B -->|gaze_dwell| F["IPadBridge → FusionEngine.on_gaze_dwell\nRule 3"]
-    B -->|tilt| G["IPadBridge → FusionEngine.on_tilt\nRule 6 → pyautogui direct"]
+    B -->|tilt_position / tilt| G["IPadBridge → FusionEngine.on_tilt\nRule 3 → pyautogui direct"]
     B -->|tilt_tap| G2["IPadBridge → pyautogui.click()\nat current cursor position"]
-    B -->|head_pose| H["IPadBridge → FusionEngine.on_head\nRule 7 → pyautogui direct"]
-    B -->|keyword| I{"keyword = 'click'\nAND gaze stable?"}
-    I -->|yes| I1["FusionEngine.on_gaze_voice\nRule 4 → multimodal click"]
-    I -->|no| I2["FusionEngine.on_voice_local\nRule 9 → standard routing"]
-    B -->|sound_action| J["IPadBridge → FusionEngine.on_sound_action\nRule 2"]
-    B -->|audio_stream| K["IPadBridge → WhisperStream\nSileroVAD + GPU transcription\n→ Rule 10"]
-    B -->|camera_frame| L["IPadBridge → GestureProcessor\nMediaPipe + LiDAR depth\n→ Rule 8"]
-    B -->|depth_frame| M["LiDARReceiver.update\nused by GestureProcessor\nfor 3D gesture distances"]
+    B -->|keyword| I{"keyword = 'click'?"}
+    I -->|yes| I1["FusionEngine voice-click\nRule 2 → click at cursor"]
+    I -->|no| I2["FusionEngine.on_voice_local\nRule 5 → standard routing"]
+    B -->|audio_stream| K["IPadBridge → WhisperStream\nSileroVAD + GPU transcription\n→ Rule 6"]
+    B -->|camera_frame| L["IPadBridge → GestureProcessor\nMediaPipe\n→ Rule 4"]
+    B -->|depth_frame| M["LiDAR/RealSense receiver\nused by GestureProcessor\nfor 3D gesture distances"]
 
     C --> DIRECT["Direct to pyautogui\nno LLM involved"]
     C2 --> DIRECT
@@ -185,56 +163,26 @@ flowchart TD
     C4 --> DIRECT
     G --> DIRECT
     G2 --> DIRECT
-    H --> DIRECT
     D --> FUSION["FusionEngine\n→ HybridCoordinator\n→ DesktopAgent"]
-    E --> FUSION
-    F --> FUSION
     I1 --> FUSION
     I2 --> FUSION
-    J --> FUSION
     K --> FUSION
     L --> FUSION
 ```
 
 ---
 
-## 5. Gaze Confidence and Stability Logic
-
-```mermaid
-flowchart TD
-    A([Gaze update received\n{x, y, conf}]) --> B{"conf ≥ 0.55?"}
-    B -->|no| DISC["Discard — not used\nfor targeting"]
-    B -->|yes| C["Add to stability\nbuffer (last N frames)"]
-
-    C --> D{"Spread of last N\ngaze points < 4%\nof screen diagonal?"}
-    D -->|no| UNSTABLE["Gaze valid\nbut NOT stable\nno targeting active"]
-    D -->|yes| STABLE["Gaze STABLE\nRules 4/5 can fire"]
-
-    STABLE --> E["Start or continue\ndwell timer"]
-    E --> F{"Dwell timer\n≥ configured duration?"}
-    F -->|no| STABLE
-    F -->|yes| DWELL["Fire gaze_dwell event\nRule 3 — auto click\nno voice/gesture needed"]
-
-    UNSTABLE --> G["Dwell timer resets\nRules 4/5 cannot fire\nuntil stability restored"]
-```
-
----
-
-## 6. Source Priority vs Gate Bypass Summary
+## 5. Source Priority vs Gate Bypass Summary
 
 ```mermaid
 flowchart LR
     subgraph PRIORITY["Priority (high → low)"]
         P1["1. touch"]
-        P2["2. sound_action"]
-        P3["3. gaze_dwell"]
-        P4["4. multimodal (gaze+click)"]
-        P5["5. multimodal (gaze+POINT)"]
-        P6["6. tilt"]
-        P7["7. head_track"]
-        P8["8. gesture"]
-        P9["9. voice_local"]
-        P10["10. voice"]
+        P2["2. voice 'click' (multimodal)"]
+        P3["3. tilt (abs / legacy velocity)"]
+        P4["4. gesture"]
+        P5["5. voice_local (on-device keyword)"]
+        P6["6. voice (PC Whisper)"]
     end
 
     subgraph GATES["Gate behavior"]
@@ -246,12 +194,8 @@ flowchart LR
 
     P1 --> G0
     P2 --> G0
-    P3 --> G0
-    P4 --> G0
-    P5 --> G0
-    P6 --> G_DIRECT
-    P7 --> G_DIRECT
-    P8 --> G_FULL
-    P9 --> G_SKIP1
-    P10 --> G_FULL
+    P3 --> G_DIRECT
+    P4 --> G_FULL
+    P5 --> G_SKIP1
+    P6 --> G_FULL
 ```

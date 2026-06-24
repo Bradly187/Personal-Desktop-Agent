@@ -2,6 +2,13 @@
 
 *Authored 2026-05-30. Covers commercial Phase 1 (Hardening, May–Jul '26).*
 
+> **⚠️ Historical snapshot — read with CLAUDE.md as the current source of truth (banner added 2026-06-24).**
+> The Part 1 architecture analysis below predates several large changes:
+> - The **laptop compute cluster was excised** (#118) — the agent is **single-machine local-only**, not a two-machine split.
+> - **Eye-gaze / head-pose / mouth-sound control were removed** — FusionEngine priority is now **6-level**, not 10.
+> - Message-type counts are stale (now **26 iPad→PC**, **12 PC→iPad** — see `docs/websocket-protocol.md`).
+> - Several Part 2 hardening items have **shipped**: B1 (60 Hz `pyautogui.position()` now cached at 10 Hz via `_cursor_cache_loop`), B4 (destructive git verbs now gated through `_confirm_destructive_op`), C4 (`websockets` pinned to `==16.0`). Genuinely-open items remain: B2 (8-hour soak), A1 (RealSense L515 integration), C2 (speculative decoding).
+
 ---
 
 ## Part 1 — Architecture Analysis

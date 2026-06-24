@@ -9,8 +9,7 @@ flowchart TD
     subgraph iPad_HW["iPad Pro Hardware"]
         accel["Accelerometer\n(tilt, table tap)"]
         gyro["Gyroscope\n(rotation rate)"]
-        truedepth["TrueDepth Camera\n(face, eyes)"]
-        lidar_hw["LiDAR Scanner"]
+        lidar_hw["RealSense L515\n(depth, incoming HW)"]
         mic_hw["Microphone"]
         front_cam_hw["Front/Back Camera"]
         touch_hw["Multi-touch Display"]
@@ -18,19 +17,14 @@ flowchart TD
 
     subgraph Swift_Frameworks["Swift Frameworks (on-device)"]
         cm["Core Motion\nCMMotionManager"]
-        arkit["ARKit\nARSession + ARFaceAnchor"]
+        arkit["ARKit\nARSession"]
         speech["Speech Framework\nSFSpeechRecognizer"]
-        avfound["AVFoundation\nAVAudioEngine"]
         uikit["SwiftUI / UIKit\nTouch events"]
-        record3d_app["Record3D App\n(separate process)"]
     end
 
     subgraph Swift_Classes["iPadApp Swift Classes"]
         tilt_sensor["TiltSensor"]
-        gaze_tracker["GazeTracker"]
-        head_tracker["HeadTracker"]
         kw_listener["KeywordListener"]
-        sound_det["SoundDetector"]
         cam_stream["CameraStreamer"]
         touch_ui["CommandPadView\nTrackpadView"]
         ws_mgr["WebSocketManager"]
@@ -45,11 +39,11 @@ flowchart TD
     end
 
     subgraph PC_Processing["PC — Processing"]
-        fusion["FusionEngine\n10-level priority @ 60Hz"]
+        fusion["FusionEngine\n6-level priority @ 60Hz"]
         whisper_str["WhisperStream\nSileroVAD + faster-whisper"]
         gesture_proc["GestureProcessor\nHandLandmarker Tasks API"]
         lidar_recv["LiDARReceiver\ndepth_frame via WebSocket"]
-        pyag["pyautogui\n(tilt/head direct path)"]
+        pyag["pyautogui\n(tilt direct path)"]
     end
 
     subgraph PC_Intelligence["PC — Intelligence"]
@@ -66,45 +60,36 @@ flowchart TD
 
     subgraph PC_Learning["PC — Learning"]
         trainer["ContinuousTrainer"]
-        agentdb["agent.db\n(SQLite 14 tables)"]
+        agentdb["agent.db\n(SQLite 48 tables)"]
         chromadb["SemanticMemory\n(ChromaDB chroma_db/)"]
     end
 
     %% Hardware → Frameworks
     accel --> cm
     gyro --> cm
-    truedepth --> arkit
     mic_hw --> speech
-    mic_hw --> avfound
     front_cam_hw --> cam_stream
     touch_hw --> uikit
-    lidar_hw --> arkit
 
     %% Frameworks → Swift Classes
     cm --> tilt_sensor
-    arkit --> gaze_tracker
-    arkit --> head_tracker
     speech --> kw_listener
-    avfound --> sound_det
     uikit --> touch_ui
 
     %% Swift Classes → WebSocketManager (single WS connection)
     tilt_sensor -->|"tilt / tilt_position"| ws_mgr
-    gaze_tracker -->|"gaze_delta"| ws_mgr
-    head_tracker -->|"head_pose"| ws_mgr
     kw_listener -->|"keyword"| ws_mgr
-    sound_det -->|"sound_action"| ws_mgr
     cam_stream -->|"camera_frame JPEG"| ws_mgr
     touch_ui -->|"touch_command / trackpad"| ws_mgr
-    arkit -->|"depth_frame (LiDAR)"| ws_mgr
+    lidar_hw -->|"depth_frame (RealSense L515)"| ws_mgr
 
     %% WebSocket wire
     ws_mgr --> ws_wire
     ws_wire --> dispatch
 
     %% Bridge dispatch → PC processing
-    dispatch -->|"tilt / head_pose"| fusion
-    dispatch -->|"gaze_delta, sound,\nkeyword, touch"| fusion
+    dispatch -->|"tilt"| fusion
+    dispatch -->|"keyword, touch"| fusion
     dispatch -->|"PCM audio"| whisper_str
     dispatch -->|"camera_frame"| gesture_proc
     dispatch -->|"depth_frame"| lidar_recv
@@ -115,7 +100,7 @@ flowchart TD
     gesture_proc -->|"Command(source=gesture)"| fusion
 
     %% Fusion → Coordinator or Direct
-    fusion -->|"tilt / head cursor deltas"| pyag
+    fusion -->|"tilt cursor deltas"| pyag
     fusion -->|"Command"| coord
 
     %% Twin state feeds coordinator
@@ -157,30 +142,9 @@ erDiagram
         FLOAT  ry       "Rotation rate around Y axis (rad/s)"
     }
 
-    GAZE_DATA {
-        FLOAT  x        "Normalized screen X [0.0, 1.0]"
-        FLOAT  y        "Normalized screen Y [0.0, 1.0]"
-        FLOAT  conf     "ARKit confidence [0.0, 1.0]"
-    }
-
-    GAZE_DWELL_DATA {
-        FLOAT  x        "Gaze X at dwell trigger"
-        FLOAT  y        "Gaze Y at dwell trigger"
-    }
-
-    HEAD_POSE_DATA {
-        FLOAT  pitch    "Head pitch in degrees"
-        FLOAT  yaw      "Head yaw in degrees"
-    }
-
     KEYWORD_DATA {
         STRING word     "Matched keyword text"
         FLOAT  conf     "Speech recognition confidence"
-    }
-
-    SOUND_ACTION_DATA {
-        STRING sound    "Detected sound (cluck|pop|hiss)"
-        FLOAT  conf     "Detection confidence"
     }
 
     TOUCH_COMMAND_DATA {
@@ -213,11 +177,7 @@ erDiagram
     }
 
     WEBSOCKET_MESSAGE ||--o| TILT_DATA         : "type=tilt"
-    WEBSOCKET_MESSAGE ||--o| GAZE_DATA         : "type=gaze"
-    WEBSOCKET_MESSAGE ||--o| GAZE_DWELL_DATA   : "type=gaze_dwell"
-    WEBSOCKET_MESSAGE ||--o| HEAD_POSE_DATA    : "type=head_pose"
     WEBSOCKET_MESSAGE ||--o| KEYWORD_DATA      : "type=keyword"
-    WEBSOCKET_MESSAGE ||--o| SOUND_ACTION_DATA : "type=sound_action"
     WEBSOCKET_MESSAGE ||--o| TOUCH_COMMAND_DATA: "type=touch_command"
     WEBSOCKET_MESSAGE ||--o| TRACKPAD_DATA     : "type=trackpad"
     WEBSOCKET_MESSAGE ||--o| AUDIO_STREAM_DATA : "type=audio_stream"
@@ -231,7 +191,7 @@ erDiagram
 - **Downscaled to 320×240** on-device before JPEG encoding. Full resolution is unnecessary for landmark detection.
 - **JPEG quality 60** keeps each frame under 50 KB → ~500 KB/s bandwidth at 10 fps.
 - **Encoding latency**: ~3 ms on iPad (hardware JPEG encoder), ~2 ms decode on PC.
-- If gesture recognition is not needed (e.g., user relies on tilt + gaze + voice), camera streaming can be disabled entirely to save bandwidth.
+- If gesture recognition is not needed (e.g., user relies on tilt + voice), camera streaming can be disabled entirely to save bandwidth.
 
 ---
 
@@ -241,11 +201,8 @@ erDiagram
 flowchart LR
     subgraph Sources["Command.source values"]
         touch["touch\n(CommandPadView tap)"]
-        sound["sound_action\n(AVFoundation cluck/pop/hiss)"]
-        gaze_dwell["gaze_dwell\n(ARKit stable gaze ≥ dwell_timeout)"]
-        multimodal["multimodal\n(gaze + voice_local or gesture)"]
+        multimodal["multimodal\n(voice 'click' → click at cursor)"]
         tilt["tilt\n(Core Motion tilt — direct to pyautogui)"]
-        head_track["head_track\n(ARKit head pose — direct to pyautogui)"]
         gesture["gesture\n(MediaPipe on PC from camera feed)"]
         voice_local["voice_local\n(Speech Framework keyword)"]
         voice["voice\n(Whisper large-v3 on GPU)"]
@@ -257,17 +214,14 @@ flowchart LR
     end
 
     subgraph GateBehavior["Gate 1 behavior per source"]
-        bypass["touch, sound_action,\ngaze_dwell, multimodal,\ntilt, head_track\n→ BYPASS all gates"]
+        bypass["touch, multimodal, tilt\n→ BYPASS all gates"]
         check_kw["voice_local\n→ skip Gate 1\n(already high-conf on-device)"]
         full_check["gesture, voice\n→ full 4-gate check"]
     end
 
     touch --> bypass
-    sound --> bypass
-    gaze_dwell --> bypass
     multimodal --> bypass
     tilt --> bypass
-    head_track --> bypass
     voice_local --> check_kw
     gesture --> full_check
     voice --> full_check
@@ -282,7 +236,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph agentdb["agent.db (SQLite — 11 tables)"]
+    subgraph agentdb["agent.db (SQLite — 48 tables, representative subset)"]
         direction TB
         sessions
         commands
@@ -385,19 +339,10 @@ gantt
     section Touch Command
     WS recv + route + pyautogui  :0, 20
 
-    section Sound Action
-    AVFoundation detect          :0, 30
-    WS + route + execute         :30, 60
-
-    section Gaze Dwell
-    ARKit continuous gaze        :0, 1000
-    Dwell fires + execute        :1000, 1020
-
-    section Gaze + Voice (keyword)
-    ARKit gaze streaming         :0, 5
-    Speech Framework match       :5, 55
-    WS + FusionEngine tick       :55, 72
-    pyautogui click              :72, 85
+    section Voice Click (keyword)
+    Speech Framework match       :0, 50
+    WS + FusionEngine tick       :50, 67
+    pyautogui click              :67, 80
 
     section Gesture (camera frame)
     iPad JPEG encode (320x240)   :0, 3

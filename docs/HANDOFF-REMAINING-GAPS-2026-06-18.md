@@ -1,5 +1,11 @@
 # Handoff Document: Remaining Critical Gaps (2026-06-18)
 
+> **✅ RESOLVED — both findings shipped (verified 2026-06-24).** FINDING 4 (Ollama
+> semaphore timeout) shipped as `DA_OLLAMA_TIMEOUT_S` (default 45s) — see
+> `inference/local_inference.py:554, 565, 811, 814`. FINDING 5 (silent audit-trail gaps)
+> shipped (commit `bc4d99f`). This document is retained for historical context only; the
+> "Remaining" items below are **done**, not open.
+
 > **⚠️ Partially moot (2026-06-18).** The laptop compute cluster was **excised on 2026-06-19**
 > (#118) — any gap below referencing `remote_indexer_service.py` / `remote_whisper_*` no longer
 > applies (those files were deleted; the agent is single-machine local-only).

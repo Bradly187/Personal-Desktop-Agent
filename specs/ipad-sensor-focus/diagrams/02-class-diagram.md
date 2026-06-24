@@ -34,10 +34,7 @@ classDiagram
 
     class SensorCoordinator {
         +TiltSensor tilt
-        +GazeTracker gaze
-        +HeadTracker head
         +KeywordListener keywords
-        +SoundDetector sounds
         +CameraStreamer camera
         +startAll() void
         +stopAll() void
@@ -54,28 +51,6 @@ classDiagram
     }
     note for TiltSensor "Core Motion\nrotationRate @ 60Hz\nAlso detects table taps\nvia accelerometer impulse"
 
-    class GazeTracker {
-        +ARSession session
-        +Double dwellDuration
-        +Bool dwellEnabled
-        +Double confidence
-        +start() void
-        +stop() void
-        +onGaze(handler) void
-        +onDwell(handler) void
-    }
-    note for GazeTracker "ARKit eye tracking\nvia ARFaceAnchor\nDwell timer fires click\nafter configured duration"
-
-    class HeadTracker {
-        +ARSession session
-        +Double sensitivity
-        +Double smoothing
-        +start() void
-        +stop() void
-        +onHeadPose(handler) void
-    }
-    note for HeadTracker "ARKit face anchor\ntransform → pitch/yaw\nCoarse cursor control"
-
     class KeywordListener {
         +SFSpeechRecognizer recognizer
         +[String] keywords
@@ -89,16 +64,6 @@ classDiagram
         +onUnmatched(audioBuffer) void
     }
     note for KeywordListener "Speech Framework\nOn-device recognition\nIncremental scan + 0.5s cooldown\nStreams unmatched audio\nto PC for Whisper"
-
-    class SoundDetector {
-        +AVAudioEngine engine
-        +[String:String] soundToAction
-        +Double cooldownMs
-        +start() void
-        +stop() void
-        +onSound(handler) void
-    }
-    note for SoundDetector "AVFoundation\nDetects cluck, pop, hiss\nMaps to configurable actions"
 
     class CameraStreamer {
         +AVCaptureSession session
@@ -141,7 +106,6 @@ classDiagram
         +Double trackpadSpeed
         +Double palmRejectRadius
         +[String] keywords
-        +[String:String] soundMappings
         +save() void
         +load() void
     }
@@ -159,10 +123,7 @@ classDiagram
     iPadApp *-- SettingsStore
     WebSocketManager --> ConnectionState
     SensorCoordinator *-- TiltSensor
-    SensorCoordinator *-- GazeTracker
-    SensorCoordinator *-- HeadTracker
     SensorCoordinator *-- KeywordListener
-    SensorCoordinator *-- SoundDetector
     SensorCoordinator *-- CameraStreamer
     TouchUIView *-- CommandPadView
     TouchUIView *-- TrackpadView
@@ -187,9 +148,8 @@ classDiagram
         +float gesture_confidence
         +str source
         +list~str~ session_context
-        +tuple|None _gaze_coords
     }
-    note for Command "source: touch | sound_action | gaze_dwell |\nmultimodal | tilt | head_track |\ngesture | voice_local | voice"
+    note for Command "source: touch | multimodal | tilt |\ngesture | voice_local | voice"
 
     class SensorMessage {
         +str type
@@ -205,21 +165,9 @@ classDiagram
         +float latency_budget_ms
     }
 
-    class GazePoint {
-        +float x
-        +float y
-        +bool valid
-        +float confidence
-    }
-
     class TiltVector {
         +float rx
         +float ry
-    }
-
-    class HeadPose {
-        +float pitch
-        +float yaw
     }
 
     %% ─────────────────────────────────────────
@@ -231,10 +179,7 @@ classDiagram
         +stop() void
         +on_message(msg SensorMessage) void
         -_dispatch_tilt(data dict) void
-        -_dispatch_gaze(data dict) void
-        -_dispatch_head(data dict) void
         -_dispatch_keyword(data dict) void
-        -_dispatch_sound(data dict) void
         -_dispatch_touch(data dict) void
         -_dispatch_trackpad(data dict) void
         -_dispatch_audio(data dict) void
@@ -246,25 +191,21 @@ classDiagram
         +stop() void
         +latest_depth ndarray|None
     }
-    note for LiDARReceiver "Receives Record3D\ndepth frames\nConfidence filtering"
+    note for LiDARReceiver "Receives RealSense L515\ndepth frames\nConfidence filtering"
 
     %% ─────────────────────────────────────────
-    %%  FUSION ENGINE (10-level)
+    %%  FUSION ENGINE (6-level)
     %% ─────────────────────────────────────────
     class FusionEngine {
         +tick() Command|None
         +on_touch(cmd Command) void
-        +on_sound_action(cmd Command) void
-        +on_gaze_dwell(cmd Command) void
-        +on_gaze_voice(cmd Command) void
-        +on_gaze_gesture(cmd Command) void
+        +on_voice_click(cmd Command) void
         +on_tilt(vector TiltVector) void
-        +on_head(pose HeadPose) void
         +on_gesture(cmd Command) void
         +on_voice_local(cmd Command) void
         +on_voice(cmd Command) void
     }
-    note for FusionEngine "10-level priority\nEmits at most 1 Command per tick\nRuns at 60 Hz"
+    note for FusionEngine "6-level priority\nEmits at most 1 Command per tick\nRuns at 60 Hz"
 
     %% ─────────────────────────────────────────
     %%  VOICE PIPELINE
