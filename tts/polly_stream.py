@@ -364,8 +364,10 @@ def _read_tts_config() -> dict:
 def get_client(voice: str = "Danielle", backend: str | None = None):
     """Return the module-level TTS client singleton.
 
-    backend can be "polly" or "chatterbox".  If None, the value of
-    tts_backend in approval_config.json is used (default "polly").
+    backend can be "kokoro", "polly", "chatterbox", or "sapi"/"windows".
+    If None, the value of tts_backend in approval_config.json is used
+    (config default is "kokoro"; the hardcoded fallback here is "polly"
+    when the key is absent).
     """
     global _default_client, _chatterbox_client, _sapi_client
 
