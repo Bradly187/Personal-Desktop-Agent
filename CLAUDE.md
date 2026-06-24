@@ -102,7 +102,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 > Full reference (voices, paths, engines, mic approval flow): [docs/tts.md](docs/tts.md)
 
-Current voice: **Danielle** (en-US, Generative engine, 24 kHz). Change via `"voice_id"` in `approval_config.json` — takes effect immediately, no restart needed.
+**Default runtime backend: Kokoro** (local ONNX, `tts_backend: "kokoro"` in `approval_config.json`, voice `af_bella`, runs on CPU — GPU auto-selects when `onnxruntime-gpu`+CUDA present). Switch backends via `tts_backend` (`kokoro` | `polly` | `chatterbox` | `sapi`); change the Polly voice via `"voice_id"` (default **Danielle**, en-US Generative 24 kHz). Both take effect immediately, no restart. **Note:** `approval_hook.py`'s voice-approval consent prompts still speak via Amazon Polly directly (hardcoded `_polly_speak`), independent of `tts_backend` — only the agent runtime honors the backend switch.
 
 ## WebSocket Protocol
 
