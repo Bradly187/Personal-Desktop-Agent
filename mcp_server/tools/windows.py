@@ -1,9 +1,12 @@
 import ctypes
 import ctypes.wintypes
+import logging
 
 import win32gui
 import win32process
 import psutil
+
+log = logging.getLogger(__name__)
 
 
 def _get_pid_for_hwnd(hwnd: int) -> int:
@@ -13,6 +16,7 @@ def _get_pid_for_hwnd(hwnd: int) -> int:
 
 def get_active_window() -> dict:
     """Return info about the currently focused window."""
+    log.debug("get_active_window")
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return {"title": None, "x": None, "y": None, "width": None, "height": None, "pid": None}
@@ -34,6 +38,7 @@ def get_active_window() -> dict:
 
 def list_windows() -> list[dict]:
     """Return a list of all visible top-level windows with their titles and PIDs."""
+    log.debug("list_windows")
     results = []
 
     def _enum_cb(hwnd, _):
@@ -49,6 +54,7 @@ def list_windows() -> list[dict]:
 
 def focus_window(title_substring: str) -> dict:
     """Bring the first window whose title contains title_substring to the foreground."""
+    log.debug("focus_window %r", title_substring)
     target = title_substring.lower()
     found_hwnd = None
 

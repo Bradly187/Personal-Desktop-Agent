@@ -17,10 +17,13 @@ Scoring weights multiple evidence signals so domain boundaries are soft.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 # E2 — learned per-domain keyword overlay. OFF by default: with DA_DOMAIN_LEARN
 # unset the classifier is exactly the static-keyword classifier (zero behaviour
@@ -304,6 +307,15 @@ class DomainClassifier:
                 ds.score += self._overlay_nudge(ds.domain, tokens)
 
         scores.sort(key=lambda s: s.score, reverse=True)
+        top = scores[0]
+        runner_up = scores[1] if len(scores) > 1 else None
+        log.debug(
+            "domain_classifier: %r → %s (%.1f)%s",
+            text[:60],
+            top.domain,
+            top.score,
+            f"  runner-up={runner_up.domain}({runner_up.score:.1f})" if runner_up and runner_up.score > 1.0 else "",
+        )
         return scores
 
     def explain(self, text: str) -> str:

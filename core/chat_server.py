@@ -53,6 +53,60 @@ _STATIC_DIR = Path(__file__).parent.parent / "web_client_chat"
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
 
+def _live_session_kpis(db_path: str, session_id: int) -> dict:
+    """Read-only aggregation over the current session's commands rows.
+
+    Returns the same KPI shape as session_summaries so dashboard consumers
+    can treat both interchangeably. Never raises; returns {} on any error.
+    """
+    import sqlite3
+    import statistics
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        with con:
+            rows = con.execute(
+                """
+                SELECT success, route, gate_that_decided, latency_ms, source
+                FROM commands WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchall()
+        con.close()
+    except Exception:
+        return {}
+
+    if not rows:
+        return {"session_id": session_id, "total_commands": 0}
+
+    total = len(rows)
+    successes = sum(1 for r in rows if r["success"])
+    cloud = sum(1 for r in rows if (r["route"] or "") == "cloud")
+    latencies = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
+    source_counts: dict = {}
+    gate_counts: dict = {}
+    for r in rows:
+        s = r["source"] or "unknown"
+        source_counts[s] = source_counts.get(s, 0) + 1
+        g = r["gate_that_decided"] or "unknown"
+        gate_counts[g] = gate_counts.get(g, 0) + 1
+
+    latencies_sorted = sorted(latencies)
+    p50 = latencies_sorted[int(len(latencies_sorted) * 0.50)] if latencies_sorted else None
+    p95 = latencies_sorted[int(len(latencies_sorted) * 0.95)] if latencies_sorted else None
+
+    return {
+        "session_id": session_id,
+        "total_commands": total,
+        "success_rate": round(successes / total, 4),
+        "cloud_escalation_rate": round(cloud / total, 4),
+        "latency_p50_ms": round(p50, 1) if p50 is not None else None,
+        "latency_p95_ms": round(p95, 1) if p95 is not None else None,
+        "source_counts": source_counts,
+        "gate_counts": gate_counts,
+    }
+
+
 class _ChatClient:
     """One connected chat socket plus a writer task, so a slow socket never
     blocks the shared EventBus pump."""
@@ -156,6 +210,7 @@ class ChatServer:
         app.router.add_get("/api/cost", self._api_cost)
         app.router.add_get("/api/models", self._api_models)
         app.router.add_get("/api/routing", self._api_routing)
+        app.router.add_get("/api/session-live", self._api_session_live)
         if _STATIC_DIR.exists():
             app.router.add_static("/static/", _STATIC_DIR, show_index=False)
 
@@ -281,6 +336,17 @@ class ChatServer:
         days_q = request.query.get("days", "30")
         days = None if str(days_q).lower() in ("0", "all", "none") else self._qint(request, "days", 30)
         result = await asyncio.to_thread(routing.routing_breakdown, path, days)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_session_live(self, request: web.Request) -> web.Response:
+        """Live KPI rollup for the current session — same shape as session_summaries
+        but computed on-the-fly without writing to DB. Returns {} when no session
+        is active or the DB is unavailable."""
+        path = self._db_path()
+        sid = self._session_id
+        if not path or sid is None or sid < 0:
+            return web.json_response({})
+        result = await asyncio.to_thread(_live_session_kpis, path, sid)
         return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
 
     async def _ws_handler(self, request: web.Request) -> web.StreamResponse:

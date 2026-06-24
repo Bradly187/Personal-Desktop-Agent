@@ -1292,10 +1292,13 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             )
         fire_and_log(_speak_crash_notice(), log, label="crash_notice_tts")
 
-    # --- Run bridge + fusion + watchdog concurrently ---
+    # --- Run bridge + fusion + watchdog + metric watcher concurrently ---
     bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
     fusion_task = asyncio.create_task(fusion.run())
     watchdog_task = asyncio.create_task(_watchdog(fusion, whisper, session_id))
+    from monitoring.metric_watcher import MetricWatcher
+    metric_watcher = MetricWatcher(event_bus=event_bus)
+    metric_watcher_task = asyncio.create_task(metric_watcher.run())
 
     # Start the chat UI server (if enabled) and open the desktop window/browser
     # once it is actually listening.
@@ -1307,7 +1310,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     await shutdown.wait_for_shutdown()
 
     # Cancel running tasks
-    for t in (bridge_task, fusion_task, watchdog_task):
+    for t in (bridge_task, fusion_task, watchdog_task, metric_watcher_task):
         t.cancel()
         try:
             await t
@@ -1360,6 +1363,17 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     if indexer is not None:
         await indexer.stop()
+
+    # Flush any in-memory traces that were never persisted (e.g. commands that
+    # completed during the shutdown window but whose fire-and-forget task was
+    # cancelled before it ran).
+    try:
+        from monitoring.trace import get_tracer
+        flushed = await get_tracer().flush_all(agent_db, session_id)
+        if flushed:
+            log.info("Trace flush: %d spans persisted during shutdown", flushed)
+    except Exception as _tf_exc:
+        log.debug("Trace flush skipped: %s", _tf_exc)
 
     await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
     await audit.log_session_stop(reason="normal")
@@ -1624,6 +1638,21 @@ def main() -> None:
     args = _parse_args()
 
     _configure_logging(args.debug)
+
+    # Register a last-resort trace dump so the in-memory ring buffer survives
+    # unclean exits (OOM, uncaught exception, kill -9 on parent process).
+    # The graceful shutdown path uses flush_all() → DB instead; this file is a
+    # fallback that appears only when the event loop never reaches shutdown.
+    import atexit
+    def _emergency_trace_dump():
+        try:
+            from monitoring.trace import get_tracer
+            path = get_tracer().dump_to_file()
+            if path:
+                log.info("Emergency trace dump written to %s", path)
+        except Exception:
+            pass
+    atexit.register(_emergency_trace_dump)
 
     _raise_windows_timer_resolution()
 

@@ -32,11 +32,13 @@ early-return no-op and nothing is allocated, exactly as before.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import time
 import uuid
 from collections import OrderedDict
 from contextvars import ContextVar, Token
+from pathlib import Path
 from threading import Lock
 from typing import Optional
 
@@ -189,6 +191,42 @@ class TraceRecorder:
             return await agent_db.insert_trace_spans(trace_id, session_id, spans)
         except Exception:
             return 0
+
+    async def flush_all(self, agent_db, session_id: int = -1) -> int:
+        """Persist every in-memory trace to DB. Call during graceful shutdown.
+
+        Returns total spans written. Best-effort — individual trace failures are
+        swallowed so a single bad trace doesn't block the rest.
+        """
+        if not self._enabled:
+            return 0
+        with self._lock:
+            ids = list(self._traces.keys())
+        total = 0
+        for tid in ids:
+            try:
+                total += await self.persist_trace(tid, agent_db, session_id)
+            except Exception:
+                pass
+        return total
+
+    def dump_to_file(self, path: "str | Path | None" = None) -> str:
+        """Write all in-memory traces to a JSON file as a crash-safe fallback.
+
+        Called synchronously from an atexit handler or exception hook. Returns
+        the path written, or "" on failure (never raises).
+        """
+        if not self._enabled:
+            return ""
+        try:
+            dest = Path(path) if path else Path("logs") / "traces_crash_dump.json"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock:
+                snapshot = list(self._traces.values())
+            dest.write_text(json.dumps(snapshot, default=str), encoding="utf-8")
+            return str(dest)
+        except Exception:
+            return ""
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────

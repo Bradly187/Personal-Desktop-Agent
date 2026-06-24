@@ -1,5 +1,6 @@
 import base64
 import io
+import logging
 from typing import Optional
 
 import mss
@@ -12,6 +13,8 @@ try:
 except ImportError:
     _OCR_AVAILABLE = False
 
+log = logging.getLogger(__name__)
+
 
 def screenshot(region: Optional[dict] = None) -> dict:
     """Capture a screenshot and return it as a base64-encoded PNG.
@@ -20,6 +23,7 @@ def screenshot(region: Optional[dict] = None) -> dict:
     If omitted, captures the full primary monitor.
     Returns: {"image_base64": str, "width": int, "height": int}
     """
+    log.debug("screenshot region=%s", region)
     with mss.MSS() as sct:
         if region:
             monitor = {
@@ -47,6 +51,7 @@ def screenshot(region: Optional[dict] = None) -> dict:
 
 def get_screen_size() -> dict:
     """Return the width and height of the primary monitor."""
+    log.debug("get_screen_size")
     with mss.MSS() as sct:
         mon = sct.monitors[1]
         return {"width": mon["width"], "height": mon["height"]}
@@ -58,7 +63,9 @@ def find_text_on_screen(text: str) -> dict:
     Returns: {"found": bool, "x": int|None, "y": int|None, "confidence": float|None}
     Requires pytesseract + Tesseract OCR installed on the system.
     """
+    log.debug("find_text_on_screen %r", text[:60])
     if not _OCR_AVAILABLE:
+        log.warning("find_text_on_screen: pytesseract not installed — OCR unavailable")
         return {"found": False, "x": None, "y": None, "confidence": None,
                 "error": "pytesseract not installed"}
 
