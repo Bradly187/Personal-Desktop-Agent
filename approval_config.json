@@ -20,9 +20,9 @@
     "ToolSearch":  "silent"
   },
 
-  "tts_backend":              "sapi",
-  "sapi_voice":               "Zira",
-  "sapi_rate":                0,
+  "tts_backend":              "kokoro",
+  "kokoro_voice":             "af_bella",
+  "kokoro_speed":             1.0,
   "chatterbox_exaggeration":  0.5,
   "chatterbox_cfg_weight":    0.5,
   "chatterbox_voice_ref":     null,

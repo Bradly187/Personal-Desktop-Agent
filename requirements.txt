@@ -92,6 +92,25 @@ mediapipe==0.10.35
 # ── Audio capture (iPad audio_stream + local mic) ────────────────────────────
 sounddevice==0.5.5
 
+# ── Kokoro local TTS (kokoro_tts.py — ONNX, natural offline voices) ───────────
+# Default tts_backend when "kokoro" is set in approval_config.json. Pulls in
+# onnxruntime; runs on CPU (no CUDA EP wired). Needs the espeak-ng binary on
+# PATH as the phonemizer backend, plus the model weights (kokoro-v1.0.onnx +
+# voices.bin) downloaded into tts/ via tts/download_kokoro.py. KokoroClient
+# degrades gracefully (raises an actionable RuntimeError) when missing.
+kokoro-onnx==0.4.7
+#
+# GPU (RTX 5090) — OPT-IN, install separately, do NOT uncomment here.
+# onnxruntime-gpu installs into the SAME `onnxruntime` import namespace as the
+# CPU build that chromadb / faster-whisper / magika pull in transitively, so it
+# can't be a plain pinned line — it must REPLACE the CPU package:
+#     pip uninstall -y onnxruntime
+#     pip install onnxruntime-gpu==1.24.3
+# Requires the CUDA 12.x runtime + cuDNN 9 DLLs on PATH (the matching wheel for
+# the installed onnxruntime version). kokoro_tts._select_onnx_provider() then
+# auto-selects CUDAExecutionProvider; it falls back to CPU if the GPU stack
+# fails to load, so this is safe to skip. Override with ONNX_PROVIDER=...
+
 # ── Chatterbox local TTS (chatterbox_tts.py — RTX 5090, MIT licence) ─────────
 # Emotion exaggeration (0.25–2.0), paralinguistic tags, zero-shot voice cloning.
 # Models auto-download from HuggingFace on first call (~2 GB, cached).

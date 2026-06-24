@@ -342,6 +342,7 @@ class PollyStreamClient:
 _default_client: Optional[PollyStreamClient] = None
 _chatterbox_client = None  # lazily created on first chatterbox request
 _sapi_client = None        # lazily created on first sapi request
+_kokoro_client = None      # lazily created on first kokoro request
 
 
 def _read_tts_config() -> dict:
@@ -392,6 +393,17 @@ def get_client(voice: str = "Danielle", backend: str | None = None):
                 audio_prompt_path=cfg.get("chatterbox_voice_ref") or None,
             )
         return _chatterbox_client
+
+    if backend == "kokoro":
+        global _kokoro_client
+        if _kokoro_client is None:
+            cfg = _read_tts_config()
+            from tts.kokoro_tts import KokoroClient
+            _kokoro_client = KokoroClient(
+                voice=cfg.get("kokoro_voice", "af_bella"),
+                speed=cfg.get("kokoro_speed", 1.0),
+            )
+        return _kokoro_client
 
     # Default: Polly via Node.js sidecar
     if _default_client is None:
