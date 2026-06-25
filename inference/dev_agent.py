@@ -2885,56 +2885,15 @@ class DevAgent:
     def _grep(pattern: str, search_path: str, max_lines: int = 100) -> str:
         """Search for a regex pattern in files under search_path.
 
-        Returns matching lines as a string (file:line: content format).
-        Uses Python re for portability — no dependency on system grep.
+        Returns matching lines as a string (file:line: content format). Delegates
+        to the shared ``mcp_server.tools.search`` implementation that also backs
+        the first-class ``grep`` MCP tool, so the verb and the tool never drift.
+        ``scopes=None`` preserves this in-process verb's repo-wide read (the MCP
+        tool passes the writable-root allowlist instead).
         """
-        import os as _os
-
-        root = Path(search_path)
-        if not root.exists():
-            return f"Path does not exist: {search_path}"
-
-        compiled = re.compile(pattern)
-        results: list[str] = []
-        extensions = {".py", ".swift", ".md", ".txt", ".json", ".yaml", ".yml"}
-
-        def _search_file(fp: Path) -> None:
-            if len(results) >= max_lines:
-                return
-            try:
-                for lineno, line in enumerate(
-                    fp.read_text(encoding="utf-8", errors="replace").splitlines(),
-                    start=1,
-                ):
-                    if compiled.search(line):
-                        results.append(f"{fp}:{lineno}: {line.rstrip()}")
-                        if len(results) >= max_lines:
-                            break
-            except OSError:
-                pass
-
-        if root.is_file():
-            _search_file(root)
-        else:
-            for dirpath, dirnames, filenames in _os.walk(root):
-                # Prune excluded directories in-place
-                dirnames[:] = [
-                    d for d in dirnames
-                    if d not in {"__pycache__", ".git", "node_modules",
-                                 "venv", ".venv", "chroma_db", "DerivedData"}
-                ]
-                for fname in filenames:
-                    if Path(fname).suffix in extensions:
-                        _search_file(Path(dirpath) / fname)
-                    if len(results) >= max_lines:
-                        break
-
-        if not results:
-            return f"No matches for pattern {pattern!r} in {search_path}"
-        summary = f"Found {len(results)} match(es)"
-        if len(results) >= max_lines:
-            summary += f" (truncated at {max_lines})"
-        return summary + "\n" + "\n".join(results)
+        from mcp_server.tools import search as _search
+        result = _search.search_text(pattern, search_path, max_lines, scopes=None)
+        return _search.format_grep_result(result, pattern, search_path, max_lines)
 
     @staticmethod
     def _run_terminal(cmd: str) -> str:
