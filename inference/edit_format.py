@@ -37,8 +37,9 @@ log = logging.getLogger(__name__)
 WHOLE_FILE = "whole_file"
 UDIFF = "udiff"          # reserved — no-line-number unified diff (R4, not yet impl)
 HASHLINE = "hashline"    # line:hash anchored edits (R4, implemented)
+SEARCH_REPLACE = "search_replace"  # aider-style SEARCH/REPLACE blocks (EDIT_FILE verb)
 
-_KNOWN_FORMATS = frozenset({WHOLE_FILE, UDIFF, HASHLINE})
+_KNOWN_FORMATS = frozenset({WHOLE_FILE, UDIFF, HASHLINE, SEARCH_REPLACE})
 
 # How far up/down from a stale anchor's line number to search for a line whose
 # hash still matches (the file shifted since the model read it). Conservative —
@@ -246,6 +247,80 @@ def _resolve_anchor(lines: list[str], op: _HashOp, path: str) -> int:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Search/Replace format (EDIT_FILE verb) — aider-style anchored blocks.
+#
+# Unlike WRITE_FILE (which re-emits the WHOLE file), EDIT_FILE makes a *surgical*
+# change: the model emits one or more blocks, each pairing an exact slice of the
+# current file (SEARCH) with its replacement (REPLACE). A SEARCH that does not
+# match the current text EXACTLY ONCE fails closed (R5) — the file is never
+# touched on an ambiguous or stale edit, mirroring the hashline contract. This is
+# the format Claude Code's Edit primitive uses; it avoids the dominant whole-file
+# failure mode (a local model dropping unrelated lines while retyping the file).
+# --------------------------------------------------------------------------- #
+
+# Block markers. Lenient on marker length (5–9 chars) and trailing whitespace so
+# a model that emits 6 or 8 angle-brackets still parses (Aider leniency principle).
+_SR_SEARCH_RE = re.compile(r"^<{5,9}\s*SEARCH\s*$")
+_SR_DIVIDER_RE = re.compile(r"^={5,9}\s*$")
+_SR_REPLACE_RE = re.compile(r"^>{5,9}\s*REPLACE\s*$")
+
+# Prepended to the plan context when EDIT_FILE is available, documenting the
+# block syntax. Kept separate from _PLAN_PROMPT so the WRITE_FILE convention is
+# untouched for models/paths that don't use EDIT_FILE.
+SEARCH_REPLACE_PROMPT_INSTRUCTIONS = """\
+EDIT_FILE — surgical edit of an EXISTING file (prefer over WRITE_FILE for changes):
+- The body is one or more SEARCH/REPLACE blocks. Each block is EXACTLY:
+    <<<<<<< SEARCH
+    <lines copied verbatim from the current file>
+    =======
+    <the replacement lines>
+    >>>>>>> REPLACE
+- The SEARCH text must match the current file content EXACTLY (whitespace and
+  all) and be UNIQUE. Copy it from the most recent READ_FILE output. If it does
+  not match exactly once, the edit is rejected and nothing is written — READ_FILE
+  again and resend.
+- Include enough surrounding context in SEARCH to make the match unique. To
+  delete code, leave the REPLACE section empty. Use one block per distinct edit.
+- Use WRITE_FILE (whole file) only to CREATE a new file or fully rewrite one."""
+
+
+@dataclass
+class _SRBlock:
+    search: str   # exact text to find in the current file ("" allowed for new file)
+    replace: str  # text to substitute
+
+
+def _parse_search_replace_blocks(payload: str) -> list[_SRBlock]:
+    """Parse ``<<<<<<< SEARCH / ======= / >>>>>>> REPLACE`` blocks.
+
+    Deterministic state machine. Text outside well-formed blocks is ignored
+    (Aider leniency). A malformed block (missing divider/closer) yields no block
+    for that region; an empty result is handled by the caller as a hard error so
+    a garbled payload never silently no-ops.
+    """
+    blocks: list[_SRBlock] = []
+    state = "outside"          # outside → search → replace
+    search: list[str] = []
+    replace: list[str] = []
+    for raw in payload.split("\n"):
+        if state == "outside":
+            if _SR_SEARCH_RE.match(raw):
+                state, search, replace = "search", [], []
+        elif state == "search":
+            if _SR_DIVIDER_RE.match(raw):
+                state = "replace"
+            else:
+                search.append(raw)
+        elif state == "replace":
+            if _SR_REPLACE_RE.match(raw):
+                blocks.append(_SRBlock("\n".join(search), "\n".join(replace)))
+                state = "outside"
+            else:
+                replace.append(raw)
+    return blocks
+
+
 class EditApplier:
     """Applies a WRITE_FILE payload to produce the resulting file text + lint.
 
@@ -287,6 +362,8 @@ class EditApplier:
             new_text = payload
         elif fmt == HASHLINE:
             new_text = self._apply_hashline(current_text, payload, path)
+        elif fmt == SEARCH_REPLACE:
+            new_text = self._apply_search_replace(current_text, payload, path)
         else:
             # UDIFF not yet implemented (task 4) — degrade gracefully to
             # whole_file rather than crash (AGENTS.md degrade-gracefully, R3.3).
@@ -353,6 +430,74 @@ class EditApplier:
                 lines[idx:idx] = op.content
 
         return "\n".join(lines)
+
+    def _apply_search_replace(
+        self, current_text: str, payload: str, path: str
+    ) -> str:
+        """Apply aider-style SEARCH/REPLACE blocks to ``current_text``.
+
+        Fail-closed contract (R5): each SEARCH must match the *running* text
+        EXACTLY ONCE. Zero matches (stale) or multiple matches (ambiguous) abort
+        the whole batch with a diagnostic — nothing is written. Blocks apply in
+        order against the running text so a later block sees earlier edits, which
+        also makes "edit two identical-looking regions" expressible by ordering.
+        An empty SEARCH is only valid against an empty file (file creation).
+        """
+        blocks = _parse_search_replace_blocks(payload)
+        if not blocks:
+            raise EditError(
+                reason="mismatch",
+                message=(
+                    "EDIT_FILE contained no parseable SEARCH/REPLACE blocks. Each "
+                    "edit must be:\n<<<<<<< SEARCH\n<current lines>\n=======\n"
+                    "<new lines>\n>>>>>>> REPLACE\nNothing was written — resend in "
+                    "that form."
+                ),
+            )
+
+        text = current_text
+        for n, block in enumerate(blocks, 1):
+            if block.search == "":
+                # Empty SEARCH = create/seed an empty file only. Refuse to blindly
+                # prepend into a non-empty file (that is a whole-file WRITE_FILE).
+                if text != "":
+                    raise EditError(
+                        reason="mismatch",
+                        message=(
+                            f"EDIT_FILE block {n} has an empty SEARCH but {path} is "
+                            f"not empty. Use WRITE_FILE to rewrite a whole file, or "
+                            f"give a non-empty SEARCH anchor. Nothing was written."
+                        ),
+                    )
+                text = block.replace
+                continue
+
+            count = text.count(block.search)
+            if count == 0:
+                raise EditError(
+                    reason="mismatch",
+                    message=(
+                        f"EDIT_FILE block {n}: the SEARCH text was not found in "
+                        f"{path}. It must match the current file content exactly. "
+                        f"The file was NOT modified. Re-READ_FILE {path} and resend "
+                        f"the edit against the current content."
+                    ),
+                    target=block.search,
+                )
+            if count > 1:
+                raise EditError(
+                    reason="mismatch",
+                    message=(
+                        f"EDIT_FILE block {n}: the SEARCH text matches {count} "
+                        f"locations in {path} — it must be unique. Add surrounding "
+                        f"context lines to the SEARCH so it identifies exactly one "
+                        f"region. Nothing was written."
+                    ),
+                    target=block.search,
+                )
+            text = text.replace(block.search, block.replace, 1)
+
+        return text
 
     def _lint(self, path: str, text: str) -> None:
         """Run the registered validator for ``path``'s extension, if any (R1.3)."""

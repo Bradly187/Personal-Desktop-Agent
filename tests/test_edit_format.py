@@ -6,7 +6,7 @@ criterion it covers. All pure-function — no model, no DevAgent loop.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -15,6 +15,8 @@ from inference.edit_format import (
     EditApplier,
     EditError,
     HASHLINE,
+    SEARCH_REPLACE,
+    SEARCH_REPLACE_PROMPT_INSTRUCTIONS,
     UDIFF,
     WHOLE_FILE,
     hash_line,
@@ -369,3 +371,191 @@ def test_r3_1_profile_default_honored_when_set(monkeypatch):
         assert router.edit_format_for("deepseek-r1:8b") == "udiff"
     finally:
         router._profiles["math"].edit_format = "whole_file"
+
+
+# --- R5: EDIT_FILE / SEARCH_REPLACE surgical edits ----------------------------
+#
+# EDIT_FILE applies aider-style SEARCH/REPLACE blocks. The core contract is
+# fail-closed: a SEARCH that doesn't match the current text EXACTLY ONCE aborts
+# the whole batch and nothing is written. It reuses the same lint gate as
+# WRITE_FILE, so a broken-Python result is still rejected pre-write.
+
+_SR_SRC = "def foo():\n    return 1\n\n\ndef bar():\n    return 2\n"
+
+
+def _sr_block(search: str, replace: str) -> str:
+    return f"<<<<<<< SEARCH\n{search}\n=======\n{replace}\n>>>>>>> REPLACE"
+
+
+def _dev_agent_no_critic(edit_format="whole_file"):
+    """A DevAgent with Critic + Tester forced OFF (no model calls in dispatch)."""
+    agent = _dev_agent(edit_format)
+    agent._critic = None
+    agent._critic_enabled = False
+    agent._tester = None
+    agent._tester_enabled = False
+    return agent
+
+
+def test_r5_search_replace_applies_unique_block():
+    """R5: a SEARCH that matches exactly once is replaced; rest of file intact."""
+    applier = EditApplier()
+    out = applier.apply(
+        _SR_SRC, _sr_block("    return 1", "    return 42"),
+        edit_format=SEARCH_REPLACE, path="m.py",
+    )
+    assert "return 42" in out and "return 2" in out
+    assert "return 1\n" not in out
+
+
+def test_r5_multi_block_applies_in_order():
+    """R5: multiple blocks each apply against the running text."""
+    applier = EditApplier()
+    payload = (
+        _sr_block("    return 1", "    return 11") + "\n"
+        + _sr_block("    return 2", "    return 22")
+    )
+    out = applier.apply(_SR_SRC, payload, edit_format=SEARCH_REPLACE, path="m.py")
+    assert "return 11" in out and "return 22" in out
+
+
+def test_r5_search_not_found_fails_closed():
+    """R5: a SEARCH absent from the file raises EditError(mismatch) — no write."""
+    applier = EditApplier()
+    with pytest.raises(EditError) as ei:
+        applier.apply(
+            _SR_SRC, _sr_block("    return 999", "    return 0"),
+            edit_format=SEARCH_REPLACE, path="m.py",
+        )
+    assert ei.value.reason == "mismatch"
+    assert "not found" in str(ei.value).lower()
+
+
+def test_r5_ambiguous_search_fails_closed():
+    """R5: a SEARCH matching >1 location is rejected (must be unique)."""
+    applier = EditApplier()
+    src = "x = 1\nx = 1\n"
+    with pytest.raises(EditError) as ei:
+        applier.apply(
+            src, _sr_block("x = 1", "x = 2"),
+            edit_format=SEARCH_REPLACE, path="m.py",
+        )
+    assert ei.value.reason == "mismatch"
+    assert "match" in str(ei.value).lower()
+
+
+def test_r5_broken_python_result_rejected_pre_write():
+    """R5 + R1.2: a SEARCH/REPLACE whose result is invalid Python is rejected."""
+    applier = EditApplier()
+    with pytest.raises(EditError) as ei:
+        applier.apply(
+            _SR_SRC, _sr_block("    return 1", "    return ("),
+            edit_format=SEARCH_REPLACE, path="m.py",
+        )
+    assert ei.value.reason == "syntax"
+
+
+def test_r5_non_python_result_not_linted():
+    """R1.3: a non-.py SEARCH/REPLACE result is not lint-gated."""
+    applier = EditApplier()
+    out = applier.apply(
+        "key: 1\n", _sr_block("key: 1", "key: 2"),
+        edit_format=SEARCH_REPLACE, path="conf.yaml",
+    )
+    assert out == "key: 2\n"
+
+
+def test_r5_empty_replace_deletes():
+    """R5: an empty REPLACE section deletes the matched region."""
+    applier = EditApplier()
+    src = "a\nDELETE ME\nb\n"
+    out = applier.apply(
+        src, _sr_block("DELETE ME\n", ""),
+        edit_format=SEARCH_REPLACE, path="m.txt",
+    )
+    assert "DELETE ME" not in out and "a\n" in out and "b\n" in out
+
+
+def test_r5_empty_search_creates_empty_file_only():
+    """R5: empty SEARCH is creation on an empty file, refused on a non-empty one."""
+    applier = EditApplier()
+    # Empty file → creation.
+    out = applier.apply("", _sr_block("", "hello\n"), edit_format=SEARCH_REPLACE,
+                        path="new.txt")
+    assert out == "hello\n"
+    # Non-empty file → refuse (use WRITE_FILE to rewrite).
+    with pytest.raises(EditError) as ei:
+        applier.apply("existing\n", _sr_block("", "x\n"),
+                      edit_format=SEARCH_REPLACE, path="m.txt")
+    assert ei.value.reason == "mismatch"
+
+
+def test_r5_no_parseable_blocks_rejected():
+    """R5: a payload with no well-formed blocks fails closed (never a no-op)."""
+    applier = EditApplier()
+    with pytest.raises(EditError) as ei:
+        applier.apply(_SR_SRC, "just some prose, no blocks",
+                      edit_format=SEARCH_REPLACE, path="m.py")
+    assert ei.value.reason == "mismatch"
+
+
+def test_r5_lenient_marker_lengths():
+    """R5: 6- or 8-char marker fences still parse (Aider leniency)."""
+    applier = EditApplier()
+    payload = "<<<<<< SEARCH\n    return 1\n======\n    return 7\n>>>>>> REPLACE"
+    out = applier.apply(_SR_SRC, payload, edit_format=SEARCH_REPLACE, path="m.py")
+    assert "return 7" in out
+
+
+def test_r5_apply_edit_override_forces_search_replace(tmp_path):
+    """R5: EDIT_FILE passes SEARCH_REPLACE explicitly — ignores the model's knob."""
+    # Model knob is whole_file, but the override wins.
+    agent = _dev_agent(edit_format="whole_file")
+    target = tmp_path / "m.py"
+    target.write_text(_SR_SRC, encoding="utf-8")
+    out = agent._apply_edit(str(target), _sr_block("    return 1", "    return 9"),
+                            SEARCH_REPLACE)
+    assert "return 9" in out
+    # The per-model resolver is NOT consulted when an override is given.
+    agent._router.edit_format_for.assert_not_called()
+    # _apply_edit does not write — file still original.
+    assert target.read_text(encoding="utf-8") == _SR_SRC
+
+
+async def test_r5_execute_step_edit_file_writes_and_snapshots(tmp_path):
+    """R5: EDIT_FILE through _execute_step edits the file and captures a snapshot."""
+    agent = _dev_agent_no_critic()
+    agent._confirm_destructive_op = AsyncMock(return_value=True)
+    target = tmp_path / "m.py"
+    target.write_text(_SR_SRC, encoding="utf-8")
+    step = AgentStep(action="EDIT_FILE", args=str(target),
+                     body=_sr_block("    return 1", "    return 5"))
+    result = await agent._execute_step(step)
+    assert "Written" in result
+    assert "return 5" in target.read_text(encoding="utf-8")
+    # Saga snapshot captured before the write so a rollback can restore it: the
+    # snapshot records that the file pre-existed (RESTORE_FILE, not DELETE_FILE).
+    assert step.comp_args is not None
+    import json as _json
+    assert _json.loads(step.comp_args)["existed"] is True
+
+
+async def test_r5_execute_step_edit_file_mismatch_leaves_file_untouched(tmp_path):
+    """R5: a non-matching EDIT_FILE fails closed — file unchanged, no snapshot."""
+    agent = _dev_agent_no_critic()
+    agent._confirm_destructive_op = AsyncMock(return_value=True)
+    target = tmp_path / "m.py"
+    target.write_text(_SR_SRC, encoding="utf-8")
+    step = AgentStep(action="EDIT_FILE", args=str(target),
+                     body=_sr_block("    return 404", "    return 5"))
+    with pytest.raises(EditError):
+        await agent._execute_step(step)
+    assert target.read_text(encoding="utf-8") == _SR_SRC
+    assert step.comp_args is None  # apply failed before snapshot
+
+
+def test_r5_prompt_instructions_describe_blocks():
+    """R5: the planner instructions document the SEARCH/REPLACE block syntax."""
+    txt = SEARCH_REPLACE_PROMPT_INSTRUCTIONS
+    assert "SEARCH" in txt and "REPLACE" in txt
+    assert "EDIT_FILE" in txt

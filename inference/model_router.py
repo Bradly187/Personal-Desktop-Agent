@@ -157,7 +157,10 @@ When given a goal, produce a concrete numbered action plan. Each step must use e
 of the following action verbs:
 
 File operations:
-  [WRITE_FILE <path>]        — create or overwrite a file (put content on the next lines)
+  [WRITE_FILE <path>]        — create or fully overwrite a file (put content on the next lines)
+  [EDIT_FILE <path>]         — surgically edit an EXISTING file via SEARCH/REPLACE blocks
+                               (prefer this over WRITE_FILE for targeted changes; see the
+                               EDIT_FILE format instructions in context)
   [READ_FILE <path>]         — read an existing file into context
   [GREP <pattern> [<path>]]  — search for a pattern across the codebase
 
@@ -233,7 +236,7 @@ Steps are 1-based by their order in the array; `after` references those position
 
 # Verb vocabulary the planner may emit (mirrors DevAgent._PLAN_ACTIONS).
 _PLAN_VERBS: list[str] = [
-    "WRITE_FILE", "RUN_TERMINAL", "READ_FILE", "GREP",
+    "WRITE_FILE", "EDIT_FILE", "RUN_TERMINAL", "READ_FILE", "GREP",
     "GIT_STATUS", "GIT_DIFF", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR",
     "FETCH_URL", "SEARCH_WEB", "CLICK", "OPEN", "HOTKEY", "SCROLL", "TYPE",
     "EXPLAIN", "READ_SCREEN",
