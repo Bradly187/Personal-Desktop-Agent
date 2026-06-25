@@ -1,24 +1,29 @@
 # Diagram 10 — NemoClaw Integration: System Architecture
 
-End-to-end view showing how NemoClaw concepts (Gate 0 privacy routing,
-`NemotronInference`, and `gate_that_decided` logging) slot into the full pipeline.
+End-to-end view showing how NemoClaw concepts (Gate 0 privacy routing and
+`gate_that_decided` logging) slot into the full pipeline.
 Green nodes = NemoClaw additions. Dark red = cloud paths. Blue = observability.
+
+> **Note (2026-06-24):** the **local-tier model roster below is historical** —
+> `NemotronInference`/`nemotron-mini` was removed and `llama3.1:70b` does not fit
+> alongside Whisper. See the "VRAM model roster" gotcha in `CLAUDE.md` for the
+> current models (command: `llama3.1:8b`; specialists: `qwen3-coder:30b`,
+> `deepseek-r1:8b`, `qwen3-vl:30b`, `gemma3:27b`). Operational writes go to
+> `agent.db`, not `routing_log.jsonl`.
 
 ```mermaid
 graph TD
     subgraph iPad["iPad Pro — Sensor Hub"]
         TiltSensor
-        GazeTracker
-        HeadTracker
         KeywordListener
-        SoundDetector
+        CameraStreamer
         CommandPadView
         TrackpadView
     end
 
     subgraph Bridge["PC — ipad_bridge.py :8765"]
         WS["WebSocket Server\naiohttp"]
-        FE["FusionEngine\n60 Hz tick · 10-priority rules"]
+        FE["FusionEngine\n60 Hz tick · 6-priority rules"]
     end
 
     subgraph Coordinator["HybridCoordinator"]
@@ -41,7 +46,7 @@ graph TD
     end
 
     subgraph Execution["Execution Layer"]
-        CE["CommandExecutor\n9-verb vocabulary"]
+        CE["CommandExecutor\n16-verb vocabulary"]
         MCP["MCP Server\ndesktop_mcp_server.py"]
         PY["pyautogui · Win32"]
     end
@@ -50,7 +55,7 @@ graph TD
         RL["routing_log.jsonl\ngate_that_decided field"]
     end
 
-    iPad -->|"WebSocket\n12 message types"| WS
+    iPad -->|"WebSocket\n26 iPad→PC message types"| WS
     WS --> FE
     FE -->|"Command DTO"| G0
     G0 -->|"sensitive → force local"| NI

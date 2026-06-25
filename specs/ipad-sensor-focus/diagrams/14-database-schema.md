@@ -1,8 +1,8 @@
 # Database Schema Diagrams
 
 Two stores make up the persistence layer:
-- **`agent.db`** (SQLite) — all operational pipeline writes; 12 tables
-- **`analytics.duckdb`** (DuckDB) — benchmark history; attaches `agent.db` for OLAP queries
+- **`agent.db`** (SQLite) — all operational pipeline writes; **48 tables at `PRAGMA user_version = 8`**. The ER diagram below depicts the core hot-path subset; `storage/db.py` is the authoritative source of truth for the full schema (AGENTS.md #1).
+- **`analytics.duckdb`** (DuckDB) — benchmark history (3 `benchmark_*` tables); attaches `agent.db` for OLAP queries
 
 ---
 
@@ -24,7 +24,7 @@ erDiagram
         INTEGER id                  PK  "AUTOINCREMENT"
         INTEGER session_id          FK  "→ sessions.id"
         REAL    ts                      "Unix timestamp"
-        TEXT    source                  "touch | gaze_dwell | voice | gesture | sound_action | keyword | trackpad"
+        TEXT    source                  "touch | voice | voice_local | gesture | keyword | trackpad | multimodal"
         TEXT    text                    "Raw command text"
         TEXT    action                  "Executed verb; NULL if CLARIFY before dispatch"
         TEXT    params                  "JSON action params"
@@ -124,7 +124,7 @@ erDiagram
         INTEGER id          PK  "AUTOINCREMENT"
         INTEGER command_id  FK  "→ commands.id; NULL if no command fired from this event"
         REAL    ts
-        TEXT    event_type      "gaze_dwell | gesture | sound_action | keyword | tilt_tap"
+        TEXT    event_type      "gesture | keyword | tilt_tap"
         REAL    x               "Normalised 0-1 screen coord"
         REAL    y
         REAL    confidence
@@ -241,7 +241,7 @@ flowchart TD
     HC -->|"INSERT every routed command"| C
     HC -->|"INSERT after each LLM call"| I
 
-    FE -->|"INSERT gaze_dwell / gesture\n/ sound / keyword events"| SE
+    FE -->|"INSERT gesture / keyword\n/ tilt_tap events"| SE
 
     CT -->|"UPSERT on record_success"| FSE
     CT -->|"UPDATE ON CONFLICT count++"| WC

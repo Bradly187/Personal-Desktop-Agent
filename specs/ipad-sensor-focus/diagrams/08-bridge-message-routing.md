@@ -21,7 +21,7 @@ flowchart TD
     TPEV -- scroll --> TSCROLL["mouse_scroll(cx,cy,dir)"]
 
     %% ── Sensor stream → FusionEngine ────────────────────────────────────
-    TYPE -- "tilt\ntilt_position\ngaze / gaze_dwell\nhead_pose\nkeyword\nsound_action" --> FE["FusionEngine\n60 Hz tick, 10-level priority"]
+    TYPE -- "tilt\ntilt_position\nkeyword" --> FE["FusionEngine\n60 Hz tick, 6-level priority"]
     FE --> HC["HybridCoordinator\n4-gate routing"]
     HC --> CE
 
@@ -70,15 +70,15 @@ flowchart TD
     style HC fill:#2a2a4a,color:#fff
 ```
 
-**Message types handled (18 total):**
+**Message routing categories:**
 
 | Category | Types | Destination |
 |----------|-------|-------------|
 | Direct execution | `touch_command`, `tilt_tap` | CommandExecutor (bypasses FusionEngine) |
 | Direct hardware | `trackpad` | pyautogui (bypasses LLM + executor) |
-| Sensor stream | `tilt`, `tilt_position`, `gaze`, `gaze_dwell`, `head_pose`, `keyword`, `sound_action` | FusionEngine → HybridCoordinator → CommandExecutor |
+| Sensor stream | `tilt`, `tilt_position`, `keyword` | FusionEngine → HybridCoordinator → CommandExecutor |
 | Specialist receivers | `depth_frame` → LiDARReceiver, `camera_frame` → GestureProcessor, `audio_stream` → WhisperStream → FusionEngine | per-subsystem |
 | Inline | `handwriting_image` | pix2tex OCR → `handwriting_result` reply |
 | Control | `ping`, `set_dwell_action`, `set_feature_toggle` | ack / FusionEngine state update |
 
-The 14 official iPad→PC sensor types are: `tilt`, `tilt_position`, `gaze`, `gaze_dwell`, `head_pose`, `keyword`, `sound_action`, `touch_command`, `trackpad`, `audio_stream`, `camera_frame`, `depth_frame`, `handwriting_image`, `tilt_tap`.
+The core iPad→PC sensor-stream types are: `tilt`, `tilt_position`, `keyword`, `touch_command`, `trackpad`, `audio_stream`, `camera_frame`, `depth_frame`, `handwriting_image`, `tilt_tap` (plus `tilt_ratchet`, `dwell_click`, `a2ui_event` and settings/diagnostics control types — 26 iPad→PC message types in total).

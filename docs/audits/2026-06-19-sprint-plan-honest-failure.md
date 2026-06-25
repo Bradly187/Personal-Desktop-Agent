@@ -1,5 +1,10 @@
 # Sprint Plan — "Honest, Actionable Failure" — 2026-06-19
 
+> **✅ SHIPPED (verified 2026-06-24).** S2 durable-failure integrity (E3/E4/E5/E6/E18/E19)
+> landed via PR #119 (`fix: durable saga-failure integrity (EH-2/S2)`) and PR #121
+> (`saga S2`); the finding IDs are cited in-code at `inference/dev_agent.py:1101-1107`.
+> This plan is retained as historical context — its items are **done**, not open.
+
 Tracked plan for the three highest-leverage items from
 [`2026-06-19-agentic-practices-assessment.md`](2026-06-19-agentic-practices-assessment.md).
 Findings reference `2026-06-16-error-handling-gap-analysis.md` (E#) and the roadmap (workstream D).

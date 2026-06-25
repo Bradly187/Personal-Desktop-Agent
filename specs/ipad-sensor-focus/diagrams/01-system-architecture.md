@@ -16,13 +16,13 @@ C4Context
 
     System_Boundary(desktop, "Desktop PC — RTX 5090") {
         System(pc_service, "PC_Service", "Python asyncio\nInference + execution")
-        SystemDb(storage, "Local Storage", "agent.db (SQLite 14 tables)\naudit.db (append-only)\nanalytics.duckdb\nchroma_db/ (vector store)")
+        SystemDb(storage, "Local Storage", "agent.db (SQLite 48 tables, v8)\naudit.db (append-only, hash-chained)\nanalytics.duckdb\nchroma_db/ (vector store)")
         System(ollama, "Ollama Server", "llama3.1:8b default\n4.6 GB VRAM / ~190 ms warm wall p50 (0.30.6)")
     }
 
     System_Ext(aws, "AWS Cloud", "Fallback only\nBedrock / Transcribe / Polly")
 
-    Rel(user, ipad_app, "Tilts, gazes, speaks,\nmakes sounds, touches")
+    Rel(user, ipad_app, "Tilts, gestures, speaks,\ntouches")
     Rel(ipad_app, pc_service, "WebSocket :8765\nSensor data + commands")
     Rel(pc_service, ollama, "HTTP :11434\nChat completions")
     Rel(pc_service, storage, "Read/write state")
@@ -39,22 +39,21 @@ flowchart LR
     subgraph iPad["iPad Pro (Native Swift App)"]
         direction TB
         CM["Core Motion\n(Tilt vectors @ 60Hz)"]
-        ARK["ARKit\n(Gaze delta + Head pose + LiDAR)"]
         SPE["Speech Framework\n(Keyword recognition)"]
-        AVF["AVFoundation\n(Sound action detection)"]
         CAM["Camera Feed\n(JPEG frames @ 10fps)"]
+        DEPTH["Depth frames\n(RealSense L515 — incoming)"]
         TOUCH["SwiftUI Touch\n(Command pad + Trackpad)"]
     end
 
-    subgraph WS["WebSocket :8765 — 15 message types"]
+    subgraph WS["WebSocket :8765 — 26 iPad→PC message types"]
         direction TB
-        MSG["JSON: tilt, gaze_delta, head_pose,\ndepth_frame, camera_frame,\naudio_stream, touch_command, …"]
+        MSG["JSON: tilt, tilt_position, keyword,\ndepth_frame, camera_frame,\naudio_stream, touch_command, …"]
     end
 
     subgraph PC["Desktop PC (Python asyncio)"]
         direction TB
         BRIDGE["IPadBridge\n(Message router)"]
-        FUSION["FusionEngine\n(10-level priority @ 60Hz)"]
+        FUSION["FusionEngine\n(6-level priority @ 60Hz)"]
         WHISPER["WhisperStream\n(Silero VAD + Whisper large-v3)"]
         TWIN["BehavioralTwinState\n(ChromaDB + AgentDB)"]
         COORD["HybridCoordinator\n(Gate 0 + Gates 1–4)"]
@@ -63,10 +62,9 @@ flowchart LR
     end
 
     CM --> MSG
-    ARK --> MSG
     SPE --> MSG
-    AVF --> MSG
     CAM --> MSG
+    DEPTH --> MSG
     TOUCH --> MSG
 
     MSG --> BRIDGE
@@ -95,13 +93,11 @@ sequenceDiagram
 
     Note over iPad,PC: Sensor Streaming (continuous)
     iPad->>PC: {"type":"tilt","ts":1234,"data":{"rx":0.02,"ry":-0.01}}
-    iPad->>PC: {"type":"gaze","ts":1235,"data":{"x":0.72,"y":0.44,"conf":0.91}}
-    iPad->>PC: {"type":"head_pose","ts":1235,"data":{"pitch":2.1,"yaw":-1.3}}
+    iPad->>PC: {"type":"tilt_position","ts":1235,"data":{"x":0.72,"y":0.44}}
     iPad->>PC: {"type":"depth_frame","ts":1236,"data":{"w":256,"h":192,"blob":"<base64>"}}
 
     Note over iPad,PC: Event Messages (on detection)
     iPad->>PC: {"type":"keyword","ts":1240,"data":{"word":"scroll down","conf":0.94}}
-    iPad->>PC: {"type":"sound_action","ts":1241,"data":{"sound":"cluck","conf":0.87}}
     iPad->>PC: {"type":"touch_command","ts":1242,"data":{"command":"open chrome"}}
     iPad->>PC: {"type":"trackpad","ts":1243,"data":{"dx":12,"dy":-5}}
     iPad->>PC: {"type":"audio_stream","ts":1244,"data":{"samples":"<base64 PCM>"}}
@@ -135,7 +131,7 @@ flowchart LR
         polly["Polly / Chatterbox"]
     end
 
-    app <-->|"WebSocket :8765 (WiFi)\n15 message types including\ndepth_frame + camera_frame"| service
+    app <-->|"WebSocket :8765 (WiFi)\n26 iPad→PC types including\ndepth_frame + camera_frame"| service
     service <-->|"boto3 HTTPS\n(Gate 2/3/4 fallback)"| bedrock
     service <-->|"boto3 HTTPS\n(Gate 1 low-confidence)"| transcribe
     service <-->|"HTTP :8766 sidecar"| polly

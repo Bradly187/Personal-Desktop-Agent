@@ -33,7 +33,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 iPad Pro (Swift/SwiftUI)          PC (Python asyncio)
 ─────────────────────────         ────────────────────────────────
 Core Motion (tilt)         ──┐
-ARKit (LiDAR)              ──┤    IPadBridge (15 message types)
+ARKit (LiDAR)              ──┤    IPadBridge (26 message types)
 Speech Framework (keywords)──┼──► FusionEngine (6-level @ 60Hz)
 AVFoundation (sound)       ──┤    BehavioralTwinState (ChromaDB)
 Touch UI (command pad)     ──┤    HybridCoordinator (Gate 0 + 1–4)
