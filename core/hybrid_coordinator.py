@@ -62,6 +62,7 @@ from inference.local_inference import (
 )
 from desktop.vision_grounder import VisionGrounder
 from core.conversation_state import ConversationState
+from core.conversation_mode import ConversationMode, conversation_mode_config
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
 from monitoring.cost_ledger import estimate_cost
@@ -484,6 +485,10 @@ class HybridCoordinator:
         # (Phase 3 prototype, flag-gated by DA_A2UI_CLICK_TARGETS).
         self._target_cache = None
         self._conversation = ConversationState()  # voice anaphora + last-action hint
+        # Voice conversation mode (wake/sleep-gated talk-only dialogue). Default
+        # OFF; reads conversation_mode.enabled from ~/.claude/ipad_bridge/config.json.
+        # Spec: specs/conversation-mode/.
+        self._conv_mode = ConversationMode.from_config(conversation_mode_config())
         self._lecture_mode: bool = False
         self._profiler = None    # set via set_profiler()
         self._calibrator = None  # set via set_calibrator()
@@ -912,6 +917,113 @@ class HybridCoordinator:
         except Exception as exc:
             log.debug("HybridCoordinator._tts_speak failed: %s", exc)
 
+    async def _speak_and_suppress(self, text: str) -> None:
+        """Speak ``text`` while suppressing the mic for the playback duration.
+
+        Without this guard the agent transcribes its own TTS voice as the user's
+        next utterance — a runaway feedback loop. We suppress generously *before*
+        speaking (also flushing any buffered audio), then re-arm a short echo
+        tail *after* ``_tts_speak`` returns (it blocks until playback finishes),
+        so the window always covers synthesis + playback even if the word-count
+        estimate runs short. Mirrors the voice-calibrator / approval-gate guard.
+        """
+        words = len(text.split())
+        # ~0.35 s/word is the spoken-rate estimate used across the voice paths.
+        est = max(1.5, words * 0.35)
+        whisper = self._whisper
+        if whisper is not None:
+            try:
+                whisper.suppress(est + 1.0)
+            except Exception as exc:
+                log.debug("conversation: pre-speak suppress failed: %s", exc)
+        await self._tts_speak(text)
+        if whisper is not None:
+            try:
+                whisper.suppress(0.8)   # echo tail after playback completes
+            except Exception as exc:
+                log.debug("conversation: post-speak suppress failed: %s", exc)
+
+    async def _maybe_handle_conversation(self, cmd: Command) -> Optional[dict]:
+        """Handle a voice utterance under conversation mode.
+
+        Returns a result dict when the utterance was consumed by conversation
+        mode (entering, replying, or leaving), or ``None`` to let the normal
+        command/dev pipeline handle it (mode inactive and not a wake phrase).
+        Fail-safe: any error degrades to ``None`` so a fault never strands the
+        user — the utterance just routes as an ordinary command.
+        """
+        try:
+            text = (cmd.text or "").strip()
+            if not text:
+                return None
+            conv = self._conv_mode
+
+            if not conv.active:
+                matched, remainder = conv.match_wake(text)
+                if not matched:
+                    return None  # ordinary command — fall through to the pipeline
+                conv.enter()
+                log.info("HybridCoordinator: entered conversation mode")
+                if remainder:
+                    # "conversation mode, <question>" — wake word and the first
+                    # turn arrived together; answer it straight away instead of
+                    # speaking a greeting that would leave the user waiting.
+                    reply = await self._converse(remainder)
+                    conv.record("user", remainder)
+                    conv.record("assistant", reply)
+                    await self._speak_and_suppress(reply)
+                    return {"status": "ok", "action": "CONVERSATION_START",
+                            "spoken": reply, "source": cmd.source,
+                            "trace_id": cmd.trace_id}
+                await self._speak_and_suppress(
+                    "Okay, I'm listening. Say 'that's all' when you're done."
+                )
+                return {"status": "ok", "action": "CONVERSATION_START",
+                        "source": cmd.source, "trace_id": cmd.trace_id}
+
+            # --- active conversation ---
+            if conv.detect_sleep(text):
+                conv.exit()
+                log.info("HybridCoordinator: left conversation mode")
+                await self._speak_and_suppress("Okay, talk to you later.")
+                return {"status": "ok", "action": "CONVERSATION_END",
+                        "source": cmd.source, "trace_id": cmd.trace_id}
+
+            reply = await self._converse(text)
+            conv.record("user", text)
+            conv.record("assistant", reply)
+            await self._speak_and_suppress(reply)
+            return {"status": "ok", "action": "CONVERSATION_REPLY",
+                    "spoken": reply, "source": cmd.source, "trace_id": cmd.trace_id}
+        except Exception as exc:  # never strand the user mid-conversation
+            log.warning("HybridCoordinator: conversation handling failed (%s)", exc)
+            return None
+
+    async def _converse(self, text: str) -> str:
+        """Answer one conversational turn with the resident general model.
+
+        Reuses ``ModelRouter.infer(domain="general", ...)`` (gemma4:12b — already
+        resident, so no extra VRAM and no eviction churn, AGENTS.md #6), threading
+        the running dialogue in as prompt context. Degrades to a spoken apology if
+        no router is wired or inference fails — never raises.
+        """
+        router = getattr(self._dev_agent, "_router", None) if self._dev_agent else None
+        if router is None:
+            return "Sorry, the conversation model isn't available right now."
+        try:
+            context = self._conv_mode.build_context()
+            result = await router.infer(
+                domain="general", user_text=text, context=context,
+            )
+            reply = (getattr(result, "text", "") or "").strip()
+            if getattr(result, "ok", True) and reply:
+                return reply
+            log.debug("conversation: empty/failed general reply (%r)",
+                      getattr(result, "error", None))
+        except Exception as exc:
+            log.warning("conversation: general inference failed (%s)", exc)
+        return "Sorry, I didn't catch that. Could you say it another way?"
+
     async def _handle_google_connect(self) -> dict:
         """Start the Google OAuth consent flow by voice (setup or recovery).
 
@@ -1091,6 +1203,15 @@ class HybridCoordinator:
             macro_result = await self._maybe_handle_macro(cmd)
             if macro_result is not None:
                 return macro_result
+
+        # --- Voice conversation mode: wake/sleep-gated talk-only dialogue ---
+        # When active, every voice utterance (other than the sleep phrase) is a
+        # conversational turn answered by the resident general model — the entire
+        # command/dev pipeline below is bypassed. Default OFF (experimental).
+        if self._conv_mode.enabled and cmd.source in ("voice", "voice_local"):
+            conv_result = await self._maybe_handle_conversation(cmd)
+            if conv_result is not None:
+                return conv_result
 
         # --- Dev-agent pre-gate: intercept non-command domains ---
         # Skip for voice system-control keywords so they reach the keyword block
