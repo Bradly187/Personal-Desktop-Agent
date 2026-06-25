@@ -6,6 +6,8 @@ state **as of its own date** — table counts and tips are historical, not curre
 authoritative current schema fact lives in `CLAUDE.md`; `storage/db.py` is the schema
 source of truth. Day-by-day notes live in `docs/daily/`.
 
+**Done (Kokoro TTS + docs truth-up + eval-gated flag flips + observability gaps — 2026-06-23→24, merged):** PRs #132/#133 + the Kokoro and obs merges. **Kokoro TTS** (2026-06-23) — local ONNX TTS is now the default runtime backend (`tts_backend: "kokoro"`, voice `af_bella`, CPU; GPU auto-selects with `onnxruntime-gpu`+CUDA); the agent runtime no longer speaks via Polly/Danielle (`approval_hook.py` consent prompts still use Polly directly). **#132** docs truth-up — reconciled checked-in docs/diagrams with code after an evaluation pass (schema fact **42→48 tables**; WS counts 25/6→**26/12**; diagram gaze/head-pose/mouth-sound scrub; 10→6 priority ladder); nearly every "open" hardening item in the audit/handoff/roadmap docs was already shipped. **#133** flipped `DA_CRITIC`/`DA_TESTER`/`DA_PLAN_REPAIR` defaults **OFF→ON** on their locked eval baselines (**supersedes the "all four default OFF" note in the 2026-06-22 entry below** — only `self_skilling.enabled` and `DA_TRAJECTORY_REDUCE` remain default-OFF; trajectory-reduce is a deliberate hold, not a missing gate). **Observability gaps** (`565ff93`) — P1 mcp_server tool logging, P2 domain-classifier winner/runner-up log, P3 pyautogui try/except, P5 `TraceRecorder.flush_all()`/`dump_to_file()` crash dump, P6 `GET /api/session-live`, P8 new `monitoring/metric_watcher.py` (`metric.threshold_crossed` EventBus topic, edge-triggered hysteresis alerts).
+
 **Done (agentic-gap sprint: Critic/Tester + sandbox-hardening + plan-contract + self-skilling — 2026-06-22, merged):** PRs #128–#131. **#131** self-skilling macros (rung 2) — `adaptive/macro_detector.py` offline-mines recurring successful trajectories into named, replayable macros via `core/macro_store.py`; voice-promote only (`"save that as a command called X"`), staged in the reused `self_evolution_candidates` table (no schema change); rungs 3–4 are explicit non-goals. **#130** dev-agent plan-contract auto-repair (`DA_PLAN_REPAIR`) — re-prompts the planner on an unknown/unparseable verb instead of silently dropping it; model-free `evals/plan_contract.py` `--check` gate (baseline `exact_acc=1.0`). **#129** sandbox interactive-hardening — stdin/env threading into `inference/sandbox.run_sandboxed`. **#128** independent Critic (`DA_CRITIC`) + autonomous Tester (`DA_TESTER`) on `WRITE_FILE` — post-lint diff review on the already-loaded model + one-shot generated pytest as a safe-observation. **All four default OFF** (self-skilling, plan-repair, critic, tester); WSL routing from #127 is the one recent default-ON. See `docs/audits/2026-06-22-gap-analysis-os-agents.md`.
 
 **Done (WSL terminal routing + edit-format ACI — 2026-06-21, merged):** PR #127 + `feat/edit-format-aci` + `feat/weather-and-terminal-tweaks`. **WSL routing** (`wsl_terminal_routing.enabled`, **default ON**) — runs WSL-safe `RUN_TERMINAL` commands inside WSL2 via `wsl.exe -e <bwrap-jail>` so the namespace jail actually applies on the Windows host; scope-preserving `E:\…`→`/mnt/e/…` map, Windows-only commands stay native, degrades to native when WSL/bwrap absent. **Edit-format ACI** — every `WRITE_FILE` routes through `inference/edit_format.py` (builds result, runs validator: `.py`→`ast.parse`, fail-closed); per-model `edit_format` knob (default `whole_file`, `hashline` opt-in, `udiff` reserved). Gate A/B (qwen3-coder:30b) kept default `whole_file` — hashline is an efficiency play, not a correctness upgrade. Plus weather geocode fix + open-terminal→PowerShell.
@@ -82,137 +84,46 @@ source of truth. Day-by-day notes live in `docs/daily/`.
 
 **Done (Gaze + head-pose removal — 2026-05-30):** Gaze tracking and head-pose tracking were removed **entirely** (PC + iPad). The standard iPad on hand has no TrueDepth front camera, so `ARFaceTrackingConfiguration.isSupported` is false and both pipelines produced no data. Removed PC-side: all gaze/head logic in `fusion_engine.py` (priority 10→7 levels; `_GazeBuffer`/`HeadStationaryLock`/`head_acceleration_curve`/`_check_edge_scroll`/`_apply_gaze_cursor` deleted; edge-scroll was gaze-gated so removed too), `ipad_bridge.py` (7 message handlers + calibration session), `db.py` (`gaze_monitor_calibration` table + 2 methods; existing DBs keep the orphan table), `whisper_stream.py` ("calibrate monitor" trigger), `main.py` wiring; deleted `calibration/gaze_calibrator.py` + `calibration/calibration_overlay.py`; trimmed `vision_grounder.py`/`session_analyzer.py`/`sensor_viewer.py`. Removed iPad-side: `GazeTracker.swift`, `HeadTracker.swift`, `SharedFaceSession.swift`, `GazeCalibrationSheet.swift`, `MonitorCalibrationSheet.swift`, `CursorConflictBanner.swift` + detangled 15 Swift files (and the now-unused front-camera permission). Voice "click" now clicks at the **current cursor position** (cursor driven by tilt/trackpad/touch). `Command.gaze_coords` is KEPT as the generic explicit-click-coordinate field (vision grounder / voice click). ~13 gaze/head test files deleted.
 
-**Done (Phase 1):** `ipad_bridge.py`, `command_executor.py`, `mcp_server/` (5 tool modules + MCP server), `tests/test_bridge_client.py`, `tests/test_touch_scroll_e2e.py`, `requirements.txt`
+> **Foundational phases (1–6, ~May 2026)** — condensed; per-file detail lives in [`docs/file-map.md`](file-map.md) + git history. Many sensor surfaces named here (gaze, head-pose, mouth-sound) were later removed (see the 2026-05-30 / 06-05 entries).
 
-**Done (Phase 2):**
-- `fusion_engine.py` — 10-level priority sensor fusion at 60 Hz; gaze delta cursor integration (relative eye movement → cursor), sound actions, tilt/head direct-to-pyautogui
-- `hybrid_coordinator.py` — 4-gate routing (Gate 0 privacy + Gates 1–4); outcome logging to `agent.db`
-- `local_inference.py` — `LocalInference` ABC + `OllamaInference` (default, 100% accuracy, ~190ms warm wall p50 / ~29ms compute on Ollama 0.30.6, RTX 5090, 2026-06-06), `VLLMInference` (verified working in Ubuntu WSL2 — vLLM 0.21.0 + torch 2.11.0+cu128; activate with `--backend vllm`)
-- `mcp_server/tools/handwriting.py` — pix2tex LaTeX OCR + unicode conversion
-- `iPadApp/DesktopAgent/` — SwiftUI app (41 Swift source files, 15 Swift test files): `SensorManager`, `SharedAudioSession`, `SharedFaceSession`, `ServiceDiscovery` (mDNS), `WebSocketManager`, `ScreenshotStore`; Sensors: `TiltSensor`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `SoundDetector`, `AudioStreamer`, `LiDARStreamer`; UI: `CommandPadView`, `TrackpadView`, `HandwritingCanvasView` (Write tab — Math+Text mode, Click & Send), `ScreenshotOverlayView`, `SettingsView`, `DwellActionToolbar`, `DwellToolbarContainer`, `LiDARDebugView`, `OnboardingView`, `SensorDashboardView`, `SensorActivityBar`, `GazeCalibrationSheet`, `TiltCalibrationSheet`, `SoundTrainingSheet`, `CursorConflictBanner`, `CommandToast`; DesignSystem: `DesignTokens`, `AppTheme`, `DAButton`, `DACard`, `DAConnectionBanner`, `DASectionHeader`; `SettingsStore`, `FeatureToggleSyncer`, `DwellActionSyncer`
+**Done (Phase 1):** iPad WebSocket bridge + `command_executor.py` + `mcp_server/` (5 tool modules + MCP server) + E2E tests.
 
-**Done (Phase 3):**
-- `gesture_processor.py` — MediaPipe Tasks API (`HandLandmarker`); peace-sign base pose; 13-gesture vocabulary (PEACE_SWIPE_*, TWO_FINGER_GRAB/RELEASE, GRAB_SNAP_*, GRAB_NEXT/PREV_MONITOR, OPEN_PUSH/PULL, PINCH); 500ms rolling frame buffer; velocity learning; 800ms debounce
-- `lidar_receiver.py` — Decodes `depth_frame` messages; confidence-map filtering; `get_depth_at()`
-- `domain_classifier.py` — Keyword-scoring domain detection: COMMAND/CODE/MATH/VISION/PLAN/GENERAL
-- `model_router.py` — VRAM-aware specialist model selection; 2 GB tolerance; domain-tuned prompts; fallback chain per domain
-- `dev_agent.py` — Plan→execute→reflect agentic loop; 5 dev verbs; session context
+**Done (Phase 2):** `fusion_engine.py` (then 10-level priority sensor fusion at 60 Hz); `hybrid_coordinator.py` 4-gate routing (Gate 0 privacy + Gates 1–4) with outcome logging to `agent.db`; `local_inference.py` — `LocalInference` ABC + **`OllamaInference`** (default, 100% accuracy, ~190ms warm wall p50 / ~29ms compute, Ollama 0.30.6, RTX 5090) + **`VLLMInference`** (Ubuntu WSL2, vLLM 0.21.0 + torch 2.11.0+cu128, `--backend vllm`); `mcp_server/tools/handwriting.py` pix2tex LaTeX OCR; SwiftUI iPad app (then 41 Swift source / 15 test files).
 
-**Done (Phase 4):**
-- `continuous_trainer.py` — Routing threshold adaptation; few-shot ranking; gesture confidence floors; velocity-floor calibration (p10 of observed samples, −30% on pain days); delegates all storage to `AgentDB`
-- `main.py` — Unified entry point; `--measure-vram`; startup status table; Ctrl-C shutdown
-- `benchmark_models.py` — Ollama model benchmark; p50/p95 latency; VRAM snapshots; `--vllm` flag for VLLMInference comparison
-- `whisper_stream.py` — GPU-accelerated speech; Silero VAD + faster-whisper
-- `db.py` — `AgentDB` (aiosqlite, 14 tables) + `AnalyticsDB` (DuckDB); MiniLM semantic few-shot retrieval; +2 tables for gesture velocity learning (gesture_velocity_samples, gesture_velocity_calibration)
+**Done (Phase 3):** `gesture_processor.py` MediaPipe `HandLandmarker`, 13-gesture vocabulary; `lidar_receiver.py` (`depth_frame` decode); `domain_classifier.py` keyword-scoring (COMMAND/CODE/MATH/VISION/PLAN/GENERAL); `model_router.py` VRAM-aware specialist selection + fallback chains; `dev_agent.py` plan→execute→reflect loop (5 dev verbs).
 
-**Done (Phase 6 — cloud fallback):**
-- `hybrid_coordinator.py` — `_retranscribe()`: phonetic vocabulary correction (6 misrecognitions, 0ms) on low-confidence voice before Gate 2 (Amazon Transcribe Stage 2 removed in the Anthropic migration); Gate 1 route label propagated to executor
-- `command_executor.py` — `_polly_speak()`: Amazon Polly TTS (Danielle neural, 16kHz PCM) sidecar-down fallback for CLARIFY; primary path uses `polly_stream.get_client().speak_sync()`; SEARCH_WEB URL-encoded via `urllib.parse`
-- Cloud path: Anthropic API (`anthropic` SDK) via `_CloudInference` in `hybrid_coordinator.py`, model `claude-haiku-4-5` (8/8 accuracy on voice misrecognitions); 10s timeout circuit-breaker → CLARIFY. The dev-domain cloud path (`CloudDevAgent`) defaults to `claude-opus-4-8` (Opus 4.8 access was granted on the Bedrock account in use; a fresh per-model grant can lag the runtime a few minutes, during which the dev path CLARIFYs). The dev model is overridable at runtime with **`DA_CLOUD_DEV_MODEL`** (no code change) — e.g. set it to `claude-sonnet-4-6` to fall back while an Opus grant propagates, then unset it to return to Opus.
-- **Cloud backend selection (`core/cloud_backend.py`).** Both cloud consumers build their client through `resolve_backend()` + `make_client()`, which pick the backend in one place: **direct Anthropic** (`ANTHROPIC_API_KEY`) by default, or **Amazon Bedrock** when an Amazon Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`) is set. Bedrock uses the `anthropic` SDK's `AnthropicBedrock`/`AsyncAnthropicBedrock` client (classic `bedrock-runtime` InvokeModel), which reads the key from `AWS_BEARER_TOKEN_BEDROCK` and signs for `aws_region`; the request shape (`messages.create`/`.stream`) is identical to the first-party client. Model ids are remapped to **cross-region inference-profile** ids — `us.anthropic.claude-haiku-4-5-20251001-v1:0`, `us.anthropic.claude-opus-4-8` (newer models dropped the date/version suffix; Haiku 4.5 keeps one). Prefix via `DA_BEDROCK_PROFILE_PREFIX` (default `us`; `global` = no regional premium). Region: `DA_BEDROCK_REGION` → `AWS_REGION` → `us-east-1`. Force a backend with `DA_CLOUD_BACKEND=bedrock|anthropic`. A missing credential or a model the account lacks access to degrades to a clear CLARIFY, not a raw SDK traceback. (The newer "Claude in Amazon Bedrock" Mantle Messages endpoint exists but a standard Bedrock API key returns "not available for this account" there, so this uses the classic InvokeModel path. Per-model Bedrock access is account-gated: Haiku 4.5, Sonnet 4.6, and Opus 4.8 are all granted on the account in use. The command path uses Haiku 4.5 (fast/cheap, latency-critical accessibility path) and the dev path uses Opus 4.8 (most capable for code/reasoning); Sonnet 4.6 remains the vision-grounding fallback.)
+**Done (Phase 4):** `continuous_trainer.py` (routing-threshold + few-shot + gesture-floor adaptation, −30% on pain days); `main.py` unified entry (`--measure-vram`, startup table); `benchmark_models.py`; `whisper_stream.py` (Silero VAD + faster-whisper); `db.py` — `AgentDB` (aiosqlite, then 14 tables) + `AnalyticsDB` (DuckDB) + MiniLM few-shot retrieval.
 
-**Done (LiDAR gesture depth + Settings UI + housekeeping — 2026-05-16):**
-- `LiDARStreamer.swift` — ARWorldTrackingConfiguration + `.smoothedSceneDepth`; 5 fps depth / 10 fps camera; serialises `depth_frame` (float32 + uint8 conf) and `camera_frame` (JPEG 480px) matching PC bridge protocol; publishes UIImages for debug view
-- `LiDARDebugView.swift` — Sensors tab: camera top, depth heatmap bottom (blue=near → red=far, 0–4 m), stats bar, Start/Stop button
-- `lidar_receiver.py` bug fix: `is_fresh()` compared `time.monotonic()` vs Unix timestamp (always True after first frame); fixed to use `_recv_mono`
-- `gesture_processor.py`: `pinch_dist_mm` renamed `pinch_z_delta_mm` (Z-axis delta only, not 3D Euclidean)
-- `chatterbox_tts.py` — local GPU TTS backend; `ChatterboxClient` mirrors `PollyStreamClient` interface; emotion exaggeration, paralinguistic tags, zero-shot voice cloning via audio prompt; dispatched from `polly_stream.get_client()` when `tts_backend == "chatterbox"` in `approval_config.json`
-- `start_agent.bat` — Windows startup script; launches `main.py` with rolling log to `logs/agent_startup.log`
-- Settings UI: keyword list, sound mappings, command pad editor all migrated from read-only `Text` to editable `TextField` bindings
-- Approval hook bug fix: `log` was undefined (NameError on PC-mic fallback); fixed with `import logging` + logger instance
-- `command_executor.py`: `sd.get_stream().active` lacked None guard → `AttributeError`; fixed to `sd.get_stream() and sd.get_stream().active`
-- `approval_config.json`: `"device"` narrowed from `"Realtek USB Audio"` (matched 3 devices, threw sounddevice exception → silent auto-approve) to `"Microphone (Realtek USB Audio)"`
+**Done (Phase 6 — cloud fallback):** `hybrid_coordinator._retranscribe()` phonetic correction before Gate 2; `command_executor._polly_speak()` Polly CLARIFY fallback. **Command cloud path** `_CloudInference` → `claude-haiku-4-5` (fast/cheap, latency-critical), 10s circuit-breaker → CLARIFY. **Dev cloud path** `CloudDevAgent` → `claude-opus-4-8`, overridable at runtime via **`DA_CLOUD_DEV_MODEL`**. **Cloud backend (`core/cloud_backend.py`)** via `resolve_backend()`+`make_client()`; model ids remap to cross-region inference-profile ids (`DA_BEDROCK_PROFILE_PREFIX` default `us`; region `DA_BEDROCK_REGION`→`AWS_REGION`→`us-east-1`); missing cred / ungranted model degrades to CLARIFY, not a traceback. **NOTE: as of #110 (2026-06-18, below) the cloud backend is Amazon Bedrock ONLY — the direct-Anthropic path and `ANTHROPIC_API_KEY` were removed; cred is `AWS_BEARER_TOKEN_BEDROCK`.** Per-model Bedrock access is account-gated (Haiku 4.5 / Sonnet 4.6 / Opus 4.8 granted); Sonnet 4.6 is the vision-grounding fallback.
 
-**Done (iPad UX + gaze refactor + sensor viewer — 2026-05-17):**
-- `sensor_viewer.py` — tkinter desktop window showing camera + LiDAR depth feeds in real time; hand landmark overlay from GestureProcessor; gaze cursor overlay on depth panel; freeze-frame (Space); snapshot to disk (Ctrl+S); always-on-top toggle; wired into `main.py --viewer`
-- `GazeTracker.swift` — refactored to delta-based cursor movement (removing dwell-click); configurable stability threshold for glasses users
-- `OnboardingView.swift` — first-run wizard (6 steps: welcome, tilt, gaze, voice, touch, summary)
-- `SensorDashboardView.swift` — all-sensor status dashboard (replaces LiDAR-only Sensors tab); per-sensor activity, conflict detection
-- `SensorActivityBar.swift` — compact horizontal sensor-activity indicator strip
-- `GazeCalibrationSheet.swift`, `TiltCalibrationSheet.swift`, `SoundTrainingSheet.swift` — per-sensor calibration UX
-- `CursorConflictBanner.swift` — banner shown when multiple cursor sources are active simultaneously
-- `CommandToast.swift` — transient action feedback toast; success state (blue icon, 2 s) and error state (orange warning icon, 4 s) driven by `wsManager.commandFeed` and `wsManager.errorFeed` respectively
-- `ContentView.swift` — swipe-to-switch tabs; parent-driven scroll disable; custom tab bar always on top
-- CI: Xcode 16.4 + iOS 18.5 SDK on `macos-15`; `upload-artifact v7`; TestFlight upload made non-fatal (SDK version gate)
+> **Mid-May 2026 sprint cluster (2026-05-16→22)** — condensed; per-file detail in [`docs/file-map.md`](file-map.md) + git history. Gaze, head-pose, and mouth-sound surfaces built here were removed later (2026-05-30 / 06-05).
 
-**Done (Touch-debug fix — 2026-05-16):**
-- `DwellToolbarContainer.swift` — outer ZStack `.allowsHitTesting(false)` with toolbar `.allowsHitTesting(true)`; removed `.frame(maxWidth: .infinity)` in top/bottom modes; bottom mode uses VStack + `Color.clear.frame(height:56).allowsHitTesting(false)` spacer; floating mode `.contentShape(RoundedRectangle(...))` before `.gesture(DragGesture())`
-- `DAConnectionBanner.swift` — added `.allowsHitTesting(isDisconnected)`; removed `.contentShape(Rectangle())`
-- Tests: `OverlayTouchInterceptionTests.swift` (bug condition geometry), `OverlayPreservationTests.swift` (17 preservation property tests)
+**Done (2026-05-16, LiDAR depth + Settings UI + housekeeping):** `LiDARStreamer.swift`/`LiDARDebugView.swift` (`.smoothedSceneDepth`, 5 fps depth/10 fps camera); `lidar_receiver.is_fresh()` monotonic-vs-Unix bug fix; `chatterbox_tts.py` local GPU TTS backend (`tts_backend == "chatterbox"`); editable Settings UI; approval-hook NameError fix; `approval_config.json` device narrowed to avoid silent auto-approve.
 
-**Done (Minority Report gestures + dead code removal — 2026-05-19):**
-- `gesture_processor.py` — complete rewrite: static-pose classifier → two-finger spatial motion detection. Base pose is peace sign (index+middle extended). 13-gesture vocabulary; 500ms rolling frame buffer; axis-dominance debounce; LiDAR-validated grab depth; `compute_peace_jitter()` inflammation signal; `drain_velocity_samples()` for ContinuousTrainer
-- `db.py` — +2 tables: `gesture_velocity_samples`, `gesture_velocity_calibration`; +4 methods: `record_gesture_velocity`, `get_recent_gesture_velocities`, `update_gesture_velocity_calibration`, `get_gesture_velocity_floor`
-- `continuous_trainer.py` — `gesture_processor=` param; `record_success()` drains velocity queue; `_update_gesture_velocity_calibration()`: velocity_floor = p10(observed), pain_day → ×0.70; calibrated thresholds pushed back to GestureProcessor
-- `HandwritingCanvasView.swift` — enhanced Write tab (replaces Keypad tab): Math mode (pix2tex), Text mode (on-device VNRecognizeTextRequest); Click & Send action; editable result field; tabs reduced from 6→5
-- Dead code deleted: `migrate.py` (migration already run), `health_viz.py` (zero accessibility value), `agentcore_fallback/` (deployment deferred, CLI missing), `NemotronInference` class (25% accuracy)
-- `approval_config.json` — gate narrowed: Bash/PowerShell/Agent → voice approval; Edit/Write/Read/Glob/Grep/WebSearch/WebFetch → silent
-- CI: `.github/workflows/build-ipad-app.yml` — `continue-on-error: true` on artifact upload (transient ECONNRESET)
+**Done (2026-05-16, Touch-debug fix):** `DwellToolbarContainer.swift`/`DAConnectionBanner.swift` hit-testing fixes so the overlay no longer eats touches; `OverlayTouchInterception`/`OverlayPreservation` tests.
 
-**Done (FusionEngine bug fixes + pain-day adaptation — 2026-05-20):**
-- `fusion_engine.py` — 4 bug fixes: tilt/head starvation (moved `return` inside `if dx or dy:`); gyro-suppression starvation (wrapped pipeline in `if not _suppressed:`); double cursor movement (`_apply_gaze_cursor` returns bool, gates gaze_delta); silent click drop (CLARIFY emitted when gaze click has no target)
-- `fusion_engine.py` — `apply_pain_day()` method: 6 thresholds relaxed on pain days; wired through `HybridCoordinator` via `BehavioralTwinState`
-- `tests/test_fusion_fixes.py` — 24 new tests covering all 4 bug fixes and pain-day config propagation
+**Done (2026-05-17, iPad UX + gaze refactor + sensor viewer):** `sensor_viewer.py` (`main.py --viewer`); `GazeTracker.swift` delta-based cursor; onboarding wizard; `SensorDashboardView`/`SensorActivityBar`; per-sensor calibration sheets; `CommandToast`; CI Xcode 16.4 / iOS 18.5.
 
-**Done (Voice pipeline improvements — 2026-05-20):**
-- `whisper_stream.py` — wake phrase `"hey agent"` / `"agent"` with punctuation normalisation; lecture mode (`ambient_transcripts` table); hallucination filter (`no_speech_prob > 0.5` + `avg_logprob < -0.8`); CLARIFY echo suppression (pre-suppress before TTS + 1.5s post-suppress); pending clarification context prepended to LLM prompt; awaiting-clarification gate blocks long non-answer transcripts
-- `local_inference.py` — known-app voice corrections applied pre-gate so `"cairo"` → `"kiro"` always fires before LLM sees text
+**Done (2026-05-19, Minority Report gestures + dead-code removal):** `gesture_processor.py` full rewrite → two-finger spatial motion (peace-sign base, 13 gestures, LiDAR-validated grab, `compute_peace_jitter()` inflammation signal); `db.py` +2 gesture-velocity tables + 4 methods; `continuous_trainer` velocity-floor calibration (p10, pain-day ×0.70). **Deleted dead code:** `migrate.py`, `health_viz.py`, `agentcore_fallback/`, `NemotronInference` (25%). `approval_config.json` gate narrowed (Bash/PowerShell/Agent → voice approval; Edit/Read/etc. → silent).
 
-**Done (Sprint A — Acoustic Profiler — 2026-05-20):**
-- `acoustic_profiler.py` — measures RMS amplitude, spectral centroid, Whisper logprob per utterance; derives per-user `vad_threshold` and `logprob_floor`; scales both on flare days; Voice clarity as Signal 5 in PainDayEngine; passive calibration (calibrated after 15 samples); drift detection (every 20 samples, >30% drop → recal callback); seasonal prompt (every 50 commands, >30 days since last cal)
-- `db.py` — +6 tables: `voice_calibration`, `voice_profile`, `voice_phrases`, `sensor_rom`, `flare_profile`, `ambient_transcripts` (total: 20 AgentDB tables)
-- `tests/test_acoustic_profiler.py` — 18 new tests
+**Done (2026-05-20, FusionEngine fixes + pain-day adaptation):** 4 fusion bug fixes (tilt/head + gyro-suppression starvation, double cursor move, silent click drop); `apply_pain_day()` relaxes 6 thresholds, wired via `BehavioralTwinState`; 24 tests.
 
-**Done (Sprint B — iPad Accessibility Onboarding UI — 2026-05-20):**
-- `VoiceProfilingSheet.swift` — 10 phrases × 3 repeats, 4s countdown; iPad streams mic while AcousticProfiler captures samples passively
-- `GestureAssessmentSheet.swift` — rates 4 gestures (POINT/PINCH/OPEN_PALM/FIST) as Easy/Hard/Can't; disabled gestures synced to `GestureProcessor.set_disabled_gestures()`
-- `FlareProfileSheet.swift` — which sensors degrade (voice/gesture/tilt/sound), voice volume fraction slider, manual pain day toggle (manual toggle syncs via `pain_day_override` in <100ms; degrade flags sync via debounced `flare_profile` message → `AgentDB.upsert_flare_profile` + `BehavioralTwinState.set_flare_profile`)
-- `QuickRecalSheet.swift` — 3 phrases × 3 repeats (~90s); shown automatically when PC detects voice drift or seasonal prompt fires; wired into `ContentView` via `wsManager.recalibrationFeed`
-- `OnboardingView.swift` — expanded 7 → 10 steps with the 3 new calibration sheets (all skippable)
+**Done (2026-05-20, Voice pipeline):** `whisper_stream.py` wake phrase `"hey agent"`, lecture mode (`ambient_transcripts`), hallucination filter, CLARIFY echo suppression, clarification-context prepend; `local_inference.py` known-app corrections pre-gate (`"cairo"`→`"kiro"`).
 
-**Done (Sprint C — Continuous Recalibration — 2026-05-20):**
-- `voice_calibrator.py` — guided voice calibration for good_day / flare_day / allergy_day conditions (svt_attack shipped here, removed 2026-06-11); 20-phrase full session; voice-triggered (`"hey agent run voice calibration"`) and iPad-triggered (Settings → Voice Calibration tab)
-- `ipad_bridge.py` — `pain_day_override` message type handler → `BehavioralTwinState.set_manual_pain_day()` → `AcousticProfiler.get_vad_threshold(pain_day=True)` → `WhisperStream._silence_thresh` relaxed immediately
-- After every 20 voice samples: drift check → `bridge.send_recalibration_request()` → `QuickRecalSheet`; after every 50 commands: seasonal prompt (same path)
+**Done (2026-05-20, Sprint A — Acoustic Profiler):** `acoustic_profiler.py` per-utterance RMS/centroid/logprob → per-user `vad_threshold`/`logprob_floor` (Voice = PainDayEngine Signal 5; passive calibration, drift + seasonal recal). `db.py` +6 tables (`voice_calibration`, `voice_profile`, `voice_phrases`, `sensor_rom`, `flare_profile`, `ambient_transcripts`) → **20 AgentDB tables**.
 
-**Done (Sprint 5 — Vision Grounding — 2026-05-20):**
-- `vision_grounder.py` — `claude-sonnet-4-6` vision resolves named UI targets to pixel coords; confidence gate ≥0.7; 2s cache per target; fallback chain: vision → gaze_coords → Tesseract OCR → cursor + CLARIFY; hooked into `HybridCoordinator._execute_action` for CLICK with named target; expected CLICK success 42% → ~78%
-- `tests/test_vision_grounder.py` — 11 new tests
+**Done (2026-05-20, Sprint B — iPad onboarding UI):** `VoiceProfilingSheet`/`GestureAssessmentSheet`/`FlareProfileSheet`/`QuickRecalSheet`; manual pain-day toggle syncs via `pain_day_override` (<100ms); degrade flags via debounced `flare_profile`; onboarding 7→10 steps.
 
-**Done (Sprint 6 — UIAutomation — 2026-05-20):**
-- `ui_automation.py` — Win32 UIAutomation BFS tree search; fuzzy name scoring (exact → contains → word-overlap → value match); 0.3s timeout; 1s cache per (target, app); targets VS Code, Chrome, Edge, Kiro, Windows Terminal, Notepad, Acrobat, Zotero; first fallback in `_resolve_coords` before vision grounder; expected CLICK success ~78% → ~88%
+**Done (2026-05-20, Sprint C — Continuous recalibration):** `voice_calibrator.py` guided good/flare/allergy-day calibration (svt_attack later removed 2026-06-11); `pain_day_override` handler relaxes `WhisperStream._silence_thresh` immediately; drift check every 20 samples / seasonal prompt every 50 commands.
 
-**Done (Sprint 7 — Action Verification — 2026-05-20):**
-- `action_verifier.py` — Pillow perceptual diff pre/post screenshot; verifies CLICK, OPEN, CLOSE, SCROLL; 2% pixel change threshold = success; 400ms delay for animations; pre-snapshot taken before dispatch, post-snapshot after; result in execute() response; expected CLICK success ~88% → ~92%
+**Done (2026-05-20, Sprints 5/6/7 — CLICK grounding stack):** **Sprint 5** `vision_grounder.py` (`claude-sonnet-4-6` resolves named targets, conf ≥0.7, fallback vision→gaze→Tesseract→CLARIFY) — CLICK 42%→~78%. **Sprint 6** `ui_automation.py` Win32 UIA BFS + fuzzy scoring (first fallback before vision) — ~78%→~88%. **Sprint 7** `action_verifier.py` Pillow pre/post perceptual diff (CLICK/OPEN/CLOSE/SCROLL, 2% threshold) — ~88%→~92%.
 
-**Done (Commercial roadmap + diagrams — 2026-05-20):**
-- `docs/diagrams/domain-model.{png,svg}` — class diagram: User/Subscription/Device/Session + pipeline hierarchy
-- `docs/diagrams/database-schema.{png,svg}` — ERD: 12 tables (4 new commercial: USERS, SUBSCRIPTIONS, DEVICES, INFERENCE_COSTS + 8 existing extended with user_id FK)
-- `docs/diagrams/user-stories.{png,svg}` — mindmap: 5 epics (Setup, Daily Control, Coding/Dev, Pain Day, Subscription)
-- 7-phase commercial roadmap: May 2026 hardening → Jul 2027 launch at 100 subscribers / $1K MRR; cloud inference via `claude-haiku-4-5` at <$0.10/user/day; $9.99/month StoreKit subscription
+**Done (2026-05-20, Commercial roadmap + diagrams):** domain-model / database-schema (12-table ERD) / user-stories diagrams; 7-phase roadmap (May 2026 hardening → Jul 2027 launch, 100 subs / $1K MRR, `claude-haiku-4-5` <$0.10/user/day, $9.99/mo StoreKit). *(Aspirational — single-user accessibility tool remains the actual scope.)*
 
-**Done (Test coverage + tilt snapshot — 2026-05-21):**
-- `tests/test_ui_automation.py` — 29 new tests: `UIElement`, `_detect_app`, `_score` (all 5 tiers), `UIAutomationProvider` (cache hit/miss/expiry, exception path, status)
-- `tests/test_action_verifier.py` — 22 new tests: `VerifyResult`, all skip paths, post-snapshot error, `_diff()` (identical/different/size-mismatch/noise-floor), `verify()` end-to-end for all 4 verifiable verbs
-- `engineering/tilt_implementation.md` (memory) — full working-state snapshot: two modes, axis mapping, all FusionConfig defaults, pain-day deltas, fall-through guarantee, stationary lock
+**Done (2026-05-21, Test coverage + tilt snapshot):** `test_ui_automation.py` (29) + `test_action_verifier.py` (22); `engineering/tilt_implementation.md` memory snapshot.
 
-**Done (Sprint G1–G4 — Gaze monitor calibration — 2026-05-21):**
-- `gaze_calibrator.py` — angular affine mapping: 5-point `add_sample()` → `solve()` (numpy lstsq, az/el tangent plane) → `project(ray_dir) → (px_x, px_y)`; `gaze_calibration.json` sidecar persistence; `save_to_db()` for history
-- `calibration_overlay.py` — tkinter full-screen translucent overlay; 5 dots (top-left, top-right, center, bottom-left, bottom-right, 5% padding); cyan 40px dot + crosshair; daemon thread; advances via `advance()`, closes via `finish()`/`cancel()`
-- `db.py` — +1 table: `gaze_monitor_calibration` (total: **21 AgentDB tables**); +2 methods: `upsert_gaze_calibration()`, `get_gaze_calibration()`
-- `GazeTracker.swift` — `currentWorldRay` property; world-space extraction from `faceAnchor.transform * eyeTransform`; 10 Hz `gaze_ray` WebSocket send (rate-limited, every 6th frame)
-- `WebSocketManager.swift` — `sendGazeRay(dx:dy:dz:confidence:)`
-- `ipad_bridge.py` — `gaze_ray` handler (stores ray + timestamp); `gaze_dwell` handler attaches fresh ray (< 300ms) to FusionEngine call; `gaze_calibration_sample` handler; `set_gaze_calibrator()` wiring
-- `fusion_engine.py` — `set_gaze_calibrator()`; `on_gaze_dwell()` extended with `ray_dir` param → calibrator override of (x, y) when calibrated
-- `main.py` — `GazeCalibrator` load at startup; startup status table "Gaze monitor calibration" row; wired to bridge and fusion
-- `tests/test_gaze_calibrator.py` — 22 new tests: sample management, solve (success/failure/collinear), project (center, all samples, bounds clamp, zero ray, type), JSON round-trip, DB persistence
-- **Remaining:** voice command trigger (`"hey agent calibrate monitor"` → overlay → solve → TTS report) and `MonitorCalibrationSheet.swift` iPad UI
+**Done (2026-05-21, Sprint G1–G4 — Gaze monitor calibration):** `gaze_calibrator.py` 5-point angular affine map + sidecar persistence; tkinter `calibration_overlay.py`; `db.py` +1 `gaze_monitor_calibration` table → **21 tables**; `GazeTracker.swift` `gaze_ray` 10 Hz send; bridge/fusion wiring. *(Entire gaze stack removed 2026-05-30.)*
 
-**Done (iPad structured log forwarding — 2026-05-22):**
-- `ipad_bridge.py` — `ipad_log` message handler: routes each AppLogger entry to `ipad.<subsystem>` Python logger; warning+ entries persisted to DB
-- `db.py` — +1 table: `ipad_logs`; +1 method: `log_ipad_events(session_id, entries)`; AgentDB is now **30 tables** (the 3 `benchmark_*` tables in `db.py` belong to the DuckDB `AnalyticsDB`, not `agent.db`; the most recent additions are `goal_queue` from gap D)
-- `iPadApp/DesktopAgent/AppLogger.swift` — structured log forwarding over WebSocket (subsystem + level + msg batching)
-- Multiple Swift sensor files updated to use AppLogger for structured output: `SharedAudioSession`, `AudioStreamer`, `GazeTracker`, `HeadTracker`, `KeywordListener`, `LiDARStreamer`, `SharedFaceSession`, `TiltSensor`, `SensorManager`, `DesktopAgentApp`
-- `fusion_engine.py` — `set_gaze_calibrator()` wiring path also updated
+**Done (2026-05-22, iPad structured log forwarding):** `ipad_log` handler routes `AppLogger` entries to `ipad.<subsystem>` loggers (warning+ persisted); `db.py` +1 `ipad_logs` table → **30 AgentDB tables** (the 3 `benchmark_*` are DuckDB `AnalyticsDB`); `AppLogger.swift` batched WS forwarding.
 
-**Test suite (2026-06-07):** 714 pytest test functions across 62 `tests/test_*.py` files (761 passed when run, incl. parametrization) + 15 Swift XCTest files
+**Test suite (current, 2026-06-25):** ~2,014 pytest test functions across 187 `tests/test_*.py` files, plus Swift XCTest. *(Historical milestone: 714 across 62 files at 2026-06-07.)*
