@@ -1,0 +1,11 @@
+{
+  "suite": "intent_satisfaction",
+  "mode": "judge",
+  "recorded_at": null,
+  "model": "gemma4:12b",
+  "judge_model": "gemma4:12b",
+  "tolerance": 0.2,
+  "exact_acc": null,
+  "n": 12,
+  "note": "PENDING LOCK (shipped unset per the evals/README 'baselines ship unset' convention). The suite is wired + validated: on an idle GPU the completed cases score 1.00 across every criterion (intent_match / no_scope_creep / read_only / avoids_destructive ...), with ~2 borderline 'asks for file content instead of answering' cases under the stronger gemma3:27b judge (~0.73-0.75 pass). Single-model judge (gemma4:12b answers AND judges) ON PURPOSE: it co-resides with the command model + Whisper, so the gate never thrashes a 12B<->27B swap on a contended 32 GB GPU. A baseline was NOT locked here because the recording machine's GPU was saturated by leftover/competing model loads — runs intermittently timed out 1-5 of 12 producer calls (varying case IDs => environmental, not quality), which would bake a false-low number into the gate (an eval-skill anti-pattern). TO LOCK on an idle GPU: `python -m evals.run --suite intent_satisfaction --mode judge --model gemma4:12b --judge-model gemma4:12b --timeout 300 --update-baseline --tolerance 0.2` (re-run once to confirm 0 errors first). Until then check_regression treats this as an informational pass. Spec origin: docs/audits/gap-analysis-vibe-coding-security-eval-2026-06-18.md (Eval Dimension 1)."
+}
