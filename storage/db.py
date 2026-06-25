@@ -194,6 +194,26 @@ CREATE TABLE IF NOT EXISTS agent_steps (
 );
 CREATE INDEX IF NOT EXISTS idx_steps_run ON agent_steps(run_id);
 
+-- Multi-agent orchestration ledger (specs/workflow-orchestration). One row per
+-- WorkflowRunner.run(): a fan-out / pipeline of fresh-context sub-agent inference
+-- calls over the resident model (no new VRAM — AGENTS.md #6). Additive,
+-- backward-compatible; experimental + OFF by default, so the table is empty
+-- until workflow_orchestration.enabled is set. Status records the terminal
+-- outcome (completed | skipped_flare | disabled | error).
+CREATE TABLE IF NOT EXISTS agent_workflows (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             REAL    NOT NULL,
+    name           TEXT    NOT NULL,
+    goal           TEXT,
+    mode           TEXT    NOT NULL DEFAULT 'fan_out',   -- fan_out | pipeline
+    subtask_count  INTEGER NOT NULL DEFAULT 0,
+    success_count  INTEGER NOT NULL DEFAULT 0,
+    verified_count INTEGER,                              -- NULL = no verify pass
+    status         TEXT    NOT NULL DEFAULT 'completed',
+    latency_ms     REAL,
+    error          TEXT
+);
+
 -- Durable goal backlog (gap D): goals authorized for autonomous execution are
 -- persisted here BEFORE they run, so a crash/shed never drops queued work. The
 -- agent_runs/agent_steps ledger journals an *executing* plan; this is the
@@ -1803,6 +1823,44 @@ class AgentDB:
             return cur.lastrowid  # type: ignore[return-value]
         except Exception as exc:
             log.warning("AgentDB.insert_agent_run failed: %s", exc)
+            return -1
+
+    async def insert_workflow(
+        self,
+        name: str,
+        goal: Optional[str],
+        mode: str,
+        subtask_count: int,
+        success_count: int,
+        status: str,
+        verified_count: Optional[int] = None,
+        latency_ms: Optional[float] = None,
+        error: Optional[str] = None,
+    ) -> int:
+        """Record one WorkflowRunner.run() in the agent_workflows ledger.
+
+        Best-effort journaling (specs/workflow-orchestration): a DB failure
+        never breaks orchestration — returns -1, like the other inserters.
+        """
+        if not self._conn:
+            return -1
+        try:
+            cur = await self._conn.execute(
+                """INSERT INTO agent_workflows
+                   (ts, name, goal, mode, subtask_count, success_count,
+                    verified_count, status, latency_ms, error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    time.time(), name, goal, mode, subtask_count, success_count,
+                    verified_count, status,
+                    round(latency_ms, 1) if latency_ms is not None else None,
+                    error,
+                ),
+            )
+            await self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
+        except Exception as exc:
+            log.warning("AgentDB.insert_workflow failed: %s", exc)
             return -1
 
     async def insert_agent_step(
