@@ -161,7 +161,16 @@ async def test_wiring_skips_on_flare_check():
     assert out == "Written"                          # R3.6 — skipped on flare
 
 
-async def test_wiring_disabled_by_default_is_noop():
+def test_tester_default_on_when_env_unset(monkeypatch):
+    # Regression gate (default flipped ON 2026-06-24, gated by dev_critic.json).
+    # If this fails, the default was silently reverted to OFF.
+    monkeypatch.delenv("DA_TESTER", raising=False)
+    agent = DevAgent(router=MagicMock())
+    assert agent._tester_enabled is True and agent._tester is not None
+
+
+async def test_wiring_disabled_is_noop(monkeypatch):
+    monkeypatch.setenv("DA_TESTER", "0")
     agent = DevAgent(router=MagicMock())
     assert agent._tester is None and agent._tester_enabled is False
     out = await agent._maybe_run_tester(AgentStep(action="WRITE_FILE", args="foo.py", body="x"), "Written")

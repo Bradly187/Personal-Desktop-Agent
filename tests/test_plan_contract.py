@@ -125,8 +125,16 @@ async def test_repair_disabled_does_not_reprompt():
     assert final is plan
 
 
-def test_default_flag_off_when_env_unset(monkeypatch):
+def test_default_flag_on_when_env_unset(monkeypatch):
+    # Regression gate (default flipped ON 2026-06-24, baseline plan_contract.json
+    # exact_acc=1.0). If this fails, the default was silently reverted to OFF.
     monkeypatch.delenv("DA_PLAN_REPAIR", raising=False)
+    agent = DevAgent(router=_FakeRouter())
+    assert agent._plan_repair_enabled is True
+
+
+def test_flag_explicitly_disabled_via_env(monkeypatch):
+    monkeypatch.setenv("DA_PLAN_REPAIR", "0")
     agent = DevAgent(router=_FakeRouter())
     assert agent._plan_repair_enabled is False
 
