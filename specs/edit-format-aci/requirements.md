@@ -46,12 +46,16 @@ before it persists and rejects with a diagnostic message on failure; (b) add an
 The path sandbox (`_path_in_scope`, realpath-based) is already solid and is out of
 scope here.
 
-**Status:** Done — all 7 tasks landed (lint gate + per-model `edit_format` knob +
+**Status:** Done — tasks 1–7 landed (lint gate + per-model `edit_format` knob +
 the **hashline** structured format end-to-end: applier with layered matcher +
 atomic batch, READ_FILE anchoring, plan-prompt instructions + worked example; the
 `--mode edit_ab` A/B eval with easy + hard subsets, baselines locked; docs). Default
 is `whole_file` everywhere — byte-identical to legacy; hashline activates only when a
-model is configured for it. The A/B verdict (tasks 6) **keeps `whole_file` default**:
+model is configured for it. **Task 8 (2026-06-25) adds R5 — the `EDIT_FILE` verb**
+(aider-style SEARCH/REPLACE `search_replace` format) for Claude-Code-parity surgical
+edits to existing files: fail-closed on non-unique/stale SEARCH, same lint gate +
+Critic + saga + Tester path as WRITE_FILE, available to every plan model. 46
+deterministic unit tests in `tests/test_edit_format.py`. The A/B verdict (tasks 6) **keeps `whole_file` default**:
 silent elision did not occur even on ~180-line files, whole_file led on correctness
 (100% vs 80% hard subset), and hashline's gain is purely efficiency (~9–23× less
 output, ~2–4× faster) — an opt-in cost play, not a correctness upgrade. Follow-ups
@@ -157,6 +161,39 @@ the ablation has something to compare against.
 3. FOR batched edits in one step, THE applier SHALL validate ALL hunks before
    applying ANY (atomic), apply bottom-up by descending position, and reject
    overlapping ranges with a clear `EditError`.
+
+### Requirement 5: EDIT_FILE — a surgical edit verb (Claude-Code parity)
+
+**User Story:** As Brad, I want a dedicated `EDIT_FILE` verb that makes a
+*targeted* change to an existing file without re-emitting the whole thing, so the
+planner can edit a 1000-line file safely the way Claude Code's `Edit` does —
+closing the biggest correctness gap vs Claude Code.
+
+> Note: R4's `hashline` is a per-model **WRITE_FILE** format that requires a prior
+> READ_FILE to anchor on `line:hash`. R5's `EDIT_FILE` is a **separate verb**
+> available to *every* plan model regardless of its WRITE_FILE knob, using
+> self-describing aider-style SEARCH/REPLACE blocks (no line:hash round-trip).
+
+#### Acceptance Criteria
+1. THE planner SHALL be able to emit an `EDIT_FILE <path>` step whose body is one
+   or more `<<<<<<< SEARCH / ======= / >>>>>>> REPLACE` blocks; THE `EditApplier`
+   SHALL apply them via the `search_replace` format independent of the model's
+   per-model WRITE_FILE `edit_format`.
+2. WHEN a SEARCH block does not match the current file content EXACTLY ONCE (zero
+   matches = stale, or >1 = ambiguous), THE applier SHALL fail closed with an
+   `EditError(reason="mismatch", …)` naming the failure and SHALL NOT write the
+   file (mirrors the hashline atomic contract).
+3. THE EDIT_FILE result SHALL pass through the SAME lint gate as WRITE_FILE (R1),
+   so a result that is invalid Python is rejected pre-write.
+4. `EDIT_FILE` SHALL be a **destructive** verb: it routes through
+   `_confirm_destructive_op`, the Critic (when ON), the `_snapshot_for_write`
+   saga snapshot, and the autonomous Tester exactly as WRITE_FILE does — no new
+   bypass, fail-safe-DENY on ambiguity (AGENTS.md #4).
+5. AN empty SEARCH SHALL be valid only against an empty file (creation); against a
+   non-empty file it SHALL fail closed (whole-file rewrites stay on WRITE_FILE).
+6. THE plan prompt SHALL document EDIT_FILE and instruct the planner to prefer it
+   for targeted changes to existing files, reserving WRITE_FILE for new/whole-file
+   rewrites.
 
 ---
 
@@ -299,4 +336,22 @@ Each acceptance criterion in §3 maps to at least one test above.
       `CLAUDE.md` (lint gate fail-closed, `edit_format_for` resolution, default
       `whole_file`, hashline opt-in, the task-6 gate verdict) and an
       `inference/edit_format.py` row to `docs/file-map.md`.
+- [x] 8. **EDIT_FILE verb (R5)** — added `search_replace` format to
+      `inference/edit_format.py` (`_parse_search_replace_blocks` +
+      `EditApplier._apply_search_replace`, fail-closed on non-unique/stale SEARCH,
+      reuses the `_lint` gate) and the `EDIT_FILE` verb to `inference/dev_agent.py`
+      (in `_PLAN_ACTIONS`/`_STEP_PATTERN`/`_DESTRUCTIVE_VERBS`/`_FANOUT_SAFE_VERBS`;
+      the WRITE_FILE dispatch branch now handles both, passing
+      `SEARCH_REPLACE` as a format override to `_apply_edit`; saga compensation +
+      surfacing + DAG de-collision extended to EDIT_FILE). `SEARCH_REPLACE_PROMPT_INSTRUCTIONS`
+      injected into every plan context; `_PLAN_PROMPT` documents the verb.
+      Satisfies R5.1–R5.6. **No model loaded; no DB schema change** (AGENTS.md #1/#6 N/A).
+- [x] 9. `tests/test_edit_format.py` — 14 EDIT_FILE tests (unique-apply, multi-block,
+      not-found/ambiguous fail-closed, broken-Python rejected pre-write, non-py
+      unlinted, delete, empty-search creation-only, no-parseable-blocks, lenient
+      markers, `_apply_edit` override forces format, `_execute_step` writes +
+      snapshots, mismatch leaves file untouched, prompt instructions). 46 total pass.
+      *Live `--mode edit_ab` search_replace arm (model-gated, run in the live
+      Ollama env) is a follow-up — the deterministic applier contract is fully
+      unit-covered.*
 ```

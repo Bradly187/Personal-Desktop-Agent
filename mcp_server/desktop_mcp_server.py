@@ -2,10 +2,13 @@
 
 Exposes Windows desktop control as MCP tools so Claude can orchestrate
 the PC directly — mouse, keyboard, screenshots, window management, plus
+first-class code search (grep, glob_files), web fetch (fetch_url), and
 browser/UI testing (preview_* — Playwright; degrades cleanly if not installed).
 
 Set SAFE_MODE=1 to block keyboard_type, mouse_drag, preview_click, preview_fill
 (useful for testing).
+grep/glob_files are read-only but scoped to the writable-root allowlist;
+fetch_url is http(s)-only and its output is trust-classified.
 
 Usage:
     python mcp_server/desktop_mcp_server.py
@@ -33,12 +36,32 @@ from mcp.types import ImageContent, TextContent, Tool
 # where `mcp_server/` is on sys.path so `tools` resolves) and when imported as
 # `mcp_server.desktop_mcp_server` (e.g. from pytest at the repo root).
 try:
-    from tools import browser, keyboard, mouse, screen, windows
+    from tools import browser, keyboard, mouse, screen, web, windows
+    from tools import search as search_tools
 except ModuleNotFoundError:  # pragma: no cover - import-path shim
-    from mcp_server.tools import browser, keyboard, mouse, screen, windows
+    from mcp_server.tools import browser, keyboard, mouse, screen, web, windows
+    from mcp_server.tools import search as search_tools
 
 # Trust classifier — scans tool outputs for injection patterns before returning to LLM
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# Search/glob tools are scoped to the writable-root allowlist so a direct
+# grep/glob_files call can't read outside it (deny-by-default, AGENTS.md #7).
+# Resolved lazily + cached: avoids importing the CommandExecutor stack at startup
+# and fails closed (empty allowlist → deny) if the resolver is unavailable.
+_search_scopes_cache: "list[str] | None" = None
+
+
+def _search_scopes() -> list[str]:
+    global _search_scopes_cache
+    if _search_scopes_cache is None:
+        try:
+            from core.command_executor import _load_writable_roots
+            _search_scopes_cache = _load_writable_roots()
+        except Exception:  # pragma: no cover - fail-closed
+            _search_scopes_cache = []
+    return _search_scopes_cache
 try:
     from adaptive.mcp_trust_classifier import MCPTrustClassifier, RiskLevel
     _trust_classifier = MCPTrustClassifier()
@@ -244,6 +267,48 @@ async def list_tools() -> list[Tool]:
                 "required": ["title_substring"],
             },
         ),
+        # --- Search / Web ---
+        Tool(
+            name="grep",
+            description="Regex-search text files under a path. Returns file:line matches. "
+                        "Scoped to the writable-root allowlist.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Python regex"},
+                    "path": {"type": "string", "default": ".", "description": "File or directory to search"},
+                    "max_lines": {"type": "integer", "default": 100, "minimum": 1},
+                },
+                "required": ["pattern"],
+            },
+        ),
+        Tool(
+            name="glob_files",
+            description="Find files matching a glob pattern (e.g. '*.py' or '**/*.ts') under a path. "
+                        "Scoped to the writable-root allowlist.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob, e.g. **/*.py"},
+                    "path": {"type": "string", "default": ".", "description": "Root directory"},
+                    "max_results": {"type": "integer", "default": 200, "minimum": 1},
+                },
+                "required": ["pattern"],
+            },
+        ),
+        Tool(
+            name="fetch_url",
+            description="Fetch an http(s) URL and return its extracted text (HTML stripped, capped). "
+                        "Output is screened by the trust classifier.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "max_chars": {"type": "integer", "default": 4000, "minimum": 1},
+                },
+                "required": ["url"],
+            },
+        ),
         # --- Browser / UI testing (Playwright; degrades if not installed) ---
         Tool(
             name="preview_start",
@@ -430,6 +495,20 @@ def _dispatch(name: str, args: dict) -> dict:
         return windows.list_windows()
     if name == "focus_window":
         return windows.focus_window(args["title_substring"])
+
+    # Search / Web
+    if name == "grep":
+        return search_tools.search_text(
+            args["pattern"], path=args.get("path", "."),
+            max_lines=args.get("max_lines", 100), scopes=_search_scopes(),
+        )
+    if name == "glob_files":
+        return search_tools.glob_paths(
+            args["pattern"], path=args.get("path", "."),
+            max_results=args.get("max_results", 200), scopes=_search_scopes(),
+        )
+    if name == "fetch_url":
+        return web.fetch_url(args["url"], max_chars=args.get("max_chars", 4000))
 
     # Browser / UI testing (Playwright). preview_click/preview_fill mutate page
     # state → SAFE_MODE-gated like keyboard_type/mouse_drag.

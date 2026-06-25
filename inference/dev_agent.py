@@ -5,7 +5,8 @@ autonomously complete multi-step development tasks using specialist models
 and an expanded action vocabulary.
 
 Expanded action verbs (beyond the 9 accessibility verbs):
-  WRITE_FILE <path>   — write content to a file
+  WRITE_FILE <path>   — create or fully overwrite a file
+  EDIT_FILE <path>    — surgically edit an existing file via SEARCH/REPLACE blocks
   RUN_TERMINAL <cmd>  — execute a shell command, capture output
   EXPLAIN <text>      — return a text response to the user (no desktop action)
   SEARCH_WEB <query>  — open browser with search query
@@ -47,6 +48,8 @@ from core.events import (
 from inference.edit_format import (
     HASHLINE,
     HASHLINE_PROMPT_INSTRUCTIONS,
+    SEARCH_REPLACE,
+    SEARCH_REPLACE_PROMPT_INSTRUCTIONS,
     EditApplier,
     render_hashline,
 )
@@ -119,7 +122,7 @@ def _strip_html(html: str) -> str:
 
 # Action verbs the planner model is allowed to emit
 _PLAN_ACTIONS = {
-    "WRITE_FILE", "RUN_TERMINAL", "CLICK", "OPEN", "HOTKEY",
+    "WRITE_FILE", "EDIT_FILE", "RUN_TERMINAL", "CLICK", "OPEN", "HOTKEY",
     "EXPLAIN", "SEARCH_WEB", "READ_SCREEN", "READ_FILE", "GREP",
     "SCROLL", "TYPE",
     # Git-native verbs (item #3 / #8 in roadmap)
@@ -137,7 +140,7 @@ _PLAN_ACTIONS = {
 _STEP_PATTERN = re.compile(
     r"^\s*(?:Step\s*\d+[:.]\s*)?"          # optional "Step N:"
     r"\[?"                                   # optional [
-    r"(WRITE_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
+    r"(WRITE_FILE|EDIT_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
     r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE"
     r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL"
     r"|SKILL_QUERY|SKILL_CALL|SEARCH_PERSONAL)"
@@ -401,7 +404,8 @@ class DevAgent:
     # approval gate (approval_hook.py, timeout_action="reject"). Read-only plans
     # keep their convenient auto-approve-on-silence.
     _DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
-        "WRITE_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR",
+        "WRITE_FILE", "EDIT_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT",
+        "GITHUB_PR",
     })
 
     # Pure context-gathering verbs (gap #1 fan-out): read-only, no side effects,
@@ -421,7 +425,7 @@ class DevAgent:
     # SEARCH_WEB(browser) — is a BARRIER: it has shared-resource / ordering side
     # effects, so it runs SOLO even when its dependencies are satisfied.
     _FANOUT_SAFE_VERBS: frozenset[str] = _PARALLEL_VERBS | frozenset({
-        "WRITE_FILE", "EXPLAIN",
+        "WRITE_FILE", "EDIT_FILE", "EXPLAIN",
     })
 
     def __init__(
@@ -587,12 +591,12 @@ class DevAgent:
     def _result_snippet(step: "AgentStep") -> str:
         """A short, secret-safe one-liner for a completed step.
 
-        Never surfaces WRITE_FILE bodies or RUN_TERMINAL stdout (may contain
-        secrets) — only a generic status for those verbs; reads/EXPLAIN show a
-        truncated result.
+        Never surfaces WRITE_FILE/EDIT_FILE bodies or RUN_TERMINAL stdout (may
+        contain secrets) — only a generic status for those verbs; reads/EXPLAIN
+        show a truncated result.
         """
         action = step.action.upper()
-        if action in ("WRITE_FILE", "RUN_TERMINAL"):
+        if action in ("WRITE_FILE", "EDIT_FILE", "RUN_TERMINAL"):
             return "ok" if step.success else "failed"
         return (step.result or "")[:120]
 
@@ -912,6 +916,15 @@ class DevAgent:
                 f"{HASHLINE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
                 if extra_ctx else HASHLINE_PROMPT_INSTRUCTIONS
             )
+
+        # EDIT_FILE (surgical SEARCH/REPLACE) is available to every plan model
+        # regardless of its WRITE_FILE knob, so teach the verb unconditionally —
+        # the planner should prefer it for targeted changes to existing files and
+        # reserve WRITE_FILE for new/whole-file rewrites (specs/edit-format-aci R5).
+        extra_ctx = (
+            f"{SEARCH_REPLACE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
+            if extra_ctx else SEARCH_REPLACE_PROMPT_INSTRUCTIONS
+        )
 
         plan_result = await self._router.infer(
             domain="plan",
@@ -1315,17 +1328,17 @@ class DevAgent:
             safe = [i for i in ready if pending[i].action.upper() in self._FANOUT_SAFE_VERBS]
             barriers = [i for i in ready if i not in safe]
 
-            # De-collide same-path WRITE_FILE within the concurrent batch (#14).
-            # The planner's "distinct paths" independence claim is unverified; two
-            # concurrent writes to one path race (nondeterministic last-writer +
-            # racing saga snapshots). Keep the lowest-indexed writer per path in
-            # the fan-out; demote later same-path writers to serial barriers so
-            # they run one-at-a-time in plan order.
+            # De-collide same-path WRITE_FILE/EDIT_FILE within the concurrent
+            # batch (#14). The planner's "distinct paths" independence claim is
+            # unverified; two concurrent writes to one path race (nondeterministic
+            # last-writer + racing saga snapshots). Keep the lowest-indexed writer
+            # per path in the fan-out; demote later same-path writers to serial
+            # barriers so they run one-at-a-time in plan order.
             seen_write_paths: set[str] = set()
             deduped_safe: list[int] = []
             for i in sorted(safe):
                 s = pending[i]
-                if s.action.upper() == "WRITE_FILE":
+                if s.action.upper() in ("WRITE_FILE", "EDIT_FILE"):
                     p = os.path.normcase(os.path.normpath((s.args or "").strip()))
                     if p in seen_write_paths:
                         barriers.append(i)
@@ -1527,10 +1540,12 @@ class DevAgent:
     def _compensation_for(step: "AgentStep") -> tuple[Optional[str], Optional[str]]:
         """Return (compensation_action, compensation_args) for a completed step, or (None, None)."""
         action = step.action.upper()
-        if action == "WRITE_FILE":
+        if action in ("WRITE_FILE", "EDIT_FILE"):
             # Prefer the execute-time snapshot (RESTORE_FILE: restore an
-            # overwritten file or delete a freshly-created one). Fall back to the
-            # legacy blind DELETE_FILE only if no snapshot was captured.
+            # overwritten/edited file or delete a freshly-created one). Fall back
+            # to the legacy blind DELETE_FILE only if no snapshot was captured
+            # (EDIT_FILE always edits an existing file, so its snapshot is always
+            # present → RESTORE_FILE, never the DELETE_FILE fallback).
             if step.comp_args:
                 return "RESTORE_FILE", step.comp_args
             return "DELETE_FILE", step.args.strip() if step.args else None
@@ -1600,12 +1615,13 @@ class DevAgent:
 
             # Register a saga compensation row for every successful step that
             # has a defined reverse action, so they can be unwound on failure.
-            # E6: a WRITE_FILE that FAILED may still have PARTIALLY modified the
-            # file (truncated/half-written then errored). If a pre-write snapshot
-            # was captured, register its RESTORE too so the partial write is
-            # rolled back — restoring is a safe no-op if the file was untouched.
+            # E6: a WRITE_FILE/EDIT_FILE that FAILED may still have PARTIALLY
+            # modified the file (truncated/half-written then errored). If a
+            # pre-write snapshot was captured, register its RESTORE too so the
+            # partial write is rolled back — restoring is a safe no-op if the file
+            # was untouched.
             register = bool(step.success)
-            if (not step.success and step.action.upper() == "WRITE_FILE"
+            if (not step.success and step.action.upper() in ("WRITE_FILE", "EDIT_FILE")
                     and step.comp_args):
                 register = True
             if register and comp_action and step_id is not None:
@@ -2290,7 +2306,7 @@ class DevAgent:
     def _critic_reject_message(step: AgentStep, verdict: CriticVerdict) -> str:
         """Diagnostic step result for a blocked/revise edit → drives _replan."""
         target = (step.args or "").strip()
-        return (f"WRITE_FILE to {target[:60]} {verdict.decision} by critic: "
+        return (f"{step.action.upper()} to {target[:60]} {verdict.decision} by critic: "
                 f"{verdict.summary()}"
                 + (f" | suggested fix: {verdict.suggested_fix}" if verdict.suggested_fix else ""))
 
@@ -2345,24 +2361,32 @@ class DevAgent:
     async def _execute_step(self, step: AgentStep) -> str:
         action = step.action.upper()
 
-        if action == "WRITE_FILE":
+        if action in ("WRITE_FILE", "EDIT_FILE"):
             # Destructive: gated like the git verbs. _confirm_destructive_op
             # short-circuits to approve when the whole plan was explicitly
             # authorized upfront, so an approved plan stays prompt-free.
+            # EDIT_FILE forces the SEARCH_REPLACE format (surgical block edit)
+            # regardless of the model's per-model WRITE_FILE knob; WRITE_FILE
+            # uses the configured format (whole_file / hashline). Both share the
+            # same lint gate, Critic, snapshot, and tester path below.
             target = (step.args or "").strip()
+            fmt_override = SEARCH_REPLACE if action == "EDIT_FILE" else None
 
             if self._critic is None or not self._critic_enabled:
                 # ── Legacy path (Critic OFF) — byte-identical to pre-feature ──
                 if not await self._confirm_destructive_op(
                     f"Approve writing file {target[:60]}?"
                 ):
-                    return "WRITE_FILE cancelled by user"
+                    return f"{action} cancelled by user"
                 # Lint-gate + format-aware apply BEFORE snapshot/write so a
-                # syntactically broken edit fails closed (file untouched) and the
-                # loop replans with a diagnostic (specs/edit-format-aci R1, R2).
-                # An EditError raised here marks the step failed (WRITE_FILE is
-                # non-retryable) → replan; nothing is snapshotted or written.
-                new_text = await asyncio.to_thread(self._apply_edit, step.args, step.body)
+                # syntactically broken (or non-matching) edit fails closed (file
+                # untouched) and the loop replans with a diagnostic
+                # (specs/edit-format-aci R1, R2, R5). An EditError raised here
+                # marks the step failed (both verbs are non-retryable) → replan;
+                # nothing is snapshotted or written.
+                new_text = await asyncio.to_thread(
+                    self._apply_edit, step.args, step.body, fmt_override
+                )
                 # Snapshot BEFORE writing so a saga rollback restores an
                 # overwritten file instead of deleting it. Captured even though
                 # we're about to write — if the write fails, no compensation is
@@ -2377,7 +2401,9 @@ class DevAgent:
             # Apply (lint gate) FIRST so the Critic reviews the actual resulting
             # text; an EditError still fails closed → replan (unchanged). The
             # Critic runs BEFORE the approval gate so it can escalate it.
-            new_text = await asyncio.to_thread(self._apply_edit, step.args, step.body)
+            new_text = await asyncio.to_thread(
+                self._apply_edit, step.args, step.body, fmt_override
+            )
             verdict = await self._critic_review(step, new_text)
             if verdict.decision in (REVISE, BLOCK):
                 # No write, no snapshot/compensation — the diagnostic becomes the
@@ -2389,7 +2415,7 @@ class DevAgent:
             if not await self._confirm_destructive_op(
                 f"Approve writing file {target[:60]}?", force=verdict.escalate
             ):
-                return "WRITE_FILE cancelled by user"
+                return f"{action} cancelled by user"
             step.comp_args = json.dumps(await asyncio.to_thread(
                 self._snapshot_for_write, step.args
             ))
@@ -2842,16 +2868,21 @@ class DevAgent:
     # Dev action implementations
     # ---------------------------------------------------------------------- #
 
-    def _apply_edit(self, path_str: str, body: str) -> str:
-        """Resolve a WRITE_FILE payload to its final file text, lint-gated.
+    def _apply_edit(
+        self, path_str: str, body: str, edit_format: Optional[str] = None
+    ) -> str:
+        """Resolve a WRITE_FILE/EDIT_FILE payload to its final file text, lint-gated.
 
         Reads the current file (if it exists) and runs the payload through the
-        EditApplier for the active edit format — the format configured for the
-        model that produced the plan (specs/edit-format-aci R3). Raises
+        EditApplier. ``edit_format`` defaults to the format configured for the
+        model that produced the plan (WRITE_FILE; specs/edit-format-aci R3); the
+        EDIT_FILE verb passes ``SEARCH_REPLACE`` explicitly to force surgical
+        block edits regardless of the per-model WRITE_FILE knob. Raises
         ``EditError`` if the result fails validation — the caller never writes
         on failure (R1). Returns the text to write on success.
         """
-        edit_format = self._router.edit_format_for(self._active_plan_model)
+        if edit_format is None:
+            edit_format = self._router.edit_format_for(self._active_plan_model)
         path = Path(path_str.strip().strip("'\""))
         current = (
             path.read_text(encoding="utf-8", errors="replace")
@@ -2885,56 +2916,15 @@ class DevAgent:
     def _grep(pattern: str, search_path: str, max_lines: int = 100) -> str:
         """Search for a regex pattern in files under search_path.
 
-        Returns matching lines as a string (file:line: content format).
-        Uses Python re for portability — no dependency on system grep.
+        Returns matching lines as a string (file:line: content format). Delegates
+        to the shared ``mcp_server.tools.search`` implementation that also backs
+        the first-class ``grep`` MCP tool, so the verb and the tool never drift.
+        ``scopes=None`` preserves this in-process verb's repo-wide read (the MCP
+        tool passes the writable-root allowlist instead).
         """
-        import os as _os
-
-        root = Path(search_path)
-        if not root.exists():
-            return f"Path does not exist: {search_path}"
-
-        compiled = re.compile(pattern)
-        results: list[str] = []
-        extensions = {".py", ".swift", ".md", ".txt", ".json", ".yaml", ".yml"}
-
-        def _search_file(fp: Path) -> None:
-            if len(results) >= max_lines:
-                return
-            try:
-                for lineno, line in enumerate(
-                    fp.read_text(encoding="utf-8", errors="replace").splitlines(),
-                    start=1,
-                ):
-                    if compiled.search(line):
-                        results.append(f"{fp}:{lineno}: {line.rstrip()}")
-                        if len(results) >= max_lines:
-                            break
-            except OSError:
-                pass
-
-        if root.is_file():
-            _search_file(root)
-        else:
-            for dirpath, dirnames, filenames in _os.walk(root):
-                # Prune excluded directories in-place
-                dirnames[:] = [
-                    d for d in dirnames
-                    if d not in {"__pycache__", ".git", "node_modules",
-                                 "venv", ".venv", "chroma_db", "DerivedData"}
-                ]
-                for fname in filenames:
-                    if Path(fname).suffix in extensions:
-                        _search_file(Path(dirpath) / fname)
-                    if len(results) >= max_lines:
-                        break
-
-        if not results:
-            return f"No matches for pattern {pattern!r} in {search_path}"
-        summary = f"Found {len(results)} match(es)"
-        if len(results) >= max_lines:
-            summary += f" (truncated at {max_lines})"
-        return summary + "\n" + "\n".join(results)
+        from mcp_server.tools import search as _search
+        result = _search.search_text(pattern, search_path, max_lines, scopes=None)
+        return _search.format_grep_result(result, pattern, search_path, max_lines)
 
     @staticmethod
     def _run_terminal(cmd: str) -> str:
