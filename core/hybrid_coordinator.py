@@ -62,6 +62,15 @@ from inference.local_inference import (
 )
 from desktop.vision_grounder import VisionGrounder
 from core.conversation_state import ConversationState
+from core.workflow_voice import (
+    parse_workflow_request,
+    parse_decomposition,
+    build_decompose_prompt,
+    build_synthesis_prompt,
+    workflow_voice_config,
+    fanout_n_from_config,
+    verify_enabled,
+)
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
 from monitoring.cost_ledger import estimate_cost
@@ -484,6 +493,11 @@ class HybridCoordinator:
         # (Phase 3 prototype, flag-gated by DA_A2UI_CLICK_TARGETS).
         self._target_cache = None
         self._conversation = ConversationState()  # voice anaphora + last-action hint
+        # Multi-agent workflow voice trigger ("think hard about …"). Default OFF;
+        # the runner is injected by main.py and gates itself on
+        # workflow_orchestration.enabled. Spec: specs/workflow-orchestration/.
+        self._workflow_runner = None
+        self._wf_cfg = workflow_voice_config()
         self._lecture_mode: bool = False
         self._profiler = None    # set via set_profiler()
         self._calibrator = None  # set via set_calibrator()
@@ -542,6 +556,12 @@ class HybridCoordinator:
 
     def set_dev_agent(self, dev_agent: "DevAgent") -> None:
         self._dev_agent = dev_agent
+
+    def set_workflow_runner(self, runner) -> None:
+        """Wire the multi-agent WorkflowRunner so the voice 'think hard about …'
+        trigger can fan a goal out to fresh-context sub-agents. The runner gates
+        itself on workflow_orchestration.enabled (default OFF)."""
+        self._workflow_runner = runner
 
     def set_skill_registry(self, registry) -> None:
         """Wire the SkillRegistry so the voice 'help' command can list skills."""
@@ -912,6 +932,139 @@ class HybridCoordinator:
         except Exception as exc:
             log.debug("HybridCoordinator._tts_speak failed: %s", exc)
 
+    async def _speak_and_suppress(self, text: str) -> None:
+        """Speak ``text`` while suppressing the mic for the playback duration.
+
+        Without this guard the agent transcribes its own TTS voice as the user's
+        next utterance — a runaway feedback loop. We suppress generously *before*
+        speaking (also flushing any buffered audio), then re-arm a short echo
+        tail *after* ``_tts_speak`` returns (it blocks until playback finishes),
+        so the window always covers synthesis + playback even if the word-count
+        estimate runs short. Mirrors the voice-calibrator / approval-gate guard.
+        """
+        words = len(text.split())
+        # ~0.35 s/word is the spoken-rate estimate used across the voice paths.
+        est = max(1.5, words * 0.35)
+        whisper = self._whisper
+        if whisper is not None:
+            try:
+                whisper.suppress(est + 1.0)
+            except Exception as exc:
+                log.debug("workflow: pre-speak suppress failed: %s", exc)
+        await self._tts_speak(text)
+        if whisper is not None:
+            try:
+                whisper.suppress(0.8)   # echo tail after playback completes
+            except Exception as exc:
+                log.debug("workflow: post-speak suppress failed: %s", exc)
+
+    async def _maybe_handle_workflow(self, cmd: Command) -> Optional[dict]:
+        """Handle a voice 'think hard about …' / 'research …' request.
+
+        Decomposes the goal into N sub-angles, fans them out as fresh-context
+        sub-agents via ``WorkflowRunner.fan_out``, then synthesizes + speaks one
+        answer. **Pure talk — no desktop actions, no command-pipeline bypass.**
+        Returns a handled result dict, or ``None`` to fall through to ordinary
+        routing (not a trigger, a flare, or any error — fail-safe, AGENTS.md #4).
+        """
+        runner = self._workflow_runner
+        if runner is None or not runner.enabled:
+            return None
+        try:
+            req = parse_workflow_request(cmd.text or "")
+            if req is None:
+                return None  # not a workflow request — ordinary routing
+            # Skip-on-flare (AGENTS.md #5): a multi-call fan-out is heavy. During a
+            # flare let the request fall through to the ordinary single-model path
+            # so the user still gets an answer with minimal friction.
+            if await self._workflow_flare_active():
+                log.info("HybridCoordinator: workflow trigger skipped (flare) — "
+                         "falling through to ordinary routing")
+                return None
+            router = getattr(self._dev_agent, "_router", None) if self._dev_agent else None
+            if router is None:
+                return None
+            log.info("HybridCoordinator: workflow trigger — goal=%r", req.goal)
+            n = fanout_n_from_config(self._wf_cfg)
+            subtasks = await self._decompose_goal(router, req.goal, n)
+            if not subtasks:
+                return None
+            verify_criterion = (
+                f"The answer is a correct, relevant, substantive response to: {req.goal}"
+                if verify_enabled(self._wf_cfg) else None
+            )
+            result = await runner.fan_out(
+                subtasks, name="voice_workflow", goal=req.goal,
+                verify_criterion=verify_criterion,
+            )
+            # Keep successful (and, if verification ran, verified) sub-answers.
+            texts = [
+                r.text for r in result.results
+                if r.ok and r.text.strip() and (r.verified is None or r.verified)
+            ]
+            if not texts:
+                msg = "Sorry, I couldn't work that one out just now."
+                await self._speak_and_suppress(msg)
+                return {"status": "ok", "action": "WORKFLOW", "spoken": msg,
+                        "source": cmd.source, "trace_id": cmd.trace_id}
+            answer = await self._synthesize_workflow(router, req.goal, texts)
+            await self._speak_and_suppress(answer)
+            return {"status": "ok", "action": "WORKFLOW", "spoken": answer,
+                    "subtasks": len(subtasks), "verified": result.verified_count,
+                    "source": cmd.source, "trace_id": cmd.trace_id}
+        except Exception as exc:  # never strand the user — fall through
+            log.warning("HybridCoordinator: workflow handling failed (%s)", exc)
+            return None
+
+    async def _decompose_goal(self, router, goal: str, n: int) -> list:
+        """Split ``goal`` into ``n`` sub-angles via the resident general model.
+
+        Returns a list of ``SubTask``. Degrades to a single sub-agent on the raw
+        goal if decomposition fails or yields nothing, so the feature always
+        produces an answer rather than going silent."""
+        from inference.workflow import SubTask
+        try:
+            r = await router.infer(
+                domain="general", user_text=build_decompose_prompt(goal, n),
+                context="",
+            )
+            if getattr(r, "ok", True):
+                lines = parse_decomposition(getattr(r, "text", "") or "", n)
+                if lines:
+                    return [SubTask(name=f"angle{i + 1}", prompt=line)
+                            for i, line in enumerate(lines)]
+        except Exception as exc:
+            log.debug("workflow: decomposition failed (%s) — single-angle fallback", exc)
+        return [SubTask(name="angle1", prompt=goal)]
+
+    async def _synthesize_workflow(self, router, goal: str, texts: list[str]) -> str:
+        """Synthesize sub-answers into one concise spoken reply. Degrades to the
+        first sub-answer (truncated) if the synthesis call fails."""
+        try:
+            r = await router.infer(
+                domain="general", user_text=build_synthesis_prompt(goal, texts),
+                context="",
+            )
+            ans = (getattr(r, "text", "") or "").strip()
+            if getattr(r, "ok", True) and ans:
+                return ans
+        except Exception as exc:
+            log.debug("workflow: synthesis failed (%s) — first-angle fallback", exc)
+        return texts[0].strip()[:600]
+
+    async def _workflow_flare_active(self) -> bool:
+        """True if a pain-day flare is active (AGENTS.md #5). A twin-snapshot
+        error fails safe to 'no flare' so a telemetry hiccup never silently
+        disables the feature."""
+        if self._twin is None:
+            return False
+        try:
+            snap = await self._twin.get_snapshot()
+            return bool(getattr(snap, "pain_day_active", False))
+        except Exception as exc:
+            log.debug("workflow: twin snapshot failed (%s) — assuming no flare", exc)
+            return False
+
     async def _handle_google_connect(self) -> dict:
         """Start the Google OAuth consent flow by voice (setup or recovery).
 
@@ -1091,6 +1244,18 @@ class HybridCoordinator:
             macro_result = await self._maybe_handle_macro(cmd)
             if macro_result is not None:
                 return macro_result
+
+        # --- Voice multi-agent workflow trigger ("think hard about …") ---
+        # Decompose the goal → fan out to fresh-context sub-agents → synthesize +
+        # speak one answer. Pure talk, no desktop actions; the entire command/dev
+        # pipeline below is bypassed for a handled request. Default OFF (the
+        # runner gates on workflow_orchestration.enabled). Fail-safe: a miss, a
+        # flare, or any error returns None → ordinary routing below.
+        if (self._workflow_runner is not None and self._workflow_runner.enabled
+                and cmd.source in ("voice", "voice_local")):
+            wf_result = await self._maybe_handle_workflow(cmd)
+            if wf_result is not None:
+                return wf_result
 
         # --- Dev-agent pre-gate: intercept non-command domains ---
         # Skip for voice system-control keywords so they reach the keyword block

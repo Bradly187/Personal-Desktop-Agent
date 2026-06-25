@@ -886,6 +886,25 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     fusion.set_scheduler(scheduler)
     dev_agent.set_scheduler(scheduler)
 
+    # ── Multi-agent workflow orchestration (voice "think hard about …") ────
+    # Fans a spoken goal out to N fresh-context sub-agents over the resident
+    # model (no new model load — AGENTS.md #6) via the scheduler's bounded pool,
+    # then synthesizes + speaks one answer. Pure inference, no desktop actions.
+    # Constructed always (cheap); the runner gates itself + the coordinator
+    # trigger on workflow_orchestration.enabled (default OFF). Coordinator does
+    # its own async skip-on-flare. Spec: specs/workflow-orchestration/.
+    try:
+        from inference.workflow import WorkflowRunner
+        workflow_runner = WorkflowRunner(
+            router=router, scheduler=scheduler, agent_db=agent_db,
+        )
+        coordinator.set_workflow_runner(workflow_runner)
+        if workflow_runner.enabled:
+            log.info("WorkflowRunner: voice trigger active")
+    except Exception as _wf_exc:
+        log.warning("WorkflowRunner: failed to init (%s) — voice workflows disabled",
+                    _wf_exc)
+
     from calibration.acoustic_profiler import AcousticProfiler
     profiler = AcousticProfiler(agent_db=agent_db, session_id=session_id)
     await profiler.load()

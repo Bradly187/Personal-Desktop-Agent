@@ -24,13 +24,16 @@ parallelize nor stay safe. The realistic, safe primitive is to orchestrate
 `AccessibilityScheduler`'s deadlock-free `fan_out` (its own sub-agent semaphore).
 **No new model is loaded.**
 
-**Status:** Done (core primitive + durability + tests). `inference/workflow.py`
-`WorkflowRunner` with `fan_out` + adversarial `verify`; `agent_workflows` ledger
-table. **Experimental + OFF by default** (`workflow_orchestration.enabled`).
-**Deferred (documented next step):** wiring the runner to a live *trigger* (a
-voice command / MCP tool) and a `pipeline` (per-item staged) mode — the
-`agent_workflows.mode` column already reserves `'pipeline'`. The runner is a
-tested building block; no caller invokes it yet, so the live system is unchanged.
+**Status:** Done (core primitive + durability + **live voice trigger** + tests).
+`inference/workflow.py` `WorkflowRunner` with `fan_out` + adversarial `verify`;
+`agent_workflows` ledger table; `core/workflow_voice.py` parses the spoken
+trigger and `HybridCoordinator._maybe_handle_workflow` drives
+decompose→fan_out→synthesize→speak. **Experimental + OFF by default**
+(`workflow_orchestration.enabled`). **Still deferred:** a `pipeline` (per-item
+staged) mode — the `agent_workflows.mode` column already reserves `'pipeline'` —
+and an MCP-tool trigger (the MCP server process has no `ModelRouter`, so a tool
+there would drive Ollama outside the main process's VRAM-eviction lifecycle —
+AGENTS.md #6; the voice trigger in the main pipeline is the correct home).
 **Owner / author session:** Claude Code (Opus 4.8).
 **Related:** `../dev-agent-critic/` (the fresh-context reviewer pattern reused
 here), `../first-class-search-tools/`, `../browser-ui-testing/` (sibling phases).
@@ -85,6 +88,24 @@ Honors AGENTS.md #1 (schema source of truth), #2 (never on the 60 Hz path), #5
 2. EACH run SHALL be journaled best-effort; a DB failure SHALL NOT break
    orchestration.
 
+### Requirement 6: Live voice trigger (decompose → fan_out → synthesize → speak)
+1. WHEN the feature is ON and a **voice** utterance begins with a trigger phrase
+   (`"think hard about …"` / `"research …"` / `"brainstorm …"`; parsed by
+   `core/workflow_voice.parse_workflow_request`, anchored + non-empty goal,
+   deterministic) followed by a goal, `HybridCoordinator` SHALL decompose the
+   goal into N sub-angles (general model), run `WorkflowRunner.fan_out`, then
+   synthesize the sub-answers into one concise reply and speak it. It is
+   intercepted **before** the dev pre-gate and bypasses the command/dev pipeline
+   for a handled request (pure talk — **no desktop actions**).
+2. The reply SHALL be spoken with the **mic-feedback suppress guard**
+   (`_speak_and_suppress`) so the agent never transcribes its own TTS.
+3. Fail-safe (AGENTS.md #4): a non-match, an **active flare** (#5), a missing
+   router, or **any** handler error SHALL return `None` → ordinary routing (the
+   utterance is never stranded). Decomposition failure SHALL degrade to a single
+   sub-agent on the raw goal rather than going silent.
+4. The trigger SHALL gate on the **same** `workflow_orchestration.enabled` flag
+   as the runner — byte-identical legacy voice path when unset.
+
 ---
 
 ## 4. Behavior Verification (executable)
@@ -94,6 +115,15 @@ Honors AGENTS.md #1 (schema source of truth), #2 (never on the 60 Hz path), #5
   confirmed + **fail-safe on reviewer error**; **skip-on-flare** (+ flare-check
   error → skip); scheduler `fan_out` used when present; **agent_workflows
   migration additive + user_version unchanged**; run journaled to DB.
+- `tests/test_workflow_voice.py` (38) — trigger parse (positive/negative,
+  longest-phrase, filler-strip, bare-trigger reject); decomposition parse
+  (numbering/bullets/blank/dedupe/cap); prompt builders; config + fan-out clamp
+  + verify-default-OFF — R6.
+- `tests/test_workflow_voice_coordinator.py` (7) — `_maybe_handle_workflow`
+  end-to-end with a fake router + real runner: happy path (decompose+fan_out+
+  synthesize, 5 infer calls); non-trigger / disabled / missing-router → None;
+  **flare → fall-through, no inference**; decompose-failure → single-angle;
+  all-subagents-fail → spoken apology — R6.
 
 ---
 
@@ -105,5 +135,11 @@ Honors AGENTS.md #1 (schema source of truth), #2 (never on the 60 Hz path), #5
       sub-agents via scheduler), adversarial `verify`, OFF-by-default flag,
       skip-on-flare, DB journaling — R1–R4.
 - [x] 3. `tests/test_workflow.py` (12).
-- [ ] 4. (Deferred) wire a live trigger (voice command / MCP tool) + `pipeline`
-      mode. Building block is ready; no caller invokes it yet.
+- [x] 4. Live **voice** trigger — `core/workflow_voice.py` (parse + prompts) +
+      `HybridCoordinator._maybe_handle_workflow` (decompose→fan_out→synthesize→
+      speak) + `main.py` runner construction; `tests/test_workflow_voice.py` (38)
+      + `tests/test_workflow_voice_coordinator.py` (7) — R6.
+- [ ] 5. (Deferred) `pipeline` (per-item staged) mode — `agent_workflows.mode`
+      already reserves `'pipeline'`. MCP-tool trigger ruled out: the MCP server
+      process has no `ModelRouter` (would drive Ollama outside the VRAM lifecycle,
+      AGENTS.md #6).
