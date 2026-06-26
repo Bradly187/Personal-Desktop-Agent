@@ -32,8 +32,26 @@ This package covers all three; all share the same regression gate (on `exact_acc
 | `single` (default) | utterance → right verb + slots? | `command_verbs`, `*_slots` | exact accuracy |
 | `single --predictor router` | utterance → right domain? (**model-free**) | `router_domains` | exact accuracy |
 | `single --predictor skill_trigger` | utterance → right **skill** fires (or none)? (**model-free**) | `skill_triggers` | exact accuracy |
-| `trajectory` | goal → right plan (verbs, order, no forbidden actions)? | `dev_trajectory` | exact (fully-correct) rate |
-| `judge` | free-form answer → meets the rubric (correct, grounded, no hallucination)? | `explain_quality` | pass rate |
+| `trajectory` | goal → right plan (verbs, order, no forbidden actions)? | `dev_trajectory` | exact (fully-correct) rate **+ `safe_acc`** |
+| `judge` | free-form answer → meets the rubric (correct, grounded, no hallucination)? | `explain_quality`, `intent_satisfaction` | pass rate |
+| `ablation` | does the codebase indexer actually *ground* the dev agent? | `rag_ablation` | grounding **delta** (`mean_delta`) |
+
+### Metric semantics — read these before "fixing" a low-looking number
+
+Two gated metrics are **not** plain accuracy and are easy to misread:
+
+- **`rag_ablation` → `mean_delta` (a delta, not a hit-rate).** It is
+  `mean_with − mean_no`: how much anchor-term grounding the RAG index *adds*
+  versus answering the same goal with retrieval disabled. The baseline 0.2 means
+  "+0.2 grounding from RAG" — **higher is better**, and the wide 0.15 tolerance
+  exists to catch RAG silently collapsing toward ~0 delta (the 2026-06-07
+  embedder-bug class), not run-to-run noise. `exact_acc == mean_delta` here, so
+  don't read 0.2 as "20% correct / 80% miss".
+- **`dev_trajectory` → the safety property is `safe_acc`, not `exact_acc`.**
+  `safe_acc` (read-only "just explain/find" goals that must NOT emit
+  `WRITE_FILE`/`RUN_TERMINAL`/`GIT_COMMIT`) is the gate that matters and sits at
+  **1.0**. `exact_acc` (0.7273) is the stricter *fully-correct-plan* rate — useful
+  signal, gated only within a 0.1 tolerance band, not a safety alarm.
 
 ```bash
 python -m evals.run --suite router_domains  --predictor router          # no model needed

@@ -15,10 +15,17 @@
       <a class="navlink" href="/">← Chat</a>
     </header>
 
-    <!-- NOW: live KPIs -->
+    <!-- NOW: live KPIs + backend-health strip -->
     <section class="panel">
       <div class="panel-head"><h2>Now</h2><span class="sub" id="now-sub">live</span></div>
       <div class="kpis" id="kpis"></div>
+      <div class="health" id="health"></div>
+    </section>
+
+    <!-- ALERTS: threshold + SLO breaches (durable) -->
+    <section class="panel">
+      <div class="panel-head"><h2>Alerts</h2><span class="sub" id="alerts-sub"></span></div>
+      <div id="alerts"><div class="empty">no alerts</div></div>
     </section>
 
     <div class="grid2">
@@ -30,7 +37,18 @@
 
       <!-- TRACES + replay -->
       <section class="panel">
-        <div class="panel-head"><h2>Traces</h2><span class="sub" id="traces-sub"></span></div>
+        <div class="panel-head">
+          <h2>Traces</h2>
+          <span class="trace-filters">
+            <select id="tf-source"><option value="">all sources</option></select>
+            <select id="tf-success">
+              <option value="">all</option>
+              <option value="1">ok</option>
+              <option value="0">failed</option>
+            </select>
+          </span>
+          <span class="sub" id="traces-sub"></span>
+        </div>
         <div class="traces" id="traces"></div>
         <div class="replay" id="replay"><div class="empty">pick a trace to replay its timeline</div></div>
       </section>
@@ -61,6 +79,34 @@
       <section class="panel">
         <div class="panel-head"><h2>Errors</h2><span class="sub" id="errors-sub"></span></div>
         <div id="errors"></div>
+      </section>
+    </div>
+
+    <div class="grid2">
+      <!-- COST: cloud spend per day -->
+      <section class="panel">
+        <div class="panel-head"><h2>Cloud cost</h2><span class="sub" id="cost-sub"></span></div>
+        <div id="cost"></div>
+      </section>
+
+      <!-- GOALS: autonomous goal queue -->
+      <section class="panel">
+        <div class="panel-head"><h2>Goal queue</h2><span class="sub" id="goals-sub"></span></div>
+        <div id="goals"></div>
+      </section>
+    </div>
+
+    <div class="grid2">
+      <!-- ESCALATIONS: dev runs needing review (read-only) -->
+      <section class="panel">
+        <div class="panel-head"><h2>Escalations</h2><span class="sub" id="escalations-sub"></span></div>
+        <div id="escalations"></div>
+      </section>
+
+      <!-- CORRECTIONS: recent user corrections -->
+      <section class="panel">
+        <div class="panel-head"><h2>Corrections</h2><span class="sub" id="corrections-sub"></span></div>
+        <div id="corrections"></div>
       </section>
     </div>
   </div>

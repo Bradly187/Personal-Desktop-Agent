@@ -40,12 +40,21 @@ from evals.scoring import check_regression
 _BASELINE_DIR = Path(__file__).parent / "baselines"
 
 
-def _infer_text(model: str | None):
+def _infer_text(model: str | None, *, timeout: float = 120.0):
     """A (system, user) -> reply coroutine fn over the local model. Imports lazily
-    so --help / a missing aiohttp never break the CLI."""
+    so --help / a missing aiohttp never break the CLI.
+
+    ``timeout`` is the OllamaInference HTTP timeout. It defaults generously
+    (120 s, not OllamaInference's 10 s default) because an eval call legitimately
+    runs longer than a single interactive command — a cold model load, a long
+    generated answer, or a judge scoring a long answer against many criteria. The
+    real per-call bound is each predictor's own outer ``asyncio.wait_for`` (the
+    ``--timeout`` arg); the 10 s default would otherwise cut those cases at 10 s
+    and record them as spurious TimeoutError 'failures'."""
     from inference.local_inference import OllamaInference
 
-    oi = OllamaInference(model=model) if model else OllamaInference()
+    oi = (OllamaInference(model=model, timeout=timeout) if model
+          else OllamaInference(timeout=timeout))
 
     async def infer_text(system: str, user: str) -> str:
         resp = await oi._chat([
@@ -111,8 +120,11 @@ def _run_judge(args):
     if not cases:
         print("no cases to run", file=sys.stderr)
         return None
-    _, producer_infer = _infer_text(args.model)
-    _, judge_infer = _infer_text(args.judge_model or args.model)
+    # Wire the HTTP timeout to --timeout so a long answer/judge isn't cut at the
+    # 10 s default and recorded as a spurious error.
+    _, producer_infer = _infer_text(args.model, timeout=max(120.0, args.timeout))
+    _, judge_infer = _infer_text(args.judge_model or args.model,
+                                 timeout=max(120.0, args.timeout))
     return run_judge_suite(
         cases,
         llm_judge(judge_infer, timeout_s=args.timeout),

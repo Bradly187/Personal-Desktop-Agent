@@ -221,16 +221,38 @@ def _build_summary(result: dict) -> dict:
     }
 
 
-def recent_traces(agent_db_path: str = "agent.db", limit: int = 20) -> list[dict]:
-    """List recent commands that carry a trace_id (newest first) for `--recent`."""
+def recent_traces(agent_db_path: str = "agent.db", limit: int = 20,
+                  source: Optional[str] = None, success: Optional[bool] = None,
+                  action: Optional[str] = None) -> list[dict]:
+    """List recent commands that carry a trace_id (newest first).
+
+    Optional `source` / `success` / `action` filters narrow the list (R7.1). Each
+    row sums tokens from its inferences and carries `error_msg` so a failed trace
+    shows its reason inline without a replay (R7.2). Backward-compatible: the CLI
+    `--recent` path calls this with just (path, limit).
+    """
     adb = _connect_ro(agent_db_path)
     try:
+        where = ["c.trace_id IS NOT NULL", "c.trace_id != ''"]
+        params: list = []
+        if source:
+            where.append("c.source = ?"); params.append(source)
+        if action:
+            where.append("c.action = ?"); params.append(action)
+        if success is not None:
+            where.append("c.success = ?"); params.append(1 if success else 0)
+        params.append(int(limit))
         return _rows(
             adb,
-            "SELECT trace_id, ts, source, action, route, success, latency_ms "
-            "FROM commands WHERE trace_id IS NOT NULL AND trace_id != '' "
-            "ORDER BY ts DESC LIMIT ?",
-            (int(limit),),
+            "SELECT c.trace_id AS trace_id, c.ts AS ts, c.source AS source, "
+            "c.action AS action, c.route AS route, c.success AS success, "
+            "c.latency_ms AS latency_ms, c.error_msg AS error_msg, "
+            "COALESCE(SUM(i.tokens_in), 0) AS tokens_in, "
+            "COALESCE(SUM(i.tokens_out), 0) AS tokens_out "
+            "FROM commands c LEFT JOIN inferences i ON i.command_id = c.id "
+            "WHERE " + " AND ".join(where) + " "
+            "GROUP BY c.id ORDER BY c.ts DESC LIMIT ?",
+            tuple(params),
         )
     finally:
         if adb is not None:

@@ -12,6 +12,8 @@
   const ms = (v) => v == null ? "—" : Math.round(v) + " ms";
   const fixed = (v, d=2) => v == null ? "—" : Number(v).toFixed(d);
   const clock = (t) => { try { return new Date((t || 0) * 1000).toLocaleTimeString(); } catch { return ""; } };
+  const esc = (s) => (s == null ? "" : String(s)).replace(/[&<>"]/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   async function getJSON(url) {
     try { const r = await fetch(url); if (!r.ok) return null; return await r.json(); }
@@ -27,21 +29,38 @@
     return c;
   }
   async function refreshMetrics() {
-    const m = await getJSON("/api/metrics");
+    // Command-scoped KPIs prefer the live-session rollup (/api/session-live) so the
+    // panel isn't empty after a restart; process-lifetime counters (/api/metrics,
+    // reset every start) are the fallback. VRAM/pain-day/EMA stay process-wide.
+    const [m, sess] = await Promise.all([getJSON("/api/metrics"), getJSON("/api/session-live")]);
     const box = $("kpis");
     if (!m) { box.innerHTML = ""; box.appendChild(el("div", "empty", "metrics endpoint unavailable")); return; }
     const g = m.gauges || {}, c = m.counters || {}, h = (m.histograms || {}).latency_ms || {};
+    const live = (sess && sess.total_commands != null) ? sess : null;
+    const win = live ? "this session" : "lifetime";
     box.innerHTML = "";
-    box.appendChild(kpi("commands", String(c.commands_total ?? 0)));
-    box.appendChild(kpi("success (1m)", pct(g.success_rate_1m)));
-    box.appendChild(kpi("cloud (1m)", pct(g.cloud_rate_1m)));
-    box.appendChild(kpi("latency p50", ms(h.p50)));
-    box.appendChild(kpi("latency p95", ms(h.p95)));
+    box.appendChild(kpi("commands", String(live ? live.total_commands : (c.commands_total ?? 0)), win));
+    box.appendChild(kpi("success", live ? pct(live.success_rate) : pct(g.success_rate_1m), live ? "session" : "1m"));
+    box.appendChild(kpi("cloud", live ? pct(live.cloud_escalation_rate) : pct(g.cloud_rate_1m), live ? "session" : "1m"));
+    box.appendChild(kpi("latency p50", live ? ms(live.latency_p50_ms) : ms(h.p50), win));
+    box.appendChild(kpi("latency p95", live ? ms(live.latency_p95_ms) : ms(h.p95), win));
     const pd = g.pain_day_score;
     const pdc = kpi("pain-day", fixed(pd)); if (pd != null && pd >= 0.6) pdc.classList.add("warn");
     box.appendChild(pdc);
     box.appendChild(kpi("VRAM free", g.vram_free_gb == null ? "—" : fixed(g.vram_free_gb, 1) + " GB"));
-    if (m.uptime_s != null) $("now-sub").textContent = "uptime " + Math.round(m.uptime_s / 60) + "m";
+    // Accessibility + backpressure KPIs (R5). Absent gauge → "—", never 0.
+    const ct = c.commands_total ?? 0;
+    box.appendChild(kpi("clarify", ct ? pct((c.commands_clarify ?? 0) / ct) : "—", "asked Brad"));
+    box.appendChild(kpi("voice q", g.whisper_logprob_ema == null ? "—" : fixed(g.whisper_logprob_ema), "logprob"));
+    box.appendChild(kpi("gesture q", g.gesture_conf_ema == null ? "—" : fixed(g.gesture_conf_ema), "conf"));
+    const qd = g.scheduler_queue_depth;
+    const qdc = kpi("queue", qd == null ? "—" : String(Math.round(qd)), "scheduler");
+    if (qd != null && qd > 20) qdc.classList.add("warn");
+    box.appendChild(qdc);
+    if (m.uptime_s != null) {
+      $("now-sub").textContent = "uptime " + Math.round(m.uptime_s / 60) + "m" +
+        (live ? " · session " + live.session_id : "");
+    }
   }
 
   // ── Activity: live feed (WS dash_event) ─────────────────────────────────────
@@ -49,34 +68,91 @@
   function pushFeed(ev) {
     const feed = $("feed");
     const empty = feed.querySelector(".empty"); if (empty) empty.remove();
-    const row = el("div", "feed-row " + (ev.severity === "warn" ? "warn" : ""));
+    const kind = ev.kind || "event";
+    const row = el("div", "feed-row kind-" + kind + (ev.severity === "warn" ? " warn" : ""));
     row.appendChild(el("span", "feed-time", clock(ev.ts)));
-    row.appendChild(el("span", "feed-kind", ev.kind || ""));
+    row.appendChild(el("span", "feed-kind", kind));
+    // "command" frames carry structured fields; every other kind (incl. unknown
+    // ones from future topics) falls back to the server-rendered ev.text.
     let text = ev.text;
-    if (ev.kind === "command") {
-      const okc = ev.success ? "ok" : "fail";
+    if (kind === "command") {
+      row.classList.add(ev.success ? "ok" : "fail");
       text = `${ev.action || "?"} · ${ev.route || "?"} · ${ms(ev.latency_ms)}`;
-      row.classList.add(okc);
     }
     row.appendChild(el("span", "feed-text", text || ""));
     feed.insertBefore(row, feed.firstChild);
     while (feed.childElementCount > FEED_MAX) feed.removeChild(feed.lastChild);
   }
 
+  // ── Alerts (poll /api/alerts) ───────────────────────────────────────────────
+  async function refreshAlerts() {
+    const res = await getJSON("/api/alerts?limit=50");
+    const box = $("alerts"); box.innerHTML = "";
+    const alerts = (res && res.alerts) || [];
+    if (!alerts.length) { box.appendChild(el("div", "empty", "no alerts 🎉")); $("alerts-sub").textContent = ""; return; }
+    const active = alerts.filter(a => a.active).length;
+    $("alerts-sub").textContent = active ? `${active} active` : `${alerts.length} recent`;
+    for (const a of alerts) {
+      const row = el("div", "alert-row" + (a.active ? " active" : " recovered"));
+      row.appendChild(el("span", "alert-time", clock(a.ts)));
+      row.appendChild(el("span", "alert-src", a.metric || a.source || ""));
+      row.appendChild(el("span", "alert-text", a.text || ""));
+      box.appendChild(row);
+    }
+  }
+
+  // ── Backend health strip (poll /api/health-backends) ────────────────────────
+  async function refreshHealth() {
+    const res = await getJSON("/api/health-backends");
+    const box = $("health"); box.innerHTML = "";
+    const items = (res && res.backends) || [];
+    for (const b of items) {
+      const up = b.status === "up" || b.status === "configured";
+      const unknown = b.status === "unknown";
+      const cls = unknown ? "unknown" : (up ? "up" : "down");
+      const chip = el("span", "health-chip " + cls);
+      chip.appendChild(el("span", "health-dot"));
+      chip.appendChild(el("span", "health-name", b.name));
+      chip.appendChild(el("span", "health-status", b.status));
+      chip.title = b.detail || "";
+      box.appendChild(chip);
+    }
+  }
+
   // ── Traces + replay (poll + on-demand) ──────────────────────────────────────
+  const _seenSources = new Set();
+  function _traceQuery() {
+    const q = ["limit=25"];
+    const src = $("tf-source").value, suc = $("tf-success").value;
+    if (src) q.push("source=" + encodeURIComponent(src));
+    if (suc !== "") q.push("success=" + suc);
+    return "/api/recent-traces?" + q.join("&");
+  }
   async function refreshTraces() {
-    const rows = await getJSON("/api/recent-traces?limit=25");
+    const rows = await getJSON(_traceQuery());
     const box = $("traces"); box.innerHTML = "";
-    if (!rows || !rows.length) { box.appendChild(el("div", "empty", "no traced commands yet")); return; }
+    if (!rows || !rows.length) { box.appendChild(el("div", "empty", "no traced commands")); $("traces-sub").textContent = ""; return; }
     $("traces-sub").textContent = rows.length + " recent";
     for (const r of rows) {
-      const item = el("button", "trace-item");
+      // Grow the source filter as new sources appear in the data.
+      if (r.source && !_seenSources.has(r.source)) {
+        _seenSources.add(r.source);
+        const opt = el("option", null, r.source); opt.value = r.source;
+        $("tf-source").appendChild(opt);
+      }
+      const item = el("button", "trace-item" + (r.success ? "" : " failrow"));
       item.appendChild(el("span", "t-id", (r.trace_id || "").slice(0, 8)));
       item.appendChild(el("span", "t-src", r.source || ""));
       item.appendChild(el("span", "t-act", r.action || ""));
+      const tok = (r.tokens_in || 0) + (r.tokens_out || 0);
+      item.appendChild(el("span", "t-tok", tok ? tok.toLocaleString() + "t" : ""));
       item.appendChild(el("span", "t-lat", ms(r.latency_ms)));
-      const ok = el("span", "t-ok " + (r.success ? "ok" : "fail"), r.success ? "✓" : "✗");
-      item.appendChild(ok);
+      item.appendChild(el("span", "t-ok " + (r.success ? "ok" : "fail"), r.success ? "✓" : "✗"));
+      // Failed traces show their reason inline (no replay needed).
+      if (!r.success && r.error_msg) {
+        const err = el("div", "t-err", r.error_msg); err.title = r.error_msg;
+        item.appendChild(err);
+      }
       item.onclick = () => replay(r.trace_id);
       box.appendChild(item);
     }
@@ -122,13 +198,15 @@
     box.appendChild(strip);
     // recent sessions table
     const tbl = el("table", "tbl");
-    tbl.innerHTML = "<thead><tr><th>session</th><th>cmds</th><th>ok</th><th>cloud</th><th>p95</th><th>pain</th></tr></thead>";
+    tbl.innerHTML = "<thead><tr><th>session</th><th>cmds</th><th>ok</th><th>cloud</th>" +
+      "<th>p50</th><th>p95</th><th>corr</th><th>pain</th></tr></thead>";
     const tb = el("tbody");
     for (const s of res.sessions.slice().reverse()) {
       const tr = el("tr");
       tr.innerHTML = `<td>${s.session_id}</td><td>${s.total_commands ?? "—"}</td>` +
         `<td>${pct(s.success_rate)}</td><td>${pct(s.cloud_escalation_rate)}</td>` +
-        `<td>${ms(s.latency_p95_ms)}</td><td>${pct(s.pain_day_pct)}</td>`;
+        `<td>${ms(s.latency_p50_ms)}</td><td>${ms(s.latency_p95_ms)}</td>` +
+        `<td>${s.corrections_count ?? "—"}</td><td>${pct(s.pain_day_pct)}</td>`;
       tb.appendChild(tr);
     }
     tbl.appendChild(tb); box.appendChild(tbl);
@@ -206,6 +284,89 @@
     }
   }
 
+  // ── Cloud cost per day (poll /api/cost) ─────────────────────────────────────
+  async function refreshCost() {
+    const res = await getJSON("/api/cost?days=30");
+    const box = $("cost"); box.innerHTML = "";
+    const byDay = (res && res.by_day) || {};
+    const days = Object.entries(byDay);
+    if (!days.length) { box.appendChild(el("div", "empty", "no cloud spend in window")); $("cost-sub").textContent = ""; return; }
+    const tot = res.totals || {};
+    $("cost-sub").textContent = `$${(tot.cost || 0).toFixed(4)} · ${res.days || "all"}d`;
+    const max = days.reduce((m, [, d]) => Math.max(m, d.cost), 0) || 1;
+    const wrap = el("div", "costbars");
+    for (const [day, d] of days.slice(-14)) {
+      const row = el("div", "cost-row");
+      row.appendChild(el("span", "cost-day", day.slice(5)));
+      const bar = el("div", "cost-bar");
+      const fill = el("div", "cost-fill"); fill.style.width = Math.max(2, Math.round(d.cost / max * 100)) + "%";
+      bar.appendChild(fill); row.appendChild(bar);
+      row.appendChild(el("span", "cost-amt", "$" + d.cost.toFixed(4)));
+      wrap.appendChild(row);
+    }
+    box.appendChild(wrap);
+  }
+
+  // ── Goal queue (poll /api/goals) ────────────────────────────────────────────
+  async function refreshGoals() {
+    const res = await getJSON("/api/goals?limit=25");
+    const box = $("goals"); box.innerHTML = "";
+    const goals = (res && res.goals) || [];
+    if (!goals.length) { box.appendChild(el("div", "empty", "no goals queued")); $("goals-sub").textContent = ""; return; }
+    const active = goals.filter(g => g.status === "queued" || g.status === "running" || g.status === "scheduled").length;
+    $("goals-sub").textContent = active ? `${active} pending` : `${goals.length} recent`;
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>status</th><th>goal</th><th>src</th><th>try</th></tr></thead>";
+    const tb = el("tbody");
+    for (const g of goals) {
+      const tr = el("tr");
+      tr.innerHTML = `<td><span class="badge ${esc(g.status)}">${esc(g.status)}</span></td>` +
+        `<td title="${esc(g.last_error || "")}">${esc((g.goal || "").slice(0, 60))}</td>` +
+        `<td>${esc(g.source_trigger || "")}</td><td>${g.attempts}/${g.max_attempts}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
+  // ── Dev escalations — READ-ONLY (poll /api/escalations) ─────────────────────
+  async function refreshEscalations() {
+    const res = await getJSON("/api/escalations?limit=25");
+    const box = $("escalations"); box.innerHTML = "";
+    const items = (res && res.escalations) || [];
+    if (!items.length) { box.appendChild(el("div", "empty", "no escalations 🎉")); $("escalations-sub").textContent = ""; return; }
+    const pending = items.filter(e => e.status === "pending").length;
+    $("escalations-sub").textContent = pending ? `${pending} pending` : `${items.length} recent`;
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>status</th><th>goal</th><th>reason</th><th>replans</th></tr></thead>";
+    const tb = el("tbody");
+    for (const e of items) {
+      const tr = el("tr");
+      tr.innerHTML = `<td><span class="badge ${esc(e.status)}">${esc(e.status)}</span></td>` +
+        `<td>${esc((e.goal || "").slice(0, 60))}</td><td>${esc(e.reason || "")}</td><td>${e.replans}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
+  // ── Recent corrections (poll /api/corrections) ──────────────────────────────
+  async function refreshCorrections() {
+    const res = await getJSON("/api/corrections?limit=25");
+    const box = $("corrections"); box.innerHTML = "";
+    const items = (res && res.corrections) || [];
+    if (!items.length) { box.appendChild(el("div", "empty", "no corrections")); $("corrections-sub").textContent = ""; return; }
+    $("corrections-sub").textContent = items.length + " recent";
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>said</th><th>did</th><th>→ corrected</th></tr></thead>";
+    const tb = el("tbody");
+    for (const c of items) {
+      const tr = el("tr");
+      tr.innerHTML = `<td title="${esc(c.text || "")}">${esc((c.text || "").slice(0, 40))}</td>` +
+        `<td>${esc(c.action || "")}</td><td>${esc(c.corrected_to || "")}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
   // ── WebSocket (live feed) ───────────────────────────────────────────────────
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -217,6 +378,7 @@
       if (f.type === "dash_event") {
         pushFeed(f);
         if (f.kind === "command") refreshMetricsSoon();
+        if (f.kind === "alert") refreshAlerts();
       }
     };
   }
@@ -224,9 +386,16 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }
+  function pollSlow() {
+    refreshAlerts(); refreshHealth();
+    refreshTraces(); refreshTrends(); refreshModels(); refreshRouting();
+    refreshCost(); refreshGoals(); refreshEscalations(); refreshCorrections();
+  }
+  function pollAll() { refreshMetrics(); pollSlow(); }
+  $("tf-source").onchange = refreshTraces;
+  $("tf-success").onchange = refreshTraces;
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }, 15000);
+  setInterval(pollSlow, 15000);
 })();

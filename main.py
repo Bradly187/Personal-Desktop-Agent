@@ -955,6 +955,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     coordinator.set_event_bus(event_bus)
     coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
     dev_agent.set_event_bus(event_bus)
+    trainer.set_event_bus(event_bus)   # per-domain SLO breaches → slo.breached alerts
     # Surface silent backend events: Ollama hang (inference.stalled) + breaker open
     # (breaker.opened). No-op on backends without a set_event_bus method.
     if hasattr(local, "set_event_bus"):

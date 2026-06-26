@@ -32,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -47,7 +49,13 @@ log = logging.getLogger(__name__)
 _DASHBOARD_TOPICS = {
     "command.executed", "goal.dequeued", "goal.completed",
     "vram.evicted", "vram.restored", "breaker.opened", "inference.stalled",
+    # Alerting + autonomous-action topics surfaced in the Activity feed.
+    "metric.threshold_crossed", "slo.breached",
+    "voice.drift", "step.failed", "replan.exhausted", "email.arrived",
 }
+
+# Topics surfaced in the Alerts panel (durable read from event_log).
+_ALERT_TOPICS = ("metric.threshold_crossed", "slo.breached")
 
 _STATIC_DIR = Path(__file__).parent.parent / "web_client_chat"
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
@@ -105,6 +113,96 @@ def _live_session_kpis(db_path: str, session_id: int) -> dict:
         "source_counts": source_counts,
         "gate_counts": gate_counts,
     }
+
+
+def _recent_alerts(db_path: str, limit: int = 50) -> dict:
+    """Read-only newest-first pull of alert topics from the durable event_log.
+
+    Returns {"alerts": [...]} so the dashboard Alerts panel never has to poll the
+    live feed for history. Never raises; returns {"alerts": []} on any error
+    (R2.5 — the page degrades to "no alerts", never errors).
+    """
+    import sqlite3
+    placeholders = ",".join("?" for _ in _ALERT_TOPICS)
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        with con:
+            rows = con.execute(
+                f"SELECT ts, topic, source, payload FROM event_log "
+                f"WHERE topic IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+                (*_ALERT_TOPICS, int(limit)),
+            ).fetchall()
+        con.close()
+    except Exception:
+        return {"alerts": []}
+
+    alerts = []
+    for r in rows:
+        try:
+            p = json.loads(r["payload"]) if r["payload"] else {}
+        except Exception:
+            p = {}
+        topic = r["topic"]
+        if topic == "metric.threshold_crossed":
+            # severity "info" is a recovery notice → not an active alert.
+            active = p.get("severity") != "info"
+            text = p.get("message") or f"{p.get('metric')} = {p.get('value')}"
+        else:  # slo.breached — always an active breach
+            active = True
+            text = (f"SLO breach: {p.get('domain')} "
+                    f"{p.get('metric')}={p.get('value')} (budget {p.get('budget')})")
+        alerts.append({"ts": r["ts"], "topic": topic, "source": r["source"],
+                       "metric": p.get("metric"), "active": active, "text": text})
+    return {"alerts": alerts}
+
+
+def _ro_query(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
+    """Read-only list-of-dicts query. Returns [] on any error (missing table,
+    bad path) so every operational panel degrades to an empty state (R8.5)."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        with con:
+            rows = [dict(r) for r in con.execute(sql, params).fetchall()]
+        con.close()
+        return rows
+    except Exception:
+        return []
+
+
+def _recent_goals(db_path: str, limit: int = 50) -> dict:
+    """Goal queue (newest first) — pending/in-flight/failed autonomous goals."""
+    return {"goals": _ro_query(
+        db_path,
+        "SELECT id, ts, goal, domain, status, attempts, max_attempts, "
+        "last_error, source_trigger FROM goal_queue ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    )}
+
+
+def _recent_escalations(db_path: str, limit: int = 50) -> dict:
+    """Dev-escalation queue (newest first). READ-ONLY display — there is NO
+    approve/deny control here; the only approval path stays the voice-approved
+    gate (AGENTS.md #4, R8.3)."""
+    return {"escalations": _ro_query(
+        db_path,
+        "SELECT id, ts, goal, reason, failed_action, replans, status "
+        "FROM dev_escalations ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    )}
+
+
+def _recent_corrections(db_path: str, limit: int = 50) -> dict:
+    """Recent user corrections — commands the user re-aimed (corrected_to set)."""
+    return {"corrections": _ro_query(
+        db_path,
+        "SELECT ts, source, text, action, corrected_to FROM commands "
+        "WHERE corrected_to IS NOT NULL AND corrected_to != '' "
+        "ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    )}
 
 
 class _ChatClient:
@@ -177,6 +275,9 @@ class ChatServer:
         self._pump_task: Optional[asyncio.Task] = None
         self._running = False
 
+        # Backend-health probe cache (throttled — R6.2). (result, monotonic_ts)
+        self._health_cache: tuple[dict, float] = ({}, 0.0)
+
     # ── wiring ──────────────────────────────────────────────────────────────
     def set_coordinator(self, c) -> None: self._coordinator = c
     def set_scheduler(self, s) -> None: self._scheduler = s
@@ -211,6 +312,11 @@ class ChatServer:
         app.router.add_get("/api/models", self._api_models)
         app.router.add_get("/api/routing", self._api_routing)
         app.router.add_get("/api/session-live", self._api_session_live)
+        app.router.add_get("/api/alerts", self._api_alerts)
+        app.router.add_get("/api/health-backends", self._api_health_backends)
+        app.router.add_get("/api/goals", self._api_goals)
+        app.router.add_get("/api/escalations", self._api_escalations)
+        app.router.add_get("/api/corrections", self._api_corrections)
         if _STATIC_DIR.exists():
             app.router.add_static("/static/", _STATIC_DIR, show_index=False)
 
@@ -294,7 +400,14 @@ class ChatServer:
             return web.json_response([], status=200)
         from monitoring import replay
         limit = self._qint(request, "limit", 25)
-        rows = await asyncio.to_thread(replay.recent_traces, path, limit)
+        source = request.query.get("source") or None
+        action = request.query.get("action") or None
+        succ_q = request.query.get("success")
+        success = None
+        if succ_q:
+            success = succ_q.lower() in ("1", "true", "yes", "ok")
+        rows = await asyncio.to_thread(
+            replay.recent_traces, path, limit, source, success, action)
         return web.json_response(rows)
 
     async def _api_replay(self, request: web.Request) -> web.Response:
@@ -348,6 +461,73 @@ class ChatServer:
             return web.json_response({})
         result = await asyncio.to_thread(_live_session_kpis, path, sid)
         return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_alerts(self, request: web.Request) -> web.Response:
+        """Recent alert events (metric.threshold_crossed + slo.breached) read from
+        the durable event_log. Read off the 60 Hz loop (AGENTS.md #2)."""
+        path = self._db_path()
+        if not path:
+            return web.json_response({"alerts": []})
+        limit = self._qint(request, "limit", 50)
+        result = await asyncio.to_thread(_recent_alerts, path, limit)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_goals(self, request: web.Request) -> web.Response:
+        path = self._db_path()
+        if not path:
+            return web.json_response({"goals": []})
+        result = await asyncio.to_thread(_recent_goals, path, self._qint(request, "limit", 50))
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_escalations(self, request: web.Request) -> web.Response:
+        path = self._db_path()
+        if not path:
+            return web.json_response({"escalations": []})
+        result = await asyncio.to_thread(_recent_escalations, path, self._qint(request, "limit", 50))
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_corrections(self, request: web.Request) -> web.Response:
+        path = self._db_path()
+        if not path:
+            return web.json_response({"corrections": []})
+        result = await asyncio.to_thread(_recent_corrections, path, self._qint(request, "limit", 50))
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_health_backends(self, request: web.Request) -> web.Response:
+        """Throttled reachability of Ollama / action-proxy + Bedrock cred presence.
+        Cached for `health_probe_ttl_s` so rapid polls don't hammer backends; each
+        probe times out fast and reports 'unknown' rather than hanging (R6.2)."""
+        cached, ts = self._health_cache
+        if cached and (time.monotonic() - ts) < 10.0:
+            return web.json_response(cached)
+        result = await self._probe_backends()
+        self._health_cache = (result, time.monotonic())
+        return web.json_response(result)
+
+    @staticmethod
+    async def _probe_backends() -> dict:
+        async def _http_ok(url: str) -> str:
+            try:
+                import aiohttp
+                timeout = aiohttp.ClientTimeout(total=2.0)
+                async with aiohttp.ClientSession(timeout=timeout) as s:
+                    async with s.get(url) as r:
+                        return "up" if r.status < 500 else "down"
+            except Exception:
+                return "down"
+
+        ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        ollama, proxy = await asyncio.gather(
+            _http_ok(f"{ollama_host.rstrip('/')}/api/version"),
+            _http_ok("http://127.0.0.1:8768/health"),
+        )
+        # Bedrock: report credential PRESENCE only — never the token (R6.4).
+        bedrock = "configured" if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") else "absent"
+        return {"backends": [
+            {"name": "ollama", "status": ollama, "detail": ollama_host},
+            {"name": "action-proxy", "status": proxy, "detail": ":8768"},
+            {"name": "bedrock", "status": bedrock, "detail": "cloud creds"},
+        ]}
 
     async def _ws_handler(self, request: web.Request) -> web.StreamResponse:
         ws = web.WebSocketResponse(heartbeat=30)
@@ -539,4 +719,27 @@ class ChatServer:
         if topic == "inference.stalled":
             return {"type": "dash_event", "kind": "stall", "ts": ts, "severity": "warn",
                     "text": f"{p.get('backend')} stall ≥{p.get('timeout_s')}s ({p.get('phase')})"}
+        if topic == "metric.threshold_crossed":
+            # MetricWatcher publishes severity "warning"/"info" (recovery); map to
+            # the feed's warn/info styling.
+            sev = "info" if p.get("severity") == "info" else "warn"
+            return {"type": "dash_event", "kind": "alert", "ts": ts, "severity": sev,
+                    "text": p.get("message") or f"{p.get('metric')} = {p.get('value')}"}
+        if topic == "slo.breached":
+            return {"type": "dash_event", "kind": "alert", "ts": ts, "severity": "warn",
+                    "text": (f"SLO breach: {p.get('domain')} "
+                             f"{p.get('metric')}={p.get('value')} (budget {p.get('budget')})")}
+        if topic == "voice.drift":
+            return {"type": "dash_event", "kind": "voice", "ts": ts, "severity": "warn",
+                    "text": f"voice drift {p.get('drift_pct')}% — recalibration advised"}
+        if topic == "step.failed":
+            return {"type": "dash_event", "kind": "dev", "ts": ts, "severity": "warn",
+                    "text": (f"step {p.get('step_num')} {p.get('action')} failed: "
+                             f"{str(p.get('error', ''))[:80]}")}
+        if topic == "replan.exhausted":
+            return {"type": "dash_event", "kind": "dev", "ts": ts, "severity": "warn",
+                    "text": f"replan exhausted ({p.get('replans')}×): {str(p.get('goal', ''))[:80]}"}
+        if topic == "email.arrived":
+            return {"type": "dash_event", "kind": "email", "ts": ts, "severity": "info",
+                    "text": f"email: {str(p.get('subject', ''))[:80]}"}
         return None

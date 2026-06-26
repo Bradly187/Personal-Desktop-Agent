@@ -161,6 +161,14 @@ watchdog==6.0.0
 # Optional — DevAgent degrades gracefully when the bridge extension is not running.
 websockets==16.0
 
+# ── Browser / UI testing (mcp_server/tools/browser.py — preview_* MCP tools) ──
+# Optional — the preview_* tools degrade gracefully when absent (return a
+# "disabled" result, never crash). Enable with:
+#     pip install playwright && playwright install chromium
+# Left commented so the core `pip install -r` stays light and offline-friendly
+# (Playwright pulls a ~150 MB Chromium build on `playwright install`).
+# playwright==1.49.0
+
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.3.0
 

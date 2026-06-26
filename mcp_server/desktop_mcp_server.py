@@ -2,9 +2,11 @@
 
 Exposes Windows desktop control as MCP tools so Claude can orchestrate
 the PC directly — mouse, keyboard, screenshots, window management, plus
-first-class code search (grep, glob_files) and web fetch (fetch_url).
+first-class code search (grep, glob_files), web fetch (fetch_url), and
+browser/UI testing (preview_* — Playwright; degrades cleanly if not installed).
 
-Set SAFE_MODE=1 to block keyboard_type and mouse_drag (useful for testing).
+Set SAFE_MODE=1 to block keyboard_type, mouse_drag, preview_click, preview_fill
+(useful for testing).
 grep/glob_files are read-only but scoped to the writable-root allowlist;
 fetch_url is http(s)-only and its output is trust-classified.
 
@@ -30,8 +32,15 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import ImageContent, TextContent, Tool
 
-from tools import keyboard, mouse, screen, web, windows
-from tools import search as search_tools
+# Works both when run as a script (`python mcp_server/desktop_mcp_server.py`,
+# where `mcp_server/` is on sys.path so `tools` resolves) and when imported as
+# `mcp_server.desktop_mcp_server` (e.g. from pytest at the repo root).
+try:
+    from tools import browser, keyboard, mouse, screen, web, windows
+    from tools import search as search_tools
+except ModuleNotFoundError:  # pragma: no cover - import-path shim
+    from mcp_server.tools import browser, keyboard, mouse, screen, web, windows
+    from mcp_server.tools import search as search_tools
 
 # Trust classifier — scans tool outputs for injection patterns before returning to LLM
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -300,6 +309,73 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"],
             },
         ),
+        # --- Browser / UI testing (Playwright; degrades if not installed) ---
+        Tool(
+            name="preview_start",
+            description="Launch headless Chromium and navigate to a localhost dev-server URL. "
+                        "Refuses non-localhost URLs unless allow_external=true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "e.g. http://localhost:8770"},
+                    "timeout_ms": {"type": "integer", "default": 15000},
+                    "allow_external": {"type": "boolean", "default": False},
+                },
+                "required": ["url"],
+            },
+        ),
+        Tool(
+            name="preview_screenshot",
+            description="Screenshot the current preview page as a base64 PNG.",
+            inputSchema={
+                "type": "object",
+                "properties": {"full_page": {"type": "boolean", "default": False}},
+            },
+        ),
+        Tool(
+            name="preview_snapshot",
+            description="Return the current preview page's url, title, and visible body text.",
+            inputSchema={
+                "type": "object",
+                "properties": {"max_chars": {"type": "integer", "default": 4000}},
+            },
+        ),
+        Tool(
+            name="preview_click",
+            description="Click an element by CSS/text selector in the preview page. Blocked in SAFE_MODE.",
+            inputSchema={
+                "type": "object",
+                "properties": {"selector": {"type": "string"}},
+                "required": ["selector"],
+            },
+        ),
+        Tool(
+            name="preview_fill",
+            description="Fill an input element (by selector) with text in the preview page. Blocked in SAFE_MODE.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string"},
+                    "text": {"type": "string"},
+                },
+                "required": ["selector", "text"],
+            },
+        ),
+        Tool(
+            name="preview_console_logs",
+            description="Return console messages captured from the preview page.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="preview_network",
+            description="Return network requests captured from the preview page.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="preview_stop",
+            description="Close the preview browser and free its resources.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
     return tools
 
@@ -433,6 +509,32 @@ def _dispatch(name: str, args: dict) -> dict:
         )
     if name == "fetch_url":
         return web.fetch_url(args["url"], max_chars=args.get("max_chars", 4000))
+
+    # Browser / UI testing (Playwright). preview_click/preview_fill mutate page
+    # state → SAFE_MODE-gated like keyboard_type/mouse_drag.
+    if name == "preview_start":
+        return browser.preview_start(
+            args["url"], timeout_ms=args.get("timeout_ms", 15000),
+            allow_external=args.get("allow_external", False),
+        )
+    if name == "preview_screenshot":
+        return browser.preview_screenshot(full_page=args.get("full_page", False))
+    if name == "preview_snapshot":
+        return browser.preview_snapshot(max_chars=args.get("max_chars", 4000))
+    if name == "preview_click":
+        if SAFE_MODE:
+            return {"error": "preview_click is disabled in SAFE_MODE"}
+        return browser.preview_click(args["selector"])
+    if name == "preview_fill":
+        if SAFE_MODE:
+            return {"error": "preview_fill is disabled in SAFE_MODE"}
+        return browser.preview_fill(args["selector"], args["text"])
+    if name == "preview_console_logs":
+        return browser.preview_console_logs()
+    if name == "preview_network":
+        return browser.preview_network()
+    if name == "preview_stop":
+        return browser.preview_stop()
 
     return {"error": f"Unknown tool: {name}"}
 
