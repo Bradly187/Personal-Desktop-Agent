@@ -242,6 +242,7 @@ _PLAN_VERBS: list[str] = [
     "EXPLAIN", "READ_SCREEN",
     "SKILL_QUERY", "SKILL_CALL",
     "SEARCH_PERSONAL",
+    "DELEGATE",   # planner-driven read-only investigation (specs/dev-agent-delegate-verb)
 ]
 
 # Ollama `format` JSON Schema constraining the plan response (gap: free-text

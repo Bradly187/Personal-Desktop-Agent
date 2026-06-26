@@ -150,6 +150,13 @@ PC → iPad (12 types): `ack` `pong` `status` `screenshot` `handwriting_result` 
 
 - **Browser/UI testing `preview_*` MCP tools (2026-06-25, Claude-Code parity) — Playwright is an OPTIONAL dep.** `mcp_server/tools/browser.py` adds `preview_start` / `preview_screenshot` / `preview_snapshot` / `preview_click` / `preview_fill` / `preview_console_logs` / `preview_network` / `preview_stop` for verifying web UIs (target: `core/chat_server.py` :8770 + `web_client_chat/`). **Degrades gracefully** — Playwright absent → every tool returns `{"ok": False, "disabled": True, …}` with the install hint (`pip install playwright && playwright install chromium`), never crashes. **Event-loop isolation:** Playwright's sync API can't run inside the server's asyncio loop, so the session lives in a dedicated worker thread (`_BrowserWorker`) that also persists the page across calls. `preview_start` **refuses non-localhost URLs** unless `allow_external=true`; `preview_click`/`preview_fill` are **SAFE_MODE-gated** (mutate page state). Spec: `specs/browser-ui-testing/`.
 
+- **Mini-coding-agent gap closure (Gaps A–D) features are ON by default.**
+  - **Live repo-context ingestion (`DA_REPO_CONTEXT`):** Builds stable repo facts (AGENTS.md/CLAUDE.md, layout, git branch/log) once and injects them ahead of dynamic RAG/git context.
+  - **Trajectory read-dedup (`DA_TRAJECTORY_DEDUP`):** Drops superseded duplicate reads from the trajectory sent to the model (independent of reduction).
+  - **Resume working-memory (`DA_RESUME_MEMORY`):** On resume, derives a compact `{files,notes,last_failure}` from `agent_steps` and seeds the replan prompt.
+  - **Planner DELEGATE verb (`DA_DELEGATE`):** `[DELEGATE <q>]` spins a bounded read-only investigation sub-agent whose finding returns into the trajectory. Depth-capped, fail-safe to skip on flare, runs sequentially.
+  To revert to legacy behavior (byte-identical), set these flags to `0` or `false`. Specs: `specs/repo-context-ingestion/`, `specs/trajectory-read-dedup/`, `specs/resume-working-memory/`, `specs/dev-agent-delegate-verb/`.
+
 ## MCP Server Registration (Claude Code)
 
 Add to `~/.claude/claude_desktop_config.json`:

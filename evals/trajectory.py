@@ -39,6 +39,7 @@ _PLAN_ACTIONS = {
     "GIT_STATUS", "GIT_DIFF", "GIT_COMMIT", "GIT_CHECKOUT",
     "GITHUB_PR", "FETCH_URL",
     "SKILL_QUERY", "SKILL_CALL", "SEARCH_PERSONAL",
+    "DELEGATE",   # planner-driven read-only investigation (specs/dev-agent-delegate-verb)
 }
 
 # Based on dev_agent._STEP_PATTERN (free-text fallback), but intentionally a

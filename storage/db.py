@@ -2022,6 +2022,24 @@ class AgentDB:
             log.warning("AgentDB.get_interrupted_runs failed: %s", exc)
             return []
 
+    async def get_steps_for_run(self, run_id: int) -> list[dict]:
+        """Ordered steps for one run (specs/resume-working-memory, Gap C).
+
+        Read-only SELECT over the existing ``agent_steps`` ledger — no schema
+        change. Returns [] on any failure so resume degrades cleanly (R3.2)."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                """SELECT step_num, action, args, body, result, success
+                   FROM agent_steps WHERE run_id = ? ORDER BY step_num ASC""",
+                (run_id,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_steps_for_run failed: %s", exc)
+            return []
+
     async def get_successful_runs_with_steps(
         self, *, since: float = 0.0, min_steps: int = 2, limit: int = 500
     ) -> list[dict]:

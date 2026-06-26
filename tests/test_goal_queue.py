@@ -232,7 +232,7 @@ async def test_plan_and_run_is_serialized():
     agent = DevAgent(router=MagicMock())
     order: list[str] = []
 
-    async def _locked_body(goal, trace_id=""):
+    async def _locked_body(goal, trace_id="", seed_context=""):
         order.append(f"start:{goal}")
         await asyncio.sleep(0.05)
         order.append(f"end:{goal}")

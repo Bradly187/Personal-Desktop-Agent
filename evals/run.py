@@ -108,9 +108,10 @@ def _run_replan(args):
         print("no cases to run", file=sys.stderr)
         return None
     _, infer_text = _infer_text(args.model)
-    from inference.trajectory import reduction_enabled
+    from inference.trajectory import reduction_enabled, dedup_enabled
     print(f"trajectory reduction: {'ON' if reduction_enabled() else 'OFF'} "
           f"(DA_TRAJECTORY_REDUCE)")
+    print(f"read-dedup: {'ON' if dedup_enabled() else 'OFF'} (DA_TRAJECTORY_DEDUP)")
     return run_trajectory_suite(cases, replan_predictor(infer_text, timeout_s=args.timeout))
 
 
@@ -152,6 +153,14 @@ def _run_execution(args):
     if not cases:
         print("no cases to run", file=sys.stderr)
         return None
+    # Surface the feature flags this end-to-end run exercises (repo-context-ingestion
+    # Gap A, dev-agent-delegate-verb Gap D) so the report records the A/B arm.
+    import os as _os
+    def _on(name):
+        return "ON" if _os.environ.get(name, "").strip().lower() in (
+            "1", "true", "yes", "on") else "OFF"
+    print(f"repo-context: {_on('DA_REPO_CONTEXT')} (DA_REPO_CONTEXT)  |  "
+          f"delegate: {_on('DA_DELEGATE')} (DA_DELEGATE)")
     return run_execution_suite(
         cases, lambda: _build_dev_agent(args.model), timeout_s=args.timeout)
 

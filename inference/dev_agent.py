@@ -137,6 +137,8 @@ _PLAN_ACTIONS = {
     "SKILL_QUERY", "SKILL_CALL",
     # Personal knowledge base — semantic search over the user's own documents.
     "SEARCH_PERSONAL",
+    # Planner-driven read-only investigation sub-agent (specs/dev-agent-delegate-verb).
+    "DELEGATE",
 }
 
 _STEP_PATTERN = re.compile(
@@ -145,10 +147,22 @@ _STEP_PATTERN = re.compile(
     r"(WRITE_FILE|EDIT_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
     r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE"
     r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL"
-    r"|SKILL_QUERY|SKILL_CALL|SEARCH_PERSONAL)"
+    r"|SKILL_QUERY|SKILL_CALL|SEARCH_PERSONAL|DELEGATE)"
     r"(?:\s+([^\]\n]+))?"                   # optional args (up to a closing ] or EOL)
     r"\s*\]?",                              # optional ]
     re.IGNORECASE,
+)
+
+# Planner teaching for the DELEGATE verb — injected into the plan context ONLY when
+# DA_DELEGATE is on (specs/dev-agent-delegate-verb R4.4), so the planner vocabulary
+# is byte-identical to today when the feature is off.
+_DELEGATE_PROMPT_INSTRUCTIONS = (
+    "You may emit [DELEGATE <question>] to hand a scoped, READ-ONLY investigation "
+    "to a bounded sub-agent (it can read files / grep / fetch but cannot write, run "
+    "shell, or take any action). Prefer it when you need to find something out "
+    "before acting — e.g. [DELEGATE which module defines the FooBar class]. The "
+    "sub-agent returns a short finding you can use in later steps. Use it sparingly; "
+    "for a single quick read prefer READ_FILE/GREP directly."
 )
 
 # Personal-document query detection lives in storage.personal_kb so the
@@ -397,6 +411,10 @@ class DevAgent:
     _RETRYABLE_VERBS: frozenset[str] = frozenset({
         "READ_FILE", "GREP", "READ_SCREEN", "GIT_STATUS", "GIT_DIFF",
         "FETCH_URL", "SEARCH_WEB", "EXPLAIN",
+        # DELEGATE is read-only (no side effects) → safe to retry. Deliberately NOT
+        # in _PARALLEL_VERBS/_FANOUT_SAFE_VERBS: it spawns a sub-agent, so it runs
+        # SEQUENTIALLY (no nested fan-out over one serialized GPU) — spec R1.3.
+        "DELEGATE",
     })
 
     # Verbs whose execution has side effects (writes files, runs shell, mutates
@@ -514,6 +532,49 @@ class DevAgent:
         )
         # Optional flare/resource gate (R3.6): a callable -> bool; True == skip.
         self._tester_skip_check = None
+
+        # Live repo-context ingestion (specs/repo-context-ingestion, Gap A). When
+        # ON, stable workspace facts (AGENTS.md/CLAUDE.md house rules, repo layout,
+        # git branch/log) are built ONCE, memoized, and prepended to the plan
+        # extra_ctx ahead of the dynamic RAG/git-status context. Default OFF
+        # (DA_REPO_CONTEXT) until the eval baseline locks; off == byte-identical.
+        # _workspace_block is the memoized block (R2.1); None = not yet built.
+        self._repo_context_enabled: bool = os.environ.get(
+            "DA_REPO_CONTEXT", "0").strip().lower() in ("1", "true", "on", "yes")
+        self._workspace_block: Optional[str] = None
+        self._workspace_built: bool = False
+        # Repo root for workspace-fact collection (cwd is the repo root in prod —
+        # _read_file/_grep/_git_context all assume it). Override in tests.
+        self._repo_root: str = os.getcwd()
+
+        # Planner-driven read-only DELEGATE verb (specs/dev-agent-delegate-verb,
+        # Gap D). When ON, the planner can emit [DELEGATE <question>] to spin off a
+        # bounded read-only investigation sub-agent whose finding returns into the
+        # trajectory. Reuses the WorkflowRunner substrate (scheduler sub-agent pool,
+        # flare guard, agent_workflows journaling) — no new model (AGENTS.md #6).
+        # Default OFF (DA_DELEGATE) until the eval baseline locks; off == the verb is
+        # absent from the planner vocabulary and a stray DELEGATE is a safe no-op.
+        self._delegate_enabled: bool = os.environ.get(
+            "DA_DELEGATE", "0").strip().lower() in ("1", "true", "on", "yes")
+        try:
+            self._max_delegate_depth: int = max(
+                1, int(os.environ.get("DA_DELEGATE_MAX_DEPTH", "1")))
+        except ValueError:
+            self._max_delegate_depth = 1
+        try:
+            self._delegate_max_steps: int = max(
+                1, int(os.environ.get("DA_DELEGATE_MAX_STEPS", "4")))
+        except ValueError:
+            self._delegate_max_steps = 4
+        try:
+            self._delegate_finding_chars: int = max(
+                200, int(os.environ.get("DA_DELEGATE_FINDING_CHARS", "1200")))
+        except ValueError:
+            self._delegate_finding_chars = 1200
+        # Current delegation depth (0 = top-level plan); set while investigating so
+        # a nested DELEGATE is refused (R3.1). Optional flare/resource skip check.
+        self._delegate_depth: int = 0
+        self._delegate_skip_check = None   # callable -> bool; True == skip (flare)
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -860,7 +921,9 @@ class DevAgent:
                 return steps, plan_result
             plan_result = repaired
 
-    async def plan_and_run(self, goal: str, trace_id: str = "") -> AgentResult:
+    async def plan_and_run(
+        self, goal: str, trace_id: str = "", seed_context: str = ""
+    ) -> AgentResult:
         """Decompose a complex goal into steps and execute them sequentially.
 
         Serialized: plan state (_plan_authorized, _cancel_event, _current_goal,
@@ -869,11 +932,16 @@ class DevAgent:
 
         ``trace_id`` (chat UI) correlates plan.generated / dag.* events to one
         socket; empty for non-chat callers → a fresh trace is minted as before.
+        ``seed_context`` (specs/resume-working-memory, Gap C) is an optional stable
+        block prepended to the plan context — used to seed a resumed plan with what
+        the interrupted run already did. Empty → byte-identical to today (R2.2).
         """
         async with self._plan_lock:
-            return await self._plan_and_run_locked(goal, trace_id)
+            return await self._plan_and_run_locked(goal, trace_id, seed_context)
 
-    async def _plan_and_run_locked(self, goal: str, cmd_trace_id: str = "") -> AgentResult:
+    async def _plan_and_run_locked(
+        self, goal: str, cmd_trace_id: str = "", seed_context: str = ""
+    ) -> AgentResult:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
 
@@ -908,6 +976,20 @@ class DevAgent:
         if git_ctx:
             extra_ctx = f"{git_ctx}\n\n{extra_ctx}" if extra_ctx else git_ctx
 
+        # Live repo-context (Gap A): stable workspace facts (AGENTS.md/CLAUDE.md
+        # rules, layout, git branch/log) lead the dynamic RAG/git-status block so
+        # the planner sees its house rules first. Memoized; None when off (R3.1,
+        # R4.4). The dynamic working-tree diff stays in _git_context above (R3.3).
+        workspace = self._workspace_context()
+        if workspace:
+            extra_ctx = f"{workspace}\n\n{extra_ctx}" if extra_ctx else workspace
+
+        # Resume working-memory (Gap C): a caller-supplied seed block describing what
+        # an interrupted run already did. Leads the context so the planner recovers
+        # rather than restarting. Empty for the normal (non-resume) path (R2.2).
+        if seed_context:
+            extra_ctx = f"{seed_context}\n\n{extra_ctx}" if extra_ctx else seed_context
+
         # If the plan model uses a structured WRITE_FILE format (hashline/udiff),
         # teach it the format up front so its bodies are edit ops, not whole files
         # (edit-format-aci R3.2 prompt side). Only for those models — whole_file is
@@ -932,6 +1014,15 @@ class DevAgent:
             f"{SEARCH_REPLACE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
             if extra_ctx else SEARCH_REPLACE_PROMPT_INSTRUCTIONS
         )
+
+        # DELEGATE verb (Gap D): only teach it when ON and only at top level (a
+        # delegated child must not be told it can delegate — R3.1/R4.4). When off,
+        # the planner vocabulary is byte-identical to today.
+        if self._delegate_enabled and self._delegate_depth == 0:
+            extra_ctx = (
+                f"{_DELEGATE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
+                if extra_ctx else _DELEGATE_PROMPT_INSTRUCTIONS
+            )
 
         plan_result = await self._router.infer(
             domain="plan",
@@ -1420,10 +1511,11 @@ class DevAgent:
         trajectory reduction (`inference/trajectory.render_trajectory`): False
         reproduces the legacy per-step rendering byte-for-byte.
         """
-        from inference.trajectory import render_trajectory
+        from inference.trajectory import render_trajectory, dedup_enabled
         traj_text, traj_stats = render_trajectory(
             executed, style="replan",
             readonly_verbs=cls._PARALLEL_VERBS, enabled=enabled,
+            dedup_reads=dedup_enabled(),
         )
         lines = [f"Goal: {goal}", "", "Steps already executed (with outcomes):", traj_text]
         if remaining:
@@ -1967,8 +2059,169 @@ class DevAgent:
                 await self._run_compensations(int(run_id), triggered_by="user_cancel")
             return None
         log.info("DevAgent.resume_pending_plan: resuming run %s — %r", run.get("id"), goal[:60])
-        await self.plan_and_run(goal)
+        # Working-memory seed (Gap C): derive what the interrupted run already did
+        # from its persisted steps and seed the resumed plan with it, so the planner
+        # recovers instead of restarting blind. Flag-gated (DA_RESUME_MEMORY) and
+        # degrades to an empty seed (today's behavior) on any failure (R2, R3.2).
+        seed = await self._resume_seed_context(run.get("id"), goal)
+        await self.plan_and_run(goal, seed_context=seed)
         return run
+
+    async def _resume_seed_context(self, run_id, goal: str) -> str:
+        """Build the resume working-memory seed block, or '' (Gap C, R2/R3).
+
+        Off (DA_RESUME_MEMORY unset) or any failure → '' so resume is byte-identical
+        to today. Derived from the durable agent_steps — no schema change (R3.1)."""
+        from inference.working_memory import memory_enabled
+        if not memory_enabled() or run_id is None:
+            return ""
+        try:
+            from inference.working_memory import summarize_run, render_seed
+            db = self._db()
+            steps = await db.get_steps_for_run(int(run_id))
+            if not steps:
+                return ""
+            return render_seed(summarize_run(goal, steps))
+        except Exception as exc:
+            log.debug("DevAgent._resume_seed_context failed: %s", exc)
+            return ""
+
+    # ---------------------------------------------------------------------- #
+    # Planner-driven DELEGATE — bounded read-only sub-agent (Gap D)
+    # ---------------------------------------------------------------------- #
+
+    def _delegate_should_skip_flare(self) -> bool:
+        """True if a flare is active (AGENTS.md #5) — investigation is non-essential
+        heavy work. A skip-check that errors fails safe to SKIP."""
+        if self._delegate_skip_check is None:
+            return False
+        try:
+            return bool(self._delegate_skip_check())
+        except Exception:
+            return True
+
+    async def _delegate_investigate(self, question: str, depth: int) -> str:
+        """Run a bounded, READ-ONLY investigation sub-agent and return its finding.
+
+        Reuses the WorkflowRunner substrate (scheduler sub-agent pool, flare guard,
+        agent_workflows journaling); the child runs a small plan→execute loop
+        restricted to read-only verbs (never re-entering plan_and_run / _plan_lock,
+        R3.2). Always returns a safe observation string — never raises into the
+        parent's _execute_step (R4.3).
+        """
+        if not self._delegate_enabled:
+            return "DELEGATE skipped: feature disabled"
+        if not question:
+            return "DELEGATE skipped: empty question"
+        if depth > self._max_delegate_depth:        # no recursion / fan-bomb (R3.1)
+            return "DELEGATE refused: max delegation depth"
+        if self._delegate_should_skip_flare():      # AGENTS.md #5 (R4.2)
+            await self._journal_delegate(question, 0, 0, "skipped_flare")
+            return "DELEGATE skipped: flare"
+
+        async def _run() -> str:
+            return await self._delegate_loop(question, depth)
+
+        try:
+            if self._scheduler is not None and hasattr(self._scheduler, "fan_out"):
+                # Run under the sub-agent semaphore, not the dev permit (R3.2).
+                results = await self._scheduler.fan_out([_run()], label="delegate")
+                r = results[0] if results else None
+                if isinstance(r, BaseException) or r is None:
+                    raise r if isinstance(r, BaseException) else RuntimeError("no result")
+                return r
+            return await _run()
+        except Exception as exc:                    # safe observation, never raise (R4.3)
+            log.warning("DevAgent._delegate_investigate(%r) failed: %s", question[:60], exc)
+            await self._journal_delegate(question, 0, 0, "error", error=str(exc))
+            return f"DELEGATE failed: {exc}"
+
+    async def _delegate_loop(self, question: str, depth: int) -> str:
+        """The bounded read-only investigation itself (no _plan_lock). Plan →
+        execute read-only steps (allowlist-enforced) → synthesize a finding."""
+        # Scoped context: the question + any RAG hits for it. The child inherits
+        # *enough to help*, not the parent's full trajectory (bounded payload).
+        rag = await self._rag_context(question, n=3)
+        child_ctx = (
+            "You are a READ-ONLY investigator. Answer the question using ONLY these "
+            "verbs: READ_FILE, GREP, FETCH_URL, READ_SCREEN, GIT_STATUS, GIT_DIFF, "
+            "SEARCH_PERSONAL. You may NOT write files, run shell, or take any action. "
+            f"Produce at most {self._delegate_max_steps} steps in the [ACTION args] "
+            "format, then stop."
+        )
+        if rag:
+            child_ctx = f"{rag}\n\n{child_ctx}"
+
+        plan_result = await self._router.infer(
+            domain="plan", user_text=f"Investigate: {question}", context=child_ctx,
+        )
+        steps: list[AgentStep] = []
+        if getattr(plan_result, "ok", True):
+            try:
+                steps = _parse_plan_json(plan_result.text)
+            except Exception:
+                steps = []                      # not structured JSON — fall back
+            if not steps:
+                steps = _parse_plan(plan_result.text)
+        steps = steps[: self._delegate_max_steps]
+
+        observations: list[str] = []
+        ran = 0
+        prev_depth = self._delegate_depth
+        self._delegate_depth = depth        # so a nested DELEGATE is refused (R3.1)
+        try:
+            for s in steps:
+                act = s.action.upper()
+                if act not in self._PARALLEL_VERBS:
+                    # Deny-by-default: a child step naming any non-read-only verb is
+                    # DROPPED, never executed (R2.1). Structurally read-only.
+                    log.info("DevAgent.delegate: dropped non-read-only child step %s", act)
+                    continue
+                try:
+                    res = await asyncio.wait_for(
+                        self._execute_step(s), timeout=self.STEP_TIMEOUT_S)
+                    observations.append(f"[{act} {s.args[:60]}]\n{(res or '')[:600]}")
+                    ran += 1
+                except Exception as exc:
+                    observations.append(f"[{act} {s.args[:60]}] failed: {exc}")
+        finally:
+            self._delegate_depth = prev_depth
+
+        if not observations:
+            await self._journal_delegate(question, len(steps), 0, "completed")
+            return f"DELEGATE finding: no read-only evidence gathered for: {question}"
+
+        synth = await self._router.infer(
+            domain="plan",
+            user_text=(
+                f"Question: {question}\n\nRead-only observations:\n"
+                + "\n\n".join(observations)
+                + "\n\nAnswer the question concisely from the observations only."
+            ),
+            context="",
+        )
+        finding = (getattr(synth, "text", "") or "").strip()[: self._delegate_finding_chars]
+        await self._journal_delegate(question, len(steps), ran, "completed")
+        return f"DELEGATE finding: {finding}" if finding else \
+            f"DELEGATE finding: gathered {ran} observation(s) for: {question}"
+
+    async def _journal_delegate(
+        self, question: str, subtask_count: int, success_count: int,
+        status: str, error: Optional[str] = None,
+    ) -> None:
+        """Best-effort journal to the existing agent_workflows ledger (mode=
+        'delegate', R4.1) — a DB failure never breaks the investigation."""
+        db = self._agent_db
+        if db is None or not getattr(db, "available", True):
+            return
+        try:
+            await db.insert_workflow(
+                name=f"delegate:{question[:40]}", goal=question, mode="delegate",
+                subtask_count=subtask_count, success_count=success_count,
+                status=status, error=error,
+            )
+        except Exception as exc:
+            log.debug("DevAgent._journal_delegate failed: %s", exc)
 
     async def drain_goal_queue(self, max_goals: int = 0) -> int:
         """Drain the durable goal backlog (gap D): claim → run → mark terminal.
@@ -2334,10 +2587,11 @@ class DevAgent:
         # trajectory compactor (spec specs/trajectory-reduction/) reproduces this
         # 200/600 budget byte-for-byte when reduction is off, and abstracts older
         # steps when DA_TRAJECTORY_REDUCE is on.
-        from inference.trajectory import render_trajectory, reduction_enabled
+        from inference.trajectory import render_trajectory, reduction_enabled, dedup_enabled
         traj_text, _ = render_trajectory(
             steps, style="reflect", success_chars=200, failure_chars=600,
             readonly_verbs=self._PARALLEL_VERBS, enabled=reduction_enabled(),
+            dedup_reads=dedup_enabled(),
         )
         lines = [f"Goal: {goal}", "", "Steps executed:", traj_text]
 
@@ -2440,6 +2694,12 @@ class DevAgent:
         if action == "EXPLAIN":
             # Return text to the caller; no desktop action
             return step.body or step.args
+
+        if action == "DELEGATE":
+            # Planner-driven read-only investigation sub-agent (Gap D). Always at
+            # depth current+1; the child cannot reach a destructive verb (allowlist).
+            question = (step.args or step.body or "").strip()
+            return await self._delegate_investigate(question, self._delegate_depth + 1)
 
         if action == "SEARCH_WEB":
             query = step.args or step.body
@@ -3347,6 +3607,37 @@ class DevAgent:
         if not self._context:
             return None
         return "\n".join(self._context[-5:])
+
+    def _workspace_context(self) -> Optional[str]:
+        """Stable repo-facts block, built once and memoized (Gap A, R2.1).
+
+        Returns None when the feature is off or nothing could be collected, so
+        the caller's extra_ctx is byte-identical to today (R4.4). Build failure
+        degrades to None — never blocks the plan (R4.3)."""
+        if not self._repo_context_enabled:
+            return None
+        if not self._workspace_built:
+            self._workspace_built = True
+            try:
+                from inference.workspace_context import build_workspace_context
+                block, stats = build_workspace_context(self._repo_root)
+                self._workspace_block = block or None
+                if self._workspace_block:
+                    log.info("DevAgent: workspace context %d chars (git=%s, files=%d)",
+                             stats.get("chars_out", 0), stats.get("has_git"),
+                             stats.get("files_read", 0))
+            except Exception as exc:  # never block the plan path (R4.3)
+                log.warning("DevAgent: workspace context build failed: %s", exc)
+                self._workspace_block = None
+        return self._workspace_block
+
+    def invalidate_workspace_context(self) -> None:
+        """Drop the memoized workspace block so the next plan rebuilds it (R2.2).
+
+        For a long-lived session after a branch switch / CLAUDE.md edit. Never
+        called on the 60 Hz path (AGENTS.md #2 — dev-agent-only)."""
+        self._workspace_built = False
+        self._workspace_block = None
 
     async def _rag_context(self, query: str, n: int = 3) -> Optional[str]:
         """Fetch top-n relevant source chunks from CodebaseIndexer for `query`.
