@@ -24,6 +24,7 @@ falls back to it for any unknown format (R3.3).
 from __future__ import annotations
 
 import ast
+import difflib
 import logging
 import re
 import zlib
@@ -35,7 +36,7 @@ log = logging.getLogger(__name__)
 
 # Edit-format identifiers (ModelProfile.edit_format values).
 WHOLE_FILE = "whole_file"
-UDIFF = "udiff"          # reserved — no-line-number unified diff (R4, not yet impl)
+UDIFF = "udiff"          # no-line-number unified diff (R4, implemented)
 HASHLINE = "hashline"    # line:hash anchored edits (R4, implemented)
 SEARCH_REPLACE = "search_replace"  # aider-style SEARCH/REPLACE blocks (EDIT_FILE verb)
 
@@ -321,6 +322,162 @@ def _parse_search_replace_blocks(payload: str) -> list[_SRBlock]:
     return blocks
 
 
+# --------------------------------------------------------------------------- #
+# Udiff format (specs/edit-format-aci R4) — no-line-number unified diff.
+#
+# The model emits a unified diff whose ``@@`` hunk-header line numbers (if any)
+# are IGNORED — each hunk is interpreted as search/replace: its context (` `) +
+# removed (`-`) lines form the "before" block to locate in the file, and its
+# context + added (`+`) lines form the replacement. Matching is layered
+# (exact → whitespace-normalized → fuzzy, R4.2); a hunk that can't be located
+# uniquely fails closed (EditError) — nothing is written. Hunks resolve against
+# the original file (atomic), reject overlaps, and apply bottom-up (R4.3).
+# --------------------------------------------------------------------------- #
+
+# Fuzzy floor for locating a hunk's "before" block when exact and
+# whitespace-normalized both miss. Below this (or without a clear single best)
+# the hunk fails rather than patch a wrong region (R4.2).
+_UDIFF_FUZZY_THRESHOLD = 0.85
+
+_UDIFF_HUNK_HDR = re.compile(r"^@@.*@@")
+
+# Prepended to the plan context when the plan model's edit_format is udiff, so it
+# overrides _PLAN_PROMPT's whole-file WRITE_FILE convention (R3.2 prompt side).
+# Only injected for udiff models — whole_file/hashline models never see it.
+UDIFF_PROMPT_INSTRUCTIONS = """\
+EDIT FORMAT — UDIFF (overrides the default WRITE_FILE convention):
+- To change a file, emit a WRITE_FILE step whose body is a unified diff. Do NOT
+  re-emit the whole file.
+- Each change is a hunk beginning with a `@@ ... @@` header line (any line
+  numbers in it are ignored). Inside a hunk, prefix each line with one char:
+    ` ` (space) for an UNCHANGED context line (copied verbatim from the file),
+    `-` for a line to REMOVE, `+` for a line to ADD.
+- Include a few unchanged context lines around each change so the hunk locates a
+  UNIQUE spot. If the context/removed lines don't match the current file, the
+  edit is rejected and nothing is written — READ_FILE again and resend.
+
+Worked example — to fix an off-by-one on one line:
+    @@ @@
+     def dec(n):
+         # BUG: off by one
+    -    return n - 1
+    +    return n
+(The space-prefixed lines are unchanged context; only the `-`/`+` line changes.)"""
+
+
+@dataclass
+class _UdiffHunk:
+    before: list[str]   # context + removed lines, in order (the "find" block)
+    after: list[str]    # context + added lines, in order (the replacement)
+
+
+def _parse_udiff_hunks(payload: str) -> list["_UdiffHunk"]:
+    """Parse no-line-number unified-diff hunks into (before, after) blocks.
+
+    Deterministic, lenient (aider style): ``@@`` headers delimit hunks but their
+    line numbers are ignored; ``---``/``+++`` file headers are skipped; an
+    unprefixed line inside a hunk is treated as context. A payload with diff
+    lines but no ``@@`` header is still parsed as a single hunk.
+    """
+    hunks: list[_UdiffHunk] = []
+    before: list[str] = []
+    after: list[str] = []
+    in_hunk = False
+
+    def flush() -> None:
+        nonlocal before, after
+        if before or after:
+            hunks.append(_UdiffHunk(before, after))
+        before, after = [], []
+
+    # splitlines() (not split("\n")) so the payload's trailing newline does not
+    # leave a phantom "" that would be absorbed as a blank context line; interior
+    # blank lines are preserved.
+    for raw in payload.splitlines():
+        if _UDIFF_HUNK_HDR.match(raw):
+            flush()
+            in_hunk = True
+            continue
+        if raw.startswith("--- ") or raw.startswith("+++ "):
+            continue  # file header — must be checked before the '-'/'+' cases
+        prefix = raw[:1]
+        if prefix == "+":
+            after.append(raw[1:])
+            in_hunk = True
+        elif prefix == "-":
+            before.append(raw[1:])
+            in_hunk = True
+        elif prefix == " ":
+            before.append(raw[1:])
+            after.append(raw[1:])
+            in_hunk = True
+        elif in_hunk:
+            # Unprefixed / blank line inside a hunk → context on both sides.
+            before.append(raw)
+            after.append(raw)
+        # else: preamble noise before any hunk → ignored
+    flush()
+    return hunks
+
+
+def _find_unique_block(
+    hay: list[str], needle: list[str], path: str, n: int
+) -> tuple[int, int]:
+    """Locate ``needle`` as a contiguous run of lines in ``hay`` (R4.2 layered:
+    exact → whitespace-normalized → fuzzy). Return (start, end) for exactly one
+    match; raise ``EditError`` on zero, multiple, or a below-threshold fuzzy."""
+    L = len(needle)
+    H = len(hay)
+    if L > H:
+        raise EditError(
+            reason="mismatch",
+            message=(f"WRITE_FILE (udiff) hunk {n}: the context/removed block is "
+                     f"longer than {path}. Nothing was written — re-READ_FILE and "
+                     f"resend."),
+            target="\n".join(needle),
+        )
+
+    def _hits(pred) -> list[int]:
+        return [i for i in range(H - L + 1) if pred(hay[i:i + L])]
+
+    # 1. exact
+    hits = _hits(lambda w: w == needle)
+    # 2. whitespace-normalized
+    if not hits:
+        nn = [s.strip() for s in needle]
+        hits = _hits(lambda w: [s.strip() for s in w] == nn)
+    if len(hits) == 1:
+        return hits[0], hits[0] + L
+    if len(hits) > 1:
+        raise EditError(
+            reason="mismatch",
+            message=(f"WRITE_FILE (udiff) hunk {n}: its context matches "
+                     f"{len(hits)} places in {path} — add more surrounding context "
+                     f"so it identifies exactly one region. Nothing was written."),
+            target="\n".join(needle),
+        )
+
+    # 3. fuzzy — require a clear single best at/above threshold (R4.2)
+    target = "\n".join(needle)
+    best_ratio, best_i, second = 0.0, -1, 0.0
+    for i in range(H - L + 1):
+        r = difflib.SequenceMatcher(None, "\n".join(hay[i:i + L]), target).ratio()
+        if r > best_ratio:
+            second, best_ratio, best_i = best_ratio, r, i
+        elif r > second:
+            second = r
+    if best_ratio >= _UDIFF_FUZZY_THRESHOLD and (best_ratio - second) >= 0.05:
+        return best_i, best_i + L
+    raise EditError(
+        reason="mismatch",
+        message=(f"WRITE_FILE (udiff) hunk {n}: could not locate its "
+                 f"context/removed lines in {path} (best fuzzy match "
+                 f"{best_ratio:.0%} < {_UDIFF_FUZZY_THRESHOLD:.0%}). Re-READ_FILE "
+                 f"and resend the hunk against the current content."),
+        target=target,
+    )
+
+
 class EditApplier:
     """Applies a WRITE_FILE payload to produce the resulting file text + lint.
 
@@ -364,11 +521,11 @@ class EditApplier:
             new_text = self._apply_hashline(current_text, payload, path)
         elif fmt == SEARCH_REPLACE:
             new_text = self._apply_search_replace(current_text, payload, path)
-        else:
-            # UDIFF not yet implemented (task 4) — degrade gracefully to
-            # whole_file rather than crash (AGENTS.md degrade-gracefully, R3.3).
+        elif fmt == UDIFF:
+            new_text = self._apply_udiff(current_text, payload, path)
+        else:  # pragma: no cover — _KNOWN_FORMATS guard above is exhaustive
             log.warning(
-                "EditApplier: edit_format %r not yet implemented — using %s",
+                "EditApplier: edit_format %r has no applier — using %s",
                 fmt, WHOLE_FILE,
             )
             new_text = payload
@@ -498,6 +655,72 @@ class EditApplier:
             text = text.replace(block.search, block.replace, 1)
 
         return text
+
+    def _apply_udiff(self, current_text: str, payload: str, path: str) -> str:
+        """Apply a no-line-number unified diff to ``current_text`` (R4).
+
+        Each hunk's context+removed lines are located in the file (layered match,
+        R4.2) and replaced by its context+added lines. Atomic (R4.3): every hunk
+        is resolved against the ORIGINAL file first and overlap-checked before any
+        edit applies; edits then apply bottom-up so an earlier edit can't shift a
+        later hunk's position. Any unlocatable hunk aborts the batch (R2.1) —
+        nothing is written.
+        """
+        hunks = _parse_udiff_hunks(payload)
+        # Drop no-op hunks (only context, no +/- change) — e.g. a whitespace-only
+        # payload — so a body with no actual edit fails rather than silently no-ops.
+        hunks = [h for h in hunks if h.before != h.after]
+        if not hunks:
+            raise EditError(
+                reason="mismatch",
+                message=(
+                    "WRITE_FILE (udiff) contained no parseable hunks. The body must "
+                    "be a unified diff: a `@@ @@` header then lines prefixed ' ' "
+                    "(context), '-' (remove), or '+' (add). Nothing was written — "
+                    "resend in that form."
+                ),
+            )
+
+        lines = current_text.split("\n")
+        resolved: list[tuple[int, int, list[str]]] = []   # (start, end, after)
+        for n, h in enumerate(hunks, 1):
+            if not h.before:
+                # Pure-insertion hunk (all '+', no anchor). Only valid as the sole
+                # hunk creating an empty file — otherwise there is nothing to anchor
+                # the insertion to (use a context line, or WRITE_FILE the whole file).
+                if current_text == "" and len(hunks) == 1:
+                    resolved.append((0, len(lines), h.after))
+                    continue
+                raise EditError(
+                    reason="mismatch",
+                    message=(
+                        f"WRITE_FILE (udiff) hunk {n} has only added lines and no "
+                        f"context to anchor on. Include a few surrounding context "
+                        f"lines, or use WRITE_FILE to write {path} whole. Nothing "
+                        f"was written."
+                    ),
+                )
+            start, end = _find_unique_block(lines, h.before, path, n)
+            resolved.append((start, end, h.after))
+
+        # Reject overlapping target ranges (R4.3).
+        for (s1, e1), (s2, e2) in zip(
+            sorted((s, e) for s, e, _ in resolved),
+            sorted((s, e) for s, e, _ in resolved)[1:],
+        ):
+            if s2 < e1:
+                raise EditError(
+                    reason="overlap",
+                    message=(
+                        "WRITE_FILE (udiff) has two hunks editing overlapping "
+                        "regions. Combine them into one hunk; nothing was written."
+                    ),
+                )
+
+        # Apply bottom-up so earlier edits don't shift later (lower) positions.
+        for start, end, after in sorted(resolved, key=lambda t: t[0], reverse=True):
+            lines[start:end] = after
+        return "\n".join(lines)
 
     def _lint(self, path: str, text: str) -> None:
         """Run the registered validator for ``path``'s extension, if any (R1.3)."""

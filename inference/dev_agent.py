@@ -50,6 +50,8 @@ from inference.edit_format import (
     HASHLINE_PROMPT_INSTRUCTIONS,
     SEARCH_REPLACE,
     SEARCH_REPLACE_PROMPT_INSTRUCTIONS,
+    UDIFF,
+    UDIFF_PROMPT_INSTRUCTIONS,
     EditApplier,
     render_hashline,
 )
@@ -906,15 +908,20 @@ class DevAgent:
         if git_ctx:
             extra_ctx = f"{git_ctx}\n\n{extra_ctx}" if extra_ctx else git_ctx
 
-        # If the plan model edits in hashline, teach it the format up front so
-        # its WRITE_FILE bodies are edit ops, not whole files (edit-format-aci
-        # R3.2 prompt side). Only for hashline models — whole_file is untouched.
-        if self._router.edit_format_for(
-            self._router.select_profile("plan").name
-        ) == HASHLINE:
+        # If the plan model uses a structured WRITE_FILE format (hashline/udiff),
+        # teach it the format up front so its bodies are edit ops, not whole files
+        # (edit-format-aci R3.2 prompt side). Only for those models — whole_file is
+        # untouched.
+        _plan_fmt = self._router.edit_format_for(self._router.select_profile("plan").name)
+        if _plan_fmt == HASHLINE:
             extra_ctx = (
                 f"{HASHLINE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
                 if extra_ctx else HASHLINE_PROMPT_INSTRUCTIONS
+            )
+        elif _plan_fmt == UDIFF:
+            extra_ctx = (
+                f"{UDIFF_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
+                if extra_ctx else UDIFF_PROMPT_INSTRUCTIONS
             )
 
         # EDIT_FILE (surgical SEARCH/REPLACE) is available to every plan model

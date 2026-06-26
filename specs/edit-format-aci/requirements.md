@@ -60,8 +60,11 @@ silent elision did not occur even on ~180-line files, whole_file led on correctn
 (100% vs 80% hard subset), and hashline's gain is purely efficiency (~9–23× less
 output, ~2–4× faster) — an opt-in cost play, not a correctness upgrade. Follow-ups
 (out of this spec): enable hashline per-model where cost/latency dominates after the
-op-format reliability improves; implement `udiff` (still reserved → degrades to
-whole_file).
+op-format reliability improves. **Update 2026-06-25:** `udiff` is now implemented
+(`EditApplier._apply_udiff` + `_parse_udiff_hunks`, layered match R4.2, atomic
+bottom-up + overlap-reject R4.3, fail-closed; `UDIFF_PROMPT_INSTRUCTIONS` injected
+per-model like hashline) — it is a third opt-in `edit_format` knob value, still
+`whole_file` by default. Tests: `tests/test_edit_format_udiff.py` (17).
 **Owner / author session:** Claude Code (Opus 4.8)
 **Related:** `../trajectory-reduction/` (sibling DevAgent token-economics work;
 both touch the plan→execute→replan loop), `../accessibility-agent/` (DevAgent
@@ -293,7 +296,8 @@ Each acceptance criterion in §3 maps to at least one test above.
       (exact line:hash → fuzzy ±5 with ambiguity rejection), atomic bottom-up
       batch with overlap rejection; READ_FILE renders anchors and the plan prompt
       gets `HASHLINE_PROMPT_INSTRUCTIONS` when the model uses hashline — satisfies
-      R2.1, R2.3, R4.1–R4.3. (`udiff` still reserved → degrades to whole_file.)
+      R2.1, R2.3, R4.1–R4.3. (`udiff` implemented 2026-06-25 — same R4.2/R4.3
+      contract; opt-in, `whole_file` still the default.)
 - [x] 5. `tests/test_edit_format.py` — 32 tests covering R1.2/R1.3, R2.2, R3.1/R3.2/
       R3.3, R1.4, the validator-injection seam, and the full hashline surface
       (render, whitespace-insensitive hash, each op, stale/fuzzy/overlap/bottom-up,

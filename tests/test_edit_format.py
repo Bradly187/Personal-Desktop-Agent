@@ -94,13 +94,16 @@ def test_r3_3_unknown_format_falls_back_to_whole_file(caplog):
     assert any("falling back" in r.message for r in caplog.records)
 
 
-def test_r3_3_reserved_udiff_degrades_until_implemented(caplog):
-    """R3.3: the not-yet-implemented udiff format degrades to whole_file."""
+def test_r3_3_unknown_format_degrades_to_whole_file(caplog):
+    """R3.3: an UNKNOWN edit_format degrades to whole_file with a warning.
+
+    (udiff is now implemented — its behavior is covered in
+    tests/test_edit_format_udiff.py.)"""
     applier = EditApplier()
     with caplog.at_level("WARNING"):
-        out = applier.apply("", GOOD_PY, edit_format=UDIFF, path="mod.py")
+        out = applier.apply("", GOOD_PY, edit_format="nonsense_format", path="mod.py")
     assert out == GOOD_PY
-    assert any("not yet implemented" in r.message for r in caplog.records)
+    assert any("unknown edit_format" in r.message for r in caplog.records)
 
 
 # --- validator injection (test seam) ------------------------------------------
