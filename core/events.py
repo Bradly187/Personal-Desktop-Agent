@@ -30,6 +30,10 @@ Topic namespace (dotted paths):
   vram.restored      — heavy models restored after a flare cleared; payload: {free_gb}
   breaker.opened     — an inference backend circuit-breaker opened; payload: {name, state, reason}
   inference.stalled  — an Ollama call hit DA_OLLAMA_TIMEOUT_S (hang guard); payload: {timeout_s, backend}
+
+  Alerting topics — drive the dashboard Activity feed + Alerts panel:
+  metric.threshold_crossed — MetricWatcher KPI breach/recovery; payload: {metric, value, message, severity}
+  slo.breached       — ContinuousTrainer per-domain SLO breach; payload: {domain, metric, value, budget, verdict}
 """
 from __future__ import annotations
 
@@ -66,6 +70,9 @@ TOPIC_VRAM_EVICTED      = "vram.evicted"
 TOPIC_VRAM_RESTORED     = "vram.restored"
 TOPIC_BREAKER_OPENED    = "breaker.opened"
 TOPIC_INFERENCE_STALLED = "inference.stalled"
+# Alerting topics — surfaced on the dashboard Activity feed / Alerts panel.
+TOPIC_METRIC_THRESHOLD  = "metric.threshold_crossed"  # MetricWatcher KPI alert
+TOPIC_SLO_BREACHED      = "slo.breached"              # ContinuousTrainer SLO breach
 
 
 class EventBus:

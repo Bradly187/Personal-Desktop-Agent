@@ -47,6 +47,9 @@ log = logging.getLogger(__name__)
 _DASHBOARD_TOPICS = {
     "command.executed", "goal.dequeued", "goal.completed",
     "vram.evicted", "vram.restored", "breaker.opened", "inference.stalled",
+    # Alerting + autonomous-action topics surfaced in the Activity feed.
+    "metric.threshold_crossed", "slo.breached",
+    "voice.drift", "step.failed", "replan.exhausted", "email.arrived",
 }
 
 _STATIC_DIR = Path(__file__).parent.parent / "web_client_chat"
@@ -539,4 +542,27 @@ class ChatServer:
         if topic == "inference.stalled":
             return {"type": "dash_event", "kind": "stall", "ts": ts, "severity": "warn",
                     "text": f"{p.get('backend')} stall ≥{p.get('timeout_s')}s ({p.get('phase')})"}
+        if topic == "metric.threshold_crossed":
+            # MetricWatcher publishes severity "warning"/"info" (recovery); map to
+            # the feed's warn/info styling.
+            sev = "info" if p.get("severity") == "info" else "warn"
+            return {"type": "dash_event", "kind": "alert", "ts": ts, "severity": sev,
+                    "text": p.get("message") or f"{p.get('metric')} = {p.get('value')}"}
+        if topic == "slo.breached":
+            return {"type": "dash_event", "kind": "alert", "ts": ts, "severity": "warn",
+                    "text": (f"SLO breach: {p.get('domain')} "
+                             f"{p.get('metric')}={p.get('value')} (budget {p.get('budget')})")}
+        if topic == "voice.drift":
+            return {"type": "dash_event", "kind": "voice", "ts": ts, "severity": "warn",
+                    "text": f"voice drift {p.get('drift_pct')}% — recalibration advised"}
+        if topic == "step.failed":
+            return {"type": "dash_event", "kind": "dev", "ts": ts, "severity": "warn",
+                    "text": (f"step {p.get('step_num')} {p.get('action')} failed: "
+                             f"{str(p.get('error', ''))[:80]}")}
+        if topic == "replan.exhausted":
+            return {"type": "dash_event", "kind": "dev", "ts": ts, "severity": "warn",
+                    "text": f"replan exhausted ({p.get('replans')}×): {str(p.get('goal', ''))[:80]}"}
+        if topic == "email.arrived":
+            return {"type": "dash_event", "kind": "email", "ts": ts, "severity": "info",
+                    "text": f"email: {str(p.get('subject', ''))[:80]}"}
         return None
