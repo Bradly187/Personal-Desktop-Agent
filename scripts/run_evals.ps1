@@ -82,6 +82,13 @@ if (-not $SkipModel) {
     # too short and a single timed-out case drops accuracy and flakes the gate.
     Invoke-Gate "trajectory gate" @("--suite", "dev_trajectory", "--mode", "trajectory", "--model", "qwen3-coder:30b", "--timeout", "180", "--check") $true
     Invoke-Gate "judge gate" @("--suite", "explain_quality", "--mode", "judge", "--model", "gemma4:12b", "--judge-model", "gemma3:27b", "--timeout", "90", "--check") $true
+    # intent_satisfaction (Eval Dimension 1: did the agent build what the user MEANT?).
+    # Single-model judge (gemma4:12b answers AND judges) on purpose: it co-resides with
+    # the command model + Whisper, so the gate never thrashes a 12B<->27B swap on a
+    # contended 32 GB GPU (which intermittently timed out the producer when locking).
+    # Judges against an explicit per-case reference + rubric, so a same-family judge is
+    # adequate here. Wide tolerance — small n + LM-judge nondeterminism.
+    Invoke-Gate "intent gate" @("--suite", "intent_satisfaction", "--mode", "judge", "--model", "gemma4:12b", "--judge-model", "gemma4:12b", "--timeout", "120", "--check") $true
     # Live-DevAgent execution gate — opt-in (slow: real plans run end-to-end).
     if ($Execution) {
         Invoke-Gate "execution gate" @("--suite", "dev_execution", "--mode", "execution", "--timeout", "200", "--check") $true

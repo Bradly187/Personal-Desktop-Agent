@@ -1,0 +1,15 @@
+{
+  "suite": "intent_satisfaction",
+  "mode": "judge",
+  "recorded_at": "2026-06-25T15:44:28",
+  "model": "gemma4:12b",
+  "judge_model": "gemma4:12b",
+  "tolerance": 0.2,
+  "n": 12,
+  "exact_acc": 0.8333,
+  "pass_rate": 0.8333,
+  "mean_overall": 0.9167,
+  "p50_latency_ms": 7577.7,
+  "errors": 0,
+  "note": "LOCKED 2026-06-25 on an idle GPU, 0 errors (was pending; the 4 spurious TimeoutError 'failures' were the eval's 10s OllamaInference HTTP default cutting long judge/answer calls — fixed in evals/run.py _infer_text). Single co-resident judge (gemma4:12b answers AND judges) so the gate never thrashes a 12B<->27B swap on the 32 GB GPU; judged against per-case reference+rubric. Wide 0.2 tolerance for small n + LM-judge nondeterminism (threshold 0.63). The 2 non-passers are genuine borderline cases (missing dry-run/confirm step; lacked context for the fix), not noise. Re-lock: python -m evals.run --suite intent_satisfaction --mode judge --model gemma4:12b --judge-model gemma4:12b --timeout 180 --update-baseline --tolerance 0.2"
+}
