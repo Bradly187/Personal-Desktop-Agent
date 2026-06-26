@@ -72,6 +72,7 @@ class ContinuousTrainer:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._memory = None   # MemoryManager — wired via set_memory()
+        self._event_bus = None   # EventBus — wired via set_event_bus() for slo.breached alerts
         self.slo_status: dict[str, str] = {}   # gap H: latest per-domain SLO verdicts
         self.misroute_status: dict[str, float] = {}   # E1: latest per-domain misroute rates
         # D9: intra-session velocity calibration trigger
@@ -109,6 +110,11 @@ class ContinuousTrainer:
     def set_memory(self, memory) -> None:
         """Wire MemoryManager for standardised storage access."""
         self._memory = memory
+
+    def set_event_bus(self, bus) -> None:
+        """Wire EventBus so per-domain SLO breaches publish `slo.breached` for the
+        dashboard Activity feed + Alerts panel. Optional — no-op if never set."""
+        self._event_bus = bus
 
     async def record_success(
         self,
@@ -378,6 +384,23 @@ class ContinuousTrainer:
                     metric_after=s.get("p50_latency_ms") or slo.latency_budget_ms,
                     domain=domain,
                 )
+                if self._event_bus is not None:
+                    metric = "p50_latency_ms" if verdict == BREACH_LATENCY else "success_rate"
+                    value = (s.get("p50_latency_ms") if verdict == BREACH_LATENCY
+                             else s.get("success_rate"))
+                    budget = (slo.latency_budget_ms if verdict == BREACH_LATENCY
+                              else slo.min_success_rate)
+                    try:
+                        from core.events import TOPIC_SLO_BREACHED
+                        await self._event_bus.publish(
+                            TOPIC_SLO_BREACHED,
+                            source="continuous_trainer",
+                            payload={"domain": domain, "metric": metric,
+                                     "value": value, "budget": budget,
+                                     "verdict": verdict},
+                        )
+                    except Exception as exc:   # never let alerting break adaptation
+                        log.debug("slo.breached publish failed: %s", exc)
         self.slo_status = status
 
     # Min routed commands in a domain before its misroute rate is trustworthy.
