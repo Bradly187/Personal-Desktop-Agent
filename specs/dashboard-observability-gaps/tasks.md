@@ -28,11 +28,11 @@
 ## Phase P2 — Cost trend, trace/trend depth, operational panels
 *Effort: M+. Depth + retiring dead surface.*
 
-- [ ] 14. Wire `GET /api/cost` into a per-day cloud-cost trend; ensure no endpoint remains registered-but-unused. — R4.1, R4.2, R4.3
-- [ ] 15. `/api/recent-traces`: add `source`/`success`/`action` filters + token/cost columns + inline error reason. — R7.1, R7.2
-- [ ] 16. Trends: add latency-p50, tokens/session, clarify-rate dimensions. — R7.3
-- [ ] 17. Read-only operational endpoints + panels: goal queue, approvals/escalation (**no approve/deny control** — R8.3), corrections, macros; optional audit-chain status. — R8.1–R8.5
-- [ ] 18. Tests: trace filters, approvals endpoint exposes GET only (no mutation route), empty-state for each panel.
+- [x] 14. Wired `GET /api/cost` into a per-day cloud-cost bar panel (`by_day`); `/api/cost` + `/api/session-live` now both consumed → no registered-but-unused endpoints. — R4.1, R4.2, R4.3
+- [x] 15. `recent_traces` + `/api/recent-traces`: `source`/`success`/`action` filters, summed tokens, inline `error_msg`. Per-row $ cost folded into the Cost + Model-usage panels rather than duplicated per trace (token sum is the per-trace cost proxy). — R7.1, R7.2
+- [x] 16. Trends: added latency-p50 + corrections columns (both already in `session_trends`). Tokens-per-session is surfaced via the Cost panel's `by_session`; clarify-rate lives in the Now panel (P1) — neither needs a `session_summaries` schema change. — R7.3
+- [x] 17. Read-only endpoints + panels: goal queue (`/api/goals`), dev-escalations (`/api/escalations`, **no approve/deny control** — R8.3), corrections (`/api/corrections`). **Macros panel deferred** — no persistent store (in-memory `MacroStore`, feature OFF). Audit-chain panel deferred (R8.4 optional). — R8.1–R8.3, R8.5
+- [x] 18. Tests: trace filters + tokens/error, operational read helpers + empty-state, GET-only guard (no `add_post`/`put`/`delete`). — `test_dashboard_observability.py`
 
 ## Cross-cutting (every phase)
 - [ ] Keep `evals/` baselines green — this spec changes no runtime agent behavior (read-only surfacing).

@@ -12,6 +12,8 @@
   const ms = (v) => v == null ? "—" : Math.round(v) + " ms";
   const fixed = (v, d=2) => v == null ? "—" : Number(v).toFixed(d);
   const clock = (t) => { try { return new Date((t || 0) * 1000).toLocaleTimeString(); } catch { return ""; } };
+  const esc = (s) => (s == null ? "" : String(s)).replace(/[&<>"]/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   async function getJSON(url) {
     try { const r = await fetch(url); if (!r.ok) return null; return await r.json(); }
@@ -118,19 +120,39 @@
   }
 
   // ── Traces + replay (poll + on-demand) ──────────────────────────────────────
+  const _seenSources = new Set();
+  function _traceQuery() {
+    const q = ["limit=25"];
+    const src = $("tf-source").value, suc = $("tf-success").value;
+    if (src) q.push("source=" + encodeURIComponent(src));
+    if (suc !== "") q.push("success=" + suc);
+    return "/api/recent-traces?" + q.join("&");
+  }
   async function refreshTraces() {
-    const rows = await getJSON("/api/recent-traces?limit=25");
+    const rows = await getJSON(_traceQuery());
     const box = $("traces"); box.innerHTML = "";
-    if (!rows || !rows.length) { box.appendChild(el("div", "empty", "no traced commands yet")); return; }
+    if (!rows || !rows.length) { box.appendChild(el("div", "empty", "no traced commands")); $("traces-sub").textContent = ""; return; }
     $("traces-sub").textContent = rows.length + " recent";
     for (const r of rows) {
-      const item = el("button", "trace-item");
+      // Grow the source filter as new sources appear in the data.
+      if (r.source && !_seenSources.has(r.source)) {
+        _seenSources.add(r.source);
+        const opt = el("option", null, r.source); opt.value = r.source;
+        $("tf-source").appendChild(opt);
+      }
+      const item = el("button", "trace-item" + (r.success ? "" : " failrow"));
       item.appendChild(el("span", "t-id", (r.trace_id || "").slice(0, 8)));
       item.appendChild(el("span", "t-src", r.source || ""));
       item.appendChild(el("span", "t-act", r.action || ""));
+      const tok = (r.tokens_in || 0) + (r.tokens_out || 0);
+      item.appendChild(el("span", "t-tok", tok ? tok.toLocaleString() + "t" : ""));
       item.appendChild(el("span", "t-lat", ms(r.latency_ms)));
-      const ok = el("span", "t-ok " + (r.success ? "ok" : "fail"), r.success ? "✓" : "✗");
-      item.appendChild(ok);
+      item.appendChild(el("span", "t-ok " + (r.success ? "ok" : "fail"), r.success ? "✓" : "✗"));
+      // Failed traces show their reason inline (no replay needed).
+      if (!r.success && r.error_msg) {
+        const err = el("div", "t-err", r.error_msg); err.title = r.error_msg;
+        item.appendChild(err);
+      }
       item.onclick = () => replay(r.trace_id);
       box.appendChild(item);
     }
@@ -176,13 +198,15 @@
     box.appendChild(strip);
     // recent sessions table
     const tbl = el("table", "tbl");
-    tbl.innerHTML = "<thead><tr><th>session</th><th>cmds</th><th>ok</th><th>cloud</th><th>p95</th><th>pain</th></tr></thead>";
+    tbl.innerHTML = "<thead><tr><th>session</th><th>cmds</th><th>ok</th><th>cloud</th>" +
+      "<th>p50</th><th>p95</th><th>corr</th><th>pain</th></tr></thead>";
     const tb = el("tbody");
     for (const s of res.sessions.slice().reverse()) {
       const tr = el("tr");
       tr.innerHTML = `<td>${s.session_id}</td><td>${s.total_commands ?? "—"}</td>` +
         `<td>${pct(s.success_rate)}</td><td>${pct(s.cloud_escalation_rate)}</td>` +
-        `<td>${ms(s.latency_p95_ms)}</td><td>${pct(s.pain_day_pct)}</td>`;
+        `<td>${ms(s.latency_p50_ms)}</td><td>${ms(s.latency_p95_ms)}</td>` +
+        `<td>${s.corrections_count ?? "—"}</td><td>${pct(s.pain_day_pct)}</td>`;
       tb.appendChild(tr);
     }
     tbl.appendChild(tb); box.appendChild(tbl);
@@ -260,6 +284,89 @@
     }
   }
 
+  // ── Cloud cost per day (poll /api/cost) ─────────────────────────────────────
+  async function refreshCost() {
+    const res = await getJSON("/api/cost?days=30");
+    const box = $("cost"); box.innerHTML = "";
+    const byDay = (res && res.by_day) || {};
+    const days = Object.entries(byDay);
+    if (!days.length) { box.appendChild(el("div", "empty", "no cloud spend in window")); $("cost-sub").textContent = ""; return; }
+    const tot = res.totals || {};
+    $("cost-sub").textContent = `$${(tot.cost || 0).toFixed(4)} · ${res.days || "all"}d`;
+    const max = days.reduce((m, [, d]) => Math.max(m, d.cost), 0) || 1;
+    const wrap = el("div", "costbars");
+    for (const [day, d] of days.slice(-14)) {
+      const row = el("div", "cost-row");
+      row.appendChild(el("span", "cost-day", day.slice(5)));
+      const bar = el("div", "cost-bar");
+      const fill = el("div", "cost-fill"); fill.style.width = Math.max(2, Math.round(d.cost / max * 100)) + "%";
+      bar.appendChild(fill); row.appendChild(bar);
+      row.appendChild(el("span", "cost-amt", "$" + d.cost.toFixed(4)));
+      wrap.appendChild(row);
+    }
+    box.appendChild(wrap);
+  }
+
+  // ── Goal queue (poll /api/goals) ────────────────────────────────────────────
+  async function refreshGoals() {
+    const res = await getJSON("/api/goals?limit=25");
+    const box = $("goals"); box.innerHTML = "";
+    const goals = (res && res.goals) || [];
+    if (!goals.length) { box.appendChild(el("div", "empty", "no goals queued")); $("goals-sub").textContent = ""; return; }
+    const active = goals.filter(g => g.status === "queued" || g.status === "running" || g.status === "scheduled").length;
+    $("goals-sub").textContent = active ? `${active} pending` : `${goals.length} recent`;
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>status</th><th>goal</th><th>src</th><th>try</th></tr></thead>";
+    const tb = el("tbody");
+    for (const g of goals) {
+      const tr = el("tr");
+      tr.innerHTML = `<td><span class="badge ${esc(g.status)}">${esc(g.status)}</span></td>` +
+        `<td title="${esc(g.last_error || "")}">${esc((g.goal || "").slice(0, 60))}</td>` +
+        `<td>${esc(g.source_trigger || "")}</td><td>${g.attempts}/${g.max_attempts}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
+  // ── Dev escalations — READ-ONLY (poll /api/escalations) ─────────────────────
+  async function refreshEscalations() {
+    const res = await getJSON("/api/escalations?limit=25");
+    const box = $("escalations"); box.innerHTML = "";
+    const items = (res && res.escalations) || [];
+    if (!items.length) { box.appendChild(el("div", "empty", "no escalations 🎉")); $("escalations-sub").textContent = ""; return; }
+    const pending = items.filter(e => e.status === "pending").length;
+    $("escalations-sub").textContent = pending ? `${pending} pending` : `${items.length} recent`;
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>status</th><th>goal</th><th>reason</th><th>replans</th></tr></thead>";
+    const tb = el("tbody");
+    for (const e of items) {
+      const tr = el("tr");
+      tr.innerHTML = `<td><span class="badge ${esc(e.status)}">${esc(e.status)}</span></td>` +
+        `<td>${esc((e.goal || "").slice(0, 60))}</td><td>${esc(e.reason || "")}</td><td>${e.replans}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
+  // ── Recent corrections (poll /api/corrections) ──────────────────────────────
+  async function refreshCorrections() {
+    const res = await getJSON("/api/corrections?limit=25");
+    const box = $("corrections"); box.innerHTML = "";
+    const items = (res && res.corrections) || [];
+    if (!items.length) { box.appendChild(el("div", "empty", "no corrections")); $("corrections-sub").textContent = ""; return; }
+    $("corrections-sub").textContent = items.length + " recent";
+    const tbl = el("table", "tbl");
+    tbl.innerHTML = "<thead><tr><th>said</th><th>did</th><th>→ corrected</th></tr></thead>";
+    const tb = el("tbody");
+    for (const c of items) {
+      const tr = el("tr");
+      tr.innerHTML = `<td title="${esc(c.text || "")}">${esc((c.text || "").slice(0, 40))}</td>` +
+        `<td>${esc(c.action || "")}</td><td>${esc(c.corrected_to || "")}</td>`;
+      tb.appendChild(tr);
+    }
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
   // ── WebSocket (live feed) ───────────────────────────────────────────────────
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -279,15 +386,16 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() {
-    refreshMetrics(); refreshAlerts(); refreshHealth();
+  function pollSlow() {
+    refreshAlerts(); refreshHealth();
     refreshTraces(); refreshTrends(); refreshModels(); refreshRouting();
+    refreshCost(); refreshGoals(); refreshEscalations(); refreshCorrections();
   }
+  function pollAll() { refreshMetrics(); pollSlow(); }
+  $("tf-source").onchange = refreshTraces;
+  $("tf-success").onchange = refreshTraces;
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => {
-    refreshAlerts(); refreshHealth();
-    refreshTraces(); refreshTrends(); refreshModels(); refreshRouting();
-  }, 15000);
+  setInterval(pollSlow, 15000);
 })();
