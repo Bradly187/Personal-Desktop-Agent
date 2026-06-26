@@ -157,6 +157,54 @@ def _recent_alerts(db_path: str, limit: int = 50) -> dict:
     return {"alerts": alerts}
 
 
+def _ro_query(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
+    """Read-only list-of-dicts query. Returns [] on any error (missing table,
+    bad path) so every operational panel degrades to an empty state (R8.5)."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        with con:
+            rows = [dict(r) for r in con.execute(sql, params).fetchall()]
+        con.close()
+        return rows
+    except Exception:
+        return []
+
+
+def _recent_goals(db_path: str, limit: int = 50) -> dict:
+    """Goal queue (newest first) — pending/in-flight/failed autonomous goals."""
+    return {"goals": _ro_query(
+        db_path,
+        "SELECT id, ts, goal, domain, status, attempts, max_attempts, "
+        "last_error, source_trigger FROM goal_queue ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    )}
+
+
+def _recent_escalations(db_path: str, limit: int = 50) -> dict:
+    """Dev-escalation queue (newest first). READ-ONLY display — there is NO
+    approve/deny control here; the only approval path stays the voice-approved
+    gate (AGENTS.md #4, R8.3)."""
+    return {"escalations": _ro_query(
+        db_path,
+        "SELECT id, ts, goal, reason, failed_action, replans, status "
+        "FROM dev_escalations ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    )}
+
+
+def _recent_corrections(db_path: str, limit: int = 50) -> dict:
+    """Recent user corrections — commands the user re-aimed (corrected_to set)."""
+    return {"corrections": _ro_query(
+        db_path,
+        "SELECT ts, source, text, action, corrected_to FROM commands "
+        "WHERE corrected_to IS NOT NULL AND corrected_to != '' "
+        "ORDER BY ts DESC LIMIT ?",
+        (int(limit),),
+    )}
+
+
 class _ChatClient:
     """One connected chat socket plus a writer task, so a slow socket never
     blocks the shared EventBus pump."""
@@ -266,6 +314,9 @@ class ChatServer:
         app.router.add_get("/api/session-live", self._api_session_live)
         app.router.add_get("/api/alerts", self._api_alerts)
         app.router.add_get("/api/health-backends", self._api_health_backends)
+        app.router.add_get("/api/goals", self._api_goals)
+        app.router.add_get("/api/escalations", self._api_escalations)
+        app.router.add_get("/api/corrections", self._api_corrections)
         if _STATIC_DIR.exists():
             app.router.add_static("/static/", _STATIC_DIR, show_index=False)
 
@@ -349,7 +400,14 @@ class ChatServer:
             return web.json_response([], status=200)
         from monitoring import replay
         limit = self._qint(request, "limit", 25)
-        rows = await asyncio.to_thread(replay.recent_traces, path, limit)
+        source = request.query.get("source") or None
+        action = request.query.get("action") or None
+        succ_q = request.query.get("success")
+        success = None
+        if succ_q:
+            success = succ_q.lower() in ("1", "true", "yes", "ok")
+        rows = await asyncio.to_thread(
+            replay.recent_traces, path, limit, source, success, action)
         return web.json_response(rows)
 
     async def _api_replay(self, request: web.Request) -> web.Response:
@@ -412,6 +470,27 @@ class ChatServer:
             return web.json_response({"alerts": []})
         limit = self._qint(request, "limit", 50)
         result = await asyncio.to_thread(_recent_alerts, path, limit)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_goals(self, request: web.Request) -> web.Response:
+        path = self._db_path()
+        if not path:
+            return web.json_response({"goals": []})
+        result = await asyncio.to_thread(_recent_goals, path, self._qint(request, "limit", 50))
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_escalations(self, request: web.Request) -> web.Response:
+        path = self._db_path()
+        if not path:
+            return web.json_response({"escalations": []})
+        result = await asyncio.to_thread(_recent_escalations, path, self._qint(request, "limit", 50))
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_corrections(self, request: web.Request) -> web.Response:
+        path = self._db_path()
+        if not path:
+            return web.json_response({"corrections": []})
+        result = await asyncio.to_thread(_recent_corrections, path, self._qint(request, "limit", 50))
         return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
 
     async def _api_health_backends(self, request: web.Request) -> web.Response:

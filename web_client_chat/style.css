@@ -174,6 +174,27 @@ body {
 .delta.flat { color: var(--text-dim); }
 .cost-total { padding: 12px 14px; font: 600 14px var(--mono); }
 
+/* Trace filters + extra columns */
+.trace-filters { display: inline-flex; gap: 6px; margin-left: 12px; }
+.trace-filters select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font: 11px var(--mono); padding: 2px 4px; }
+.trace-item .t-tok { color: var(--text-dim); min-width: 54px; text-align: right; }
+.trace-item.failrow { background: rgba(255,92,92,.05); }
+.trace-item .t-err { flex-basis: 100%; color: var(--fail); font-size: 11.5px; opacity: .85; padding-left: 70px; }
+
+/* Cloud-cost per-day bars */
+.costbars { padding: 8px 0; }
+.cost-row { display: flex; gap: 10px; align-items: center; padding: 3px 14px; font: 12px var(--mono); }
+.cost-day { color: var(--text-dim); min-width: 44px; flex: none; }
+.cost-bar { flex: 1; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.cost-fill { height: 100%; background: var(--accent); }
+.cost-amt { color: var(--text); min-width: 70px; text-align: right; flex: none; }
+
+/* Status badges (goals + escalations) */
+.badge { display: inline-block; padding: 1px 7px; border-radius: 6px; font: 11px var(--mono); background: var(--surface-2); color: var(--text-dim); }
+.badge.running, .badge.queued, .badge.scheduled, .badge.pending { background: rgba(10,132,255,.15); color: var(--accent); }
+.badge.done, .badge.completed, .badge.acknowledged { background: rgba(46,204,113,.15); color: var(--ok); }
+.badge.failed, .badge.error { background: rgba(255,92,92,.15); color: var(--fail); }
+
 /* Model-usage route badge */
 .tag { display: inline-block; padding: 1px 7px; border-radius: 6px; font: 11px var(--mono); white-space: nowrap; }
 .tag.local { background: rgba(63,185,80,.14); color: #3fb950; }

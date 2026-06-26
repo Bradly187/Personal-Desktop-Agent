@@ -166,3 +166,93 @@ async def test_continuous_trainer_publishes_slo_breached():
     assert topic == "slo.breached"
     assert payload["domain"] == "command" and payload["verdict"] == "breach_latency"
     assert payload["budget"] == 600.0
+
+
+# ── P2: trace filters + tokens/error (R7.1, R7.2) ────────────────────────────
+
+def _seed_traces_db(path: Path) -> None:
+    con = sqlite3.connect(path)
+    con.execute(
+        """CREATE TABLE commands (
+               id INTEGER PRIMARY KEY, session_id INTEGER, ts REAL, source TEXT,
+               text TEXT, action TEXT, route TEXT, gate_that_decided TEXT,
+               latency_ms REAL, success INTEGER, error_msg TEXT,
+               corrected_to TEXT, trace_id TEXT)"""
+    )
+    con.execute("CREATE TABLE inferences (id INTEGER PRIMARY KEY, command_id INTEGER, tokens_in INTEGER, tokens_out INTEGER)")
+    con.executemany(
+        "INSERT INTO commands (id, ts, source, text, action, route, success, error_msg, corrected_to, trace_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            (1, 10.0, "voice", "open vscode", "OPEN", "local", 1, None, None, "tA"),
+            (2, 20.0, "chat", "do thing", "RUN_TERMINAL", "cloud", 0, "boom failed", None, "tB"),
+            (3, 30.0, "voice", "click ok", "CLICK", "local", 1, None, "DOUBLECLICK", "tC"),
+        ],
+    )
+    con.executemany("INSERT INTO inferences (command_id, tokens_in, tokens_out) VALUES (?,?,?)",
+                    [(1, 100, 20), (1, 50, 5), (2, 200, 80)])
+    con.commit()
+    con.close()
+
+
+def test_recent_traces_tokens_and_error_inline(tmp_path):
+    """R7.2 — rows carry summed tokens + the failed command's error_msg."""
+    from monitoring.replay import recent_traces
+    db = tmp_path / "agent.db"
+    _seed_traces_db(db)
+    rows = recent_traces(str(db), 25)
+    by_id = {r["trace_id"]: r for r in rows}
+    assert by_id["tA"]["tokens_in"] == 150 and by_id["tA"]["tokens_out"] == 25   # summed
+    assert by_id["tB"]["error_msg"] == "boom failed" and by_id["tB"]["success"] == 0
+
+
+def test_recent_traces_filters(tmp_path):
+    """R7.1 — source / success filters narrow the list."""
+    from monitoring.replay import recent_traces
+    db = tmp_path / "agent.db"
+    _seed_traces_db(db)
+    assert {r["trace_id"] for r in recent_traces(str(db), 25, source="voice")} == {"tA", "tC"}
+    assert {r["trace_id"] for r in recent_traces(str(db), 25, success=False)} == {"tB"}
+    assert {r["trace_id"] for r in recent_traces(str(db), 25, action="CLICK")} == {"tC"}
+
+
+# ── P2: operational read helpers (R8.1, R8.5) ────────────────────────────────
+
+def test_operational_read_helpers(tmp_path):
+    from core.chat_server import _recent_goals, _recent_escalations, _recent_corrections
+    db = tmp_path / "agent.db"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE goal_queue (id INTEGER PRIMARY KEY, ts REAL, goal TEXT,
+                   domain TEXT, status TEXT, attempts INTEGER, max_attempts INTEGER,
+                   last_error TEXT, source_trigger TEXT)""")
+    con.execute("INSERT INTO goal_queue (ts, goal, domain, status, attempts, max_attempts, source_trigger) "
+                "VALUES (1, 'tidy desktop', 'plan', 'queued', 0, 3, 'manual')")
+    con.execute("""CREATE TABLE dev_escalations (id INTEGER PRIMARY KEY, ts REAL, goal TEXT,
+                   reason TEXT, failed_action TEXT, replans INTEGER, status TEXT)""")
+    con.execute("INSERT INTO dev_escalations (ts, goal, reason, failed_action, replans, status) "
+                "VALUES (1, 'refactor', 'max_replans', 'WRITE_FILE', 3, 'pending')")
+    con.execute("""CREATE TABLE commands (id INTEGER PRIMARY KEY, ts REAL, source TEXT,
+                   text TEXT, action TEXT, corrected_to TEXT)""")
+    con.execute("INSERT INTO commands (ts, source, text, action, corrected_to) "
+                "VALUES (1, 'voice', 'click ok', 'CLICK', 'DOUBLECLICK')")
+    con.commit(); con.close()
+
+    assert _recent_goals(str(db))["goals"][0]["status"] == "queued"
+    assert _recent_escalations(str(db))["escalations"][0]["reason"] == "max_replans"
+    assert _recent_corrections(str(db))["corrections"][0]["corrected_to"] == "DOUBLECLICK"
+    # R8.5 — bad path degrades to empty, never errors.
+    assert _recent_goals("/nope/agent.db") == {"goals": []}
+    assert _recent_escalations("/nope/agent.db") == {"escalations": []}
+    assert _recent_corrections("/nope/agent.db") == {"corrections": []}
+
+
+def test_no_mutation_routes_for_operational_panels():
+    """R8.3 — the dashboard registers GET-only; no approve/deny (or any) mutation
+    route exists. Guards against a future POST that would bypass the voice gate."""
+    import inspect
+    from core.chat_server import ChatServer
+    src = inspect.getsource(ChatServer.start)
+    assert 'add_get("/api/escalations"' in src
+    assert 'add_get("/api/goals"' in src
+    assert 'add_get("/api/corrections"' in src
+    assert "add_post" not in src and "add_put" not in src and "add_delete" not in src
