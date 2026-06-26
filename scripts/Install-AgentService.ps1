@@ -81,6 +81,13 @@ foreach ($t in $Tasks) {
         -WorkingDirectory $Root
 
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    # Delay the logon launch so the repo's drive is mounted before wscript.exe
+    # runs run_hidden.vbs. The repo lives on a secondary ReFS volume (E:) that
+    # mounts AFTER the system drive at logon; firing immediately races the mount
+    # and wscript dies with "Can not find script file" (LastTaskResult 0x1).
+    # A non-zero action exit code does NOT trip Task Scheduler's restart-on-
+    # failure, so the delay - not RestartCount - is the actual fix.
+    $trigger.Delay = "PT1M"
 
     # ExecutionTimeLimit zero = unlimited (the default 72h limit would kill a
     # long-running agent). RestartCount/Interval guard the WATCHDOG process

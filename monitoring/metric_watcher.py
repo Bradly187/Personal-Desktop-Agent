@@ -159,8 +159,9 @@ class MetricWatcher:
         if self._event_bus is None:
             return
         try:
+            from core.events import TOPIC_METRIC_THRESHOLD
             await self._event_bus.publish(
-                "metric.threshold_crossed",
+                TOPIC_METRIC_THRESHOLD,
                 source="metric_watcher",
                 payload={"metric": metric, "value": value,
                          "message": message, "severity": severity},

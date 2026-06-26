@@ -27,21 +27,29 @@
     return c;
   }
   async function refreshMetrics() {
-    const m = await getJSON("/api/metrics");
+    // Command-scoped KPIs prefer the live-session rollup (/api/session-live) so the
+    // panel isn't empty after a restart; process-lifetime counters (/api/metrics,
+    // reset every start) are the fallback. VRAM/pain-day/EMA stay process-wide.
+    const [m, sess] = await Promise.all([getJSON("/api/metrics"), getJSON("/api/session-live")]);
     const box = $("kpis");
     if (!m) { box.innerHTML = ""; box.appendChild(el("div", "empty", "metrics endpoint unavailable")); return; }
     const g = m.gauges || {}, c = m.counters || {}, h = (m.histograms || {}).latency_ms || {};
+    const live = (sess && sess.total_commands != null) ? sess : null;
+    const win = live ? "this session" : "lifetime";
     box.innerHTML = "";
-    box.appendChild(kpi("commands", String(c.commands_total ?? 0)));
-    box.appendChild(kpi("success (1m)", pct(g.success_rate_1m)));
-    box.appendChild(kpi("cloud (1m)", pct(g.cloud_rate_1m)));
-    box.appendChild(kpi("latency p50", ms(h.p50)));
-    box.appendChild(kpi("latency p95", ms(h.p95)));
+    box.appendChild(kpi("commands", String(live ? live.total_commands : (c.commands_total ?? 0)), win));
+    box.appendChild(kpi("success", live ? pct(live.success_rate) : pct(g.success_rate_1m), live ? "session" : "1m"));
+    box.appendChild(kpi("cloud", live ? pct(live.cloud_escalation_rate) : pct(g.cloud_rate_1m), live ? "session" : "1m"));
+    box.appendChild(kpi("latency p50", live ? ms(live.latency_p50_ms) : ms(h.p50), win));
+    box.appendChild(kpi("latency p95", live ? ms(live.latency_p95_ms) : ms(h.p95), win));
     const pd = g.pain_day_score;
     const pdc = kpi("pain-day", fixed(pd)); if (pd != null && pd >= 0.6) pdc.classList.add("warn");
     box.appendChild(pdc);
     box.appendChild(kpi("VRAM free", g.vram_free_gb == null ? "—" : fixed(g.vram_free_gb, 1) + " GB"));
-    if (m.uptime_s != null) $("now-sub").textContent = "uptime " + Math.round(m.uptime_s / 60) + "m";
+    if (m.uptime_s != null) {
+      $("now-sub").textContent = "uptime " + Math.round(m.uptime_s / 60) + "m" +
+        (live ? " · session " + live.session_id : "");
+    }
   }
 
   // ── Activity: live feed (WS dash_event) ─────────────────────────────────────
@@ -49,14 +57,16 @@
   function pushFeed(ev) {
     const feed = $("feed");
     const empty = feed.querySelector(".empty"); if (empty) empty.remove();
-    const row = el("div", "feed-row " + (ev.severity === "warn" ? "warn" : ""));
+    const kind = ev.kind || "event";
+    const row = el("div", "feed-row kind-" + kind + (ev.severity === "warn" ? " warn" : ""));
     row.appendChild(el("span", "feed-time", clock(ev.ts)));
-    row.appendChild(el("span", "feed-kind", ev.kind || ""));
+    row.appendChild(el("span", "feed-kind", kind));
+    // "command" frames carry structured fields; every other kind (incl. unknown
+    // ones from future topics) falls back to the server-rendered ev.text.
     let text = ev.text;
-    if (ev.kind === "command") {
-      const okc = ev.success ? "ok" : "fail";
+    if (kind === "command") {
+      row.classList.add(ev.success ? "ok" : "fail");
       text = `${ev.action || "?"} · ${ev.route || "?"} · ${ms(ev.latency_ms)}`;
-      row.classList.add(okc);
     }
     row.appendChild(el("span", "feed-text", text || ""));
     feed.insertBefore(row, feed.firstChild);
