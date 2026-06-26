@@ -15,10 +15,17 @@
       <a class="navlink" href="/">← Chat</a>
     </header>
 
-    <!-- NOW: live KPIs -->
+    <!-- NOW: live KPIs + backend-health strip -->
     <section class="panel">
       <div class="panel-head"><h2>Now</h2><span class="sub" id="now-sub">live</span></div>
       <div class="kpis" id="kpis"></div>
+      <div class="health" id="health"></div>
+    </section>
+
+    <!-- ALERTS: threshold + SLO breaches (durable) -->
+    <section class="panel">
+      <div class="panel-head"><h2>Alerts</h2><span class="sub" id="alerts-sub"></span></div>
+      <div id="alerts"><div class="empty">no alerts</div></div>
     </section>
 
     <div class="grid2">

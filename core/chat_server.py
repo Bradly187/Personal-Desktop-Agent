@@ -32,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -51,6 +53,9 @@ _DASHBOARD_TOPICS = {
     "metric.threshold_crossed", "slo.breached",
     "voice.drift", "step.failed", "replan.exhausted", "email.arrived",
 }
+
+# Topics surfaced in the Alerts panel (durable read from event_log).
+_ALERT_TOPICS = ("metric.threshold_crossed", "slo.breached")
 
 _STATIC_DIR = Path(__file__).parent.parent / "web_client_chat"
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
@@ -108,6 +113,48 @@ def _live_session_kpis(db_path: str, session_id: int) -> dict:
         "source_counts": source_counts,
         "gate_counts": gate_counts,
     }
+
+
+def _recent_alerts(db_path: str, limit: int = 50) -> dict:
+    """Read-only newest-first pull of alert topics from the durable event_log.
+
+    Returns {"alerts": [...]} so the dashboard Alerts panel never has to poll the
+    live feed for history. Never raises; returns {"alerts": []} on any error
+    (R2.5 — the page degrades to "no alerts", never errors).
+    """
+    import sqlite3
+    placeholders = ",".join("?" for _ in _ALERT_TOPICS)
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        with con:
+            rows = con.execute(
+                f"SELECT ts, topic, source, payload FROM event_log "
+                f"WHERE topic IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+                (*_ALERT_TOPICS, int(limit)),
+            ).fetchall()
+        con.close()
+    except Exception:
+        return {"alerts": []}
+
+    alerts = []
+    for r in rows:
+        try:
+            p = json.loads(r["payload"]) if r["payload"] else {}
+        except Exception:
+            p = {}
+        topic = r["topic"]
+        if topic == "metric.threshold_crossed":
+            # severity "info" is a recovery notice → not an active alert.
+            active = p.get("severity") != "info"
+            text = p.get("message") or f"{p.get('metric')} = {p.get('value')}"
+        else:  # slo.breached — always an active breach
+            active = True
+            text = (f"SLO breach: {p.get('domain')} "
+                    f"{p.get('metric')}={p.get('value')} (budget {p.get('budget')})")
+        alerts.append({"ts": r["ts"], "topic": topic, "source": r["source"],
+                       "metric": p.get("metric"), "active": active, "text": text})
+    return {"alerts": alerts}
 
 
 class _ChatClient:
@@ -180,6 +227,9 @@ class ChatServer:
         self._pump_task: Optional[asyncio.Task] = None
         self._running = False
 
+        # Backend-health probe cache (throttled — R6.2). (result, monotonic_ts)
+        self._health_cache: tuple[dict, float] = ({}, 0.0)
+
     # ── wiring ──────────────────────────────────────────────────────────────
     def set_coordinator(self, c) -> None: self._coordinator = c
     def set_scheduler(self, s) -> None: self._scheduler = s
@@ -214,6 +264,8 @@ class ChatServer:
         app.router.add_get("/api/models", self._api_models)
         app.router.add_get("/api/routing", self._api_routing)
         app.router.add_get("/api/session-live", self._api_session_live)
+        app.router.add_get("/api/alerts", self._api_alerts)
+        app.router.add_get("/api/health-backends", self._api_health_backends)
         if _STATIC_DIR.exists():
             app.router.add_static("/static/", _STATIC_DIR, show_index=False)
 
@@ -351,6 +403,52 @@ class ChatServer:
             return web.json_response({})
         result = await asyncio.to_thread(_live_session_kpis, path, sid)
         return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_alerts(self, request: web.Request) -> web.Response:
+        """Recent alert events (metric.threshold_crossed + slo.breached) read from
+        the durable event_log. Read off the 60 Hz loop (AGENTS.md #2)."""
+        path = self._db_path()
+        if not path:
+            return web.json_response({"alerts": []})
+        limit = self._qint(request, "limit", 50)
+        result = await asyncio.to_thread(_recent_alerts, path, limit)
+        return web.json_response(result, dumps=lambda o: json.dumps(o, default=str))
+
+    async def _api_health_backends(self, request: web.Request) -> web.Response:
+        """Throttled reachability of Ollama / action-proxy + Bedrock cred presence.
+        Cached for `health_probe_ttl_s` so rapid polls don't hammer backends; each
+        probe times out fast and reports 'unknown' rather than hanging (R6.2)."""
+        cached, ts = self._health_cache
+        if cached and (time.monotonic() - ts) < 10.0:
+            return web.json_response(cached)
+        result = await self._probe_backends()
+        self._health_cache = (result, time.monotonic())
+        return web.json_response(result)
+
+    @staticmethod
+    async def _probe_backends() -> dict:
+        async def _http_ok(url: str) -> str:
+            try:
+                import aiohttp
+                timeout = aiohttp.ClientTimeout(total=2.0)
+                async with aiohttp.ClientSession(timeout=timeout) as s:
+                    async with s.get(url) as r:
+                        return "up" if r.status < 500 else "down"
+            except Exception:
+                return "down"
+
+        ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        ollama, proxy = await asyncio.gather(
+            _http_ok(f"{ollama_host.rstrip('/')}/api/version"),
+            _http_ok("http://127.0.0.1:8768/health"),
+        )
+        # Bedrock: report credential PRESENCE only — never the token (R6.4).
+        bedrock = "configured" if os.environ.get("AWS_BEARER_TOKEN_BEDROCK") else "absent"
+        return {"backends": [
+            {"name": "ollama", "status": ollama, "detail": ollama_host},
+            {"name": "action-proxy", "status": proxy, "detail": ":8768"},
+            {"name": "bedrock", "status": bedrock, "detail": "cloud creds"},
+        ]}
 
     async def _ws_handler(self, request: web.Request) -> web.StreamResponse:
         ws = web.WebSocketResponse(heartbeat=30)

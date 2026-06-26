@@ -46,6 +46,15 @@
     const pdc = kpi("pain-day", fixed(pd)); if (pd != null && pd >= 0.6) pdc.classList.add("warn");
     box.appendChild(pdc);
     box.appendChild(kpi("VRAM free", g.vram_free_gb == null ? "—" : fixed(g.vram_free_gb, 1) + " GB"));
+    // Accessibility + backpressure KPIs (R5). Absent gauge → "—", never 0.
+    const ct = c.commands_total ?? 0;
+    box.appendChild(kpi("clarify", ct ? pct((c.commands_clarify ?? 0) / ct) : "—", "asked Brad"));
+    box.appendChild(kpi("voice q", g.whisper_logprob_ema == null ? "—" : fixed(g.whisper_logprob_ema), "logprob"));
+    box.appendChild(kpi("gesture q", g.gesture_conf_ema == null ? "—" : fixed(g.gesture_conf_ema), "conf"));
+    const qd = g.scheduler_queue_depth;
+    const qdc = kpi("queue", qd == null ? "—" : String(Math.round(qd)), "scheduler");
+    if (qd != null && qd > 20) qdc.classList.add("warn");
+    box.appendChild(qdc);
     if (m.uptime_s != null) {
       $("now-sub").textContent = "uptime " + Math.round(m.uptime_s / 60) + "m" +
         (live ? " · session " + live.session_id : "");
@@ -71,6 +80,41 @@
     row.appendChild(el("span", "feed-text", text || ""));
     feed.insertBefore(row, feed.firstChild);
     while (feed.childElementCount > FEED_MAX) feed.removeChild(feed.lastChild);
+  }
+
+  // ── Alerts (poll /api/alerts) ───────────────────────────────────────────────
+  async function refreshAlerts() {
+    const res = await getJSON("/api/alerts?limit=50");
+    const box = $("alerts"); box.innerHTML = "";
+    const alerts = (res && res.alerts) || [];
+    if (!alerts.length) { box.appendChild(el("div", "empty", "no alerts 🎉")); $("alerts-sub").textContent = ""; return; }
+    const active = alerts.filter(a => a.active).length;
+    $("alerts-sub").textContent = active ? `${active} active` : `${alerts.length} recent`;
+    for (const a of alerts) {
+      const row = el("div", "alert-row" + (a.active ? " active" : " recovered"));
+      row.appendChild(el("span", "alert-time", clock(a.ts)));
+      row.appendChild(el("span", "alert-src", a.metric || a.source || ""));
+      row.appendChild(el("span", "alert-text", a.text || ""));
+      box.appendChild(row);
+    }
+  }
+
+  // ── Backend health strip (poll /api/health-backends) ────────────────────────
+  async function refreshHealth() {
+    const res = await getJSON("/api/health-backends");
+    const box = $("health"); box.innerHTML = "";
+    const items = (res && res.backends) || [];
+    for (const b of items) {
+      const up = b.status === "up" || b.status === "configured";
+      const unknown = b.status === "unknown";
+      const cls = unknown ? "unknown" : (up ? "up" : "down");
+      const chip = el("span", "health-chip " + cls);
+      chip.appendChild(el("span", "health-dot"));
+      chip.appendChild(el("span", "health-name", b.name));
+      chip.appendChild(el("span", "health-status", b.status));
+      chip.title = b.detail || "";
+      box.appendChild(chip);
+    }
   }
 
   // ── Traces + replay (poll + on-demand) ──────────────────────────────────────
@@ -227,6 +271,7 @@
       if (f.type === "dash_event") {
         pushFeed(f);
         if (f.kind === "command") refreshMetricsSoon();
+        if (f.kind === "alert") refreshAlerts();
       }
     };
   }
@@ -234,9 +279,15 @@
   function refreshMetricsSoon() { clearTimeout(_mt); _mt = setTimeout(refreshMetrics, 400); }
 
   // ── boot ────────────────────────────────────────────────────────────────────
-  function pollAll() { refreshMetrics(); refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }
+  function pollAll() {
+    refreshMetrics(); refreshAlerts(); refreshHealth();
+    refreshTraces(); refreshTrends(); refreshModels(); refreshRouting();
+  }
   pollAll();
   connect();
   setInterval(refreshMetrics, 3000);
-  setInterval(() => { refreshTraces(); refreshTrends(); refreshModels(); refreshRouting(); }, 15000);
+  setInterval(() => {
+    refreshAlerts(); refreshHealth();
+    refreshTraces(); refreshTrends(); refreshModels(); refreshRouting();
+  }, 15000);
 })();

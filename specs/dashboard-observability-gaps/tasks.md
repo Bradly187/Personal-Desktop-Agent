@@ -17,13 +17,13 @@
 ## Phase P1 — Alerts, health, accessibility KPIs
 *Effort: M. The "make autonomous problems visible" core.*
 
-- [ ] 7. `adaptive/continuous_trainer.py`: publish `slo.breached` on the breach it currently only logs. — R2.1
-- [ ] 8. `GET /api/alerts?limit=N` reading `metric.threshold_crossed` + `slo.breached` from `event_log` via `asyncio.to_thread`; `{"alerts":[]}` on error. — R2.2, R2.4, R2.5
-- [ ] 9. Dashboard **Alerts** panel (active vs recent). — R2.3
-- [ ] 10. `GET /api/health-backends` — throttled (TTL 10s), per-probe timeout 2s → `unknown`; Bedrock = presence only, never the token. — R6.1, R6.2, R6.4
-- [ ] 11. Dashboard **Health strip** (Ollama / Whisper / proxy / Bedrock). — R6.3
-- [ ] 12. Accessibility/backpressure KPI cards: clarify-rate, `whisper_logprob_ema`, `gesture_conf_ema`, `scheduler_queue_depth` (warn on threshold; `—` when absent). — R5.1–R5.4
-- [ ] 13. Tests: `slo.breached` publish, `/api/alerts` read+degrade, `/api/health-backends` cache/timeout/no-secret.
+- [x] 7. `adaptive/continuous_trainer.py`: publish `slo.breached` (via `set_event_bus`, wired in `main.py`) on the breach it currently only logs. — R2.1
+- [x] 8. `GET /api/alerts?limit=N` (`_recent_alerts`) reading `metric.threshold_crossed` + `slo.breached` from `event_log` via `asyncio.to_thread`; `{"alerts":[]}` on error. — R2.2, R2.4, R2.5
+- [x] 9. Dashboard **Alerts** panel (active vs recovered). — R2.3
+- [x] 10. `GET /api/health-backends` — cached (TTL 10s), per-probe timeout 2s, Bedrock = presence only, never the token. — R6.1, R6.2, R6.4
+- [x] 11. Dashboard **Health strip** (Ollama / action-proxy / Bedrock; Whisper is in-process post-cluster-excision, so omitted). — R6.3
+- [x] 12. Accessibility/backpressure KPI cards: clarify-rate, `whisper_logprob_ema`, `gesture_conf_ema`, `scheduler_queue_depth` (warn on threshold; `—` when absent). — R5.1–R5.4
+- [x] 13. Tests: `slo.breached` publish, `/api/alerts` read+degrade, `/api/health-backends` no-secret. — `test_dashboard_observability.py`
 
 ## Phase P2 — Cost trend, trace/trend depth, operational panels
 *Effort: M+. Depth + retiring dead surface.*
