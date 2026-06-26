@@ -943,7 +943,14 @@ class FusionEngine:
                     trace_id=cmd.trace_id,
                 )
             else:
-                # Fallback: bare fire-and-forget (scheduler not yet wired)
+                # Intentional graceful-degradation path (NOT unfinished): direct
+                # fire-and-forget when no scheduler is wired. Reached only (a) in
+                # the brief startup window before main.py calls set_scheduler, or
+                # (b) when the watchdog deliberately set_scheduler(None) because the
+                # scheduler wedged — so accessibility keeps flowing. It loses only
+                # the scheduler's PRIORITY ordering; the route-task circuit breaker
+                # above still bounds it (tracked tasks → inflight → shed), so this
+                # never becomes unbounded. AGENTS.md #2: no blocking work here.
                 task = asyncio.create_task(self._coordinator.route(cmd))
                 self._route_tasks.add(task)
                 task.add_done_callback(self._route_tasks.discard)
