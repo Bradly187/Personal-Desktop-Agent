@@ -2040,6 +2040,33 @@ class AgentDB:
             log.warning("AgentDB.get_steps_for_run failed: %s", exc)
             return []
 
+    async def get_recent_runs(
+        self, limit: int = 20, exclude_id: Optional[int] = None
+    ) -> list[dict]:
+        """Recent terminal/interrupted runs, most recent first (R4.2, Gap C).
+
+        Read-only SELECT over ``agent_runs`` — no schema change, no
+        ``user_version`` bump. Powers cross-session working-memory: a fresh plan
+        scans these for runs related to its goal. ``exclude_id`` is defensive only
+        (the current run row isn't created until after context assembly). Returns
+        [] on any failure so seeding degrades cleanly (R4.4 / R3.2)."""
+        if not self._conn:
+            return []
+        try:
+            cur = await self._conn.execute(
+                """SELECT id, goal, ts, success, status
+                   FROM agent_runs
+                   WHERE status IN ('completed','failed','interrupted')
+                     AND (? IS NULL OR id != ?)
+                   ORDER BY ts DESC LIMIT ?""",
+                (exclude_id, exclude_id, limit),
+            )
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            log.warning("AgentDB.get_recent_runs failed: %s", exc)
+            return []
+
     async def get_successful_runs_with_steps(
         self, *, since: float = 0.0, min_steps: int = 2, limit: int = 500
     ) -> list[dict]:

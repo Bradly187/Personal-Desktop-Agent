@@ -595,6 +595,15 @@ class DevAgent:
         self._plan_authorized: bool = False
         self._approved_verbs: frozenset[str] = frozenset()
         self._escalated_this_run: bool = False  # halted plan landed in review queue
+        # Saga rollback summary, set by _run_compensations when a rollback runs
+        # ({reverted, manual, incomplete, triggered_by}); None when none ran.
+        self._rollback_summary: Optional[dict] = None
+        # Proactive accessibility notice: speak a short TTS summary when a saga
+        # rollback reverts file changes — covers the user-cancel path, which was
+        # previously silent about reverting edits (specs/dev-agent-sagas R2.2).
+        # Default ON (DA_SAGA_ANNOUNCE); =0 for byte-identical legacy completion speech.
+        self._saga_announce: bool = os.environ.get(
+            "DA_SAGA_ANNOUNCE", "1").strip().lower() in ("1", "true", "on", "yes")
         # Durable fallback store for escalations the DB can't accept (E4).
         # Instance attr so tests can redirect it off the real home dir.
         self._escalation_sidecar_path: Path = (
@@ -987,6 +996,14 @@ class DevAgent:
         # Resume working-memory (Gap C): a caller-supplied seed block describing what
         # an interrupted run already did. Leads the context so the planner recovers
         # rather than restarting. Empty for the normal (non-resume) path (R2.2).
+        #
+        # Cross-session memory (R4): a crash-resume seed is the most specific memory,
+        # so it wins. ONLY when no caller seed is supplied (a fresh task) do we pull
+        # compact memory from recent *related* prior runs — mutually exclusive, so we
+        # never double-seed. Flag-gated (DA_SESSION_MEMORY, default OFF); '' otherwise
+        # → byte-identical to today.
+        if not seed_context:
+            seed_context = await self._session_seed_context(goal)
         if seed_context:
             extra_ctx = f"{seed_context}\n\n{extra_ctx}" if extra_ctx else seed_context
 
@@ -1092,6 +1109,7 @@ class DevAgent:
         self._total_steps = min(len(steps), self.MAX_STEPS)
         self._current_step = 0
         self._escalated_this_run = False
+        self._rollback_summary = None
 
         # Live DAG: publish the approved plan as a node/edge graph and map each
         # step object to its 1-based plan position so dag.* events line up with
@@ -1625,6 +1643,18 @@ class DevAgent:
             info["path"] = str(p)
             if p.exists() and p.is_file():
                 info["existed"] = True
+                # Git-blob backend (opt-in, DA_SAGA_GIT_BACKEND): capture the
+                # current bytes as a git loose object. No size cap (closes the
+                # file-copy backend's >256 KB rollback gap), git-native and
+                # inspectable (`git cat-file blob <sha>`), and it touches ONLY the
+                # object store — never the working tree, index, or stash stack.
+                # Degrades to the file-copy backend below when git/repo is absent.
+                if cls._saga_git_backend_enabled():
+                    blob = cls._git_blob_snapshot(p)
+                    if blob:
+                        info["git_blob"] = blob["sha"]
+                        info["git_repo"] = blob["repo"]
+                        return info
                 if p.stat().st_size <= cls._SAGA_SNAPSHOT_MAX_BYTES:
                     saga = cls._saga_dir()
                     saga.mkdir(parents=True, exist_ok=True)
@@ -1634,6 +1664,60 @@ class DevAgent:
         except Exception as exc:
             log.debug("DevAgent._snapshot_for_write(%r) failed: %s", path_str, exc)
         return info
+
+    @staticmethod
+    def _saga_git_backend_enabled() -> bool:
+        """Whether the git-blob saga snapshot backend is on (DA_SAGA_GIT_BACKEND).
+
+        Default OFF → byte-identical file-copy snapshots. Read per-call (not the
+        60 Hz path; only fires on a dev-agent file write) so tests/ops can toggle
+        it via the env without reconstructing the agent."""
+        return os.environ.get(
+            "DA_SAGA_GIT_BACKEND", "0").strip().lower() in ("1", "true", "on", "yes")
+
+    @staticmethod
+    def _git_blob_snapshot(p: Path) -> Optional[dict]:
+        """Write p's current bytes into the git object store; return {sha, repo}.
+
+        Returns None when p is not inside a git work tree or git is unavailable —
+        the caller then falls back to the file-copy backend. `hash-object -w` only
+        creates a loose object; it does NOT stage the file or alter the working
+        tree/index/stash, so a snapshot is side-effect-free for the user's repo.
+        """
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(p.parent), "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=5,
+            )
+            repo_root = top.stdout.strip()
+            if top.returncode != 0 or not repo_root:
+                return None
+            out = subprocess.run(
+                ["git", "-C", repo_root, "hash-object", "-w", "--", str(p)],
+                capture_output=True, text=True, timeout=10,
+            )
+            sha = out.stdout.strip()
+            if out.returncode != 0 or not sha:
+                return None
+            return {"sha": sha, "repo": repo_root}
+        except Exception as exc:
+            log.debug("DevAgent._git_blob_snapshot(%s) failed: %s", p, exc)
+            return None
+
+    @staticmethod
+    def _git_cat_blob(repo: str, sha: str) -> Optional[bytes]:
+        """Return the bytes of git blob `sha` from `repo`, or None if unavailable."""
+        try:
+            out = subprocess.run(
+                ["git", "-C", repo, "cat-file", "blob", sha],
+                capture_output=True, timeout=10,
+            )
+            if out.returncode != 0:
+                return None
+            return out.stdout
+        except Exception as exc:
+            log.debug("DevAgent._git_cat_blob(%s) failed: %s", sha, exc)
+            return None
 
     @staticmethod
     def _compensation_for(step: "AgentStep") -> tuple[Optional[str], Optional[str]]:
@@ -1940,6 +2024,8 @@ class DevAgent:
         log.info("DevAgent: running %d saga compensation(s) for run %d (%s)",
                  len(compensations), run_id, triggered_by)
         incomplete = 0
+        reverted = 0   # file changes actually undone (RESTORE_FILE / DELETE_FILE)
+        manual = 0     # REVERT_TERMINAL notes that need a human
         for comp in compensations:
             cid = comp["id"]
             caction = comp.get("compensation_action", "")
@@ -1961,13 +2047,16 @@ class DevAgent:
                             caction, 0, incomplete=1,
                         )
                         continue
+                    reverted += 1
                 elif caction == "DELETE_FILE" and cargs:
                     # Legacy/back-compat (no pre-write snapshot was captured).
                     path = Path(cargs.strip())
                     if path.exists():
                         path.unlink()
+                        reverted += 1
                         log.info("DevAgent: saga compensation DELETE_FILE %s", path)
                 elif caction == "REVERT_TERMINAL":
+                    manual += 1
                     log.warning(
                         "DevAgent: saga compensation REVERT_TERMINAL requires manual review: %r", cargs
                     )
@@ -1983,6 +2072,13 @@ class DevAgent:
         if incomplete:
             log.warning("DevAgent: %d compensation(s) did not roll back cleanly for run %d",
                         incomplete, run_id)
+        # Record the rollback so completion speech can announce it (R2.2). Set only
+        # when compensations actually ran (empty list returns early above), so a
+        # successful plan with no rollback leaves the summary None → silent.
+        self._rollback_summary = {
+            "reverted": reverted, "manual": manual,
+            "incomplete": incomplete, "triggered_by": triggered_by,
+        }
         return incomplete
 
     @staticmethod
@@ -2000,6 +2096,23 @@ class DevAgent:
         info = json.loads(comp_args)
         path = Path(info["path"])
         if info.get("existed"):
+            # Git-blob backend (DA_SAGA_GIT_BACKEND snapshots) — restore the
+            # original bytes from the captured loose object. The snapshot is
+            # self-describing (git_blob/git_repo ride in comp_args), so restore
+            # works regardless of the current flag state.
+            blob, repo = info.get("git_blob"), info.get("git_repo")
+            if blob and repo:
+                data = DevAgent._git_cat_blob(repo, blob)
+                if data is not None:
+                    path.write_bytes(data)
+                    log.info("DevAgent: saga RESTORE_FILE restored %s from git blob %s",
+                             path, blob[:8])
+                    return True
+                log.warning(
+                    "DevAgent: saga RESTORE_FILE %s git blob %s unavailable — "
+                    "leaving the overwritten file in place", path, blob[:8],
+                )
+                return False
             backup = info.get("backup")
             if backup and Path(backup).exists():
                 shutil.copy2(backup, path)
@@ -2084,6 +2197,44 @@ class DevAgent:
             return render_seed(summarize_run(goal, steps))
         except Exception as exc:
             log.debug("DevAgent._resume_seed_context failed: %s", exc)
+            return ""
+
+    async def _session_seed_context(self, goal: str) -> str:
+        """Build the cross-session working-memory seed for a fresh plan, or ''.
+
+        Off (DA_SESSION_MEMORY unset) or any failure → '' so the plan context is
+        byte-identical to today (R4.4). Scans recent runs, selects those lexically
+        related to ``goal``, and renders their compact memory (derived from the
+        durable agent_steps — no schema change) into a <prior-session-memory>
+        block. Bounded work: one recent-runs query + ≤top_k step queries, once per
+        plan, off the 60 Hz path (AGENTS.md #2)."""
+        from inference.working_memory import session_memory_enabled
+        if not session_memory_enabled():
+            return ""
+        try:
+            from inference.working_memory import (
+                select_related_runs, summarize_run, render_session_seed,
+            )
+            db = self._db()
+            if not db:
+                return ""
+            candidates = await db.get_recent_runs(limit=20)
+            related = select_related_runs(goal, candidates)
+            if not related:
+                return ""
+            mems: list[tuple[str, object]] = []
+            for run in related:
+                run_id = run.get("id")
+                if run_id is None:
+                    continue
+                steps = await db.get_steps_for_run(int(run_id))
+                if not steps:
+                    continue
+                run_goal = run.get("goal", "") or ""
+                mems.append((run_goal, summarize_run(run_goal, steps)))
+            return render_session_seed(mems)
+        except Exception as exc:
+            log.debug("DevAgent._session_seed_context failed: %s", exc)
             return ""
 
     # ---------------------------------------------------------------------- #
@@ -2433,6 +2584,8 @@ class DevAgent:
         """Speak a short TTS summary after a plan finishes."""
         if cancelled:
             msg = (f"Task cancelled at step {self._current_step} of {self._total_steps}.")
+            # A cancel that rolled back edits used to be silent about it (R2.2).
+            msg += self._rollback_notice()
         elif result.success:
             summary = (result.response_text or "")[:80].replace("\n", " ")
             msg = f"Done. {summary}" if summary else "Plan complete."
@@ -2442,11 +2595,40 @@ class DevAgent:
             msg = f"Task failed at step {self._current_step}: {first_err}" if first_err else "Plan failed."
             if self._escalated_this_run:
                 msg += " Changes rolled back and saved to the review queue."
+            else:
+                # Halt path that rolled back but didn't escalate (e.g. escalation
+                # persist failed) — still tell the user the edits were reverted.
+                msg += self._rollback_notice()
         try:
             from tts.polly_stream import get_client as _get_tts
             asyncio.create_task(_get_tts().speak(msg))
         except Exception as exc:
             log.debug("DevAgent._speak_plan_completion: TTS failed: %s", exc)
+
+    def _rollback_notice(self) -> str:
+        """Spoken addendum describing a saga rollback (DA_SAGA_ANNOUNCE).
+
+        Returns '' when the flag is off or no rollback ran, so completion speech is
+        byte-identical to legacy in those cases (specs/dev-agent-sagas R2.2). The
+        counts come from _run_compensations' self._rollback_summary."""
+        if not self._saga_announce:
+            return ""
+        rb = self._rollback_summary
+        if not rb:
+            return ""
+        reverted = rb.get("reverted", 0)
+        manual = rb.get("manual", 0)
+        incomplete = rb.get("incomplete", 0)
+        parts: list[str] = []
+        if reverted:
+            parts.append(f"Reverted {reverted} file change{'' if reverted == 1 else 's'}.")
+        if manual:
+            parts.append(
+                f"{manual} terminal action{'' if manual == 1 else 's'} need manual review.")
+        if incomplete:
+            parts.append(
+                f"{incomplete} change{'' if incomplete == 1 else 's'} could not be rolled back.")
+        return (" " + " ".join(parts)) if parts else ""
 
     def _reset_plan_state(self) -> None:
         """Clean up goal-session and status fields after a plan run."""
@@ -2455,6 +2637,7 @@ class DevAgent:
         self._plan_authorized = False
         self._approved_verbs = frozenset()
         self._escalated_this_run = False
+        self._rollback_summary = None
         self._cancel_event.clear()
         self._current_goal = None
         self._current_step = 0

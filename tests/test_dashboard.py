@@ -73,6 +73,13 @@ def test_dashboard_topics_are_covered_by_mapping():
         "vram.restored": {"free_gb": 9.0},
         "breaker.opened": {"name": "ollama", "reason": "x"},
         "inference.stalled": {"backend": "ollama", "timeout_s": 45, "phase": "waiting"},
+        "metric.threshold_crossed": {"metric": "misroute_rate", "value": 0.2,
+                                     "severity": "warning", "message": "misroute_rate high"},
+        "slo.breached": {"domain": "code", "metric": "latency_p95", "value": 900, "budget": 500},
+        "voice.drift": {"drift_pct": 12},
+        "step.failed": {"step_num": 3, "action": "WRITE_FILE", "error": "boom"},
+        "replan.exhausted": {"replans": 3, "goal": "refactor module"},
+        "email.arrived": {"subject": "Build failed"},
     }
     assert set(samples) == _DASHBOARD_TOPICS
     for topic, payload in samples.items():
