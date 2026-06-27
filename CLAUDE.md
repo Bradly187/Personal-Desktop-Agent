@@ -54,10 +54,15 @@ Set `--safe-mode` (or `SAFE_MODE=1`) to block `keyboard_type` and `mouse_drag` d
 
 `MOUSEDOWN`/`MOUSEUP` are executed synchronously (no `asyncio.to_thread`) because they are timing-critical for drag-select and must not compete with trackpad moves.
 
-**Dev-agent verbs (13)** — emitted by specialist models via DevAgent:
-`WRITE_FILE` `RUN_TERMINAL` `EXPLAIN` `SEARCH_WEB` `READ_SCREEN` `SPAWN_PROCESS` `READ_STREAM` `SEND_INPUT` `TERMINATE_PROCESS` `GIT_CREATE_BRANCH` `GIT_CHECKOUT` `GIT_COMMIT` `GIT_DIFF`
+**Dev-agent verbs (5, via `CommandExecutor`)** — the 5 dev verbs `CommandExecutor` dispatches alongside the 11 accessibility verbs (16 total):
+`WRITE_FILE` `RUN_TERMINAL` `EXPLAIN` `SEARCH_WEB` `READ_SCREEN`
 
-The `CommandExecutor` handles all 24 verbs. The `DomainClassifier` determines which pipeline a query enters — accessibility (llama3.1:8b, verb-first) or dev-agent (specialist model, free-form).
+**Planner-only verbs (8, `DevAgent` internal)** — emitted by the DevAgent planner and resolved directly within `DevAgent` via subprocess; never reach `CommandExecutor`:
+`SPAWN_PROCESS` `READ_STREAM` `SEND_INPUT` `TERMINATE_PROCESS` `GIT_CREATE_BRANCH` `GIT_CHECKOUT` `GIT_COMMIT` `GIT_DIFF`
+
+`SNAP_WINDOW` is an additional `CommandExecutor` verb for D7 flick-to-snap gestures (not part of the planner vocabulary).
+
+The `CommandExecutor` handles 16 verbs (11 accessibility + 5 dev). The `DomainClassifier` determines which pipeline a query enters — accessibility (llama3.1:8b, verb-first) or dev-agent (specialist model, free-form).
 
 ## Architecture
 

@@ -3,7 +3,7 @@
 Addresses the critical accessibility gap: disabled users (RA, allergies)
 have voices that vary significantly across conditions.  This calibrator:
 
-  1. Announces each phrase via Danielle TTS: "Please say: scroll down"
+  1. Announces each phrase via the configured TTS backend (default: Kokoro): "Please say: scroll down"
   2. Captures the next WhisperStream transcript as the user's response
   3. Stores the (expected → heard) mapping in AgentDB
   4. Builds a personal voice_profile with per-user VAD threshold and
@@ -122,7 +122,7 @@ class CalibrationReport:
 # ---------------------------------------------------------------------------
 
 class VoiceCalibrator:
-    """Runs guided voice calibration sessions driven by Danielle TTS prompts."""
+    """Runs guided voice calibration sessions driven by the configured TTS backend."""
 
     # How long to wait for user to speak after the TTS prompt (seconds)
     RESPONSE_TIMEOUT_S: float = 8.0

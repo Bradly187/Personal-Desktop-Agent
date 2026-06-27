@@ -52,7 +52,7 @@
 | Ollama qwen3-coder:30b (code+plan) | RTX 5090 | — (thinking ON) | 17.3 GB |
 | Ollama deepseek-r1:8b (math) | RTX 5090 | — | 4.9 GB |
 | Ollama qwen3-vl:30b (vision) | RTX 5090 | ~0.4s warm | 18.2 GB |
-| Ollama gemma3:27b (general) | RTX 5090 | — | 16.2 GB |
+| Ollama gemma4:12b (general) | RTX 5090 | — | ~9.1 GB |
 | EasyOCR | RTX 5090 | < 200 ms | ~1 GB |
 | Silero VAD | CPU | < 1 ms/chunk | 0 |
 | Chatterbox TTS | RTX 5090 | ~300 ms first token | ~2 GB |
@@ -122,7 +122,7 @@ class LlamaCppInference(LocalInference): ... # llama-server HTTP backend (--back
 class VLLMInference(LocalInference): ...     # Production target — verified in WSL2 (--backend vllm)
 ```
 
-`OllamaInference` with `llama3.1:8b` is the current production default for the command domain (100% accuracy, ~190ms warm wall p50 / ~29ms compute on Ollama 0.30.6). Specialist domains (code/plan/math/vision/general) use `ModelRouter` which selects from qwen3-coder:30b, deepseek-r1:8b, qwen3-vl:30b, gemma3:27b based on VRAM. `NemotronInference` was removed (25% accuracy). `VLLMInference` is verified working in Ubuntu WSL2 with vLLM 0.21.0 + torch 2.11.0+cu128 — activate with `--backend vllm`; use `--gpu-memory-utilization 0.65` when Whisper is also loaded.
+`OllamaInference` with `llama3.1:8b` is the current production default for the command domain (100% accuracy, ~190ms warm wall p50 / ~29ms compute on Ollama 0.30.6). Specialist domains (code/plan/math/vision/general) use `ModelRouter` which selects from qwen3-coder:30b, deepseek-r1:8b, qwen3-vl:30b, gemma4:12b based on VRAM (`gemma3:27b` was retired 2026-06-07). `NemotronInference` was removed (25% accuracy). `VLLMInference` is verified working in Ubuntu WSL2 with vLLM 0.21.0 + torch 2.11.0+cu128 — activate with `--backend vllm`; use `--gpu-memory-utilization 0.65` when Whisper is also loaded.
 
 ## Coding Conventions
 
