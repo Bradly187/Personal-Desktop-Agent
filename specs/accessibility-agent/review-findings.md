@@ -34,7 +34,7 @@ This review identifies 23 areas requiring attention across 6 categories: missing
   - Gesture debounce timings
   - Voice activation keywords
 - Add `ConfigManager` class in [`design.md`](specs/accessibility-agent/design.md:1)
-- Specify config file location (e.g., `~/.kiro/config.yaml`)
+- Specify config file location (e.g., `~/.claude/ipad_bridge/config.json`)
 - Add validation on load with sensible defaults
 
 **Files to Update:**

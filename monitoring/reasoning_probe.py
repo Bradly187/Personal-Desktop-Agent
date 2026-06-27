@@ -148,7 +148,7 @@ print("\n\n" + "=" * 64, flush=True)
 print("PHASE 2 — reasoning probe (12 verifiable Qs, num_predict=1024)", flush=True)
 print("=" * 64, flush=True)
 PROBE_MODELS = [m.strip() for m in _ARGS.models.split(",") if m.strip()] or [
-    "llama3.1:8b", "gemma3:27b", "gemma4:e4b-it-qat",
+    "llama3.1:8b", "gemma4:e4b-it-qat",
     "gemma4:12b", "gemma4:26b-a4b-it-qat", "gemma4:31b-it-qat"]
 probe_results = {}
 for model in PROBE_MODELS:

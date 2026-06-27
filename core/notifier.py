@@ -1,6 +1,6 @@
 """core/notifier.py — Notifier: the proactive notification sink (N+2).
 
-Unifies the two delivery channels — Danielle TTS + iPad push — behind one call so
+Unifies the two delivery channels — TTS (Kokoro by default) + iPad push — behind one call so
 the ProactiveScheduler, EventRuleEngine, and DevAgent plan steps don't each
 re-implement them. TTS is best-effort (it plays on the PC, independent of the
 iPad). The iPad push is store-and-forward (EH-3 / E12): when no iPad is connected

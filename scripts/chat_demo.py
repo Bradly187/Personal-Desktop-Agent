@@ -53,7 +53,7 @@ class _DemoCoordinator:
                 await self._pub("chat.token", {"text": word + " "}, tid)
                 await asyncio.sleep(0.05)
             return {"status": "ok", "action": "dev_agent", "response": answer,
-                    "domain": "general", "model": "gemma3:27b", "steps": 0}
+                    "domain": "general", "model": "gemma4:12b", "steps": 0}
 
         # 2) Dev plan → DAG with an approval gate on the destructive step.
         if any(k in text for k in ("create", "fizzbuzz", "script", "build", "run")):

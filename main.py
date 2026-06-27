@@ -1166,7 +1166,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # --- Proactivity (N+2): time- + event-triggered automation ---
     # ProactiveScheduler promotes due scheduled goals; EventRuleEngine fires rules
     # off the EventBus. Both feed the existing goal_queue/drainer; notifications go
-    # out via Notifier (Danielle TTS + iPad push).
+    # out via Notifier (TTS + iPad push).
     from core.notifier import Notifier
     from core.proactive_scheduler import ProactiveScheduler
     from core.event_rule_engine import EventRuleEngine
