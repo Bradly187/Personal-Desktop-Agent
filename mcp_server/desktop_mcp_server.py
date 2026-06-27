@@ -36,10 +36,10 @@ from mcp.types import ImageContent, TextContent, Tool
 # where `mcp_server/` is on sys.path so `tools` resolves) and when imported as
 # `mcp_server.desktop_mcp_server` (e.g. from pytest at the repo root).
 try:
-    from tools import browser, keyboard, mouse, screen, web, windows
+    from tools import browser, keyboard, lsp, mouse, screen, terminal, vcs, web, windows
     from tools import search as search_tools
 except ModuleNotFoundError:  # pragma: no cover - import-path shim
-    from mcp_server.tools import browser, keyboard, mouse, screen, web, windows
+    from mcp_server.tools import browser, keyboard, lsp, mouse, screen, terminal, vcs, web, windows
     from mcp_server.tools import search as search_tools
 
 # Trust classifier — scans tool outputs for injection patterns before returning to LLM
@@ -376,6 +376,125 @@ async def list_tools() -> list[Tool]:
             description="Close the preview browser and free its resources.",
             inputSchema={"type": "object", "properties": {}},
         ),
+        # --- LSP ---
+        Tool(
+            name="lsp_get_definition",
+            description="Get the definition of a symbol at the given file, line, and character.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "line": {"type": "integer", "description": "0-indexed line number"},
+                    "character": {"type": "integer", "description": "0-indexed character offset"},
+                },
+                "required": ["file_path", "line", "character"],
+            },
+        ),
+        Tool(
+            name="lsp_find_references",
+            description="Find all references to a symbol at the given file, line, and character.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "line": {"type": "integer", "description": "0-indexed line number"},
+                    "character": {"type": "integer", "description": "0-indexed character offset"},
+                },
+                "required": ["file_path", "line", "character"],
+            },
+        ),
+        # --- Interactive Terminal (PTY) ---
+        Tool(
+            name="spawn_process",
+            description="Spawn a long-running background process in a PTY and return its session ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The command to run"},
+                },
+                "required": ["command"],
+            },
+        ),
+        Tool(
+            name="read_stream",
+            description="Read the latest output buffer from a PTY session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "max_lines": {"type": "integer", "default": 100},
+                },
+                "required": ["session_id"],
+            },
+        ),
+        Tool(
+            name="send_input",
+            description="Send text to the standard input of a PTY session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "text": {"type": "string", "description": "Text to send to stdin"},
+                },
+                "required": ["session_id", "text"],
+            },
+        ),
+        Tool(
+            name="terminate_process",
+            description="Terminate a running PTY session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                },
+                "required": ["session_id"],
+            },
+        ),
+        # --- VCS (Git MCP) ---
+        Tool(
+            name="git_create_branch",
+            description="Create and switch to a new git branch.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "branch_name": {"type": "string"},
+                },
+                "required": ["branch_name"],
+            },
+        ),
+        Tool(
+            name="git_checkout",
+            description="Switch to an existing git branch.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "branch_name": {"type": "string"},
+                },
+                "required": ["branch_name"],
+            },
+        ),
+        Tool(
+            name="git_commit",
+            description="Stage all changes and commit them.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                    "add_all": {"type": "boolean", "default": True},
+                },
+                "required": ["message"],
+            },
+        ),
+        Tool(
+            name="git_diff",
+            description="Get structured differences between branches, commits, or the working tree.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Branch, commit, or empty for working tree."},
+                },
+            },
+        ),
     ]
     return tools
 
@@ -535,6 +654,32 @@ def _dispatch(name: str, args: dict) -> dict:
         return browser.preview_network()
     if name == "preview_stop":
         return browser.preview_stop()
+
+    # LSP
+    if name == "lsp_get_definition":
+        return lsp.get_definition(args["file_path"], args["line"], args["character"])
+    if name == "lsp_find_references":
+        return lsp.find_references(args["file_path"], args["line"], args["character"])
+
+    # Terminal PTY
+    if name == "spawn_process":
+        return terminal.spawn_process(args["command"])
+    if name == "read_stream":
+        return terminal.read_stream(args["session_id"], args.get("max_lines", 100))
+    if name == "send_input":
+        return terminal.send_input(args["session_id"], args["text"])
+    if name == "terminate_process":
+        return terminal.terminate_process(args["session_id"])
+
+    # VCS (Git)
+    if name == "git_create_branch":
+        return vcs.git_create_branch(args["branch_name"])
+    if name == "git_checkout":
+        return vcs.git_checkout(args["branch_name"])
+    if name == "git_commit":
+        return vcs.git_commit(args["message"], args.get("add_all", True))
+    if name == "git_diff":
+        return vcs.git_diff(args.get("target", ""))
 
     return {"error": f"Unknown tool: {name}"}
 

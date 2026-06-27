@@ -28,12 +28,16 @@ with it. No new table, no `user_version` bump — the durable transcript is alre
 the source; we just summarize it. (A persisted incremental snapshot table is a
 noted alternative, deferred — see §4.)
 
-**Status:** In Progress — `inference/working_memory.py`
-(`WorkingMemory`/`summarize_run`/`render_seed`/`memory_enabled`) + read-only
-`AgentDB.get_steps_for_run` (no schema change) + `seed_context` param on
-`plan_and_run`/`_plan_and_run_locked` + `DevAgent._resume_seed_context` wired into
-`resume_pending_plan` behind `DA_RESUME_MEMORY`; 9 unit tests green. Integration
-test (task 5b) pending.
+**Status:** Done — crash-resume (R1–R3) and cross-session (R4) both shipped.
+`inference/working_memory.py` (`WorkingMemory`/`summarize_run`/`render_seed`/
+`memory_enabled` + cross-session `score_relevance`/`select_related_runs`/
+`render_session_seed`/`session_memory_enabled`) + read-only
+`AgentDB.get_steps_for_run` & `get_recent_runs` (no schema change) + `seed_context`
+param on `plan_and_run`/`_plan_and_run_locked` + `DevAgent._resume_seed_context`
+(crash-resume) & `_session_seed_context` (cross-session) wired in. `DA_RESUME_MEMORY`
+default **ON** (5b integration test confirms no regression); `DA_SESSION_MEMORY`
+default **OFF** until verified on real runs. 21 tests green
+(`tests/test_resume_working_memory.py`).
 **Owner / author session:** Claude Code (Opus 4.8)
 **Related:** `../accessibility-agent/` (DevAgent), `./` siblings
 `../repo-context-ingestion/` + `../trajectory-read-dedup/` (the other two
@@ -98,9 +102,39 @@ remember what it already did and how it failed, so it doesn't blindly start over
 3. THE resume path's existing voice-confirm gate (`_confirm_destructive_op`) and
    decline-rollback (`_run_compensations`) SHALL be unchanged — seeding adds
    context only, it does NOT alter the fail-safe-DENY approval (AGENTS.md #4).
-4. THE feature SHALL be controlled by `DA_RESUME_MEMORY`, default **off** until
-   verified; WHILE off, `resume_pending_plan` SHALL call `plan_and_run(goal)`
-   exactly as today.
+4. THE crash-resume feature SHALL be controlled by `DA_RESUME_MEMORY`, default
+   **ON** (verified by the integration test in §5 — flag-off branch is a
+   byte-identical regression guard); WHILE off, `resume_pending_plan` SHALL call
+   `plan_and_run(goal)` exactly as today.
+
+### Requirement 4: Cross-session seeding (generalize the same mechanism)
+
+**User Story:** As Brad, when I start a *new* task related to work the agent did in
+an earlier session, I want it to remember what those runs already learned about the
+same files, so it builds on them instead of re-investigating from zero. This is the
+most direct address to the session-level context-loss ("Codified Context") gap.
+
+#### Acceptance Criteria
+1. THE `score_relevance(new_goal, prior_goal)` SHALL return a lexical similarity in
+   `[0.0, 1.0]` — Jaccard overlap over content-word sets, deterministic, no LLM /
+   no embeddings (identical content → 1.0, disjoint → 0.0).
+2. THE `select_related_runs(new_goal, candidate_runs, *, top_k=3, min_score=0.2)`
+   SHALL keep only candidates scoring ≥ `min_score` and return the top-`top_k`
+   sorted by score desc then `ts` desc (stable); `[]` when nothing clears the bar.
+3. THE `render_session_seed` SHALL render the selected runs' `WorkingMemory` into a
+   single bounded (`max_chars`, default 2000) `<prior-session-memory>` block — a
+   tag DISTINCT from `<resumed-task-memory>` so the planner separates "the run I'm
+   resuming" from "earlier related runs"; `""` when empty.
+4. WHEN `plan_and_run` is called WITHOUT a caller `seed_context` (a fresh task) AND
+   `DA_SESSION_MEMORY` is on, `_plan_and_run_locked` SHALL derive a session seed via
+   `_session_seed_context(goal)` and prepend it to `extra_ctx`; a crash-resume
+   `seed_context` takes precedence (mutually exclusive — never double-seed). WHILE
+   `DA_SESSION_MEMORY` is off (default), the planner context SHALL be byte-identical
+   to today, and no recent-runs DB read SHALL occur.
+5. THE cross-session path SHALL add NO schema (read-only `AgentDB.get_recent_runs`
+   SELECT over `agent_runs`), do bounded work once per plan (≤1 recent-runs query +
+   ≤`top_k` step queries — off the 60 Hz path, AGENTS.md #2), load no new model
+   (#6), and degrade to `""` on any error (never raise into planning).
 
 ---
 
@@ -151,10 +185,17 @@ lossy under crash.
 
 ```yaml
 resume_memory:
-  enabled: false          # env DA_RESUME_MEMORY; default off until verified
+  enabled: true           # env DA_RESUME_MEMORY; default ON (crash-resume, R3.4)
   max_files: 8            # most-recent distinct paths touched
   max_notes: 5            # most-recent result snippets
-  max_chars: 1500         # cap on the rendered seed block
+  max_chars: 1500         # cap on the rendered crash-resume seed block
+
+session_memory:
+  enabled: false          # env DA_SESSION_MEMORY; default OFF until verified (R4.4)
+  recent_runs: 20         # how many recent runs to scan for relevance
+  top_k: 3                # most-relevant prior runs to seed from
+  min_score: 0.2          # Jaccard threshold a prior goal must clear
+  max_chars: 2000         # cap on the rendered cross-session seed block
 ```
 
 ---
@@ -170,11 +211,16 @@ resume_memory:
   - `test_r3_2_no_steps_returns_empty_and_resumes`
   - `test_r3_1_no_schema_change` (assert `user_version` unchanged; introspect that
     no new table is created)
-- **Integration test:** extend the existing resume test path — persist a run with a
-  failing step, call `resume_pending_plan` with the flag on (mock voice-confirm
-  → yes), assert the resumed `plan_and_run` received a `seed_context` naming the
-  touched file and the failure. With the flag off, assert it was called with the
-  bare goal (regression guard).
+- **Integration test (5b, crash-resume):** persist a run with a failing step, call
+  `resume_pending_plan` with the flag on (mock voice-confirm → yes), assert the
+  resumed `plan_and_run` received a `seed_context` naming the touched file and the
+  failure. With the flag off, assert it was called with the bare goal (regression
+  guard) — `test_5b_resume_seeds_plan_when_enabled` / `test_5b_resume_bare_goal_when_disabled`.
+- **Cross-session tests (R4):** pure-helper tests for `score_relevance` /
+  `select_related_runs` / `render_session_seed` / `session_memory_enabled`;
+  `_session_seed_context` tests for enabled/disabled/no-related/db-error; and an
+  end-to-end `test_r4_plan_context_carries_session_seed` asserting the planner
+  context carries `<prior-session-memory>` when on and is byte-identical when off.
 
 Each acceptance criterion in §3 maps to ≥1 test above.
 
@@ -182,16 +228,23 @@ Each acceptance criterion in §3 maps to ≥1 test above.
 
 ## 6. Tasks
 
-- [ ] 1. Add `inference/working_memory.py` (`WorkingMemory`, `summarize_run`,
+- [x] 1. Add `inference/working_memory.py` (`WorkingMemory`, `summarize_run`,
       `render_seed`) — R1.
-- [ ] 2. Add read-only `AgentDB.get_steps_for_run(run_id)` if absent (no schema
+- [x] 2. Add read-only `AgentDB.get_steps_for_run(run_id)` if absent (no schema
       change) — R2.1, R3.1.
-- [ ] 3. Add `seed_context` param to `plan_and_run`/`_plan_and_run_locked`; prepend
+- [x] 3. Add `seed_context` param to `plan_and_run`/`_plan_and_run_locked`; prepend
       to `extra_ctx` — R2.2.
-- [ ] 4. Wire `resume_pending_plan` to derive + seed, flag-gated (`DA_RESUME_MEMORY`),
+- [x] 4. Wire `resume_pending_plan` to derive + seed, flag-gated (`DA_RESUME_MEMORY`),
       leaving the voice-confirm/rollback gate untouched — R2.1, R3.3, R3.4.
-- [ ] 5. `tests/test_resume_working_memory.py` + resume integration test — R1–R3.
-- [ ] 6. **DECISION (Brad):** flip `DA_RESUME_MEMORY` default on after the
-      integration test confirms no regression.
-- [ ] 7. Update `CLAUDE.md` Known Gotchas (new flag) + note the deferred
+- [x] 5. `tests/test_resume_working_memory.py` + resume integration test (5b) — R1–R3.
+- [x] 6. **DECISION (Brad, 2026-06-26):** `DA_RESUME_MEMORY` default **ON** —
+      integration test 5b confirms the flag-off path is byte-identical.
+- [x] 7. Update `CLAUDE.md` Known Gotchas (both flags) + note the deferred
       `agent_working_memory` table alternative.
+- [x] 8. **Cross-session (R4):** add `score_relevance`/`select_related_runs`/
+      `render_session_seed`/`session_memory_enabled` + read-only
+      `AgentDB.get_recent_runs` + `DevAgent._session_seed_context` wired into
+      `_plan_and_run_locked` (fires only when no caller seed), flag-gated
+      (`DA_SESSION_MEMORY`, default OFF) — R4.
+- [ ] 9. **DECISION (Brad):** flip `DA_SESSION_MEMORY` default ON after validating
+      relevance quality on real back-to-back related runs.

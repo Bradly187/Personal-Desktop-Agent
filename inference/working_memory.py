@@ -23,8 +23,19 @@ _PATH_VERBS: frozenset = frozenset({"READ_FILE", "WRITE_FILE", "EDIT_FILE"})
 
 
 def memory_enabled() -> bool:
-    """True when DA_RESUME_MEMORY is explicitly truthy. Default ON (R3.4)."""
+    """True when DA_RESUME_MEMORY is truthy. Default ON (R3.4) — gates the
+    crash-resume seed (``DevAgent._resume_seed_context``)."""
     return os.environ.get("DA_RESUME_MEMORY", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def session_memory_enabled() -> bool:
+    """True when DA_SESSION_MEMORY is truthy. Default **OFF** (R4.4) — gates the
+    cross-session seed (``DevAgent._session_seed_context``), which pulls compact
+    working-memory from recent *related* prior runs into a fresh plan. Independent
+    of ``memory_enabled`` so each capability rolls back on its own."""
+    return os.environ.get("DA_SESSION_MEMORY", "0").strip().lower() in (
         "1", "true", "yes", "on",
     )
 
@@ -108,4 +119,101 @@ def render_seed(mem: WorkingMemory, *, max_chars: int = 1500) -> str:
         lines.append(f"last failure (resume here): {mem.last_failure}")
     lines.append("</resumed-task-memory>")
     block = "\n".join(lines)
+    return block if len(block) <= max_chars else block[:max_chars] + "\n…[truncated]"
+
+
+# --------------------------------------------------------------------------- #
+# Cross-session memory (specs/resume-working-memory R4): seed a *fresh* plan
+# with compact working-memory from recent *related* prior runs, so a new task
+# builds on what earlier runs already learned about the same files instead of
+# re-investigating from zero. Same derive-don't-store discipline as above —
+# pure, deterministic, no LLM, no schema change. Gated by DA_SESSION_MEMORY.
+# --------------------------------------------------------------------------- #
+
+# Trivial words carry no goal-relevance signal; dropping them keeps the Jaccard
+# overlap from being dominated by filler ("the fix in", "update the").
+_STOPWORDS: frozenset = frozenset({
+    "a", "an", "the", "to", "of", "in", "on", "for", "and", "or", "with",
+    "is", "are", "be", "it", "this", "that", "fix", "update", "add", "make",
+})
+
+
+def _tokens(text: str) -> set:
+    """Lowercased alphanumeric word set with stopwords dropped (deterministic)."""
+    out = set()
+    for raw in (text or "").lower().split():
+        word = "".join(ch for ch in raw if ch.isalnum())
+        if word and word not in _STOPWORDS:
+            out.add(word)
+    return out
+
+
+def score_relevance(new_goal: str, prior_goal: str) -> float:
+    """Lexical similarity of two goals in [0.0, 1.0] (R4.1).
+
+    Jaccard overlap over content-word sets — deterministic, no LLM, no
+    embeddings. Identical content words → 1.0; disjoint → 0.0."""
+    a, b = _tokens(new_goal), _tokens(prior_goal)
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if not inter:
+        return 0.0
+    return inter / len(a | b)
+
+
+def select_related_runs(
+    new_goal: str,
+    candidate_runs: list[dict],
+    *,
+    top_k: int = 3,
+    min_score: float = 0.2,
+) -> list[dict]:
+    """Pick the ``top_k`` prior runs most relevant to ``new_goal`` (R4.2).
+
+    Scores each candidate's ``goal`` via :func:`score_relevance`, keeps those at
+    or above ``min_score``, and returns them sorted by score desc then ``ts``
+    desc (stable, deterministic). Empty list when nothing clears the bar — the
+    caller then injects no seed (byte-identical to today)."""
+    scored = []
+    for run in candidate_runs or []:
+        score = score_relevance(new_goal, run.get("goal", "") or "")
+        if score >= min_score:
+            scored.append((score, float(run.get("ts") or 0.0), run))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [run for _, _, run in scored[:top_k]]
+
+
+def render_session_seed(
+    mems: list[tuple[str, WorkingMemory]],
+    *,
+    max_chars: int = 2000,
+) -> str:
+    """Render related prior-run memories to a bounded seed block (R4.3).
+
+    ``mems`` is ordered ``(goal, WorkingMemory)`` pairs (most-relevant first).
+    One short subsection per run; deterministically ordered (files → notes →
+    failure within each). Returns ``""`` when nothing renders so the caller's
+    context is unchanged. The tag is distinct from ``render_seed``'s
+    ``<resumed-task-memory>`` so the planner can tell "the run I'm resuming"
+    from "earlier related runs"."""
+    sections: list[str] = []
+    for goal, mem in mems or []:
+        if mem.is_empty():
+            continue
+        sub = [f"  prior run — {_clip(goal, 120)}"]
+        if mem.files:
+            sub.append("    files touched: " + ", ".join(mem.files))
+        if mem.notes:
+            sub.append("    observed: " + "; ".join(mem.notes))
+        if mem.last_failure:
+            sub.append(f"    last failure: {mem.last_failure}")
+        sections.append("\n".join(sub))
+    if not sections:
+        return ""
+    block = "\n".join(
+        ['<prior-session-memory note="what earlier related runs found">']
+        + sections
+        + ["</prior-session-memory>"]
+    )
     return block if len(block) <= max_chars else block[:max_chars] + "\n…[truncated]"
