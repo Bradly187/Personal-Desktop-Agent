@@ -713,6 +713,25 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     if _vllm_pool is not None:
         router.set_vllm_pool(_vllm_pool)
 
+    # Cloud plan routing (specs/cloud-plan-routing, DA_CLOUD_PLAN, default OFF):
+    # wrap the router so DevAgent's domain="plan" inference is served by Sonnet 4.6
+    # on Bedrock — frees the ~18 GB local plan model and ends the VRAM swap thrash.
+    # Transparent proxy: every other domain/method delegates to the raw router, and
+    # any cloud failure / missing credential falls back to the local plan model, so
+    # OFF (or no credential) is byte-identical to legacy.
+    dev_router = router
+    try:
+        from inference.cloud_plan_router import CloudPlanRouter, cloud_plan_enabled
+        if cloud_plan_enabled():
+            dev_router = CloudPlanRouter(
+                router, content_filter=content_filter, agent_db=agent_db,
+            )
+            log.info("Cloud plan routing ENABLED → %s (Bedrock); local plan model is fallback",
+                     dev_router.model)
+    except Exception as _cpr_exc:
+        log.warning("CloudPlanRouter wiring failed (%s) — planning stays local", _cpr_exc)
+        dev_router = router
+
     coordinator = HybridCoordinator(
         local=local, config=cfg, trainer=trainer,
         agent_db=agent_db, session_id=session_id,
@@ -720,7 +739,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         twin_state=twin_state,
     )
     dev_agent = DevAgent(
-        router=router, coordinator=coordinator, trainer=trainer,
+        router=dev_router, coordinator=coordinator, trainer=trainer,
         agent_db=agent_db,
     )
     coordinator.set_dev_agent(dev_agent)
@@ -954,6 +973,11 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     rate_limiter = RateLimiter(agent_db)
     coordinator.set_event_bus(event_bus)
     coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
+    # Share the same 'anthropic' bucket with the cloud plan router (specs/cloud-plan-routing
+    # R4.2) so Sonnet 4.6 plan calls count against the same throttle. No-op for the raw
+    # ModelRouter (flag off) — only CloudPlanRouter defines set_rate_limiter.
+    if dev_router is not router and hasattr(dev_router, "set_rate_limiter"):
+        dev_router.set_rate_limiter(rate_limiter)
     dev_agent.set_event_bus(event_bus)
     trainer.set_event_bus(event_bus)   # per-domain SLO breaches → slo.breached alerts
     # Surface silent backend events: Ollama hang (inference.stalled) + breaker open

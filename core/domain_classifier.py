@@ -34,6 +34,21 @@ _DOMAIN_LEARN = os.environ.get("DA_DOMAIN_LEARN", "0").strip().lower() in (
     "1", "true", "on", "yes",
 )
 
+# Explicit "plan" word trigger (specs/cloud-plan-routing R5). When ON, a literal
+# "plan"/"plans"/"planning" token anywhere in the query forces the plan domain to
+# win — so the agentic plan_and_run loop (→ CloudPlanRouter → Sonnet 4.6) fires
+# reliably without keyword-tuning the wording. Bypasses the _MIN_WORDS_FOR_DEV gate
+# so a short "plan X" still routes to plan. Default OFF → byte-identical to the
+# static classifier (the router_domains eval baseline holds). Command-bypass
+# sources (touch / voice-click) never reach the classifier, so the accessibility
+# path is unaffected. Enabled on this machine via DA_PLAN_WORD_TRIGGER=1.
+_PLAN_WORD_TRIGGER = os.environ.get("DA_PLAN_WORD_TRIGGER", "0").strip().lower() in (
+    "1", "true", "on", "yes",
+)
+_PLAN_TRIGGER_WORDS = frozenset({"plan", "plans", "planning"})
+# Winning score: above the command short-verb boost (40) and any keyword score.
+_PLAN_TRIGGER_SCORE = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Keyword sets per domain
@@ -305,6 +320,18 @@ class DomainClassifier:
         if _DOMAIN_LEARN and self._KEYWORD_OVERLAY:
             for ds in scores:
                 ds.score += self._overlay_nudge(ds.domain, tokens)
+
+        # Explicit "plan" word trigger (default OFF). A literal plan token forces
+        # the plan domain to win, even when the _MIN_WORDS_FOR_DEV gate skipped the
+        # dev-domain scoring above (so a short "plan X" still gets a plan entry).
+        if _PLAN_WORD_TRIGGER and any(w in tokens for w in _PLAN_TRIGGER_WORDS):
+            existing = next((s for s in scores if s.domain == "plan"), None)
+            if existing is not None:
+                existing.score = max(existing.score, _PLAN_TRIGGER_SCORE)
+                if "plan" not in existing.matched_keywords:
+                    existing.matched_keywords.insert(0, "plan")
+            else:
+                scores.append(DomainScore("plan", _PLAN_TRIGGER_SCORE, ["plan"]))
 
         scores.sort(key=lambda s: s.score, reverse=True)
         top = scores[0]
