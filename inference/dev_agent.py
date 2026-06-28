@@ -738,8 +738,20 @@ class DevAgent:
     # Primary entry point
     # ---------------------------------------------------------------------- #
 
+    def set_repo_root(self, path: str) -> bool:
+        """Re-point the DevAgent at a different project (chat active-directory
+        switching, specs/chat-context-attachments R1.2). ``_repo_root`` drives
+        `_read_file`/`_grep`/`_git_context`/`_workspace_context`. Returns False
+        and changes nothing if ``path`` isn't a real directory."""
+        import os as _os
+        rp = _os.path.realpath(_os.path.expanduser(path or ""))
+        if not _os.path.isdir(rp):
+            return False
+        self._repo_root = rp
+        return True
+
     async def handle(self, text: str, screenshot_b64: Optional[str] = None,
-                     trace_id: str = "") -> AgentResult:
+                     trace_id: str = "", attachment_context: str = "") -> AgentResult:
         """Classify, route, and execute a user query.
 
         - COMMAND domain → passes through to HybridCoordinator (existing pipeline)
@@ -749,6 +761,9 @@ class DevAgent:
         ``trace_id`` (set by the chat UI via HybridCoordinator) correlates every
         live DAG / token event this request emits to one chat socket. Empty for
         non-chat callers (voice / drain queue) → live emission is a no-op.
+        ``attachment_context`` (specs/chat-context-attachments R2.4) is an optional
+        per-turn block from extracted file attachments, injected ahead of RAG in
+        both the plan and single-turn paths. Empty → byte-identical to today.
         """
         t0 = time.monotonic()
         self._active_trace_id = trace_id
@@ -779,7 +794,8 @@ class DevAgent:
             return await self._handle_personal_query(text)
 
         if domain == "plan":
-            return await self.plan_and_run(text, trace_id=trace_id)
+            return await self.plan_and_run(
+                text, trace_id=trace_id, extra_context=attachment_context)
 
         if domain == "vision" and screenshot_b64 is None:
             # Auto-capture screen for vision queries
@@ -791,6 +807,10 @@ class DevAgent:
             rag = await self._rag_context(text, n=3)
             if rag:
                 extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
+        # Per-turn attachment context leads (specs/chat-context-attachments R2.4).
+        if attachment_context:
+            extra_ctx = (f"{attachment_context}\n\n{extra_ctx}"
+                         if extra_ctx else attachment_context)
 
         # Chat path (trace_id + EventBus wired): stream tokens so the chat UI
         # types the answer out like Claude Code. Each chunk is published as a
@@ -931,7 +951,8 @@ class DevAgent:
             plan_result = repaired
 
     async def plan_and_run(
-        self, goal: str, trace_id: str = "", seed_context: str = ""
+        self, goal: str, trace_id: str = "", seed_context: str = "",
+        extra_context: str = "",
     ) -> AgentResult:
         """Decompose a complex goal into steps and execute them sequentially.
 
@@ -944,12 +965,17 @@ class DevAgent:
         ``seed_context`` (specs/resume-working-memory, Gap C) is an optional stable
         block prepended to the plan context — used to seed a resumed plan with what
         the interrupted run already did. Empty → byte-identical to today (R2.2).
+        ``extra_context`` (specs/chat-context-attachments R2.4) is an optional
+        per-turn block (e.g. extracted file attachments) prepended ahead of all
+        other context. Empty → byte-identical to today.
         """
         async with self._plan_lock:
-            return await self._plan_and_run_locked(goal, trace_id, seed_context)
+            return await self._plan_and_run_locked(
+                goal, trace_id, seed_context, extra_context)
 
     async def _plan_and_run_locked(
-        self, goal: str, cmd_trace_id: str = "", seed_context: str = ""
+        self, goal: str, cmd_trace_id: str = "", seed_context: str = "",
+        turn_context: str = "",
     ) -> AgentResult:
         t0 = time.monotonic()
         log.info("DevAgent: planning goal %r", goal[:80])
@@ -1006,6 +1032,12 @@ class DevAgent:
             seed_context = await self._session_seed_context(goal)
         if seed_context:
             extra_ctx = f"{seed_context}\n\n{extra_ctx}" if extra_ctx else seed_context
+
+        # Per-turn context (specs/chat-context-attachments R2.4): extracted file
+        # attachments for THIS message lead all other context so the planner sees
+        # them first. Empty for the non-attachment path → byte-identical to today.
+        if turn_context:
+            extra_ctx = f"{turn_context}\n\n{extra_ctx}" if extra_ctx else turn_context
 
         # If the plan model uses a structured WRITE_FILE format (hashline/udiff),
         # teach it the format up front so its bodies are edit ops, not whole files

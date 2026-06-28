@@ -18,8 +18,24 @@
       </header>
       <div id="transcript" aria-live="polite"></div>
       <form id="composer" autocomplete="off">
-        <textarea id="input" rows="1" placeholder="Ask the agent… (Enter to send, Shift+Enter for newline)"></textarea>
-        <button id="send" type="submit" title="Send">➤</button>
+        <div id="composer-tools">
+          <button type="button" id="dir-btn" class="tool" title="Active directory">📁 <span id="dir-label">cwd</span></button>
+          <button type="button" id="attach-btn" class="tool" title="Attach .pdf, .png, or .svg">📎</button>
+          <input type="file" id="file-input" accept=".pdf,.png,.svg" multiple hidden>
+          <div id="attach-chips"></div>
+        </div>
+        <div id="dir-panel" class="hidden">
+          <div class="dir-list" id="dir-list"></div>
+          <div class="dir-add">
+            <input type="text" id="dir-input" placeholder="Type a folder path to switch to…">
+            <button type="button" id="dir-set">Switch</button>
+          </div>
+          <div id="dir-confirm" class="hidden"></div>
+        </div>
+        <div id="composer-row">
+          <textarea id="input" rows="1" placeholder="Ask the agent… (Enter to send, Shift+Enter for newline)"></textarea>
+          <button id="send" type="submit" title="Send">➤</button>
+        </div>
       </form>
     </section>
 

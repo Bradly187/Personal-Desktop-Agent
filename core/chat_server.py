@@ -60,6 +60,11 @@ _ALERT_TOPICS = ("metric.threshold_crossed", "slo.breached")
 _STATIC_DIR = Path(__file__).parent.parent / "web_client_chat"
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
+# File-context attachments (specs/chat-context-attachments R2). Uploads land in a
+# scratch dir under the active root; only these types/size are accepted.
+_UPLOAD_DIRNAME = ".chat_uploads"
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB cap (R2.1)
+
 
 def _live_session_kpis(db_path: str, session_id: int) -> dict:
     """Read-only aggregation over the current session's commands rows.
@@ -278,6 +283,10 @@ class ChatServer:
         # Backend-health probe cache (throttled — R6.2). (result, monotonic_ts)
         self._health_cache: tuple[dict, float] = ({}, 0.0)
 
+        # File-context attachments (specs/chat-context-attachments R2):
+        # attachment_id -> absolute stored path.
+        self._uploads: dict[str, str] = {}
+
     # ── wiring ──────────────────────────────────────────────────────────────
     def set_coordinator(self, c) -> None: self._coordinator = c
     def set_scheduler(self, s) -> None: self._scheduler = s
@@ -300,6 +309,7 @@ class ChatServer:
         app.router.add_get("/", self._index_handler)
         app.router.add_get("/chat", self._ws_handler)
         app.router.add_get("/health", self._health_handler)
+        app.router.add_post("/upload", self._upload_handler)
         # Unified observability dashboard (read-only JSON + a static page). The
         # live "Now"/activity panels reuse the EventBus pump (broadcast frames);
         # the historical panels call the monitoring/* modules off the loop.
@@ -368,6 +378,76 @@ class ChatServer:
 
     async def _health_handler(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "clients": len(self._clients)})
+
+    # ── File-context attachments (specs/chat-context-attachments R2) ──────────
+    def _active_root(self) -> str:
+        """The chat session's active root (upload base + relative-path base).
+
+        Falls back to cwd when the coordinator isn't wired (tests/standalone)."""
+        if self._coordinator is not None:
+            try:
+                return self._coordinator.list_writable_roots().get("active_root") \
+                    or os.getcwd()
+            except Exception:  # noqa: BLE001
+                pass
+        return os.getcwd()
+
+    async def _upload_handler(self, request: web.Request) -> web.Response:
+        """Accept a single .pdf/.png/.svg file (multipart) up to the size cap and
+        store it under ``<active_root>/.chat_uploads/`` (R2.1, R2.2). Returns
+        ``{attachment_id, name, kind}``; rejects bad type / oversize / traversal."""
+        from inference.attachments import is_allowed, ALLOWED_EXTS
+        try:
+            reader = await request.multipart()
+            field = await reader.next()
+            if field is None or field.name != "file":
+                return web.json_response({"error": "expected a 'file' part"}, status=400)
+            raw_name = os.path.basename(field.filename or "")
+            if not raw_name or not is_allowed(raw_name):
+                return web.json_response(
+                    {"error": f"type not allowed (need {sorted(ALLOWED_EXTS)})"},
+                    status=415)
+            # Sanitize the filename: basename already strips dirs; reject anything
+            # that still smells like traversal (R2.2 — never escape the root).
+            if os.path.sep in raw_name or (os.path.altsep and os.path.altsep in raw_name) \
+                    or raw_name in (".", ".."):
+                return web.json_response({"error": "invalid filename"}, status=400)
+
+            root = self._active_root()
+            up_dir = Path(root) / _UPLOAD_DIRNAME
+            up_dir.mkdir(parents=True, exist_ok=True)
+            attachment_id = uuid.uuid4().hex
+            dest = up_dir / f"{attachment_id}_{raw_name}"
+            # Final containment check on the resolved destination (defense in depth).
+            if not str(os.path.realpath(dest)).startswith(str(os.path.realpath(up_dir)) + os.sep):
+                return web.json_response({"error": "path escapes upload dir"}, status=400)
+
+            size = 0
+            try:
+                with open(dest, "wb") as fh:
+                    while True:
+                        chunk = await field.read_chunk(64 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > _MAX_UPLOAD_BYTES:
+                            fh.close()
+                            os.remove(dest)
+                            return web.json_response(
+                                {"error": f"file exceeds {_MAX_UPLOAD_BYTES} bytes"},
+                                status=413)
+                        fh.write(chunk)
+            except Exception as exc:  # noqa: BLE001
+                return web.json_response({"error": f"write failed: {exc}"}, status=500)
+
+            self._uploads[attachment_id] = str(dest)
+            ext = os.path.splitext(raw_name)[1].lower()
+            kind = "image" if ext in (".png", ".svg") else "text"
+            return web.json_response(
+                {"attachment_id": attachment_id, "name": raw_name, "kind": kind})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ChatServer: upload failed: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
 
     # ── Dashboard (read-only observability) ───────────────────────────────────
     def _db_path(self) -> Optional[str]:
@@ -565,13 +645,38 @@ class ChatServer:
         mtype = msg.get("type")
         if mtype == "user_message":
             text = (msg.get("text") or "").strip()
-            if text:
-                await self._start_request(client, text)
+            attachment_ids = msg.get("attachment_ids") or []
+            if text or attachment_ids:
+                await self._start_request(client, text, attachment_ids)
         elif mtype == "approval_response":
             await self._write_approval(bool(msg.get("approve")))
+        elif mtype == "list_dirs":
+            client.push({"type": "dirs", **self._list_dirs()})
+        elif mtype == "set_active_dir":
+            client.push({"type": "active_dir",
+                         **self._set_active_dir(msg.get("path") or "",
+                                                bool(msg.get("confirm")))})
+
+    # ── active-directory switching (specs/chat-context-attachments R1) ─────────
+    def _list_dirs(self) -> dict:
+        if self._coordinator is None:
+            return {"active_root": os.getcwd(), "writable_roots": [os.getcwd()]}
+        try:
+            return self._coordinator.list_writable_roots()
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+
+    def _set_active_dir(self, path: str, confirm: bool) -> dict:
+        if self._coordinator is None:
+            return {"status": "invalid", "error": "agent pipeline not wired"}
+        try:
+            return self._coordinator.set_active_directory(path, confirm=confirm)
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "invalid", "error": str(exc)}
 
     # ── request lifecycle ─────────────────────────────────────────────────────
-    async def _start_request(self, client: _ChatClient, text: str) -> None:
+    async def _start_request(self, client: _ChatClient, text: str,
+                             attachment_ids: Optional[list] = None) -> None:
         """Route a chat message as a background task so the socket read loop
         stays free (e.g. to receive the approval-card click)."""
         if self._coordinator is None or self._scheduler is None:
@@ -579,12 +684,37 @@ class ChatServer:
             return
         trace_id = uuid.uuid4().hex
         self._active[trace_id] = client.ws_id
-        task = asyncio.create_task(self._run_request(client, trace_id, text))
+        task = asyncio.create_task(
+            self._run_request(client, trace_id, text, attachment_ids or []))
         self._requests[trace_id] = task
         task.add_done_callback(lambda _t, tid=trace_id: self._requests.pop(tid, None))
 
-    async def _run_request(self, client: _ChatClient, trace_id: str, text: str) -> None:
-        cmd = Command(text=text, action="CLARIFY", source="chat", trace_id=trace_id)
+    def _build_attachment_params(self, attachment_ids: list) -> dict:
+        """Extract uploaded attachments into Command.params (R2.4). Off the hot
+        path (chat only, AGENTS.md #2). Text extractions → attachment_context;
+        the first image → attachment_image_b64; names → attachment_names."""
+        from inference.attachments import extract_attachment, render_attachment_context
+        atts = []
+        for aid in attachment_ids:
+            path = self._uploads.get(aid)
+            if path:
+                atts.append(extract_attachment(path))
+        if not atts:
+            return {}
+        image_b64 = next((a.image_b64 for a in atts if a.kind == "image" and a.image_b64), None)
+        return {
+            "attachment_context": render_attachment_context(atts),
+            "attachment_image_b64": image_b64,
+            "attachment_names": [a.name for a in atts],
+        }
+
+    async def _run_request(self, client: _ChatClient, trace_id: str, text: str,
+                           attachment_ids: Optional[list] = None) -> None:
+        params = {}
+        if attachment_ids:
+            params = await asyncio.to_thread(self._build_attachment_params, attachment_ids)
+        cmd = Command(text=text, action="CLARIFY", source="chat", trace_id=trace_id,
+                      params=params)
         try:
             fut = self._scheduler.submit(
                 self._coordinator.route(cmd), Priority.VOICE,
