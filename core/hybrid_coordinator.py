@@ -562,6 +562,41 @@ class HybridCoordinator:
     def set_dev_agent(self, dev_agent: "DevAgent") -> None:
         self._dev_agent = dev_agent
 
+    # ── Chat active-directory switching (specs/chat-context-attachments R1) ──
+    def list_writable_roots(self) -> dict:
+        """Current allowlist + active root for the chat picker (R1.5)."""
+        return {"active_root": self._executor.active_root,
+                "writable_roots": self._executor.writable_roots}
+
+    def set_active_directory(self, path: str, *, confirm: bool = False) -> dict:
+        """Activate ``path`` as the chat session's working dir (browse + confirm,
+        R1.2–R1.4 / AGENTS.md #7).
+
+        Returns ``{status, path, ...}`` where status is:
+          - ``"invalid"``          — not a real directory; nothing changed.
+          - ``"confirm_required"`` — a new root (outside the allowlist) and
+            ``confirm`` was False; nothing changed, the UI must re-send with
+            ``confirm=True``.
+          - ``"activated"``        — the root is now active (appended to the
+            allowlist if it was new) and the DevAgent re-points to it.
+        """
+        import os as _os
+        from core.goal_session import _path_in_scope
+        rp = _os.path.realpath(_os.path.expanduser(path or ""))
+        if not _os.path.isdir(rp):
+            return {"status": "invalid", "path": path}
+        already = _path_in_scope(rp, self._executor.writable_roots)
+        if not already and not confirm:
+            return {"status": "confirm_required", "path": rp}
+        # Already in scope, or an explicit confirm → activate (appends if new).
+        self._executor.set_active_root(rp)
+        if self._dev_agent is not None:
+            self._dev_agent.set_repo_root(rp)
+        log.info("HybridCoordinator: active directory → %s (confirm=%s)", rp, confirm)
+        return {"status": "activated", "path": rp,
+                "active_root": self._executor.active_root,
+                "writable_roots": self._executor.writable_roots}
+
     def set_workflow_runner(self, runner) -> None:
         """Wire the multi-agent WorkflowRunner so the voice 'think hard about …'
         trigger can fan a goal out to fresh-context sub-agents. The runner gates
@@ -1451,7 +1486,14 @@ class HybridCoordinator:
                     }
 
                 log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
-                agent_result = await self._dev_agent.handle(cmd.text, trace_id=cmd.trace_id)
+                # Chat file attachments (specs/chat-context-attachments R2.4): the
+                # chat server stuffs extracted context + an optional image into
+                # cmd.params. Forward both; absent → byte-identical to today.
+                _att_ctx = cmd.params.get("attachment_context", "") if cmd.params else ""
+                _att_img = cmd.params.get("attachment_image_b64") if cmd.params else None
+                agent_result = await self._dev_agent.handle(
+                    cmd.text, screenshot_b64=_att_img, trace_id=cmd.trace_id,
+                    attachment_context=_att_ctx)
                 # Personal-document queries are NOT recorded in the rolling dev
                 # context: _recent_dev_commands is sent verbatim to the cloud
                 # dev agent on later queries, which would leak the very text the

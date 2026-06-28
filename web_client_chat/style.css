@@ -65,7 +65,8 @@ body {
 .approval.answered { opacity: .5; pointer-events: none; }
 
 /* composer */
-#composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+#composer { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+#composer-row { display: flex; gap: 8px; }
 #input {
   flex: 1; resize: none; max-height: 160px; padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface); color: var(--text);
@@ -74,6 +75,48 @@ body {
 #input:focus { border-color: var(--accent); }
 #send { width: 44px; border: none; border-radius: 10px; background: var(--accent); color: #fff; font-size: 17px; cursor: pointer; }
 #send:disabled { opacity: .4; cursor: default; }
+
+/* Composer tools: active-directory + attachments (specs/chat-context-attachments R3) */
+#composer-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tool {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-dim);
+  border-radius: 8px; padding: 4px 10px; font: 12.5px var(--mono); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; max-width: 240px;
+}
+.tool:hover { color: var(--text); border-color: var(--accent); }
+#dir-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#attach-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; font: 12px var(--mono);
+  background: var(--accent-dim); color: var(--text); border-radius: 12px; padding: 3px 6px 3px 10px;
+}
+.chip button { border: none; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 14px; line-height: 1; padding: 0; }
+.chip button:hover { color: var(--text); }
+
+#dir-panel {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+  padding: 10px; display: flex; flex-direction: column; gap: 8px;
+}
+#dir-panel.hidden, #dir-confirm.hidden { display: none; }
+.dir-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; }
+.dir-item {
+  text-align: left; border: 1px solid transparent; background: transparent; color: var(--text-dim);
+  border-radius: 6px; padding: 5px 8px; font: 12px var(--mono); cursor: pointer; word-break: break-all;
+}
+.dir-item:hover { background: var(--surface-2); color: var(--text); }
+.dir-item.active { color: var(--accent); border-color: var(--accent-dim); }
+.dir-add { display: flex; gap: 6px; }
+.dir-add input {
+  flex: 1; padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); font: 12px var(--mono); outline: none;
+}
+.dir-add input:focus { border-color: var(--accent); }
+.dir-add button, #dir-confirm button {
+  border: 1px solid var(--border); background: var(--accent); color: #fff;
+  border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 12.5px;
+}
+#dir-confirm { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-dim); flex-wrap: wrap; }
 
 /* DAG pane */
 #dag-wrap { flex: 1; overflow: auto; padding: 16px; }

@@ -60,6 +60,18 @@ class SubTask:
 
 
 @dataclass
+class Stage:
+    """One stage of a :meth:`WorkflowRunner.pipeline` chain.
+
+    ``build_prompt(item, prior_texts) -> prompt`` produces this stage's prompt
+    from the original item and the ordered list of prior stages' output **texts**.
+    The prior text is threaded into the *prompt* — never the model context — so
+    every stage stays a fresh-context inference call (AGENTS.md #6)."""
+    name: str
+    build_prompt: Callable[[str, list[str]], str]
+
+
+@dataclass
 class SubResult:
     name: str
     ok: bool
@@ -156,17 +168,8 @@ class WorkflowRunner:
                 else:
                     norm.append(SubResult(st.name, False, error=f"{r}"))
 
-            verified_count: Optional[int] = None
-            if verify_criterion:
-                verdicts = await self._run_concurrent(
-                    [self._verify_one(sr, verify_criterion, verify_domain)
-                     for sr in norm],
-                    label=f"{name}:verify")
-                verified_count = 0
-                for sr, v in zip(norm, verdicts):
-                    sr.verified = bool(v) if not isinstance(v, BaseException) else False
-                    if sr.verified:
-                        verified_count += 1
+            verified_count = await self._maybe_verify(
+                norm, verify_criterion, verify_domain, name)
 
             success = sum(1 for r in norm if r.ok)
             await self._journal(name, goal, "fan_out", len(subtasks), success,
@@ -185,7 +188,118 @@ class WorkflowRunner:
                                   subtask_count=len(subtasks), error=str(exc),
                                   latency_ms=(time.monotonic() - t0) * 1000)
 
+    async def pipeline(
+        self,
+        items: list[str],
+        stages: list[Stage],
+        *,
+        name: str = "pipeline",
+        goal: Optional[str] = None,
+        verify_criterion: Optional[str] = None,
+        verify_domain: str = "plan",
+    ) -> WorkflowResult:
+        """Run each item through ALL ``stages`` in order — staged refinement.
+
+        Per item, stage k's prompt is built from the original item plus the prior
+        stages' output texts (``Stage.build_prompt``); each stage is a
+        fresh-context ``infer(context="")`` call (AGENTS.md #6 — no new model).
+        The final stage's text is the item's :class:`SubResult.text`. Items run
+        with **no barrier between stages** (each item's chain is independent); a
+        stage error **fails that one item closed** (skips its remaining stages)
+        without aborting siblings. Same OFF-default / skip-on-flare / never-raise /
+        ``mode="pipeline"`` journaling envelope as :meth:`fan_out`.
+        """
+        t0 = time.monotonic()
+
+        if not self._enabled:
+            return WorkflowResult(name=name, status="disabled",
+                                  subtask_count=len(items))
+        if self._should_skip_flare():
+            log.info("WorkflowRunner.pipeline(%s): skipped (flare)", name)
+            await self._journal(name, goal, "pipeline", len(items), 0, None,
+                                 "skipped_flare", t0)
+            return WorkflowResult(name=name, status="skipped_flare",
+                                  subtask_count=len(items))
+        if not items or not stages:
+            return WorkflowResult(name=name, status="completed",
+                                  subtask_count=len(items))
+
+        try:
+            labels = [f"item{i}" for i in range(len(items))]
+            results = await self._run_concurrent(
+                [self._run_pipeline_one(item, stages, lbl)
+                 for item, lbl in zip(items, labels)],
+                label=name)
+            norm: list[SubResult] = []
+            for lbl, r in zip(labels, results):
+                norm.append(r if isinstance(r, SubResult)
+                            else SubResult(lbl, False, error=f"{r}"))
+
+            verified_count = await self._maybe_verify(
+                norm, verify_criterion, verify_domain, name)
+
+            success = sum(1 for r in norm if r.ok)
+            await self._journal(name, goal, "pipeline", len(items), success,
+                                 verified_count, "completed", t0)
+            return WorkflowResult(
+                name=name, status="completed", results=norm,
+                subtask_count=len(items), success_count=success,
+                verified_count=verified_count,
+                latency_ms=(time.monotonic() - t0) * 1000,
+            )
+        except Exception as exc:  # never raise out of orchestration
+            log.warning("WorkflowRunner.pipeline(%s) failed: %s", name, exc)
+            await self._journal(name, goal, "pipeline", len(items), 0, None,
+                                 "error", t0, error=str(exc))
+            return WorkflowResult(name=name, status="error",
+                                  subtask_count=len(items), error=str(exc),
+                                  latency_ms=(time.monotonic() - t0) * 1000)
+
     # -- internals ----------------------------------------------------------- #
+
+    async def _maybe_verify(
+        self, norm: list[SubResult], verify_criterion: Optional[str],
+        verify_domain: str, label: str,
+    ) -> Optional[int]:
+        """Optional adversarial verify pass shared by fan_out + pipeline. Returns
+        the confirmed count, or None when no criterion is given. Sets each
+        ``SubResult.verified``; any reviewer error → NOT verified (fail-safe)."""
+        if not verify_criterion:
+            return None
+        verdicts = await self._run_concurrent(
+            [self._verify_one(sr, verify_criterion, verify_domain) for sr in norm],
+            label=f"{label}:verify")
+        count = 0
+        for sr, v in zip(norm, verdicts):
+            sr.verified = bool(v) if not isinstance(v, BaseException) else False
+            if sr.verified:
+                count += 1
+        return count
+
+    async def _run_pipeline_one(
+        self, item: str, stages: list[Stage], label: str,
+    ) -> SubResult:
+        """Fold one item through the ordered stages. Fail-closed: the first stage
+        error (prompt build, infer raise, or non-ok) returns a failed SubResult and
+        skips the remaining stages. The final stage's text is the result text."""
+        prior_texts: list[str] = []
+        for stage in stages:
+            try:
+                prompt = stage.build_prompt(item, list(prior_texts))
+            except Exception as exc:
+                return SubResult(label, False,
+                                 error=f"stage {stage.name} prompt: {exc}")
+            try:
+                r = await self._router.infer(domain=self._domain,
+                                             user_text=prompt, context="")
+            except Exception as exc:
+                return SubResult(label, False, error=f"stage {stage.name}: {exc}")
+            if not getattr(r, "ok", True):
+                return SubResult(label, False, error=(
+                    f"stage {stage.name}: "
+                    + (getattr(r, "error", None) or "infer not ok")))
+            prior_texts.append(getattr(r, "text", "") or "")
+        return SubResult(label, True, text=prior_texts[-1] if prior_texts else "")
 
     async def _run_concurrent(self, coros: list[Awaitable], *, label: str) -> list:
         """Run coroutines concurrently — via the scheduler's bounded sub-agent

@@ -37,6 +37,24 @@ class _DemoCoordinator:
 
     def __init__(self, bus: EventBus) -> None:
         self._bus = bus
+        self._active_root = str(Path(__file__).parent.parent)
+
+    # Active-directory switching (specs/chat-context-attachments R1) — scripted.
+    def list_writable_roots(self) -> dict:
+        import tempfile
+        return {"active_root": self._active_root,
+                "writable_roots": [str(Path(__file__).parent.parent), tempfile.gettempdir()]}
+
+    def set_active_directory(self, path: str, *, confirm: bool = False) -> dict:
+        import os
+        if not os.path.isdir(path):
+            return {"status": "invalid", "path": path}
+        in_scope = path in self.list_writable_roots()["writable_roots"]
+        if not in_scope and not confirm:
+            return {"status": "confirm_required", "path": path}
+        self._active_root = path
+        return {"status": "activated", "path": path, "active_root": path,
+                "writable_roots": [path]}
 
     async def _pub(self, topic, payload, tid):
         await self._bus.publish(topic, payload, source="demo", trace_id=tid)
@@ -112,9 +130,13 @@ class _DemoCoordinator:
 
 
 async def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8770)
+    args, _ = ap.parse_known_args()
     db = _FakeDB()
     bus = EventBus(db)
-    cs = ChatServer(host="127.0.0.1", port=8770)
+    cs = ChatServer(host="127.0.0.1", port=args.port)
     cs.set_event_bus(bus)
     cs.set_scheduler(_PassthroughScheduler())
     cs.set_coordinator(_DemoCoordinator(bus))

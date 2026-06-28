@@ -474,6 +474,40 @@ class CommandExecutor:
         self._agent_db = None  # AgentDB — set via set_agent_db(); optional
         self._audit_log = None  # AuditLog — set via set_audit_log(); optional
         self._writable_roots = _load_writable_roots()  # M2: WRITE_FILE/RUN_TERMINAL scope
+        self._active_root: str | None = None  # chat-selected active dir (cwd base)
+
+    def add_writable_root(self, path: str) -> bool:
+        """Append ``path`` to the writable-root allowlist if absent (browse+confirm,
+        specs/chat-context-attachments R1.3 / AGENTS.md #7). Returns True when the
+        root is now allowed. Rejects a non-existent / non-directory path — never
+        widens scope to a path that isn't really there."""
+        try:
+            rp = os.path.realpath(os.path.expanduser(path))
+        except Exception:
+            return False
+        if not os.path.isdir(rp):
+            return False
+        if rp not in self._writable_roots:
+            self._writable_roots.append(rp)
+        return True
+
+    def set_active_root(self, path: str) -> bool:
+        """Activate ``path`` as the session's working dir — appends it to the
+        allowlist (R1.2) and records it as the relative-path base. Returns False
+        (and changes nothing) if the path isn't a real directory."""
+        if not self.add_writable_root(path):
+            return False
+        self._active_root = os.path.realpath(os.path.expanduser(path))
+        return True
+
+    @property
+    def active_root(self) -> str | None:
+        return self._active_root
+
+    @property
+    def writable_roots(self) -> list[str]:
+        """Read-only view of the current allowlist (for the chat picker, R1.5)."""
+        return list(self._writable_roots)
 
     def set_agent_db(self, db) -> None:
         """Wire AgentDB for per-call idempotency tracking and timeout config."""

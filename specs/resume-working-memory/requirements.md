@@ -246,5 +246,23 @@ Each acceptance criterion in §3 maps to ≥1 test above.
       `AgentDB.get_recent_runs` + `DevAgent._session_seed_context` wired into
       `_plan_and_run_locked` (fires only when no caller seed), flag-gated
       (`DA_SESSION_MEMORY`, default OFF) — R4.
-- [ ] 9. **DECISION (Brad):** flip `DA_SESSION_MEMORY` default ON after validating
-      relevance quality on real back-to-back related runs.
+- [~] 9. **DECISION (Brad):** flip `DA_SESSION_MEMORY` default ON after validating
+      relevance quality on real back-to-back related runs. **Validation harness
+      added** (`scripts/validate_session_memory.py`) — mirrors
+      `DevAgent._session_seed_context` exactly (same `get_recent_runs(limit=20)` /
+      `select_related_runs(top_k=3, min_score=0.2)` / `summarize_run` /
+      `render_session_seed`), runs read-only over the live `agent.db`, reports the
+      scored candidate field + the exact `<prior-session-memory>` block per
+      new-goal scenario. **First run (2026-06-28): precondition UNMET → keep OFF.**
+      (1) The live DB has 380 terminal runs but **0** with persisted multi-step
+      file-touching trajectories (367/380 are `general`-domain accessibility/chat;
+      the only 3 step-bearing rows are misattributed CLICKs with `args=None`), so
+      every session seed derives to empty — the feature is a no-op against this
+      history. (2) The `--synthetic` reference run exposed a relevance-scorer
+      weakness worth fixing *before* the flip: a same-file follow-up
+      ("finish the fix in core/poller.py" vs prior "fix the timeout bug in
+      core/poller.py") scored **0.12 < `min_score` 0.2** and was rejected —
+      `score_relevance`'s Jaccard-over-content-words dilutes shared file-path
+      tokens when goal wording differs. **Next:** accumulate real related
+      multi-file DevAgent runs, re-run `--from-db`; consider weighting path tokens
+      in `score_relevance` (or lowering `min_score`) before flipping ON.
