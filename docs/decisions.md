@@ -9,6 +9,8 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D017 — 2026-06-28 — Pre-commit hook is the mechanical doc-drift enforcement boundary](#d017)
+- [D016 — 2026-06-28 — /doc-update is a slash command, not a Stop hook](#d016)
 - [D015 — 2026-06-28 — DA_CLOUD_PLAN routes plan domain only, not full DevAgent](#d015)
 - [D014 — 2026-06-28 — DA_SESSION_MEMORY held OFF until relevance validated](#d014)
 - [D013 — 2026-06-25 — EDIT_FILE SEARCH block is fail-closed (exact match only)](#d013)
@@ -28,6 +30,24 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D017 — Pre-commit hook is the mechanical doc-drift enforcement boundary {#d017}
+**Date:** 2026-06-28
+**Chose:** Git pre-commit hook in `scripts/hooks/pre-commit` that fails the commit if CLAUDE.md Gotchas exceed 12 entries or `docs/decisions.md` index exceeds 30 lines.
+**Rejected (primary):** GitHub Actions CI check on the same conditions. **Rejected (secondary):** Trust AGENTS.md Rule 13 alone with no mechanical enforcement.
+**Why:** Pre-commit runs at the boundary where drift is cheapest to fix — before the commit exists, without CI round-trip latency. CI catches it after push, when the commit is already in history and reverting is more disruptive. Rule 13 alone has already proven insufficient in this codebase (the pruning pass that motivated this session). The pre-commit hook adds zero noise when the file is healthy and blocks exactly when discipline has slipped.
+**Ref:** `scripts/hooks/pre-commit`, AGENTS.md Rule 13
+
+---
+
+### D016 — /doc-update is a slash command, not a Stop hook {#d016}
+**Date:** 2026-06-28
+**Chose:** Claude Code slash command at `.claude/commands/doc-update.md`, invoked deliberately by the agent when a shipping event occurs.
+**Rejected:** Claude Code `Stop` hook that fires automatically at the end of every agent turn.
+**Why:** Stop hooks fire on every turn — 20+ times per session, including conversational turns with no code changes. An auto-firing hygiene checklist on every response would be ignored immediately (training the agent to treat it as noise) or would slow every interaction. The slash command is invoked with intent: the agent knows when a feature shipped and runs the checklist then. Lower frequency, higher signal. If the agent forgets, the pre-commit hook (D017) provides the mechanical backstop.
+**Ref:** `.claude/commands/doc-update.md`, AGENTS.md Rule 13
 
 ---
 

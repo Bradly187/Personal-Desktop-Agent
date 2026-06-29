@@ -1,0 +1,82 @@
+#!/bin/bash
+# Pre-commit hook: (1) secret scanning, (2) doc-drift guard (AGENTS.md Rule 13)
+#
+# Active location: .git/hooks/pre-commit  (core.hooksPath = .git/hooks by default)
+# Canonical copy:  scripts/hooks/pre-commit  (tracked; keep in sync)
+#
+# To install after a fresh clone:
+#   cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# Bypass flags (one-off, not permanent):
+#   DA_SKIP_SECRET_SCAN=1  — skip the secret patterns check
+#   SKIP_DOC_GUARD=1       — skip the doc-drift count checks
+
+set -e
+
+# ── Secret scanning ──────────────────────────────────────────────────────────
+if [[ "${DA_SKIP_SECRET_SCAN:-0}" == "0" ]]; then
+    PATTERNS=(
+        "sk-ant-[A-Za-z0-9_-]{50,}"
+        "AKIA[0-9A-Z]{16}"
+        "aws_secret_access_key.*=.*[A-Za-z0-9/+]{40}"
+        "Bearer [A-Za-z0-9_-]{32,}"
+        "INDEXER_TOKEN.*=.*[A-Za-z0-9_-]{20,}"
+        "WHISPER_TOKEN.*=.*[A-Za-z0-9_-]{20,}"
+    )
+
+    STAGED=$(git diff --cached --name-only)
+    FOUND_SECRETS=0
+
+    for FILE in $STAGED; do
+        if [[ "$FILE" == *.db ]] || [[ "$FILE" == *.bin ]] || [[ "$FILE" == docs/*.md ]]; then
+            continue
+        fi
+        for PATTERN in "${PATTERNS[@]}"; do
+            if git diff --cached "$FILE" | grep -E "$PATTERN" > /dev/null 2>&1; then
+                echo "❌ secret-scan: potential secret detected in $FILE"
+                echo "   Pattern: $PATTERN"
+                git diff --cached "$FILE" | grep -E "$PATTERN" | head -1 | sed 's/^/   /'
+                FOUND_SECRETS=1
+            fi
+        done
+    done
+
+    if [[ $FOUND_SECRETS -eq 1 ]]; then
+        echo ""
+        echo "⚠️  BLOCKING COMMIT: remove the secret and use an env var instead."
+        echo "   Bypass: DA_SKIP_SECRET_SCAN=1 git commit"
+        exit 1
+    fi
+fi
+
+# ── Doc-drift guard (AGENTS.md Rule 13) ─────────────────────────────────────
+if [[ "${SKIP_DOC_GUARD:-0}" == "0" ]]; then
+    DOC_FAIL=0
+
+    # 1. CLAUDE.md Known Gotchas count (limit 12)
+    if [[ -f "CLAUDE.md" ]]; then
+        GOTCHA_COUNT=$(grep -c "^- \*\*" CLAUDE.md 2>/dev/null || echo 0)
+        if (( GOTCHA_COUNT > 12 )); then
+            echo "❌ doc-drift: CLAUDE.md has $GOTCHA_COUNT Known Gotchas (limit 12)"
+            echo "   Run /doc-update Step 5 (pruning pass) before committing."
+            DOC_FAIL=1
+        fi
+    fi
+
+    # 2. docs/decisions.md index length (limit 30 entries)
+    if [[ -f "docs/decisions.md" ]]; then
+        INDEX_LINES=$(awk '/^---/{exit} /^- \[D/{count++} END{print count+0}' docs/decisions.md)
+        if (( INDEX_LINES > 30 )); then
+            echo "❌ doc-drift: docs/decisions.md index has $INDEX_LINES entries (limit 30)"
+            echo "   Prune entries whose trade-off is fully covered by a spec."
+            DOC_FAIL=1
+        fi
+    fi
+
+    if [[ $DOC_FAIL -eq 1 ]]; then
+        echo "   Bypass: SKIP_DOC_GUARD=1 git commit"
+        exit 1
+    fi
+fi
+
+exit 0
