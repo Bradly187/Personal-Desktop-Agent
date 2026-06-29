@@ -57,7 +57,7 @@ Two gated metrics are **not** plain accuracy and are easy to misread:
 python -m evals.run --suite router_domains  --predictor router          # no model needed
 python -m evals.run --suite skill_triggers   --predictor skill_trigger   # no model needed
 python -m evals.run --suite dev_trajectory  --mode trajectory --model qwen3-coder:30b
-python -m evals.run --suite explain_quality --mode judge --judge-model gemma3:27b
+python -m evals.run --suite explain_quality --mode judge --judge-model gemma4:12b
 python -m evals.token_budget                                            # always-loaded metadata budget
 ```
 

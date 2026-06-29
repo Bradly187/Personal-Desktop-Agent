@@ -16,7 +16,7 @@ Examples:
     python -m evals.run --suite command_verbs --check          # nonzero on regression
     python -m evals.run --suite pain_journal_slots --predictor slots
     python -m evals.run --suite dev_trajectory --mode trajectory
-    python -m evals.run --suite explain_quality --mode judge --judge-model gemma3:27b
+    python -m evals.run --suite explain_quality --mode judge --judge-model gemma4:12b
     python -m evals.run --suite command_verbs --db agent.db    # + harvest gold cases
 """
 
