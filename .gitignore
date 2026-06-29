@@ -86,5 +86,7 @@ desktop.ini
 *.suo
 *.user
 
-# Claude Code local config and memory
-.claude/
+# Claude Code local config and memory (track project-level commands, ignore the rest)
+.claude/*
+!.claude/commands/
+!.claude/commands/**

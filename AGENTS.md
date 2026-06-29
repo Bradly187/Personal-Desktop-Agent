@@ -49,6 +49,34 @@ truth for cross-tool behavior; do not duplicate these rules elsewhere.
 - **Rule:** When a spec fully defines a unit's behavior **and** tests/evals cover it, an agent may regenerate **that single function** from the spec rather than debugging it line-by-line. **Never** regenerate an entire module, class, or file wholesale without first confirming no untested invariant would be lost.
 - **Context:** This is a mature, security-hardened codebase (~1,400+ tests), not a greenfield prototype — "treat code as disposable" applies at function granularity only. Whole-file regeneration silently drops hard-won invariants that no spec captures in full: the fail-safe-DENY approval gate, the 60 Hz tick-loop guarantees (#2), VRAM eviction lifecycle (#6), `goal_session` path/Bash allowlists (#7), and pain-day threshold wiring (#5). If those invariants aren't both specced and test-covered, edit surgically instead.
 
+## 11. 🚦 Two-Gate Feature Approval
+- **Rule:** A spec at `Status: Draft` MUST NOT be built. An agent drafts the spec, presents it for review, and waits for explicit human approval before changing the status to `In Progress` and writing any code. `tasks.md` (the phase plan) follows the same gate — draft it, present it, wait for explicit approval before executing any task. Silence or ambiguity = NOT approved. **This gate also applies to AGENTS.md rule additions and modifications** — draft the change in conversation, present it, and wait for explicit approval before committing it to the file.
+- **Context:** This prevents a session from spec-ing and immediately building a feature in one unreviewed sweep, and prevents rule creep in AGENTS.md from accumulating unchecked. The two gates are: (1) spec/rule approved → `Status: In Progress` (or rule committed); (2) phase plan (`tasks.md`) approved → tasks may execute. Both gates require an explicit "yes" in the conversation or a written sign-off on the file. The spec `Status:` field is the approval signal — don't promote it yourself.
+
+## 12. 📋 Decision Log
+- **Rule:** When making a non-obvious architectural or behavioral decision with a meaningful rejected alternative, add an entry to `docs/decisions.md`. Use the format: **Date, Chose, Rejected, Why, Ref**. Log mid-session when the decision is made, not at session end.
+- **Context:** This repo has multiple AI sessions and two AI assistants. Without a log, the same trade-off gets re-derived in every new session — wasting tokens and occasionally arriving at the wrong answer. The bar is "meaningful rejected alternative": if there was only one reasonable option, skip the log. If you chose X over Y and the reasoning isn't obvious from the code, log it. Keep the index at the top of `docs/decisions.md` under 30 lines.
+
+## 13. 📄 Documentation Hygiene
+- **Rule:** Route new documentation to the correct destination using this matrix. Before writing to CLAUDE.md or AGENTS.md, identify which row applies and go there instead:
+
+  | Content type | Correct destination |
+  |---|---|
+  | Non-obvious trade-off with a rejected alternative | `docs/decisions.md` (D-entry) |
+  | Feature behavior, API contract, EARS criteria | `specs/<feature>/` |
+  | New `DA_*` flag | One row in CLAUDE.md Feature Flags table |
+  | True gotcha: invariant not obvious from the spec (≤3 sentences) | CLAUDE.md Known Gotchas |
+  | Cross-tool behavioral rule (MUST/MUST NOT, stable, cross-tool) | `AGENTS.md` (Rule 11 gate applies) |
+  | Status update | CLAUDE.md Current Status — date + PR# only |
+
+  **Never append inline amendments** to existing statements — replace the full statement and update the Current Status date. History belongs in `docs/CHANGELOG.md`, not inside section prose.
+
+  **Pruning:** A Gotcha entry MUST be removed or compressed to one sentence + refs when both conditions hold: (1) its behavioral content is fully described in the feature's spec, AND (2) any trade-off it documents is captured in `docs/decisions.md`. Run `/doc-update` at the end of every session that ships code. Run the pruning pass (Step 5 of `/doc-update`) after every 5 merged PRs.
+
+  **AGENTS.md rule bar:** A rule belongs in AGENTS.md only when it passes all three: (a) phrased as MUST or MUST NOT, (b) applies cross-tool, (c) is stable across features. Feature-specific content that fails any bar belongs in CLAUDE.md or a spec. Proposing a new rule requires two-gate approval per Rule 11.
+
+- **Context:** CLAUDE.md is loaded at the start of every session. Redundant feature summaries and stale gotchas directly cost context budget and mislead new sessions. The destination matrix is the single check; `/doc-update` is the enforcement mechanism that fires at session end.
+
 ## Skills catalog (dev/meta procedural memory)
 
 Real [agentskills.io](https://agentskills.io) `SKILL.md` skills live in `.agents/skills/`

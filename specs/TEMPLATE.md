@@ -13,7 +13,8 @@
 project, tie it to an accessibility need or a concrete user (Brad) workflow where
 relevant. Link related specs with relative paths, e.g. `../behavioral-twin-state/`.>
 
-**Status:** Draft | In Progress | Shipped (PR #___) | Superseded by `<spec>`
+**Status:** Draft → [Brad approves spec] → In Progress → [Brad approves tasks.md] → Building → Shipped (PR #___) | Superseded by `<spec>`
+**Approved:** <!-- set to "Brad, YYYY-MM-DD" when approving this spec; do NOT self-promote -->
 **Owner / author session:** <Antigravity | Claude Code | …>
 
 ---
@@ -104,6 +105,9 @@ Each acceptance criterion in §3 SHOULD map to at least one eval case or test.
 
 ## 6. Tasks
 
+> **Gate 2:** Draft `tasks.md` and present it for explicit approval before executing
+> any task. Do not self-promote `Status` from `In Progress` to `Building`.
+>
 > Promote to `tasks.md` once there is more than a handful. Reference acceptance
 > criteria by number. Keep each task small enough to ship and verify independently.
 
