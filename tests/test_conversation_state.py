@@ -171,7 +171,7 @@ def _make_coord():
     coord = HybridCoordinator(config=CoordinatorConfig())
     # Force the local path deterministically (Gate 3 does a real VRAM probe).
     coord._gates.gate3 = AsyncMock(return_value=True)
-    coord._ground_target = AsyncMock(return_value=None)
+    coord._action_executor.ground_target = AsyncMock(return_value=None)
     coord._executor.execute = AsyncMock(
         return_value={"status": "ok", "action": "CLICK"}
     )
@@ -182,7 +182,7 @@ def _make_coord():
 async def test_execute_action_records_turn():
     coord = _make_coord()
     cmd = Command(text="click the save button", action="", source="voice")
-    await coord._execute_action("CLICK Save button", cmd, route_label="local")
+    await coord._action_executor.execute_action("CLICK Save button", cmd, route_label="local")
     last = coord._conversation.last
     assert last is not None
     assert last.verb == "CLICK"

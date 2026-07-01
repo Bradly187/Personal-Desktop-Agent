@@ -4,7 +4,7 @@ The opt-in `use_tools=True` path calls /api/chat with a single constrained
 `desktop_action` tool whose `verb` enum guarantees a valid action verb — the
 same format guarantee the vLLM path gets from grammar-constrained decoding.
 The structured tool_call is reconstructed into the exact "VERB argument" string
-the default generate path returns, so HybridCoordinator._parse_action is
+the default generate path returns, so ActionExecutor.parse_action is
 unchanged.
 
 These tests monkeypatch OllamaInference._chat (the only network boundary) so

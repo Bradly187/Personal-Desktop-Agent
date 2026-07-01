@@ -79,7 +79,7 @@ async def test_gate2_routes_to_cloud() -> tuple[bool, str]:
     cfg = CoordinatorConfig()
     coord = HybridCoordinator(config=cfg)
     coord._cloud.infer = mock_cloud
-    coord._execute_action = mock_execute
+    coord._action_executor.execute_action = mock_execute
 
     cmd = _complex_cmd("close the window and then open Chrome")
     await coord.route(cmd)
@@ -138,7 +138,7 @@ async def test_gate0_blocks_cloud_for_sensitive_text() -> tuple[bool, str]:
     coord = HybridCoordinator(config=cfg)
     coord._cloud.infer = mock_cloud
     coord._local.infer = mock_local
-    coord._execute_action = mock_execute
+    coord._action_executor.execute_action = mock_execute
 
     # "password" is in gate0_sensitive_patterns → must stay local
     cmd = _cmd("type my password into the login field", source="voice")
@@ -165,7 +165,7 @@ async def test_cloud_content_filter_scrubs_secrets() -> tuple[bool, str]:
 
     coord = HybridCoordinator(config=CoordinatorConfig())
     coord._cloud.infer = mock_cloud
-    coord._execute_action = mock_execute
+    coord._action_executor.execute_action = mock_execute
     coord._content_filter = ContentFilter()
 
     cmd = _complex_cmd("my password is secret123 close the window and open Chrome")

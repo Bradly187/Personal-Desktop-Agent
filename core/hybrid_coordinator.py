@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Optional
 from core.command_executor import Command, CommandExecutor
 from core.gate_evaluator import GateEvaluator
 from core.inference_runner import InferenceRunner, _CloudInference, _PENDING_INFERENCE_IDS
+from core.action_executor import ActionExecutor
 from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
@@ -397,6 +398,25 @@ class HybridCoordinator:
         # (Phase 3 prototype, flag-gated by DA_A2UI_CLICK_TARGETS).
         self._target_cache = None
         self._conversation = ConversationState()  # voice anaphora + last-action hint
+        self._action_executor = ActionExecutor(
+            # Late-bound for the same reason as InferenceRunner/GateEvaluator
+            # above — several of these (metrics, whisper, bridge, target_cache)
+            # are wired onto the coordinator after construction via a set_*
+            # method.
+            executor=lambda: self._executor,
+            grounder=lambda: self._grounder,
+            conversation=lambda: self._conversation,
+            metrics=lambda: self._metrics,
+            whisper=lambda: self._whisper,
+            bridge=lambda: self._bridge,
+            target_cache=lambda: self._target_cache,
+            get_pending_clarification=lambda: self._pending_clarification,
+            set_pending_clarification=lambda v: setattr(self, "_pending_clarification", v),
+            get_active_clarify_surface_id=lambda: self._active_clarify_surface_id,
+            set_active_clarify_surface_id=lambda v: setattr(self, "_active_clarify_surface_id", v),
+            get_recent_open_targets=lambda: self._recent_open_targets,
+            set_recent_open_targets=lambda v: setattr(self, "_recent_open_targets", v),
+        )
         # Multi-agent workflow voice trigger ("think hard about …"). Default OFF;
         # the runner is injected by main.py and gates itself on
         # workflow_orchestration.enabled. Spec: specs/workflow-orchestration/.
@@ -699,126 +719,6 @@ class HybridCoordinator:
         """Wire the ClickableTargetCache so click-target CLARIFYs can render a
         palette of on-screen elements (Phase 3 prototype)."""
         self._target_cache = cache
-
-    def _maybe_emit_clarify_surface(self, message: Optional[str]) -> None:
-        """Push a tappable A2UI choice card for enumerable CLARIFYs (token-free).
-
-        No-op when no bridge is wired or the message isn't an enumerable shape.
-        Never raises — the voice clarification path is authoritative.
-        """
-        if self._bridge is None or not message:
-            return
-        try:
-            from core import a2ui
-            surface = a2ui.template_for_clarify(message, recent_apps=self._recent_open_targets)
-            if surface is None and a2ui.is_click_target_clarify(message):
-                surface = self._build_click_target_surface()
-            if surface is None:
-                return
-            self._active_clarify_surface_id = surface["surface_id"]
-            asyncio.create_task(self._bridge.send_a2ui_surface(surface))
-        except Exception as exc:
-            log.debug("a2ui: clarify surface emit failed: %s", exc)
-
-    @staticmethod
-    def _rank_click_targets(snapshot, cursor, limit: int = 8) -> list[tuple[str, int, int]]:
-        """Filter + rank clickable targets into (name, cx, cy), nearest-first.
-
-        Drops unnamed / tiny / oversized elements, dedups by name (keeping the
-        nearest), and ranks by squared distance to the cursor (or reading order
-        when no cursor is available). Pure + cursor-injectable for testing.
-        """
-        scored: list[tuple[int, str, int, int]] = []
-        for t in snapshot:
-            name = (getattr(t, "name", "") or "").strip()
-            if not name:
-                continue
-            try:
-                left, top, right, bottom = t.bounds
-            except Exception:
-                continue
-            w, h = right - left, bottom - top
-            if w < 8 or h < 8 or w > 1400 or h > 1000:
-                continue
-            cx, cy = (left + right) // 2, (top + bottom) // 2
-            if cursor is not None:
-                d = (cx - cursor[0]) ** 2 + (cy - cursor[1]) ** 2
-            else:
-                d = cy * 100000 + cx          # top-to-bottom, left-to-right
-            scored.append((d, name, cx, cy))
-        scored.sort(key=lambda z: z[0])
-        seen: set[str] = set()
-        ranked: list[tuple[str, int, int]] = []
-        for _d, name, cx, cy in scored:
-            key = name.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            ranked.append((name, cx, cy))
-            if len(ranked) >= limit:
-                break
-        return ranked
-
-    def _build_click_target_surface(self) -> Optional[dict]:
-        """Build a tappable element palette from the live UI tree, or None.
-
-        Flag-gated (DA_A2UI_CLICK_TARGETS=1) while we evaluate whether a ranked
-        list beats voice. Logs the ranked names at INFO so they can be eyeballed.
-        """
-        if self._target_cache is None:
-            return None
-        if os.environ.get("DA_A2UI_CLICK_TARGETS", "0") != "1":
-            return None
-        try:
-            snapshot = self._target_cache.snapshot()
-        except Exception as exc:
-            log.debug("a2ui: target_cache.snapshot failed: %s", exc)
-            return None
-        if not snapshot:
-            return None
-        cursor = None
-        try:
-            import pyautogui
-            cursor = pyautogui.position()
-        except Exception:
-            cursor = None
-        ranked = self._rank_click_targets(snapshot, cursor)
-        if not ranked:
-            return None
-        log.info("a2ui: click-target palette (%d): %s",
-                 len(ranked), [r[0] for r in ranked])
-        try:
-            from core import a2ui
-            return a2ui.click_target_surface(ranked)
-        except Exception as exc:
-            log.debug("a2ui: click_target_surface build failed: %s", exc)
-            return None
-
-    def _record_open_target(self, target: str) -> None:
-        """Push an opened app/file to the front of the recent-targets buffer
-        (deduped, capped at 8) so the 'what would you like to open?' card can
-        offer the user's actual apps."""
-        t = target.strip()
-        if not t:
-            return
-        lower = t.lower()
-        self._recent_open_targets = [t] + [
-            x for x in self._recent_open_targets if x.lower() != lower
-        ]
-        if len(self._recent_open_targets) > 8:
-            self._recent_open_targets = self._recent_open_targets[:8]
-
-    def _clear_clarify_surface(self) -> None:
-        """Dismiss a live CLARIFY card once the clarification has resolved."""
-        sid = self._active_clarify_surface_id
-        if not sid or self._bridge is None:
-            self._active_clarify_surface_id = None
-            return
-        self._active_clarify_surface_id = None
-        try:
-            asyncio.create_task(self._bridge.clear_a2ui_surface(sid))
-        except Exception as exc:
-            log.debug("a2ui: clarify surface clear failed: %s", exc)
 
     def _approval_config(self) -> dict:
         """Load approval_config.json; returns {} on failure (safe defaults used by callers)."""
@@ -1828,7 +1728,7 @@ class HybridCoordinator:
                 self._cfg = _original_cfg
 
             # --- Execute the action ----------------------------------------
-            result = await self._execute_action(action_str, cmd, route_label=route_label)
+            result = await self._action_executor.execute_action(action_str, cmd, route_label=route_label)
             success = result.get("status") == "ok"
 
             # E17: record a concrete failure reason so root-cause analysis does
@@ -2104,256 +2004,6 @@ class HybridCoordinator:
                 self._session_id, getattr(cmd, "trace_id", None),
                 cmd.text or "", prior_action or "", domain),
             log, label="harvest correction")
-
-    # ---------------------------------------------------------------------- #
-    # Action execution
-    # ---------------------------------------------------------------------- #
-
-    async def _execute_action(
-        self, action_str: str, cmd: Command, route_label: str = "local"
-    ) -> dict:
-        """Parse the LLM's action string and execute it via CommandExecutor."""
-        if not action_str:
-            return {"status": "error", "error": "empty action string"}
-
-        verb, target = self._parse_action(action_str)
-
-        # Output-schema validation: the command-path LLM must answer with one of
-        # the 11 accessibility verbs. A response whose first token is anything
-        # else (prose, a hallucinated verb, a refusal) is malformed — degrade to
-        # CLARIFY so the user is re-prompted instead of dispatching a bad verb
-        # that would surface as a raw "Unknown action" error. The original
-        # malformed action_str is still recorded to agent.db by route() for
-        # later analysis.
-        if verb not in _VALID_COMMAND_VERBS:
-            log.warning(
-                "Malformed LLM action %r — first token %r not in command "
-                "vocabulary; degrading to CLARIFY",
-                action_str, verb,
-            )
-            if self._metrics is not None:
-                _rec = getattr(self._metrics, "record_malformed_action", None)
-                if _rec is not None:
-                    try:
-                        _rec(action_str)
-                    except Exception:
-                        pass
-            verb = "CLARIFY"
-            target = "Sorry, I didn't catch that. Could you say it again?"
-
-        params = self._parse_params(verb, target, cmd)
-        # CLARIFY from a cloud route should speak via Polly TTS
-        if route_label == "cloud":
-            params["route"] = "cloud"
-
-        # Vision grounding: resolve named CLICK targets to pixel coords.
-        # Only runs when there's a named target and no coords already supplied
-        # (explicit click coords or x/y from touch). Falls through silently on
-        # any failure — CommandExecutor's Tesseract + cursor fallback takes over.
-        grounded_coords = cmd.gaze_coords
-        used_vision = False
-        if verb == "CLICK" and target and "x" not in params:
-            vision_coords = await self._ground_target(target)
-            if vision_coords:
-                params["x"], params["y"] = vision_coords
-                grounded_coords = vision_coords
-                used_vision = True
-
-        exec_cmd = Command(
-            text=target or cmd.text,
-            action=verb,
-            source=cmd.source,
-            whisper_logprob=cmd.whisper_logprob,
-            gesture_confidence=cmd.gesture_confidence,
-            session_context=cmd.session_context,
-            gaze_coords=grounded_coords,
-            params=params,
-        )
-
-        # Pre-suppress: flush buffer and block mic BEFORE TTS starts playing.
-        # This prevents Danielle's voice from accumulating in the WhisperStream
-        # buffer and being transcribed as a new command mid-playback.
-        if verb == "CLARIFY" and self._whisper is not None:
-            word_count = len((target or "").split())
-            # Generative TTS is ~0.45s/word; add 1s safety margin before + tail
-            pre_suppress_s = max(3.0, word_count * 0.45 + 1.0)
-            self._whisper.suppress(pre_suppress_s)
-            log.debug("Pre-CLARIFY mic suppressed for %.1fs", pre_suppress_s)
-
-        with get_tracer().timed("execute", verb=verb):
-            result = await self._executor.execute(exec_cmd)
-
-        # EH-1 (E1): a vision-resolved CLICK that produced no visible change gets
-        # ONE corrective retry forcing the structured (UIAutomation) resolver —
-        # the vision coords may simply have been wrong. Strictly one attempt; a
-        # second miss falls through to the CLARIFY conversion below.
-        if (result.get("status") == "verify_failed" and verb == "CLICK"
-                and used_vision):
-            log.info(
-                "CLICK %r verify-failed on vision coords — retrying via UIAutomation",
-                target,
-            )
-            retry_params = {k: v for k, v in params.items() if k not in ("x", "y")}
-            retry_cmd = _dc_replace(exec_cmd, params=retry_params, gaze_coords=None)
-            with get_tracer().timed("execute", verb=verb):
-                result = await self._executor.execute(retry_cmd)
-
-        # EH-1 (E1/E2): a verifiable action that still had no effect, or a named
-        # target nothing could resolve, becomes an honest CLARIFY instead of a
-        # silently-recorded miss. The original action_str is reported as the
-        # outcome (status != "ok") so route() persists and learns it as a
-        # failure, while the clarification is spoken to the user.
-        miss_status = result.get("status")
-        if miss_status in ("verify_failed", "resolve_miss"):
-            if miss_status == "resolve_miss" and target:
-                msg = f"I couldn't find {target}. Could you say it another way?"
-            elif target:
-                msg = (f"I tried to {verb.lower()} {target}, but nothing seemed "
-                       "to happen. Could you say it another way?")
-            else:
-                msg = ("I tried that, but nothing seemed to happen. Could you say "
-                       "it another way?")
-            await self._execute_action(f"CLARIFY {msg}", cmd, route_label=route_label)
-            return {
-                "status": miss_status,
-                "action": verb,
-                "spoke_clarification": True,
-                "verification": result.get("verification"),
-            }
-
-        # Post-action suppression:
-        #   CLARIFY  — long suppress covers TTS echo (already pre-suppressed too)
-        #   All else — short cooldown prevents app-startup sounds / utterance
-        #              tail from being transcribed as a second command.
-        if verb == "CLARIFY":
-            self._pending_clarification = target or "unclear command"
-            # A2UI (token-free): if this clarification is an enumerable shape,
-            # push a tappable choice card. Free-form CLARIFYs return no template
-            # and stay voice-only. Best-effort — never blocks the voice path.
-            self._maybe_emit_clarify_surface(target)
-            if self._whisper is not None:
-                self._whisper.suppress(1.5)
-                self._whisper.set_awaiting_clarification(True)
-                log.debug("Post-CLARIFY mic suppressed 1.5s; wake-phrase bypassed")
-        else:
-            self._pending_clarification = None
-            self._clear_clarify_surface()   # answer arrived (tap or voice) → dismiss card
-            # Remember successful OPEN targets for the "what would you like to
-            # open?" choice card (most-recent first, deduped, capped).
-            if verb == "OPEN" and target and result.get("status") == "ok":
-                self._record_open_target(target)
-            if self._whisper is not None:
-                self._whisper.set_awaiting_clarification(False)
-                if result.get("status") == "ok":
-                    self._whisper.suppress(0.8)
-                    log.debug("Post-action mic cooldown 0.8s (verb=%s)", verb)
-
-        # Record the resolved turn so the NEXT utterance can resolve anaphora
-        # ("do that again", "click it") and the prompt can carry a last-action
-        # hint. Best-effort — never let bookkeeping fail a command.
-        try:
-            self._conversation.record(
-                command_text=cmd.text,
-                verb=verb,
-                target=target or "",
-                coords=grounded_coords,
-                success=result.get("status") == "ok",
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("ConversationState.record failed: %s", exc)
-
-        return result
-
-    async def _ground_target(self, target: str) -> Optional[tuple[int, int]]:
-        """Screenshot the desktop and ask VisionGrounder to resolve the target."""
-        try:
-            # mcp_server/ is already in sys.path via command_executor import
-            from tools import screen as _screen
-            screenshot_result = await asyncio.to_thread(_screen.screenshot)
-            screenshot_b64: str = screenshot_result.get("image_base64", "")
-            if not screenshot_b64:
-                return None
-            result = await asyncio.to_thread(
-                self._grounder.ground, target, screenshot_b64
-            )
-            if result is None:
-                return None
-            return (result.x, result.y)
-        except Exception as exc:
-            log.warning("_ground_target failed for %r: %s", target, exc)
-            return None
-
-    @staticmethod
-    def _parse_action(action_str: str) -> tuple[str, str]:
-        """Split a raw LLM action string into (verb, target).
-
-        verb is upper-cased; target is the remainder (may be empty). Callers
-        validate verb against _VALID_COMMAND_VERBS before dispatch. Tolerates a
-        single leading "Action:"/"ACTION:" label some models prepend, but does
-        not otherwise hunt for a verb mid-string — an accessibility tool should
-        re-prompt rather than guess at a destructive action.
-        """
-        text = action_str.strip()
-        # Strip one optional leading label, e.g. "Action: CLICK button".
-        low = text.lower()
-        for label in ("action:", "command:"):
-            if low.startswith(label):
-                text = text[len(label):].strip()
-                break
-        parts = text.split(None, 1)
-        if not parts:
-            return "", ""
-        verb = parts[0].upper().rstrip(":")
-        target = parts[1].strip() if len(parts) > 1 else ""
-        return verb, target
-
-    @staticmethod
-    def _parse_params(verb: str, target: str, original: Command) -> dict:
-        """Extract verb-specific params from the LLM target string."""
-        params: dict = {}
-
-        if verb == "SCROLL":
-            words = target.lower().split()
-            direction = "down"
-            for w in words:
-                if w in ("up", "down", "left", "right"):
-                    direction = w
-                    break
-            amount = 3
-            for w in words:
-                try:
-                    amount = int(w)
-                    break
-                except ValueError:
-                    pass
-            params = {"direction": direction, "amount": amount}
-
-        elif verb == "CLICK":
-            # Carry through explicit touch coords (tilt-tap pins cursor x/y +
-            # snap_nearest in FusionEngine.on_touch). Without this the coords are
-            # dropped and the click falls back to re-searching UIA for the text.
-            if "x" in original.params and "y" in original.params:
-                params = {"x": original.params["x"], "y": original.params["y"]}
-                if original.params.get("snap_nearest"):
-                    params["snap_nearest"] = True
-            elif original.gaze_coords:
-                x, y = original.gaze_coords
-                params = {"x": x, "y": y}
-
-        elif verb == "TYPE":
-            params = {"text": target}
-
-        elif verb == "OPEN":
-            params = {"target": target}
-
-        elif verb == "HOTKEY":
-            keys = [k.strip() for k in target.replace("+", " ").split() if k.strip()]
-            params = {"keys": keys}
-
-        elif verb == "CLARIFY":
-            params = {"message": target}
-
-        return params
 
     # ---------------------------------------------------------------------- #
     # Correction API — user feedback loop

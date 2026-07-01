@@ -84,7 +84,7 @@ async def test_route_survives_local_hang():
         executed["action"] = action_str
         return {"status": "ok"}
 
-    coord._execute_action = _exec
+    coord._action_executor.execute_action = _exec
 
     result = await coord.route(_cmd())
     # route() returns normally and the CLARIFY fallback reached the executor.
