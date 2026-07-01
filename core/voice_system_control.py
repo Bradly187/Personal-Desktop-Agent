@@ -26,6 +26,27 @@ from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
 
 log = logging.getLogger(__name__)
 
+# Hoisted to module level to avoid rebuilding on every voice command (#5).
+_CONDITION_TRIGGERS: dict[str, str] = {
+    "this is a good day":      "good_day",
+    "good day mode":           "good_day",
+    "feeling well":            "good_day",
+    "this is a flare day":     "flare_day",
+    "flare day":               "flare_day",
+    "flare mode":              "flare_day",
+    "this is an allergy day":  "allergy_day",
+    "allergy day":             "allergy_day",
+    "allergy mode":            "allergy_day",
+}
+
+_CALIBRATION_TRIGGERS: dict[str, tuple[str, bool]] = {
+    "run voice calibration":   ("good_day",    False),
+    "calibrate my voice":      ("good_day",    False),
+    "quick calibration":       ("good_day",    True),
+    "calibrate flare day":     ("flare_day",   False),
+    "calibrate allergy day":   ("allergy_day", False),
+}
+
 
 class VoiceSystemControl:
     def __init__(
@@ -146,17 +167,7 @@ class VoiceSystemControl:
             return {"status": "ok", "action": "PAIN_DAY", "enabled": False}
 
         # Condition switching — loads calibrated voice profile for condition
-        _CONDITION_TRIGGERS: dict[str, str] = {
-            "this is a good day":      "good_day",
-            "good day mode":           "good_day",
-            "feeling well":            "good_day",
-            "this is a flare day":     "flare_day",
-            "flare day":               "flare_day",
-            "flare mode":              "flare_day",
-            "this is an allergy day":  "allergy_day",
-            "allergy day":             "allergy_day",
-            "allergy mode":            "allergy_day",
-        }
+        # (dict hoisted to module level, #5)
         if _lower in _CONDITION_TRIGGERS and self._profiler():
             condition = _CONDITION_TRIGGERS[_lower]
             t = asyncio.create_task(self._switch_condition(condition))
@@ -164,14 +175,7 @@ class VoiceSystemControl:
             return {"status": "ok", "action": "CONDITION_SWITCH",
                     "condition": condition}
 
-        # Calibration triggers
-        _CALIBRATION_TRIGGERS: dict[str, tuple[str, bool]] = {
-            "run voice calibration":   ("good_day",    False),
-            "calibrate my voice":      ("good_day",    False),
-            "quick calibration":       ("good_day",    True),
-            "calibrate flare day":     ("flare_day",   False),
-            "calibrate allergy day":   ("allergy_day", False),
-        }
+        # Calibration triggers (dict hoisted to module level, #5)
         if _lower in _CALIBRATION_TRIGGERS and self._calibrator():
             condition, quick = _CALIBRATION_TRIGGERS[_lower]
             t = asyncio.create_task(self._run_calibration(condition, quick))
@@ -192,7 +196,8 @@ class VoiceSystemControl:
                            f"{ps.get('goal', '')[:50]}")
                 else:
                     msg = "No active task."
-                asyncio.create_task(self._tts_speak(msg))
+                from core.async_utils import fire_and_log
+                fire_and_log(self._tts_speak(msg), log, label="tts agent status")  # fix #15
                 return {"status": "ok", "action": "AGENT_STATUS", "plan": ps}
 
         # "hey agent stop" / "cancel task" / "cancel agent"
@@ -201,7 +206,8 @@ class VoiceSystemControl:
             dev_agent = self._dev_agent()
             if dev_agent is not None:
                 dev_agent.request_cancel()
-                asyncio.create_task(self._tts_speak("Cancelling after current step."))
+                from core.async_utils import fire_and_log
+                fire_and_log(self._tts_speak("Cancelling after current step."), log, label="tts agent cancel")  # fix #15
                 return {"status": "ok", "action": "AGENT_CANCEL"}
             return {"status": "ok", "action": "AGENT_CANCEL", "note": "no active agent"}
 
@@ -218,7 +224,8 @@ class VoiceSystemControl:
                 pending = await agent_db.get_interrupted_runs(limit=1)
             dev_agent = self._dev_agent()
             if dev_agent is None or not pending:
-                asyncio.create_task(self._tts_speak("No interrupted task to resume."))
+                from core.async_utils import fire_and_log
+                fire_and_log(self._tts_speak("No interrupted task to resume."), log, label="tts resume none")  # fix #15
                 return {"status": "ok", "action": "AGENT_RESUME", "offered": False}
             t = asyncio.create_task(dev_agent.resume_pending_plan())
             t.add_done_callback(lambda t: self._on_task_done(t, "resume_pending_plan"))
@@ -236,10 +243,11 @@ class VoiceSystemControl:
                                         duration_s=duration, max_actions=max_act)
                 # Durable goal backlog (gap D): persist the goal so it survives a
                 # crash/restart, then kick the drainer to run it. idempotency_key
-                # is unique per authorize so a re-issue can't double-queue.
+                # uses millisecond precision so two quick re-issues within the
+                # same second get distinct keys (#7).
                 agent_db = self._agent_db()
                 if agent_db and agent_db.available:
-                    key = f"authorize:{goal_text[:80]}:{_time.time():.0f}"
+                    key = f"authorize:{goal_text[:80]}:{_time.time():.3f}"  # fix #7
                     await agent_db.enqueue_goal(
                         goal_text, domain="plan", idempotency_key=key,
                     )
@@ -247,8 +255,10 @@ class VoiceSystemControl:
                     if dev_agent is not None:
                         asyncio.create_task(dev_agent.drain_goal_queue())
                 mins = int(duration / 60)
-                asyncio.create_task(
-                    self._tts_speak(f"Goal authorized for {mins} minutes: {goal_text[:40]}")
+                from core.async_utils import fire_and_log
+                fire_and_log(  # fix #15
+                    self._tts_speak(f"Goal authorized for {mins} minutes: {goal_text[:40]}"),
+                    log, label="tts goal authorize",
                 )
                 return {"status": "ok", "action": "GOAL_AUTHORIZE", "goal": goal_text}
 
@@ -261,7 +271,8 @@ class VoiceSystemControl:
         elif _lower in ("hey agent history", "what did you do", "agent history",
                         "show history", "recent actions"):
             summary = await self._audit_history_summary(n=5)
-            asyncio.create_task(self._tts_speak(summary))
+            from core.async_utils import fire_and_log
+            fire_and_log(self._tts_speak(summary), log, label="tts agent history")  # fix #15
             return {"status": "ok", "action": "AGENT_HISTORY", "summary": summary}
 
         # "review queue" / "what needs review" — dev plans that exhausted
@@ -283,7 +294,8 @@ class VoiceSystemControl:
                        f"{newest['reason'].replace('_', ' ')}.")
             else:
                 msg = "Review queue is empty."
-            asyncio.create_task(self._tts_speak(msg))
+            from core.async_utils import fire_and_log
+            fire_and_log(self._tts_speak(msg), log, label="tts review queue")  # fix #15
             return {"status": "ok", "action": "AGENT_ESCALATIONS",
                     "count": total, "items": items}
 
@@ -295,8 +307,11 @@ class VoiceSystemControl:
             if agent_db and agent_db.available:
                 cleared = await agent_db.resolve_escalations(
                     status="acknowledged")
-            asyncio.create_task(self._tts_speak(
-                f"Cleared {cleared} review item{'s' if cleared != 1 else ''}."))
+            from core.async_utils import fire_and_log
+            fire_and_log(  # fix #15
+                self._tts_speak(f"Cleared {cleared} review item{'s' if cleared != 1 else ''}."),
+                log, label="tts clear queue",
+            )
             return {"status": "ok", "action": "AGENT_ESCALATIONS_CLEAR",
                     "count": cleared}
 
@@ -305,34 +320,40 @@ class VoiceSystemControl:
             whisper = self._whisper()
             if whisper is not None:
                 whisper.set_muted(True)
-            asyncio.create_task(self._tts_speak("Microphone muted. Tap the iPad to unmute."))
+            from core.async_utils import fire_and_log
+            fire_and_log(self._tts_speak("Microphone muted. Tap the iPad to unmute."), log, label="tts mic mute")  # fix #15
             return {"status": "ok", "action": "MIC_MUTE", "muted": True}
 
         # Capability discovery — "help" / "what can you do" (GAP-4)
         elif _lower in ("help", "what can you do", "what can i say",
                         "list your skills"):
             summary = self._capability_summary()
-            asyncio.create_task(self._tts_speak(summary))
+            from core.async_utils import fire_and_log
+            fire_and_log(self._tts_speak(summary), log, label="tts help")  # fix #15
             return {"status": "ok", "action": "HELP", "summary": summary}
 
         # Personal KB maintenance — "index my notes"
         elif _lower in ("index my notes", "reindex my notes",
                         "index my documents"):
             personal_kb = self._personal_kb()
+            from core.async_utils import fire_and_log
             if personal_kb is not None and getattr(personal_kb, "available", False):
-                from core.async_utils import fire_and_log
                 if personal_kb.get_status().get("paused"):
-                    asyncio.create_task(self._tts_speak(
-                        "Indexing is paused during the flare — I'll be able "
-                        "to index after it passes."))
+                    fire_and_log(  # fix #15
+                        self._tts_speak(
+                            "Indexing is paused during the flare — I'll be able "
+                            "to index after it passes."),
+                        log, label="tts kb paused",
+                    )
                     return {"status": "ok", "action": "PERSONAL_KB_PAUSED"}
                 fire_and_log(personal_kb.index(), log,
                              label="voice personal_kb index")
-                asyncio.create_task(self._tts_speak(
-                    "Okay, indexing your documents in the background."))
+                fire_and_log(  # fix #15
+                    self._tts_speak("Okay, indexing your documents in the background."),
+                    log, label="tts kb index",
+                )
                 return {"status": "ok", "action": "PERSONAL_KB_INDEX"}
-            asyncio.create_task(self._tts_speak(
-                "The personal knowledge base isn't available."))
+            fire_and_log(self._tts_speak("The personal knowledge base isn't available."), log, label="tts kb unavail")  # fix #15
             return {"status": "ok", "action": "PERSONAL_KB_UNAVAILABLE"}
 
         # Google PIM auth — "connect google" / "reconnect google".

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from storage.personal_kb import is_personal_query as _is_personal_query
@@ -28,6 +29,18 @@ if TYPE_CHECKING:
     from core.hybrid_coordinator import CoordinatorConfig
 
 log = logging.getLogger(__name__)
+
+# Task-local effective config — set by HybridCoordinator._route_impl before
+# gate evaluation so concurrent route() tasks each see their own
+# pain-day-adjusted config without mutating a shared self._cfg (#4). A
+# ContextVar (not a method arg threaded through every call) keeps gate/
+# inference signatures stable, so test monkey-patches like
+# `coord._run_local = fake` keep working. Falls back to the instance's own
+# self._cfg when unset (e.g. the dev pre-gate, which always runs with the
+# base config, before this is set).
+_EFFECTIVE_CFG: ContextVar[Optional["CoordinatorConfig"]] = ContextVar(
+    "da_effective_cfg", default=None
+)
 
 _COMPLEXITY_KEYWORDS = (
     "and then", "after that", "for each", "followed by",
@@ -78,24 +91,50 @@ class GateEvaluator:
     # Gates
     # ---------------------------------------------------------------------- #
 
-    def gate0(self, cmd: "Command") -> bool:
+    def effective_cfg(self) -> "CoordinatorConfig":
+        """Return the task-local effective config set by _route_impl, or self._cfg.
+
+        This allows pain-day threshold relaxations to propagate to all gate
+        and inference helpers without passing a cfg parameter through the
+        entire call chain (which would break test monkey-patches).
+        """
+        return _EFFECTIVE_CFG.get() or self._cfg
+
+    def gate0(self, cmd: "Command", cfg: "CoordinatorConfig | None" = None) -> bool:
         """Gate 0 — Privacy. True = pass (safe to consider cloud).
 
-        Checks command text against patterns for credentials, financial data,
-        and PII. A match forces local routing regardless of subsequent gates.
+        Checks command text AND cmd.params["text"] (typed/dictated content)
+        against patterns for credentials, financial data, and PII. A match
+        forces local routing regardless of subsequent gates (#2).
+
+        `cfg` should be the effective config for this route() invocation;
+        defaults to self._cfg when omitted (used from the dev pre-gate,
+        which always runs with the base config).
         """
+        effective = cfg if cfg is not None else self.effective_cfg()
         # Personal-document queries always stay local — this covers the COMMAND
         # path too (e.g. "open my notes about <topic>" classifies as command,
         # where Gates 1-4 could otherwise escalate the text to cloud). Checked
         # before the enabled flag: disabling keyword Gate-0 must not disable it.
         if _is_personal_query(cmd.text):
             return False
-        if not self._cfg.gate0_enabled:
+        if not effective.gate0_enabled:
             return True
+        patterns = effective.gate0_sensitive_patterns
         text = cmd.text.lower()
-        return not any(pat in text for pat in self._cfg.gate0_sensitive_patterns)
+        if any(pat in text for pat in patterns):
+            return False
+        # Also scan typed/dictated content in cmd.params["text"] so a
+        # "TYPE my password is hunter2" with the secret in params doesn't
+        # escape to cloud via a split text/params payload (#2).
+        param_text = (cmd.params.get("text") or "").lower() if cmd.params else ""
+        if param_text and any(pat in param_text for pat in patterns):
+            return False
+        return True
 
-    async def gate1(self, cmd: "Command") -> tuple[bool | None, "Command"]:
+    async def gate1(
+        self, cmd: "Command", cfg: "CoordinatorConfig | None" = None
+    ) -> tuple[bool | None, "Command"]:
         """Gate 1 — Confidence.
 
         Returns:
@@ -103,7 +142,7 @@ class GateEvaluator:
           (False, cmd) — fail-voice (low whisper logprob)
           (None,  cmd) — fail-gesture (discard)
         """
-        cfg = self._cfg
+        cfg = cfg if cfg is not None else self.effective_cfg()
         logprob_ok = cmd.whisper_logprob >= cfg.whisper_logprob_min
         gesture_ok = cmd.gesture_confidence >= cfg.gesture_confidence_min
 
@@ -122,10 +161,13 @@ class GateEvaluator:
         )
         return False, cmd
 
-    async def gates_2_to_4(self, cmd: "Command") -> tuple[str, str, str]:
+    async def gates_2_to_4(
+        self, cmd: "Command", cfg: "CoordinatorConfig | None" = None
+    ) -> tuple[str, str, str]:
         """Run Gates 2-4. Returns (action_str, gate_that_decided, route_label)."""
+        effective = cfg if cfg is not None else self.effective_cfg()
         # Gate 2 — Complexity
-        if not self.gate2(cmd):
+        if not self.gate2(cmd, effective):
             log.debug("Gate 2 fail (complexity): %r", cmd.text)
             return await self._run_cloud(cmd), "gate2_complexity", "cloud"
 
@@ -135,7 +177,7 @@ class GateEvaluator:
             return await self._run_cloud(cmd), "gate3_vram", "cloud"
 
         # Gate 4 — Latency EMA
-        if not self.gate4():
+        if not self.gate4(effective):
             log.debug(
                 "Gate 4 fail (latency EMA=%.0f ms)", self.latency_ema or 0
             )
@@ -143,13 +185,14 @@ class GateEvaluator:
 
         return await self._run_local(cmd), "all_pass", "local"
 
-    def gate2(self, cmd: "Command") -> bool:
+    def gate2(self, cmd: "Command", cfg: "CoordinatorConfig | None" = None) -> bool:
         """Gate 2 — Complexity. True = pass (route local)."""
+        effective = cfg if cfg is not None else self.effective_cfg()
         text = cmd.text.lower()
         if any(kw in text for kw in _COMPLEXITY_KEYWORDS):
             return False
         token_count = len(cmd.text.split())
-        return token_count <= self._cfg.max_local_tokens
+        return token_count <= effective.max_local_tokens
 
     async def gate3(self) -> bool:
         """Gate 3 — VRAM. True = pass.
@@ -178,7 +221,7 @@ class GateEvaluator:
             free_gb = await asyncio.wait_for(
                 asyncio.to_thread(vram.free_vram_gb), timeout=probe_timeout
             )
-            result = free_gb >= self._cfg.vram_free_min_gb
+            result = free_gb >= self._cfg.vram_free_min_gb  # gate3 always uses self._cfg (no effective_cfg needed)
         except TimeoutError:
             log.warning("Gate 3 VRAM probe timed out after %.1fs — assuming pass",
                         self._vram_probe_timeout_s)
@@ -190,16 +233,17 @@ class GateEvaluator:
         self._vram_cache = (result, now)
         return result
 
-    def gate4(self) -> bool:
+    def gate4(self, cfg: "CoordinatorConfig | None" = None) -> bool:
         """Gate 4 — Latency EMA. True = pass.
 
         Budget is sourced per-domain via the SLO layer (gap H); the gated path is
         the command domain, so this resolves to the command budget (600 ms default)
         unless the trainer has set a per-domain override.
         """
+        effective = cfg if cfg is not None else self.effective_cfg()
         if self.latency_ema is None:
             return True  # no history yet — optimistically run local
-        return self.latency_ema <= self._cfg.latency_budget_for("command")
+        return self.latency_ema <= effective.latency_budget_for("command")
 
     def update_ema(self, latency_ms: float) -> None:
         alpha = self._cfg.latency_ema_alpha

@@ -45,13 +45,14 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
-from core.gate_evaluator import GateEvaluator
+from core.gate_evaluator import GateEvaluator, _EFFECTIVE_CFG
 from core.inference_runner import InferenceRunner, _CloudInference, _PENDING_INFERENCE_IDS
 from core.action_executor import ActionExecutor
 from core.workflow_handler import WorkflowHandler
@@ -172,6 +173,10 @@ _VOICE_CORRECTIONS: dict[str, str] = {
     "diskord":     "discord",
     "dis cord":    "discord",
 }
+# RLock so add_personal_corrections (write) and _apply_vocabulary_corrections
+# (read-then-iterate) are safe when called concurrently from asyncio.to_thread
+# workers on different threads (#3).
+_VOICE_CORRECTIONS_LOCK = threading.RLock()
 
 
 def _apply_vocabulary_corrections(text: str) -> tuple[str, bool]:
@@ -181,15 +186,30 @@ def _apply_vocabulary_corrections(text: str) -> tuple[str, bool]:
     'scroll done' beats 'done' matching nothing.
     """
     lower = text.lower()
-    # Longest-phrase-first so "scroll done" beats a single-word match
-    for wrong, right in sorted(_VOICE_CORRECTIONS.items(), key=lambda kv: -len(kv[0])):
+    # Snapshot the corrections dict under the lock so a concurrent write from
+    # add_personal_corrections doesn't mutate the dict mid-iteration (#3).
+    with _VOICE_CORRECTIONS_LOCK:
+        corrections_snapshot = sorted(
+            _VOICE_CORRECTIONS.items(), key=lambda kv: -len(kv[0])
+        )
+    for wrong, right in corrections_snapshot:
         if wrong in lower:
             corrected = lower.replace(wrong, right)
-            # Restore original capitalisation pattern (title-case first word)
-            parts = corrected.split()
-            if parts:
-                parts[0] = parts[0].capitalize()
-            return " ".join(parts), True
+            # Restore capitalisation: capitalize the first token; preserve
+            # all-caps acronyms (VS, AI, etc.) from the original where they
+            # weren't part of the corrected span (#17).
+            orig_tokens = text.split()
+            corr_tokens = corrected.split()
+            result_tokens = []
+            for i, tok in enumerate(corr_tokens):
+                orig_tok = orig_tokens[i] if i < len(orig_tokens) else ""
+                if i == 0:
+                    result_tokens.append(tok.capitalize())
+                elif orig_tok.isupper() and len(orig_tok) > 1:
+                    result_tokens.append(tok.upper())
+                else:
+                    result_tokens.append(tok)
+            return " ".join(result_tokens), True
     return text, False
 
 
@@ -626,10 +646,11 @@ class HybridCoordinator:
     def add_personal_corrections(self, corrections: dict) -> None:
         """Merge condition-specific corrections into the live _VOICE_CORRECTIONS map."""
         global _VOICE_CORRECTIONS
-        for heard, expected in corrections.items():
-            if heard not in _VOICE_CORRECTIONS:
-                _VOICE_CORRECTIONS[heard] = expected
-                log.info("Personal correction loaded: %r → %r", heard, expected)
+        with _VOICE_CORRECTIONS_LOCK:  # guard concurrent reads in _apply_vocabulary_corrections (#3)
+            for heard, expected in corrections.items():
+                if heard not in _VOICE_CORRECTIONS:
+                    _VOICE_CORRECTIONS[heard] = expected
+                    log.info("Personal correction loaded: %r → %r", heard, expected)
 
     async def _switch_condition(self, condition: str) -> None:
         """Load and apply a voice profile for the given condition."""
@@ -682,14 +703,26 @@ class HybridCoordinator:
         self._target_cache = cache
 
     def _approval_config(self) -> dict:
-        """Load approval_config.json; returns {} on failure (safe defaults used by callers)."""
+        """Load approval_config.json; returns {} on failure (safe defaults used by callers).
+
+        Result is cached for 60 s so repeated calls in the hot path (authorize,
+        cloud-budget check) don't pay a disk read on every cloud call (#6).
+        """
+        now = time.monotonic()
+        cache = getattr(self, "_approval_cfg_cache", None)
+        if cache is not None:
+            cached_at, cached_val = cache
+            if now - cached_at < 60.0:
+                return cached_val
         try:
-            import json
+            import json as _json
             from pathlib import Path
             p = Path(__file__).parent.parent / "approval_config.json"
-            return json.loads(p.read_text(encoding="utf-8"))
+            result = _json.loads(p.read_text(encoding="utf-8"))
         except Exception:
-            return {}
+            result = {}
+        self._approval_cfg_cache: tuple[float, dict] = (now, result)
+        return result
 
     async def _tts_speak(self, text: str) -> None:
         """Speak text via the configured TTS backend (fire-and-forget safe)."""
@@ -759,7 +792,9 @@ class HybridCoordinator:
         if _tracer.enabled:
             _tid = cmd.trace_id or _tracer.new_trace(source=cmd.source)
             if not cmd.trace_id:
-                cmd.trace_id = _tid
+                # Use _dc_replace so the original Command object is never mutated
+                # (concurrent route() tasks share the same reference until here).
+                cmd = _dc_replace(cmd, trace_id=_tid)  # fix #1
             _tracer.set_current(_tid)
 
         # De-glue an ASR-concatenated leading command verb ("OpenVSCode" ->
@@ -774,7 +809,7 @@ class HybridCoordinator:
             if deglued != cmd.text:
                 log.info("HybridCoordinator: de-glued command verb %r -> %r",
                          cmd.text, deglued)
-                cmd.text = deglued
+                cmd = _dc_replace(cmd, text=deglued)  # fix #1 — never mutate in place
 
         # --- Self-skilling rung 2: macro replay + "save that as ..." approval ---
         # Runs before the dev pre-gate so a saved macro routes by its own name
@@ -940,7 +975,7 @@ class HybridCoordinator:
         route_label = "local"
         gate_that_decided = "all_pass"
         action_str: Optional[str] = None
-        success: Optional[bool] = None
+        success: bool = False  # default False so a pre-action exception never sends None to metrics (#11)
         error_msg: Optional[str] = None
         command_id: int = -1
         # Per-command accumulator for inference row ids written by
@@ -1019,9 +1054,12 @@ class HybridCoordinator:
                 ctx = [clarify_ctx] + list(cmd.session_context or [])
                 cmd = _dc_replace(cmd, session_context=ctx)
 
-            # Temporarily apply effective_cfg for gate evaluation
-            _original_cfg = self._cfg
-            self._cfg = effective_cfg
+            # Gate evaluation — set effective_cfg in a task-local ContextVar so
+            # concurrent route() tasks each see their own pain-day-adjusted config
+            # without mutating the shared self._cfg (#4). Gate/inference helpers
+            # read it via effective_cfg(), which falls back to their own self._cfg
+            # when unset.
+            _cfg_token = _EFFECTIVE_CFG.set(effective_cfg)
             try:
                 # --- Bypass path (touch / multimodal) --------------------------
                 # These sources always run local and never reach the cloud, so
@@ -1104,7 +1142,7 @@ class HybridCoordinator:
                         action_str, gate_that_decided, route_label = \
                             await self._gates.gates_2_to_4(cmd)
             finally:
-                self._cfg = _original_cfg
+                _EFFECTIVE_CFG.reset(_cfg_token)
 
             # --- Execute the action ----------------------------------------
             result = await self._action_executor.execute_action(action_str, cmd, route_label=route_label)

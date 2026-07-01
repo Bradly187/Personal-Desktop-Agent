@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from dataclasses import replace as _dc_replace
 
+from core.gate_evaluator import _EFFECTIVE_CFG
 from inference.local_inference import (
     _SYSTEM_PROMPT,
     get_inference_capture,
@@ -175,7 +176,17 @@ class InferenceRunner:
         self._rate_limiter = rate_limiter
         self._note_cloud_call = note_cloud_call
 
-    async def run_local(self, cmd: "Command") -> str:
+    def effective_cfg(self) -> "CoordinatorConfig":
+        """Return the task-local effective config set by _route_impl, or self._cfg.
+
+        Mirrors GateEvaluator.effective_cfg() — same ContextVar, so pain-day
+        threshold relaxations (local_timeout_s) and cfg reads
+        (anthropic_model) see the same effective config gate evaluation used.
+        """
+        return _EFFECTIVE_CFG.get() or self._cfg
+
+    async def run_local(self, cmd: "Command", cfg: "CoordinatorConfig | None" = None) -> str:
+        effective = cfg if cfg is not None else self.effective_cfg()
         trainer = self._trainer()
         examples = (
             await trainer.get_few_shot_examples(cmd)
@@ -195,14 +206,14 @@ class InferenceRunner:
         # On timeout, degrade to CLARIFY rather than blocking the accessibility
         # path indefinitely. Mirrors the cloud-path guard in run_cloud().
         try:
-            async with asyncio.timeout(self._cfg.local_timeout_s):
+            async with asyncio.timeout(effective.local_timeout_s):
                 action_str = await local.infer(
                     cmd, few_shot_examples=examples, counterexamples=counterexamples
                 )
         except TimeoutError:
             log.error(
                 "InferenceRunner: local inference timed out after %.0fs — CLARIFY fallback",
-                self._cfg.local_timeout_s,
+                effective.local_timeout_s,
             )
             return "CLARIFY local inference timed out"
         latency_ms = (time.monotonic() - t0) * 1000
@@ -243,7 +254,7 @@ class InferenceRunner:
             pass
         return action_str
 
-    async def run_cloud(self, cmd: "Command") -> str:
+    async def run_cloud(self, cmd: "Command", cfg: "CoordinatorConfig | None" = None) -> str:
         """Route to Anthropic API (Claude).
 
         Content filter scrubs secrets/PII from the command text before
@@ -299,24 +310,26 @@ class InferenceRunner:
                 self._CLOUD_TIMEOUT_S,
             )
             # Record the timed-out call as a span too (was previously invisible).
+            effective = cfg if cfg is not None else self.effective_cfg()
             try:
                 get_tracer().record_span(
-                    "inference", route="cloud", model=self._cfg.anthropic_model,
+                    "inference", route="cloud", model=effective.anthropic_model,
                     dur_ms=round((time.monotonic() - t0) * 1000, 1), status="timeout",
                 )
             except Exception:
                 pass
             return "CLARIFY cloud inference timed out"
+        effective = cfg if cfg is not None else self.effective_cfg()
         latency_ms = (time.monotonic() - t0) * 1000
         # Capture token usage once: shared by the trace span (cost-per-step in the
         # replay timeline) and the durable inferences row below.
         _prompt, _tokens_in, _tokens_out = get_inference_capture()
         try:
             get_tracer().record_span(
-                "inference", route="cloud", model=self._cfg.anthropic_model,
+                "inference", route="cloud", model=effective.anthropic_model,
                 dur_ms=round(latency_ms, 1),
                 tokens_in=_tokens_in, tokens_out=_tokens_out,
-                cost_usd=estimate_cost(self._cfg.anthropic_model, _tokens_in, _tokens_out) or None,
+                cost_usd=estimate_cost(effective.anthropic_model, _tokens_in, _tokens_out) or None,
             )
         except Exception:
             pass
@@ -325,7 +338,7 @@ class InferenceRunner:
             error = action_str if action_str.startswith("CLARIFY") else None
             _inf_id = await agent_db.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
-                model=self._cfg.anthropic_model,
+                model=effective.anthropic_model,
                 domain="command",
                 prompt=_prompt,
                 response=action_str,
