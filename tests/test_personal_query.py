@@ -161,14 +161,16 @@ def test_gate0_forces_personal_queries_local():
     # Covers the COMMAND path too ("open my notes about X" classifies command;
     # Gates 1–4 could otherwise escalate the text to cloud).
     from core.hybrid_coordinator import CoordinatorConfig
-    c = HybridCoordinator.__new__(HybridCoordinator)
-    c._cfg = CoordinatorConfig()
+    from core.gate_evaluator import GateEvaluator
+    gates = GateEvaluator(
+        CoordinatorConfig(), run_local=None, run_cloud=None,
+        approval_config=lambda: {})
     cmd = MagicMock()
     cmd.text = "open my notes about the new medication"
-    assert c._gate0(cmd) is False                  # personal → never cloud
+    assert gates.gate0(cmd) is False                  # personal → never cloud
     cmd.text = "open the web browser"
-    assert c._gate0(cmd) is True                   # ordinary command unaffected
+    assert gates.gate0(cmd) is True                   # ordinary command unaffected
     # The guard must hold even with keyword Gate-0 disabled.
-    c._cfg = CoordinatorConfig(gate0_enabled=False)
+    gates._cfg = CoordinatorConfig(gate0_enabled=False)
     cmd.text = "open my notes about the new medication"
-    assert c._gate0(cmd) is False
+    assert gates.gate0(cmd) is False

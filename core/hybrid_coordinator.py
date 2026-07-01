@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
+from core.gate_evaluator import GateEvaluator
 from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
@@ -111,11 +112,6 @@ _CLOUD_SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-_COMPLEXITY_KEYWORDS = (
-    "and then", "after that", "for each", "followed by",
-    "then open", "then click", "then type", "while", "repeat",
-)
 
 
 @dataclass
@@ -479,7 +475,17 @@ class HybridCoordinator:
         self._content_filter = content_filter
         self._audit = audit_log
         self._twin = twin_state
-        self._latency_ema: Optional[float] = None
+        self._gates = GateEvaluator(
+            self._cfg,
+            # Late-bound: looks up self._run_local/_run_cloud at call time (not
+            # capture time) so tests that monkeypatch coord._run_local after
+            # construction still take effect.
+            run_local=lambda cmd: self._run_local(cmd),
+            run_cloud=lambda cmd: self._run_cloud(cmd),
+            approval_config=lambda: self._approval_config(),
+            audit=self._audit,
+            tts_speak=lambda text: self._tts_speak(text),
+        )
         self._grounder = VisionGrounder()
         self._whisper = whisper_stream
         self._fusion = None   # set via set_fusion_engine() after FusionEngine is created
@@ -518,12 +524,6 @@ class HybridCoordinator:
         self._drift_streak: int = 0
         self._drift_warned: bool = False
 
-        # Gate 3 VRAM cache — avoid calling pynvml on every command
-        self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
-        self._vram_cache_ttl: float = 2.0  # seconds
-        # Hard bound on the NVML probe await (E9): a wedged driver must not stall
-        # the command path. Generous vs. a healthy probe (~ms), tight vs. a hang.
-        self._vram_probe_timeout_s: float = 1.0
         self._metrics = None   # set via set_metrics()
 
         self._memory = None   # MemoryManager — wired via set_memory()
@@ -540,10 +540,6 @@ class HybridCoordinator:
         # as context without a DB round-trip in the hot path.
         self._recent_dev_commands: list[str] = []
 
-        # GAP-10: denial-of-wallet tripwire. Count cloud API calls this session
-        # and speak a one-time warning once they exceed cloud_call_budget.
-        self._session_cloud_calls: int = 0
-        self._cloud_budget_warned: bool = False
 
     # ---------------------------------------------------------------------- #
     # Internal helpers
@@ -1417,7 +1413,7 @@ class HybridCoordinator:
                     # Questions about the user's OWN documents answer from the
                     # local PersonalKB — the query itself must never go to cloud.
                     route_cloud = False
-                if route_cloud and not self._gate0(cmd):
+                if route_cloud and not self._gates.gate0(cmd):
                     log.info("HybridCoordinator: dev-domain=%s contains sensitive "
                              "data — forcing LOCAL DevAgent (Gate 0)", domain)
                     route_cloud = False
@@ -1446,7 +1442,7 @@ class HybridCoordinator:
                         "source": cmd.source,
                         "trace_id": cmd.trace_id,
                     }
-                    self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
+                    self._gates.note_cloud_call()  # GAP-10: denial-of-wallet tripwire
                     # Clear the task-local capture so a stale prompt/token count
                     # from a prior inference in this task can't be attributed to
                     # this cloud-dev call (mirrors _run_cloud).
@@ -1871,7 +1867,7 @@ class HybridCoordinator:
                     gate_that_decided = "bypass"
 
                 # --- Gate 0 — Privacy (force local for cloud-eligible sources) --
-                elif not self._gate0(cmd):
+                elif not self._gates.gate0(cmd):
                     log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
                     action_str = await self._run_local(cmd)
                     route_label = "local"
@@ -1879,12 +1875,12 @@ class HybridCoordinator:
 
                 # --- Skip Gate 1 path ------------------------------------------
                 elif source in _SKIP_GATE1_SOURCES:
-                    action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
+                    action_str, gate_that_decided, route_label = await self._gates.gates_2_to_4(cmd)
 
                 # --- Full 4-gate path -------------------------------------------
                 else:
                     # Gate 1 — Confidence
-                    passed, cmd = await self._gate1(cmd)
+                    passed, cmd = await self._gates.gate1(cmd)
                     if passed is None:
                         # Gesture low confidence — discard. Record it (E10) so the
                         # drop is visible to retraining and analytics instead of
@@ -1918,7 +1914,7 @@ class HybridCoordinator:
                         if vocab_corrected:
                             cmd = await _retranscribe(cmd)
                             action_str, gate_that_decided, route_label = \
-                                await self._gates_2_to_4(cmd)
+                                await self._gates.gates_2_to_4(cmd)
                         else:
                             log.info(
                                 "Gate 1 voice low-confidence (logprob=%.3f) — "
@@ -1930,7 +1926,7 @@ class HybridCoordinator:
                             route_label = "cloud"
                     else:
                         action_str, gate_that_decided, route_label = \
-                            await self._gates_2_to_4(cmd)
+                            await self._gates.gates_2_to_4(cmd)
             finally:
                 self._cfg = _original_cfg
 
@@ -2068,7 +2064,7 @@ class HybridCoordinator:
             # never recovers. So only local routes update the Gate 4 EMA; when a
             # burst goes to cloud the EMA stays low and local is retried promptly.
             if route_label == "local":
-                self._update_ema(latency_ms)
+                self._gates.update_ema(latency_ms)
             # Record outcome in metrics singleton (non-fatal)
             if self._metrics is not None:
                 try:
@@ -2212,167 +2208,6 @@ class HybridCoordinator:
                 cmd.text or "", prior_action or "", domain),
             log, label="harvest correction")
 
-    def _cloud_call_budget(self) -> int:
-        try:
-            return int(self._approval_config().get("cloud_call_budget", 20))
-        except Exception:
-            return 20
-
-    def _note_cloud_call(self) -> None:
-        """GAP-10: count cloud API calls per session; warn once past the budget.
-
-        Denial-of-wallet tripwire — slow loops under the per-call cap can still
-        accumulate significant cost. Advisory (warn + audit, fire-and-forget): it
-        does NOT hard-block the cloud path, so a legitimate long session is never
-        wedged mid-task. The counter resets each session.
-        """
-        self._session_cloud_calls += 1
-        budget = self._cloud_call_budget()
-        if self._session_cloud_calls <= budget or self._cloud_budget_warned:
-            return
-        self._cloud_budget_warned = True
-        log.warning(
-            "HybridCoordinator: cloud-call budget exceeded (%d > %d) — DoW tripwire",
-            self._session_cloud_calls, budget,
-        )
-        from core.async_utils import fire_and_log
-        if self._audit and getattr(self._audit, "available", False):
-            fire_and_log(
-                self._audit.log_security_event(
-                    detail=(f"denial-of-wallet tripwire: {self._session_cloud_calls} "
-                            f"cloud calls this session (budget {budget})"),
-                    severity="warning",
-                    params={"cloud_calls": self._session_cloud_calls, "budget": budget}),
-                log, label="audit dow")
-        msg = (f"Heads up — this session has made {self._session_cloud_calls} cloud "
-               "calls, over the budget. Keeping an eye on cost.")
-        fire_and_log(self._tts_speak(msg), log, label="dow warning")
-
-    def _gate0(self, cmd: Command) -> bool:
-        """Gate 0 — Privacy. True = pass (safe to consider cloud).
-
-        Checks command text against patterns for credentials, financial data,
-        and PII. A match forces local routing regardless of subsequent gates.
-        """
-        # Personal-document queries always stay local — this covers the COMMAND
-        # path too (e.g. "open my notes about <topic>" classifies as command,
-        # where Gates 1–4 could otherwise escalate the text to cloud). Checked
-        # before the enabled flag: disabling keyword Gate-0 must not disable it.
-        if _is_personal_query(cmd.text):
-            return False
-        if not self._cfg.gate0_enabled:
-            return True
-        text = cmd.text.lower()
-        return not any(pat in text for pat in self._cfg.gate0_sensitive_patterns)
-
-    async def _gate1(self, cmd: Command) -> tuple[bool | None, Command]:
-        """Gate 1 — Confidence.
-
-        Returns:
-          (True,  cmd) — pass
-          (False, cmd) — fail-voice (low whisper logprob)
-          (None,  cmd) — fail-gesture (discard)
-        """
-        cfg = self._cfg
-        logprob_ok = cmd.whisper_logprob >= cfg.whisper_logprob_min
-        gesture_ok = cmd.gesture_confidence >= cfg.gesture_confidence_min
-
-        if logprob_ok and gesture_ok:
-            return True, cmd
-
-        # Distinguish gesture failure (source=gesture) vs voice failure
-        if cmd.source == "gesture" and not gesture_ok:
-            return None, cmd  # discard
-
-        # Voice low confidence — signal for re-transcription
-        log.debug(
-            "Gate 1 fail (voice): logprob=%.3f gesture=%.3f",
-            cmd.whisper_logprob,
-            cmd.gesture_confidence,
-        )
-        return False, cmd
-
-    async def _gates_2_to_4(
-        self, cmd: Command
-    ) -> tuple[str, str, str]:
-        """Run Gates 2-4. Returns (action_str, gate_that_decided, route_label)."""
-        # Gate 2 — Complexity
-        if not self._gate2(cmd):
-            log.debug("Gate 2 fail (complexity): %r", cmd.text)
-            return await self._run_cloud(cmd), "gate2_complexity", "cloud"
-
-        # Gate 3 — VRAM
-        if not await self._gate3():
-            log.debug("Gate 3 fail (VRAM)")
-            return await self._run_cloud(cmd), "gate3_vram", "cloud"
-
-        # Gate 4 — Latency EMA
-        if not self._gate4():
-            log.debug(
-                "Gate 4 fail (latency EMA=%.0f ms)", self._latency_ema or 0
-            )
-            return await self._run_cloud(cmd), "gate4_latency", "cloud"
-
-        return await self._run_local(cmd), "all_pass", "local"
-
-    def _gate2(self, cmd: Command) -> bool:
-        """Gate 2 — Complexity. True = pass (route local)."""
-        text = cmd.text.lower()
-        if any(kw in text for kw in _COMPLEXITY_KEYWORDS):
-            return False
-        token_count = len(cmd.text.split())
-        return token_count <= self._cfg.max_local_tokens
-
-    async def _gate3(self) -> bool:
-        """Gate 3 — VRAM. True = pass.
-
-        Caches the result for 2 seconds to avoid probing the GPU on every command.
-        The probe (pynvml: nvmlInit/GetMemoryInfo/nvmlShutdown) is a blocking CUDA
-        driver round-trip, so on a cache miss it runs in a thread — never on the
-        event loop, where it would stall every concurrent accessibility/voice
-        task for the duration of the probe (#6).
-        """
-        now = time.monotonic()
-        if self._vram_cache is not None:
-            cached_result, cached_time = self._vram_cache
-            if now - cached_time < self._vram_cache_ttl:
-                return cached_result
-
-        try:
-            from core import vram
-            # vram.free_vram_gb returns UNKNOWN_FREE_GB (fail-open) if pynvml is
-            # unavailable, so an unmeasurable GPU still passes (don't penalise local).
-            # Bound the await (E9): a wedged NVML/CUDA driver can hang the worker
-            # thread, and asyncio.to_thread is not cancellable — without the
-            # wait_for, this route() task would block indefinitely. On timeout the
-            # orphaned thread keeps running but we fail-open and move on.
-            probe_timeout = getattr(self, "_vram_probe_timeout_s", 1.0)
-            free_gb = await asyncio.wait_for(
-                asyncio.to_thread(vram.free_vram_gb), timeout=probe_timeout
-            )
-            result = free_gb >= self._cfg.vram_free_min_gb
-        except TimeoutError:
-            log.warning("Gate 3 VRAM probe timed out after %.1fs — assuming pass",
-                        getattr(self, "_vram_probe_timeout_s", 1.0))
-            result = True
-        except Exception as exc:
-            log.debug("Gate 3 VRAM probe error (assuming pass): %s", exc)
-            result = True
-
-        self._vram_cache = (result, now)
-        return result
-
-    def _gate4(self) -> bool:
-        """Gate 4 — Latency EMA. True = pass.
-
-        Budget is sourced per-domain via the SLO layer (gap H); the gated path is
-        the command domain, so this resolves to the command budget (600 ms default)
-        unless the trainer has set a per-domain override.
-        """
-        if self._latency_ema is None:
-            return True  # no history yet — optimistically run local
-        return self._latency_ema <= self._cfg.latency_budget_for("command")
-
     # ---------------------------------------------------------------------- #
     # Inference helpers
     # ---------------------------------------------------------------------- #
@@ -2453,7 +2288,7 @@ class HybridCoordinator:
         (network drop, service hiccup) the coroutine is cancelled and the
         pipeline degrades to a CLARIFY response rather than stalling indefinitely.
         """
-        self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
+        self._gates.note_cloud_call()  # GAP-10: denial-of-wallet tripwire
         # Scrub secrets before sending to external API — from BOTH the command
         # text AND the session_context the cloud prompt embeds. A sensitive
         # prior command that Gate 0 correctly forced local must not leak later
@@ -2787,17 +2622,6 @@ class HybridCoordinator:
         return params
 
     # ---------------------------------------------------------------------- #
-    # Latency EMA
-    # ---------------------------------------------------------------------- #
-
-    def _update_ema(self, latency_ms: float) -> None:
-        α = self._cfg.latency_ema_alpha
-        if self._latency_ema is None:
-            self._latency_ema = latency_ms
-        else:
-            self._latency_ema = α * latency_ms + (1 - α) * self._latency_ema
-
-    # ---------------------------------------------------------------------- #
     # Correction API — user feedback loop
     # ---------------------------------------------------------------------- #
 
@@ -2842,7 +2666,7 @@ class HybridCoordinator:
     def get_status(self) -> dict:
         return {
             "local_backend": self._local.get_status(),
-            "latency_ema_ms": round(self._latency_ema, 1) if self._latency_ema else None,
+            "latency_ema_ms": round(self._gates.latency_ema, 1) if self._gates.latency_ema else None,
             "config": {
                 "whisper_logprob_min": self._cfg.whisper_logprob_min,
                 "gesture_confidence_min": self._cfg.gesture_confidence_min,

@@ -170,7 +170,7 @@ def _make_coord():
 
     coord = HybridCoordinator(config=CoordinatorConfig())
     # Force the local path deterministically (Gate 3 does a real VRAM probe).
-    coord._gate3 = AsyncMock(return_value=True)
+    coord._gates.gate3 = AsyncMock(return_value=True)
     coord._ground_target = AsyncMock(return_value=None)
     coord._executor.execute = AsyncMock(
         return_value={"status": "ok", "action": "CLICK"}

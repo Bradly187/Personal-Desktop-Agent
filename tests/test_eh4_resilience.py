@@ -6,7 +6,7 @@ Covers:
       fast-fail when it is open (no full-timeout per request on a hung server).
 - E8  ResourceGovernor._evict_heavy_models stops the batch on the first failed
       keep_alive POST (no 5 s × N stall when Ollama is down during a flare).
-- E9  HybridCoordinator._gate3 bounds the NVML probe and fails open on timeout.
+- E9  GateEvaluator.gate3 bounds the NVML probe and fails open on timeout.
 - E15 AgentDB.reap_expired_leases requeues a 'running' goal whose claim lease
       outlived the TTL, but never an actively-claimed (fresh) goal.
 - E21 Supervisor logs once when a supervised subsystem flips to disabled.
@@ -96,12 +96,12 @@ async def test_gate3_vram_probe_timeout_fails_open(monkeypatch):
     import core.vram as vram
 
     coord = HybridCoordinator(config=CoordinatorConfig())
-    coord._vram_probe_timeout_s = 0.05
+    coord._gates._vram_probe_timeout_s = 0.05
 
     monkeypatch.setattr(vram, "free_vram_gb", lambda: time.sleep(0.5) or 0.0)
 
     t0 = time.monotonic()
-    result = await coord._gate3()
+    result = await coord._gates.gate3()
     assert result is True                       # fail-open
     assert time.monotonic() - t0 < 0.4          # did not wait the full 0.5 s
 
@@ -112,7 +112,7 @@ async def test_gate3_passes_when_vram_ample(monkeypatch):
 
     coord = HybridCoordinator(config=CoordinatorConfig())
     monkeypatch.setattr(vram, "free_vram_gb", lambda: 99.0)
-    assert await coord._gate3() is True
+    assert await coord._gates.gate3() is True
 
 
 # ===========================================================================
