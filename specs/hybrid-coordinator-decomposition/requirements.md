@@ -10,7 +10,7 @@ making each hard to test or modify in isolation. No behavior change is
 intended — this spec exists to gate the *structure* of the change per AGENTS.md
 Rule 11, since it touches a core pipeline file at scale.
 
-**Status:** In Progress
+**Status:** Building — all 5 phases complete on `feat/dev-agent-plan-fidelity`, pending PR/merge to master.
 **Approved:** Brad, 2026-07-01
 **Owner / author session:** Claude Code
 
