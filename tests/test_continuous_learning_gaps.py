@@ -492,63 +492,71 @@ class TestGap2PromptInjection:
 
 
 # ============================================================================
-# Gap 2 — hybrid_coordinator._run_local passes counterexamples
+# Gap 2 — InferenceRunner.run_local passes counterexamples
 # ============================================================================
 
 class TestGap2CoordinatorPassthrough:
     @pytest.mark.asyncio
     async def test_run_local_fetches_counterexamples(self):
-        from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
-        hc = HybridCoordinator.__new__(HybridCoordinator)
-        hc._cfg = CoordinatorConfig()
-        hc._local = MagicMock()
-        hc._local.infer = AsyncMock(return_value="CLICK ok")
-        hc._local.last_prompt = []
+        from core.inference_runner import InferenceRunner
+        from core.hybrid_coordinator import CoordinatorConfig
+        local = MagicMock()
+        local.infer = AsyncMock(return_value="CLICK ok")
+        local.last_prompt = []
         captured = {}
 
         async def _fake_infer(cmd, few_shot_examples=None, counterexamples=None):
             captured["counterexamples"] = counterexamples
             return "CLICK ok"
 
-        hc._local.infer = _fake_infer
-        hc._trainer = MagicMock()
-        hc._trainer.get_few_shot_examples = AsyncMock(return_value=[])
-        hc._trainer.get_few_shot_counterexamples = AsyncMock(
+        local.infer = _fake_infer
+        trainer = MagicMock()
+        trainer.get_few_shot_examples = AsyncMock(return_value=[])
+        trainer.get_few_shot_counterexamples = AsyncMock(
             return_value=[{"command_text": "scroll", "wrong_action": "CLICK nothing"}]
         )
-        hc._agent_db = MagicMock()
-        hc._agent_db.available = False
-        # Patch _update_ema so it doesn't blow up
-        hc._latency_ema = None
-        hc._ema_alpha = 0.2
+        agent_db = MagicMock()
+        agent_db.available = False
+
+        runner = InferenceRunner(
+            CoordinatorConfig(),
+            local=lambda: local, cloud=lambda: None,
+            trainer=lambda: trainer, agent_db=lambda: agent_db,
+            content_filter=lambda: None, rate_limiter=lambda: None,
+            note_cloud_call=lambda: None,
+        )
 
         cmd = _Cmd("scroll down")
-        result = await hc._run_local(cmd)
+        result = await runner.run_local(cmd)
         assert result == "CLICK ok"
         assert captured["counterexamples"] is not None
         assert len(captured["counterexamples"]) == 1
 
     @pytest.mark.asyncio
     async def test_run_local_counterexamples_none_when_no_trainer(self):
-        from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
-        hc = HybridCoordinator.__new__(HybridCoordinator)
-        hc._cfg = CoordinatorConfig()
+        from core.inference_runner import InferenceRunner
+        from core.hybrid_coordinator import CoordinatorConfig
         captured = {}
 
         async def _fake_infer(cmd, few_shot_examples=None, counterexamples=None):
             captured["counterexamples"] = counterexamples
             return "CLICK ok"
 
-        hc._local = MagicMock()
-        hc._local.infer = _fake_infer
-        hc._trainer = None
-        hc._agent_db = MagicMock()
-        hc._agent_db.available = False
-        hc._latency_ema = None
-        hc._ema_alpha = 0.2
+        local = MagicMock()
+        local.infer = _fake_infer
+        agent_db = MagicMock()
+        agent_db.available = False
+
+        runner = InferenceRunner(
+            CoordinatorConfig(),
+            local=lambda: local, cloud=lambda: None,
+            trainer=lambda: None, agent_db=lambda: agent_db,
+            content_filter=lambda: None, rate_limiter=lambda: None,
+            note_cloud_call=lambda: None,
+        )
 
         cmd = _Cmd("click ok")
-        result = await hc._run_local(cmd)
+        result = await runner.run_local(cmd)
         assert result == "CLICK ok"
         assert captured["counterexamples"] is None
 

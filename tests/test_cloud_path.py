@@ -29,11 +29,10 @@ from core.command_executor import Command
 from core.hybrid_coordinator import (
     CoordinatorConfig,
     HybridCoordinator,
-    _CloudInference,
-    _CLOUD_SYSTEM_PROMPT,
     _apply_vocabulary_corrections,
     _retranscribe,
 )
+from core.inference_runner import _CloudInference, _CLOUD_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

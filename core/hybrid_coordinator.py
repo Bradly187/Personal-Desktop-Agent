@@ -52,12 +52,12 @@ from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
 from core.gate_evaluator import GateEvaluator
+from core.inference_runner import InferenceRunner, _CloudInference, _PENDING_INFERENCE_IDS
 from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
     OllamaInference,
     _build_prompt,
-    _SYSTEM_PROMPT,
     get_inference_capture,
     set_inference_capture,
 )
@@ -76,14 +76,6 @@ from core.conversation_mode import ConversationMode, conversation_mode_config
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
 from monitoring.cost_ledger import estimate_cost
-from contextvars import ContextVar
-
-# Task-local accumulator linking inference rows to their command row (the
-# inference insert happens before insert_command, so command_id is unknown at
-# write time and backfilled by route() — see AgentDB.link_inferences_to_command).
-_PENDING_INFERENCE_IDS: ContextVar[Optional[list]] = ContextVar(
-    "da_pending_inference_ids", default=None
-)
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog
@@ -94,20 +86,6 @@ if TYPE_CHECKING:
     from inference.dev_agent import DevAgent
 
 log = logging.getLogger(__name__)
-
-# Cloud system prompt — mirrors local _SYSTEM_PROMPT but adds misrecognition
-# guidance specific to voice+accessibility input.  Kept separate so we can
-# tune cloud behaviour independently of the local LLM prompt.
-_CLOUD_SYSTEM_PROMPT = (
-    _SYSTEM_PROMPT
-    + "\n\nAdditional guidance for cloud disambiguation:\n"
-    "- Common voice misrecognitions to correct automatically:\n"
-    '  "clothes"→CLOSE  "scroll done"→SCROLL down  "hot key"→HOTKEY\n'
-    '  "oh pen"→OPEN  "clique"→CLICK  "tight"→TYPE\n'
-    "- For multi-step commands (\"close then open\"): execute the FIRST action "
-    "and emit CLARIFY for the remaining steps.\n"
-    "- For gesture-source commands: POINT→CLICK FIST→CLOSE PALM→SCROLL up."
-)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -172,100 +150,6 @@ class CoordinatorConfig:
         if domain != "command":
             return self.slo.latency_budget_ms(domain)
         return self.latency_budget_ms
-
-
-# ---------------------------------------------------------------------------
-# Cloud inference (Anthropic API)
-# ---------------------------------------------------------------------------
-
-class _CloudInference:
-    """Anthropic SDK Claude backend. Lazy import."""
-
-    def __init__(self, model: str) -> None:
-        self._model = model
-        self._client = None
-        self._effective_model = model   # backend-mapped at client-build time
-        self._backend = "bedrock"
-
-    def _get_client(self):
-        if self._client is None:
-            try:
-                import anthropic
-            except ImportError:
-                raise RuntimeError("anthropic not installed — run: pip install anthropic")
-            # Resolve the backend (direct Anthropic vs Amazon Bedrock) and the
-            # credential in one place. resolve_backend() raises a clear, actionable
-            # message when the needed key is missing, instead of the raw SDK "Could
-            # not resolve authentication method" traceback at request time.
-            from core.cloud_backend import resolve_backend
-            backend = resolve_backend()
-            self._client = backend.make_client()
-            self._backend = backend.name
-            self._effective_model = backend.map_model(self._model)
-        return self._client
-
-    async def infer(self, cmd: Command) -> str:
-        try:
-            client = self._get_client()
-        except RuntimeError as exc:
-            log.error("CloudInference unavailable: %s", exc)
-            return f"CLARIFY cloud unavailable: {exc}"
-
-        context_lines = ""
-        if cmd.session_context:
-            joined = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
-            context_lines = f"\n\nRecent commands:\n{joined}"
-
-        user_content = f"Command: {cmd.text}{context_lines}"
-        # Task-local fine-tuning capture (see inference.local_inference) — a
-        # ContextVar so concurrent route() tasks can't misattribute prompts.
-        prompt_json = json.dumps([
-            {"role": "system", "content": _CLOUD_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ])
-        set_inference_capture(prompt_json)
-
-        t0 = time.monotonic()
-        try:
-            response = await asyncio.to_thread(
-                client.messages.create,
-                model=self._effective_model,
-                max_tokens=64,
-                temperature=0.0,
-                system=_CLOUD_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_content}],
-            )
-            action = response.content[0].text.strip().splitlines()[0].strip()
-            if hasattr(response, "usage") and response.usage:
-                set_inference_capture(
-                    prompt_json,
-                    response.usage.input_tokens, response.usage.output_tokens,
-                )
-            latency_ms = (time.monotonic() - t0) * 1000
-            log.info("CloudInference[%s]: %r → %r (%.0f ms)",
-                     self._backend, cmd.text, action, latency_ms)
-            return action
-        except Exception as exc:
-            # Surface authentication problems (invalid/expired/empty key, 401) with
-            # an actionable hint rather than the raw SDK error text. AuthenticationError
-            # subclasses the SDK's APIStatusError with status 401.
-            msg = str(exc)
-            is_auth = (
-                type(exc).__name__ == "AuthenticationError"
-                or getattr(exc, "status_code", None) == 401
-                or "authentication" in msg.lower()
-                or "x-api-key" in msg.lower()
-            )
-            if is_auth:
-                log.error("CloudInference auth failure: %s", exc)
-                return (
-                    "CLARIFY cloud auth failed: AWS_BEARER_TOKEN_BEDROCK is missing or invalid. "
-                    "Set a valid Amazon Bedrock API key and restart the agent."
-                )
-            # Raw SDK/network error stays in the log; the user hears a stable
-            # sentence rather than leaked internals (E16).
-            log.error("CloudInference failed: %s", exc)
-            return "CLARIFY the cloud service had an error. Please try again."
 
 
 # ---------------------------------------------------------------------------
@@ -475,13 +359,26 @@ class HybridCoordinator:
         self._content_filter = content_filter
         self._audit = audit_log
         self._twin = twin_state
+        self._inference = InferenceRunner(
+            self._cfg,
+            # Late-bound: several of these (rate_limiter especially) are wired
+            # onto the coordinator *after* construction via a set_* method, and
+            # tests routinely monkeypatch coord._content_filter / coord._cloud /
+            # etc. post-construction — a captured-by-value reference would
+            # silently go stale.
+            local=lambda: self._local,
+            cloud=lambda: self._cloud,
+            trainer=lambda: self._trainer,
+            agent_db=lambda: self._agent_db,
+            content_filter=lambda: self._content_filter,
+            rate_limiter=lambda: self._rate_limiter,
+            note_cloud_call=lambda: self._gates.note_cloud_call(),
+        )
         self._gates = GateEvaluator(
             self._cfg,
-            # Late-bound: looks up self._run_local/_run_cloud at call time (not
-            # capture time) so tests that monkeypatch coord._run_local after
-            # construction still take effect.
-            run_local=lambda cmd: self._run_local(cmd),
-            run_cloud=lambda cmd: self._run_cloud(cmd),
+            # Late-bound for the same reason as InferenceRunner above.
+            run_local=lambda cmd: self._inference.run_local(cmd),
+            run_cloud=lambda cmd: self._inference.run_cloud(cmd),
             approval_config=lambda: self._approval_config(),
             audit=self._audit,
             tts_speak=lambda text: self._tts_speak(text),
@@ -1862,14 +1759,14 @@ class HybridCoordinator:
                     if cmd.source == "touch" and cmd.action in _VALID_COMMAND_VERBS:
                         action_str = cmd.action
                     else:
-                        action_str = await self._run_local(cmd)
+                        action_str = await self._inference.run_local(cmd)
                     route_label = "local"
                     gate_that_decided = "bypass"
 
                 # --- Gate 0 — Privacy (force local for cloud-eligible sources) --
                 elif not self._gates.gate0(cmd):
                     log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
-                    action_str = await self._run_local(cmd)
+                    action_str = await self._inference.run_local(cmd)
                     route_label = "local"
                     gate_that_decided = "gate0_privacy"
 
@@ -1921,7 +1818,7 @@ class HybridCoordinator:
                                 "escalating to cloud for misrecognition repair",
                                 cmd.whisper_logprob,
                             )
-                            action_str = await self._run_cloud(cmd)
+                            action_str = await self._inference.run_cloud(cmd)
                             gate_that_decided = "gate1_voice_conf"
                             route_label = "cloud"
                     else:
@@ -2207,169 +2104,6 @@ class HybridCoordinator:
                 self._session_id, getattr(cmd, "trace_id", None),
                 cmd.text or "", prior_action or "", domain),
             log, label="harvest correction")
-
-    # ---------------------------------------------------------------------- #
-    # Inference helpers
-    # ---------------------------------------------------------------------- #
-
-    async def _run_local(self, cmd: Command) -> str:
-        examples = (
-            await self._trainer.get_few_shot_examples(cmd)
-            if self._trainer else None
-        )
-        counterexamples = (
-            await self._trainer.get_few_shot_counterexamples(cmd)
-            if self._trainer else None
-        )
-        # Clear the task-local capture so a backend that doesn't set it (or a
-        # mocked infer in tests) can't surface a previous command's prompt.
-        set_inference_capture(None)
-        t0 = time.monotonic()
-        # Circuit-breaker: a wedged local backend (Ollama hung, GPU stuck during
-        # a flare, stalled model reload) must not stall the pipeline forever.
-        # On timeout, degrade to CLARIFY rather than blocking the accessibility
-        # path indefinitely. Mirrors the cloud-path guard in _run_cloud().
-        try:
-            async with asyncio.timeout(self._cfg.local_timeout_s):
-                action_str = await self._local.infer(
-                    cmd, few_shot_examples=examples, counterexamples=counterexamples
-                )
-        except TimeoutError:
-            log.error(
-                "HybridCoordinator: local inference timed out after %.0fs — CLARIFY fallback",
-                self._cfg.local_timeout_s,
-            )
-            return "CLARIFY local inference timed out"
-        latency_ms = (time.monotonic() - t0) * 1000
-        # NOTE: Do NOT call _update_ema here — route()'s finally block already
-        # updates EMA with the total route latency (which includes inference).
-        # Calling it here too would double-count inference time in Gate 4's EMA.
-        if self._agent_db and self._agent_db.available:
-            status = self._local.get_status()
-            error = action_str if action_str.startswith("CLARIFY inference") else None
-            _prompt, _tokens_in, _tokens_out = get_inference_capture()
-            _inf_id = await self._agent_db.insert_inference(
-                command_id=None,   # backfilled by route() via link_inferences_to_command
-                model=status.get("model", "unknown"),
-                domain="command",
-                prompt=_prompt,
-                response=action_str,
-                tokens_in=_tokens_in,
-                tokens_out=_tokens_out,
-                latency_ms=latency_ms,
-                backend=status.get("backend", "ollama"),
-                error=error,
-            )
-            _ids = _PENDING_INFERENCE_IDS.get()
-            if _ids is not None and _inf_id and _inf_id > 0:
-                _ids.append(_inf_id)
-        try:
-            _st = self._local.get_status()
-            _ti, _to = get_inference_capture()[1:]
-            get_tracer().record_span(
-                "inference", route="local", backend=_st.get("backend"),
-                model=_st.get("model"), dur_ms=round(latency_ms, 1),
-                tokens_in=_ti, tokens_out=_to,
-                cost_usd=estimate_cost(_st.get("model", ""), _ti, _to) or None,
-            )
-        except Exception:
-            pass
-        return action_str
-
-    _CLOUD_TIMEOUT_S = 10.0  # circuit-breaker: cloud inference must complete within this window
-
-    async def _run_cloud(self, cmd: Command) -> str:
-        """Route to Anthropic API (Claude).
-
-        Content filter scrubs secrets/PII from the command text before
-        transmitting to external APIs. Findings are logged to the audit trail.
-
-        A 10-second asyncio.timeout acts as a circuit-breaker: if the API hangs
-        (network drop, service hiccup) the coroutine is cancelled and the
-        pipeline degrades to a CLARIFY response rather than stalling indefinitely.
-        """
-        self._gates.note_cloud_call()  # GAP-10: denial-of-wallet tripwire
-        # Scrub secrets before sending to external API — from BOTH the command
-        # text AND the session_context the cloud prompt embeds. A sensitive
-        # prior command that Gate 0 correctly forced local must not leak later
-        # inside an innocuous command's context window.
-        if self._content_filter:
-            clean_text, findings = await self._content_filter.scrub(cmd.text)
-            total = len(findings)
-            ctx_overrides: dict = {}
-            if cmd.session_context:
-                clean_ctx = []
-                for line in cmd.session_context:
-                    cl, f = await self._content_filter.scrub(line)
-                    clean_ctx.append(cl)
-                    total += len(f)
-                ctx_overrides["session_context"] = clean_ctx
-            if total:
-                log.info("ContentFilter: redacted %d secret(s) before cloud call", total)
-            # replace() preserves every field (action, source, params, …) and
-            # only overrides text/context — the manual rebuild dropped the
-            # required `action` and used a nonexistent `_gaze_coords` kwarg.
-            if findings or ctx_overrides:
-                cmd = _dc_replace(cmd, text=clean_text, **ctx_overrides)
-
-        # Clear the task-local capture so a stale prompt from a previous
-        # inference in this task can't be attributed to this cloud call.
-        set_inference_capture(None)
-        t0 = time.monotonic()
-        try:
-            async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
-                # Throttle cloud egress INSIDE the timeout (#18): a saturated
-                # 'anthropic' bucket otherwise stalled the command path past the
-                # advertised budget. Fail-open if no limiter/bucket is configured;
-                # shares the bucket with CloudDevAgent.
-                if self._rate_limiter is not None:
-                    await self._rate_limiter.check("anthropic")
-                action_str = await self._cloud.infer(cmd)
-        except TimeoutError:
-            log.error(
-                "HybridCoordinator: cloud inference timed out after %.0fs — CLARIFY fallback",
-                self._CLOUD_TIMEOUT_S,
-            )
-            # Record the timed-out call as a span too (was previously invisible).
-            try:
-                get_tracer().record_span(
-                    "inference", route="cloud", model=self._cfg.anthropic_model,
-                    dur_ms=round((time.monotonic() - t0) * 1000, 1), status="timeout",
-                )
-            except Exception:
-                pass
-            return "CLARIFY cloud inference timed out"
-        latency_ms = (time.monotonic() - t0) * 1000
-        # Capture token usage once: shared by the trace span (cost-per-step in the
-        # replay timeline) and the durable inferences row below.
-        _prompt, _tokens_in, _tokens_out = get_inference_capture()
-        try:
-            get_tracer().record_span(
-                "inference", route="cloud", model=self._cfg.anthropic_model,
-                dur_ms=round(latency_ms, 1),
-                tokens_in=_tokens_in, tokens_out=_tokens_out,
-                cost_usd=estimate_cost(self._cfg.anthropic_model, _tokens_in, _tokens_out) or None,
-            )
-        except Exception:
-            pass
-        if self._agent_db and self._agent_db.available:
-            error = action_str if action_str.startswith("CLARIFY") else None
-            _inf_id = await self._agent_db.insert_inference(
-                command_id=None,   # backfilled by route() via link_inferences_to_command
-                model=self._cfg.anthropic_model,
-                domain="command",
-                prompt=_prompt,
-                response=action_str,
-                tokens_in=_tokens_in,
-                tokens_out=_tokens_out,
-                latency_ms=latency_ms,
-                backend="anthropic",
-                error=error,
-            )
-            _ids = _PENDING_INFERENCE_IDS.get()
-            if _ids is not None and _inf_id and _inf_id > 0:
-                _ids.append(_inf_id)
-        return action_str
 
     # ---------------------------------------------------------------------- #
     # Action execution

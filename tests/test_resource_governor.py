@@ -612,14 +612,15 @@ class TestCloudCircuitBreaker:
         coord._cloud = MagicMock()
         coord._cloud.infer = _hang
 
-        original_timeout = HybridCoordinator._CLOUD_TIMEOUT_S
-        HybridCoordinator._CLOUD_TIMEOUT_S = 0.05
+        from core.inference_runner import InferenceRunner
+        original_timeout = InferenceRunner._CLOUD_TIMEOUT_S
+        InferenceRunner._CLOUD_TIMEOUT_S = 0.05
 
         try:
             cmd = Command(text="open notepad", action="OPEN", source="voice")
-            result = await coord._run_cloud(cmd)
+            result = await coord._inference.run_cloud(cmd)
         finally:
-            HybridCoordinator._CLOUD_TIMEOUT_S = original_timeout
+            InferenceRunner._CLOUD_TIMEOUT_S = original_timeout
 
         assert result.startswith("CLARIFY")
         assert "timed out" in result.lower()
@@ -639,15 +640,15 @@ class TestCloudCircuitBreaker:
         coord._cloud.infer = AsyncMock(return_value="SCROLL down")
 
         cmd = Command(text="scroll down", action="SCROLL", source="voice")
-        result = await coord._run_cloud(cmd)
+        result = await coord._inference.run_cloud(cmd)
 
         assert result == "SCROLL down"
 
     @pytest.mark.asyncio
     async def test_cloud_timeout_constant_is_10s(self):
         """_CLOUD_TIMEOUT_S must be exactly 10 seconds."""
-        from core.hybrid_coordinator import HybridCoordinator
-        assert HybridCoordinator._CLOUD_TIMEOUT_S == 10.0
+        from core.inference_runner import InferenceRunner
+        assert InferenceRunner._CLOUD_TIMEOUT_S == 10.0
 
 
 class TestFlareChangeCallback:

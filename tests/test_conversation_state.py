@@ -199,7 +199,7 @@ async def test_route_rewrites_anaphora_before_inference():
         seen.append(cmd.text)
         return "CLICK Save button"
 
-    coord._run_local = fake_local
+    coord._inference.run_local = fake_local
 
     # First turn establishes the antecedent.
     await coord.route(Command(text="click the save button", action="", source="voice"))
@@ -220,7 +220,7 @@ async def test_route_appends_last_action_hint_to_context():
         seen_ctx.append(list(cmd.session_context or []))
         return "TYPE hello"
 
-    coord._run_local = fake_local
+    coord._inference.run_local = fake_local
 
     await coord.route(Command(text="type hello", action="", source="voice"))
     # No hint yet on the first command.
