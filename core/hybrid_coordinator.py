@@ -55,6 +55,7 @@ from core.gate_evaluator import GateEvaluator
 from core.inference_runner import InferenceRunner, _CloudInference, _PENDING_INFERENCE_IDS
 from core.action_executor import ActionExecutor
 from core.workflow_handler import WorkflowHandler
+from core.voice_system_control import VoiceSystemControl
 from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
@@ -434,9 +435,30 @@ class HybridCoordinator:
             tts_speak=lambda text: self._tts_speak(text),
             speak_and_suppress=lambda text: self._speak_and_suppress(text),
         )
-        self._lecture_mode: bool = False
         self._profiler = None    # set via set_profiler()
         self._calibrator = None  # set via set_calibrator()
+        self._voice_control = VoiceSystemControl(
+            # Explicit DI (specs/hybrid-coordinator-decomposition R3): every
+            # dependency is a named accessor, no back-reference to self. Late-
+            # bound for the same reason as the other extracted modules.
+            whisper=lambda: self._whisper,
+            agent_db=lambda: self._agent_db,
+            twin=lambda: self._twin,
+            profiler=lambda: self._profiler,
+            calibrator=lambda: self._calibrator,
+            dev_agent=lambda: self._dev_agent,
+            personal_kb=lambda: self._personal_kb,
+            skill_registry=lambda: self._skill_registry,
+            audit=lambda: self._audit,
+            tts_speak=lambda text: self._tts_speak(text),
+            approval_config=lambda: self._approval_config(),
+            # condition switching / calibration must run on the real
+            # coordinator: ConditionProfiler.apply_to() takes coordinator= as
+            # an external API kwarg, so these stay coordinator methods and
+            # are passed through as narrow delegates rather than moved.
+            switch_condition=lambda condition: self._switch_condition(condition),
+            run_calibration=lambda condition, quick: self._run_calibration(condition, quick),
+        )
         # D8: correction tracking
         self._last_executed_action: str = ""
         self._last_command_id: int = -1
@@ -669,33 +691,6 @@ class HybridCoordinator:
         except Exception:
             return {}
 
-    def _capability_summary(self) -> str:
-        """A concise spoken summary of what the user can ask for (GAP-4).
-
-        Static core abilities plus the DYNAMIC skill intents from the registry
-        and proactivity/personal-KB availability — so the summary never goes
-        stale as skills are added by manifest.
-        """
-        parts = [
-            "I can control the desktop: click, scroll, type, open and close apps, "
-            "take screenshots, and dictate.",
-            "I can write code, run plans, and answer technical questions.",
-            "You can set reminders, like: every morning at 8, brief me. "
-            "Say 'what are my reminders' to review them.",
-        ]
-        if self._personal_kb is not None and getattr(self._personal_kb, "available", False):
-            parts.append("I can search your own documents — ask things like: "
-                         "what did I write in my notes about a topic.")
-        if self._skill_registry is not None and self._skill_registry.has_skills():
-            kws: list[str] = []
-            for action in self._skill_registry.list_actions()[:6]:
-                if action.get("keywords"):
-                    kws.append(action["keywords"][0])
-            if kws:
-                parts.append("Connected skills also let you say: " + "; ".join(kws) + ".")
-        parts.append("Say 'pain day on' when you're flaring and I'll adapt.")
-        return " ".join(parts)
-
     async def _tts_speak(self, text: str) -> None:
         """Speak text via the configured TTS backend (fire-and-forget safe)."""
         try:
@@ -729,126 +724,6 @@ class HybridCoordinator:
                 whisper.suppress(0.8)   # echo tail after playback completes
             except Exception as exc:
                 log.debug("tts: post-speak suppress failed: %s", exc)
-
-    async def _handle_google_connect(self) -> dict:
-        """Start the Google OAuth consent flow by voice (setup or recovery).
-
-        Speaks any setup blocker (libraries / client secret) with the exact fix;
-        otherwise launches the browser consent flow in the background and, on
-        success, hot-starts the google_pim skill — no agent restart.
-        """
-        from skills import google_setup
-        blocker = google_setup.setup_blocker()
-        if blocker:
-            asyncio.create_task(self._tts_speak(blocker))
-            return {"status": "ok", "action": "GOOGLE_CONNECT_BLOCKED",
-                    "reason": blocker}
-        from core.async_utils import fire_and_log
-        asyncio.create_task(self._tts_speak(
-            "Opening Google sign-in in your browser — approve access there, "
-            "and I'll tell you when it's done."))
-        fire_and_log(self._google_connect_flow(), log, label="google connect flow")
-        return {"status": "ok", "action": "GOOGLE_CONNECT_STARTED"}
-
-    async def _google_connect_flow(self) -> None:
-        """Background half of the connect flow: await consent, hot-start, report."""
-        from skills.google_setup import run_auth_flow
-        ok, message = await run_auth_flow()
-        if ok and self._skill_registry is not None:
-            try:
-                started = await self._skill_registry.start_skill("google_pim")
-                if not started:
-                    message += " The skill will start on the next agent launch."
-            except Exception as exc:
-                log.warning("google_pim hot-start failed: %s", exc)
-                message += " The skill will start on the next agent launch."
-        await self._tts_speak(message)
-
-    async def _handle_schedule_command(self, spec: Optional[dict]) -> dict:
-        """Act on a parsed voice schedule / reminder / event-rule / management
-        command (N+2). Writes to AgentDB; the ProactiveScheduler and
-        EventRuleEngine pick the new rows up on their next tick/event."""
-        if spec is None:
-            asyncio.create_task(self._tts_speak(
-                "Sorry, I didn't catch that. Try 'every morning at 8 brief me'."))
-            return {"status": "ok", "action": "SCHEDULE_UNPARSED"}
-        db = self._agent_db
-        if not (db and db.available):
-            return {"status": "ok", "action": "SCHEDULE_NOOP"}
-        kind = spec.get("kind")
-
-        if kind == "schedule":
-            key = f"sched:{spec['goal'][:60]}:{spec['execute_at']:.0f}"
-            await db.enqueue_scheduled_goal(
-                spec["goal"], execute_at=spec["execute_at"],
-                recurrence=spec.get("recurrence"), source_trigger="schedule",
-                idempotency_key=key)
-            asyncio.create_task(self._tts_speak(spec.get("spoken", "Reminder set.")))
-            return {"status": "ok", "action": "SCHEDULE_SET", "goal": spec["goal"]}
-
-        if kind == "event_rule":
-            await db.insert_event_rule(
-                topic_pattern=spec["topic_pattern"], goal_template=spec["goal_template"],
-                name=spec.get("name"), predicate=spec.get("predicate"),
-                action_kind=spec.get("action_kind", "notify"))
-            asyncio.create_task(self._tts_speak(spec.get("spoken", "Rule set.")))
-            return {"status": "ok", "action": "EVENT_RULE_SET"}
-
-        if kind == "list":
-            scheds = await db.list_schedules()
-            rules = await db.list_event_rules()
-            total = len(scheds) + len(rules)
-            if not total:
-                msg = "You have no reminders set."
-            else:
-                parts = [s["goal"][:40] for s in scheds[:5]]
-                parts += [(r.get("name") or r["topic_pattern"]) for r in rules[:5]]
-                msg = f"You have {total} reminder{'s' if total != 1 else ''}: " + "; ".join(parts) + "."
-            asyncio.create_task(self._tts_speak(msg))
-            return {"status": "ok", "action": "SCHEDULE_LIST", "count": total}
-
-        if kind == "cancel":
-            q = (spec.get("query") or "").strip().lower()
-            cancelled = 0
-            for s in await db.list_schedules():
-                if not q or q in s["goal"].lower():
-                    if await db.cancel_schedule(s["id"]):
-                        cancelled += 1
-            asyncio.create_task(self._tts_speak(
-                f"Cancelled {cancelled} reminder{'s' if cancelled != 1 else ''}."))
-            return {"status": "ok", "action": "SCHEDULE_CANCEL", "count": cancelled}
-
-        return {"status": "ok", "action": "SCHEDULE_NOOP"}
-
-    async def _audit_history_summary(self, n: int = 5) -> str:
-        """Query audit.db for the last `n` mcp_call events and return a spoken summary."""
-        if self._audit is None:
-            return "Audit log not available."
-        try:
-            rows = await self._audit.get_recent_mcp_calls(n=n)
-            if not rows:
-                return "No recent actions recorded."
-            parts = []
-            for r in rows:
-                tool = r.get("tool", "unknown")
-                params = r.get("params") or ""
-                # Extract the most readable param for speech
-                try:
-                    import json as _json
-                    p = _json.loads(params) if isinstance(params, str) else params
-                    detail = (
-                        p.get("command", "")[:30] or
-                        p.get("text", "")[:30] or
-                        p.get("title_substring", "")[:30] or
-                        p.get("key", "") or ""
-                    )
-                except Exception:
-                    detail = ""
-                parts.append(f"{tool}{' ' + detail if detail else ''}")
-            return "Last " + str(len(parts)) + " actions: " + ", ".join(parts) + "."
-        except Exception as exc:
-            log.debug("HybridCoordinator._audit_history_summary failed: %s", exc)
-            return "Could not retrieve history."
 
     async def route(self, cmd: Command) -> dict:
         """Route a Command, then durably persist its trace for eval replay (GAP-4).
@@ -1057,256 +932,9 @@ class HybridCoordinator:
                 }
 
         # System control commands — intercept before gate evaluation
-        if cmd.source in ("voice", "voice_local"):
-            # Strip surrounding whitespace AND punctuation: Whisper routinely
-            # appends a period ("pain day on." / "lecture mode on?") which would
-            # otherwise miss every exact-match keyword below.
-            _lower = cmd.text.lower().strip(" \t\n.,!?;:\"'")
-
-            # Lecture mode
-            if _lower in ("start lecture mode", "lecture mode on", "begin lecture mode"):
-                self._lecture_mode = True
-                if self._whisper:
-                    self._whisper.set_lecture_mode(True)
-                log.info("Lecture mode ON")
-                return {"status": "ok", "action": "LECTURE_MODE", "enabled": True}
-            elif _lower in ("stop lecture mode", "lecture mode off", "end lecture mode"):
-                self._lecture_mode = False
-                if self._whisper:
-                    self._whisper.set_lecture_mode(False)
-                log.info("Lecture mode OFF")
-                return {"status": "ok", "action": "LECTURE_MODE", "enabled": False}
-
-            # Lecture notes search — "search my lecture notes for X"
-            elif "lecture notes" in _lower and (
-                _lower.startswith("search") or "search" in _lower
-            ):
-                # Extract query after "for" or "about"
-                for sep in ("for ", "about ", "on "):
-                    if sep in _lower:
-                        search_q = cmd.text[_lower.index(sep) + len(sep):].strip()
-                        break
-                else:
-                    search_q = cmd.text  # fallback: search whole phrase
-                if self._agent_db and self._agent_db.available and search_q:
-                    rows = await self._agent_db.search_lecture_notes(search_q, limit=10)
-                    if rows:
-                        summary = "\n".join(f"- {r['text']}" for r in rows[:5])
-                        log.info("Lecture notes search %r: %d results", search_q, len(rows))
-                        return {"status": "ok", "action": "LECTURE_SEARCH",
-                                "query": search_q, "results": len(rows),
-                                "preview": summary}
-                    else:
-                        return {"status": "ok", "action": "LECTURE_SEARCH",
-                                "query": search_q, "results": 0,
-                                "preview": "No lecture notes found for that query."}
-
-            # Manual pain day toggle
-            elif _lower in ("pain day on", "flare day on", "bad day"):
-                if self._twin:
-                    self._twin.set_manual_pain_day(True)
-                # Immediately relax the recognizer (VAD + logprob floor) for the
-                # next utterance, before route() reconciles on the next command.
-                if self._whisper is not None:
-                    self._whisper.apply_pain_day(True)
-                return {"status": "ok", "action": "PAIN_DAY", "enabled": True}
-            elif _lower in ("pain day off", "flare day off", "feeling better"):
-                if self._twin:
-                    self._twin.set_manual_pain_day(False)
-                if self._whisper is not None:
-                    self._whisper.apply_pain_day(False)
-                return {"status": "ok", "action": "PAIN_DAY", "enabled": False}
-
-            # Condition switching — loads calibrated voice profile for condition
-            _CONDITION_TRIGGERS: dict[str, str] = {
-                "this is a good day":      "good_day",
-                "good day mode":           "good_day",
-                "feeling well":            "good_day",
-                "this is a flare day":     "flare_day",
-                "flare day":               "flare_day",
-                "flare mode":              "flare_day",
-                "this is an allergy day":  "allergy_day",
-                "allergy day":             "allergy_day",
-                "allergy mode":            "allergy_day",
-            }
-            if _lower in _CONDITION_TRIGGERS and self._profiler:
-                condition = _CONDITION_TRIGGERS[_lower]
-                t = asyncio.create_task(self._switch_condition(condition))
-                t.add_done_callback(lambda t: self._on_task_done(t, "_switch_condition"))
-                return {"status": "ok", "action": "CONDITION_SWITCH",
-                        "condition": condition}
-
-            # Calibration triggers
-            _CALIBRATION_TRIGGERS: dict[str, tuple[str, bool]] = {
-                "run voice calibration":   ("good_day",    False),
-                "calibrate my voice":      ("good_day",    False),
-                "quick calibration":       ("good_day",    True),
-                "calibrate flare day":     ("flare_day",   False),
-                "calibrate allergy day":   ("allergy_day", False),
-            }
-            if _lower in _CALIBRATION_TRIGGERS and self._calibrator:
-                condition, quick = _CALIBRATION_TRIGGERS[_lower]
-                t = asyncio.create_task(self._run_calibration(condition, quick))
-                t.add_done_callback(lambda t: self._on_task_done(t, "_run_calibration"))
-                return {"status": "ok", "action": "CALIBRATION_START",
-                        "condition": condition, "quick": quick}
-
-            # ── Goal-level agent control ──────────────────────────────────────
-
-            # "hey agent status" / "what are you doing"
-            if _lower in ("hey agent status", "what are you doing", "agent status",
-                          "status", "what's happening"):
-                if self._dev_agent is not None:
-                    ps = self._dev_agent.get_plan_status()
-                    if ps.get("active"):
-                        msg = (f"Running step {ps['step']} of {ps['total_steps']}: "
-                               f"{ps.get('goal', '')[:50]}")
-                    else:
-                        msg = "No active task."
-                    asyncio.create_task(self._tts_speak(msg))
-                    return {"status": "ok", "action": "AGENT_STATUS", "plan": ps}
-
-            # "hey agent stop" / "cancel task" / "cancel agent"
-            elif _lower in ("hey agent stop", "cancel task", "cancel agent", "stop agent",
-                            "stop the agent", "cancel the task"):
-                if self._dev_agent is not None:
-                    self._dev_agent.request_cancel()
-                    asyncio.create_task(self._tts_speak("Cancelling after current step."))
-                    return {"status": "ok", "action": "AGENT_CANCEL"}
-                return {"status": "ok", "action": "AGENT_CANCEL", "note": "no active agent"}
-
-            # "resume task" — offer to resume the most recent interrupted plan
-            # (post-crash recovery; advertised by the crash-notice TTS in
-            # main.py). Safe to fire-and-forget: resume_pending_plan() is
-            # itself gated on an explicit spoken confirmation, so this phrase
-            # alone can never re-run a plan with destructive steps.
-            elif _lower in ("resume task", "resume the task", "hey agent resume",
-                            "resume work", "resume interrupted task"):
-                pending: list = []
-                if self._agent_db and self._agent_db.available:
-                    pending = await self._agent_db.get_interrupted_runs(limit=1)
-                if self._dev_agent is None or not pending:
-                    asyncio.create_task(self._tts_speak("No interrupted task to resume."))
-                    return {"status": "ok", "action": "AGENT_RESUME", "offered": False}
-                t = asyncio.create_task(self._dev_agent.resume_pending_plan())
-                t.add_done_callback(lambda t: self._on_task_done(t, "resume_pending_plan"))
-                return {"status": "ok", "action": "AGENT_RESUME", "offered": True,
-                        "goal": pending[0].get("goal", "")[:80]}
-
-            # "hey agent authorize <goal>" — create a standalone goal session
-            elif _lower.startswith("hey agent authorize ") or _lower.startswith("authorize "):
-                goal_text = (cmd.text.split("authorize ", 1)[-1]).strip(" .,!?\"'")
-                if goal_text:
-                    from core.goal_session import GoalSessionStore
-                    duration = self._approval_config().get("goal_session_duration_s", 900)
-                    max_act = self._approval_config().get("goal_session_max_actions", 50)
-                    GoalSessionStore.create(goal=goal_text, domain="plan",
-                                            duration_s=duration, max_actions=max_act)
-                    # Durable goal backlog (gap D): persist the goal so it survives a
-                    # crash/restart, then kick the drainer to run it. idempotency_key
-                    # is unique per authorize so a re-issue can't double-queue.
-                    if self._agent_db and self._agent_db.available:
-                        import time as _t
-                        key = f"authorize:{goal_text[:80]}:{_t.time():.0f}"
-                        await self._agent_db.enqueue_goal(
-                            goal_text, domain="plan", idempotency_key=key,
-                        )
-                        if self._dev_agent is not None:
-                            asyncio.create_task(self._dev_agent.drain_goal_queue())
-                    mins = int(duration / 60)
-                    asyncio.create_task(
-                        self._tts_speak(f"Goal authorized for {mins} minutes: {goal_text[:40]}")
-                    )
-                    return {"status": "ok", "action": "GOAL_AUTHORIZE", "goal": goal_text}
-
-            # ── Proactive scheduling / reminders / event rules (N+2) ──────────
-            elif is_schedule_phrase(_lower):
-                import time as _t
-                return await self._handle_schedule_command(
-                    parse_schedule(cmd.text, _t.time()))
-
-            # "hey agent history" / "what did you do"
-            elif _lower in ("hey agent history", "what did you do", "agent history",
-                            "show history", "recent actions"):
-                summary = await self._audit_history_summary(n=5)
-                asyncio.create_task(self._tts_speak(summary))
-                return {"status": "ok", "action": "AGENT_HISTORY", "summary": summary}
-
-            # "review queue" / "what needs review" — dev plans that exhausted
-            # their replan/step budget, were rolled back, and now need a human
-            # decision (R-10 escalation queue)
-            elif _lower in ("review queue", "show review queue", "what needs review",
-                            "hey agent review queue", "show escalations",
-                            "pending reviews"):
-                items: list = []
-                total = 0
-                if self._agent_db and self._agent_db.available:
-                    total = await self._agent_db.count_pending_escalations()
-                    items = await self._agent_db.get_pending_escalations(limit=5)
-                if total:
-                    newest = items[0]
-                    msg = (f"{total} plan{'s' if total != 1 else ''} need review. "
-                           f"Most recent: {newest['goal'][:50]}, "
-                           f"{newest['reason'].replace('_', ' ')}.")
-                else:
-                    msg = "Review queue is empty."
-                asyncio.create_task(self._tts_speak(msg))
-                return {"status": "ok", "action": "AGENT_ESCALATIONS",
-                        "count": total, "items": items}
-
-            # "clear review queue" — acknowledge every pending escalation
-            elif _lower in ("clear review queue", "dismiss reviews",
-                            "clear escalations"):
-                cleared = 0
-                if self._agent_db and self._agent_db.available:
-                    cleared = await self._agent_db.resolve_escalations(
-                        status="acknowledged")
-                asyncio.create_task(self._tts_speak(
-                    f"Cleared {cleared} review item{'s' if cleared != 1 else ''}."))
-                return {"status": "ok", "action": "AGENT_ESCALATIONS_CLEAR",
-                        "count": cleared}
-
-            # Mic mute — voice one-way; unmute via iPad mic_mute message
-            elif _lower in ("mute mic", "mute microphone", "mic off", "silence mic"):
-                if self._whisper is not None:
-                    self._whisper.set_muted(True)
-                asyncio.create_task(self._tts_speak("Microphone muted. Tap the iPad to unmute."))
-                return {"status": "ok", "action": "MIC_MUTE", "muted": True}
-
-            # Capability discovery — "help" / "what can you do" (GAP-4)
-            elif _lower in ("help", "what can you do", "what can i say",
-                            "list your skills"):
-                summary = self._capability_summary()
-                asyncio.create_task(self._tts_speak(summary))
-                return {"status": "ok", "action": "HELP", "summary": summary}
-
-            # Personal KB maintenance — "index my notes"
-            elif _lower in ("index my notes", "reindex my notes",
-                            "index my documents"):
-                if self._personal_kb is not None and getattr(
-                        self._personal_kb, "available", False):
-                    from core.async_utils import fire_and_log
-                    if self._personal_kb.get_status().get("paused"):
-                        asyncio.create_task(self._tts_speak(
-                            "Indexing is paused during the flare — I'll be able "
-                            "to index after it passes."))
-                        return {"status": "ok", "action": "PERSONAL_KB_PAUSED"}
-                    fire_and_log(self._personal_kb.index(), log,
-                                 label="voice personal_kb index")
-                    asyncio.create_task(self._tts_speak(
-                        "Okay, indexing your documents in the background."))
-                    return {"status": "ok", "action": "PERSONAL_KB_INDEX"}
-                asyncio.create_task(self._tts_speak(
-                    "The personal knowledge base isn't available."))
-                return {"status": "ok", "action": "PERSONAL_KB_UNAVAILABLE"}
-
-            # Google PIM auth — "connect google" / "reconnect google".
-            # One spoken phrase + one browser consent click replaces the old
-            # env-var + script + manifest-edit setup; also the recovery path
-            # the expired-token messages name.
-            elif _lower in ("connect google", "reconnect google",
-                            "connect gmail", "set up gmail", "set up google"):
-                return await self._handle_google_connect()
+        vsc_result = await self._voice_control.maybe_handle(cmd)
+        if vsc_result is not None:
+            return vsc_result
 
         t0 = time.monotonic()
         route_label = "local"

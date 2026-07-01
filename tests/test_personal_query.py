@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from inference.dev_agent import DevAgent, AgentStep
-from core.hybrid_coordinator import HybridCoordinator, _is_system_control_voice
+from core.hybrid_coordinator import _is_system_control_voice
+from core.voice_system_control import VoiceSystemControl
 
 
 @pytest.fixture(autouse=True)
@@ -118,11 +119,22 @@ async def test_search_personal_without_kb():
 # Coordinator — help, index-my-notes, force-local
 # ---------------------------------------------------------------------------
 
-def _coord():
-    c = HybridCoordinator.__new__(HybridCoordinator)
-    c._skill_registry = None
-    c._personal_kb = None
-    return c
+def _coord() -> VoiceSystemControl:
+    box = {"skill_registry": None, "personal_kb": None}
+
+    async def _noop(*a, **k):
+        return None
+
+    vsc = VoiceSystemControl(
+        whisper=lambda: None, agent_db=lambda: None, twin=lambda: None,
+        profiler=lambda: None, calibrator=lambda: None, dev_agent=lambda: None,
+        personal_kb=lambda: box["personal_kb"],
+        skill_registry=lambda: box["skill_registry"],
+        audit=lambda: None, tts_speak=_noop, approval_config=lambda: {},
+        switch_condition=_noop, run_calibration=_noop,
+    )
+    vsc._box = box  # test-only handle for mutating skill_registry/personal_kb
+    return vsc
 
 
 def test_help_summary_includes_dynamic_skills_and_kb():
@@ -131,8 +143,8 @@ def test_help_summary_includes_dynamic_skills_and_kb():
     reg.has_skills = MagicMock(return_value=True)
     reg.list_actions = MagicMock(return_value=[
         {"keywords": ["next meeting"]}, {"keywords": ["unread email"]}])
-    c._skill_registry = reg
-    c._personal_kb = MagicMock(available=True)
+    c._box["skill_registry"] = reg
+    c._box["personal_kb"] = MagicMock(available=True)
     s = c._capability_summary()
     assert "next meeting" in s and "your own documents" in s and "reminders" in s
 
