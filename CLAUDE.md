@@ -109,7 +109,7 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 > Full reference (voices, paths, engines, mic approval flow): [docs/tts.md](docs/tts.md)
 
-**Default runtime backend: Kokoro** (local ONNX, `tts_backend: "kokoro"` in `approval_config.json`, voice `af_bella`, CPU). Switch backends via `tts_backend` (`kokoro` | `polly` | `chatterbox` | `sapi`). **Note:** `approval_hook.py` speaks via Amazon Polly directly (hardcoded `_polly_speak`), independent of `tts_backend`.
+**Default runtime backend: Kokoro** (local ONNX, `tts_backend: "kokoro"` in `approval_config.json`, voice `af_bella`, CPU). Switch backends via `tts_backend` (`kokoro` | `polly` | `sapi`). **Note:** `approval_hook.py` speaks via Amazon Polly directly (hardcoded `_polly_speak`), independent of `tts_backend`.
 
 ## WebSocket Protocol
 

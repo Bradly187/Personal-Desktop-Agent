@@ -9,6 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D019 — 2026-07-01 — Chatterbox TTS backend removed; Kokoro covers the use case](#d019)
 - [D017 — 2026-06-28 — Pre-commit hook is the mechanical doc-drift enforcement boundary](#d017)
 - [D016 — 2026-06-28 — /doc-update is a slash command, not a Stop hook](#d016)
 - [D015 — 2026-06-28 — DA_CLOUD_PLAN routes plan domain only, not full DevAgent](#d015)
@@ -30,6 +31,21 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D019 — Chatterbox TTS backend removed; Kokoro covers the use case {#d019}
+**Date:** 2026-07-01
+**Chose:** Delete `tts/chatterbox_tts.py` and all config/requirement references.
+**Rejected:** Keep Chatterbox as a documented optional path.
+**Why:** Chatterbox was added before Kokoro existed. It hard-pins `torch==2.6.0`
+(incompatible with the current `torch 2.12.0` stack), causing it to be moved to
+"install-separately" in PR #125. `chatterbox_voice_ref` has been `null` since
+initial config — the zero-shot voice-cloning feature was never exercised.
+Kokoro (local ONNX, default since 2026-06-23) covers local/offline/zero-cost TTS
+without the torch conflict, with GPU auto-selection on `onnxruntime-gpu`. Keeping
+Chatterbox is dead code maintenance burden on a production accessibility dependency.
+**Ref:** `specs/chatterbox-removal/`, PR #125 (original demotion to install-separately)
 
 ---
 

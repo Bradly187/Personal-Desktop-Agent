@@ -250,12 +250,11 @@ Line counts are from `wc -l` on the live files (2026-06-07).
 | 131 | `coding_eval.py` | Coding task evaluation |
 | 98 | `token_budget_sweep.py` | Token budget optimization sweeps |
 
-### `tts/` — Text-to-speech (2 modules)
+### `tts/` — Text-to-speech
 
 | Lines | Module | Purpose |
 |-------|--------|---------|
-| 288 | `polly_stream.py` | AWS Polly bidirectional streaming; OGG decode; Chatterbox dispatch |
-| 171 | `chatterbox_tts.py` | Local GPU TTS (RTX 5090); zero-shot voice cloning |
+| 288 | `polly_stream.py` | AWS Polly bidirectional streaming; OGG decode; backend dispatch (kokoro/sapi) |
 
 ### `mcp_server/` — MCP integration (6 modules)
 
@@ -387,7 +386,6 @@ hash-chaining protection (deferred — single-user home LAN scope).
 | faster-whisper | 1.2.1 | Local GPU transcription, large-v3 model |
 | Silero VAD | — | Pre-filter before Whisper |
 | AWS Polly | SDK v3 | Danielle neural, Generative engine 24 kHz; Node.js sidecar |
-| Chatterbox TTS | 0.1.3 | Local GPU TTS alternative; zero-shot voice cloning |
 
 ### Gesture & Vision
 
@@ -648,7 +646,7 @@ Degradation is layered throughout:
 |-----------|---------|-------------|
 | Coordinate resolution | UIAutomation BFS | Vision grounder → OCR → cursor + CLARIFY |
 | Vision grounder | qwen3-vl:30b (local) | claude-sonnet-4-6 (cloud) |
-| TTS | Chatterbox (local GPU) | AWS Polly → `_polly_speak()` direct (sidecar down) |
+| TTS | Kokoro (local ONNX) | AWS Polly → `_polly_speak()` direct (sidecar down) |
 | Whisper | Local GPU large-v3 | Laptop-offload remote Whisper |
 | RAG embedder | VLLMEmbedder | all-MiniLM-L6-v2 → Jaccard |
 | Routing | Local LLM | Anthropic cloud (gate fail) → CLARIFY (cloud timeout) |

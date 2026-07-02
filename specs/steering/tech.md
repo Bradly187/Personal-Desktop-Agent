@@ -55,7 +55,6 @@
 | Ollama gemma4:12b (general) | RTX 5090 | — | ~9.1 GB |
 | EasyOCR | RTX 5090 | < 200 ms | ~1 GB |
 | Silero VAD | CPU | < 1 ms/chunk | 0 |
-| Chatterbox TTS | RTX 5090 | ~300 ms first token | ~2 GB |
 
 ## MCP Integration Layer
 

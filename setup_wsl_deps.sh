@@ -41,7 +41,7 @@ python -c "import vllm; print('vLLM', vllm.__version__)" 2>/dev/null \
          warn "  pip install vllm  (see vllm_setup.bat for CUDA wheel instructions)"; }
 
 # ── Pre-install build prerequisites ──────────────────────────────────────────
-# Several packages (pkuseg via chatterbox, mediapipe, etc.) require numpy and
+# Several packages (mediapipe, etc.) require numpy and
 # scipy to be present in the venv *before* their own wheels are built.
 # pip's isolated build env won't find these even if vLLM installed them —
 # installing explicitly here guarantees the main requirements pass succeeds.

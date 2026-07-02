@@ -340,7 +340,6 @@ class PollyStreamClient:
 # ---------------------------------------------------------------------------
 
 _default_client: Optional[PollyStreamClient] = None
-_chatterbox_client = None  # lazily created on first chatterbox request
 _sapi_client = None        # lazily created on first sapi request
 _kokoro_client = None      # lazily created on first kokoro request
 
@@ -364,12 +363,12 @@ def _read_tts_config() -> dict:
 def get_client(voice: str = "Danielle", backend: str | None = None):
     """Return the module-level TTS client singleton.
 
-    backend can be "kokoro", "polly", "chatterbox", or "sapi"/"windows".
+    backend can be "kokoro", "polly", or "sapi"/"windows".
     If None, the value of tts_backend in approval_config.json is used
     (config default is "kokoro"; the hardcoded fallback here is "polly"
     when the key is absent).
     """
-    global _default_client, _chatterbox_client, _sapi_client
+    global _default_client, _sapi_client
 
     if backend is None:
         backend = _read_tts_config().get("tts_backend", "polly")
@@ -385,17 +384,6 @@ def get_client(voice: str = "Danielle", backend: str | None = None):
             )
         return _sapi_client
 
-    if backend == "chatterbox":
-        if _chatterbox_client is None:
-            cfg = _read_tts_config()
-            from tts.chatterbox_tts import ChatterboxClient
-            _chatterbox_client = ChatterboxClient(
-                exaggeration=cfg.get("chatterbox_exaggeration", 0.5),
-                cfg_weight=cfg.get("chatterbox_cfg_weight", 0.5),
-                audio_prompt_path=cfg.get("chatterbox_voice_ref") or None,
-            )
-        return _chatterbox_client
-
     if backend == "kokoro":
         global _kokoro_client
         if _kokoro_client is None:
@@ -408,6 +396,12 @@ def get_client(voice: str = "Danielle", backend: str | None = None):
         return _kokoro_client
 
     # Default: Polly via Node.js sidecar
+    if backend != "polly":
+        # Unknown backend string (e.g. stale "chatterbox" config) — degrade to
+        # Polly audibly in the logs rather than silently.
+        log.warning(
+            "get_client: unknown tts_backend %r — falling back to Polly", backend
+        )
     if _default_client is None:
         _default_client = PollyStreamClient(voice=voice)
     return _default_client
