@@ -2509,6 +2509,34 @@ class DevAgent:
         n = min(len(steps), self.MAX_STEPS)
         message = f"I'll run {n} step{'s' if n != 1 else ''}: {verb_summary}. Approve all?"
 
+        if os.environ.get("DA_PLAN_PREVIEW", "0").strip().lower() in ("1", "true", "yes", "on"):
+            threshold = int(os.environ.get("DA_PLAN_PREVIEW_THRESHOLD", "3"))
+            if len(steps) >= threshold:
+                try:
+                    actions = []
+                    for s in steps[:self.MAX_STEPS]:
+                        if s.action:
+                            args_trunc = str(s.args)[:80] if s.args else ""
+                            actions.append(f"Step {s.step_num}: {s.action} {args_trunc}")
+                    prompt = (
+                        f"Goal: {goal}\n"
+                        f"Steps proposed:\n" + "\n".join(actions) + "\n\n"
+                        "Provide a 1-sentence plain English spoken summary of what this plan intends to do. "
+                        "Do NOT list the API verbs (like write_file). Just summarize the outcome."
+                    )
+                    res = await asyncio.wait_for(
+                        self._router.infer(domain="plan", user_text=prompt, context=None),
+                        timeout=5.0
+                    )
+                    if res and res.ok and res.text:
+                        preview = res.text.strip()
+                        if preview.startswith('"') and preview.endswith('"'):
+                            preview = preview[1:-1]
+                        if preview:
+                            message = f"{preview} Approve all?"
+                except Exception as exc:
+                    log.warning("DevAgent._approve_plan_upfront: preview generation failed: %s", exc)
+
         log.info("DevAgent: requesting plan approval — %s", message)
 
         plan_is_destructive = any(

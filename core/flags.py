@@ -45,6 +45,8 @@ _S = FlagSpec
 
 REGISTRY: dict[str, FlagSpec] = {f.name: f for f in (
     # ── dev-agent loop (inference/dev_agent.py) ─────────────────────────────
+    _S("DA_PLAN_PREVIEW", "bool", "0", "TTS voice preview for large plans"),
+    _S("DA_PLAN_PREVIEW_THRESHOLD", "int", "3", "min steps to trigger plan preview"),
     _S("DA_PLAN_REPAIR", "bool", "1", "re-prompt planner on unparseable plan"),
     _S("DA_PLAN_REPAIR_MAX", "int", "1", "max plan auto-repair attempts"),
     _S("DA_CRITIC", "bool", "1", "review diffs pre-disk-commit"),

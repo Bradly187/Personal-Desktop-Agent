@@ -142,6 +142,7 @@ by `tests/test_flags_registry.py`.
 | `DA_TRAJECTORY_REDUCE` | ON | Compact trajectory tokens; flipped to ON despite ~12.5pt ordering regression | D011 | `specs/trajectory-reduction/` |
 | `DA_CRITIC` | ON | Review diffs pre-disk-commit; REVISE drives replan | D007 | `specs/dev-agent-critic/` |
 | `DA_TESTER` | ON | Auto-pytest after `.py` writes; failure = safe-observation, never rollback | D008 | `specs/dev-agent-critic/` |
+| `DA_PLAN_PREVIEW` | OFF | Voice preview intent for large plans (threshold defaults to 3) | D018 | `specs/plan-preview-voice-gate/` |
 | `DA_PLAN_REPAIR` | ON | Re-prompt planner on unknown-verb / unparseable plan (max `DA_PLAN_REPAIR_MAX=1`) | — | `specs/dev-agent-plan-contract/` |
 | `DA_REPO_CONTEXT` | OFF | Inject stable repo facts (AGENTS.md/CLAUDE.md, layout, git) ahead of RAG | — | `specs/repo-context-ingestion/` |
 | `DA_TRAJECTORY_DEDUP` | ON | Drop superseded duplicate reads from trajectory | — | `specs/trajectory-read-dedup/` |
