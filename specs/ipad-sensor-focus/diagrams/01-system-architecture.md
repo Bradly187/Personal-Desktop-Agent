@@ -128,7 +128,7 @@ flowchart LR
     subgraph aws["AWS (fallback)"]
         bedrock["Bedrock\nClaude Haiku"]
         transcribe["Transcribe"]
-        polly["Polly / Chatterbox"]
+        polly["Polly / Kokoro / SAPI"]
     end
 
     app <-->|"WebSocket :8765 (WiFi)\n26 iPad→PC types including\ndepth_frame + camera_frame"| service

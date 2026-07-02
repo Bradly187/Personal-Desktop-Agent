@@ -60,6 +60,9 @@ except ImportError:
 
 _ENCODER = None   # SentenceTransformer instance; None until first use
 _ENCODER_FAILED = False  # set True if import/load fails so we don't retry
+# Lock prevents two concurrent first-callers from both entering
+# asyncio.to_thread(_load_encoder_sync) and loading the model twice (#13).
+_ENCODER_LOCK = asyncio.Lock()
 
 
 def _load_encoder_sync():
@@ -71,19 +74,30 @@ def _load_encoder_sync():
 
 
 async def _get_encoder() -> Optional[object]:
-    """Return the cached encoder, loading it on first call (non-blocking)."""
+    """Return the cached encoder, loading it on first call (non-blocking).
+
+    Uses a double-checked lock so only one coroutine pays the model-load cost
+    even when multiple callers race on the first call (#13).
+    """
     global _ENCODER, _ENCODER_FAILED
+    # Fast path: already loaded or permanently failed.
     if _ENCODER is not None:
         return _ENCODER
     if _ENCODER_FAILED:
         return None
-    try:
-        _ENCODER = await asyncio.to_thread(_load_encoder_sync)
-        return _ENCODER
-    except Exception as exc:
-        _ENCODER_FAILED = True
-        log.debug("MiniLM unavailable — falling back to Jaccard scoring: %s", exc)
-        return None
+    async with _ENCODER_LOCK:
+        # Re-check inside the lock: another coroutine may have loaded it.
+        if _ENCODER is not None:
+            return _ENCODER
+        if _ENCODER_FAILED:
+            return None
+        try:
+            _ENCODER = await asyncio.to_thread(_load_encoder_sync)
+            return _ENCODER
+        except Exception as exc:
+            _ENCODER_FAILED = True
+            log.debug("MiniLM unavailable — falling back to Jaccard scoring: %s", exc)
+            return None
 
 
 def _encode_sync(text: str, encoder) -> bytes:

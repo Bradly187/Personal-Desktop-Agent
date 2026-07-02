@@ -170,21 +170,19 @@ def test_git_commit_staging_failure_raises_runtimeerror(monkeypatch):
 
 async def test_gate3_is_async_and_returns_bool(monkeypatch):
     import core.vram as vram
-    from core.hybrid_coordinator import HybridCoordinator
-
-    coord = HybridCoordinator.__new__(HybridCoordinator)
-    coord._vram_cache = None
-    coord._vram_cache_ttl = 2.0
+    from core.gate_evaluator import GateEvaluator
 
     class _Cfg:
         vram_free_min_gb = 8.0
-    coord._cfg = _Cfg()
+
+    gates = GateEvaluator(
+        _Cfg(), run_local=None, run_cloud=None, approval_config=lambda: {})
 
     monkeypatch.setattr(vram, "free_vram_gb", lambda: 20.0)   # plenty free
-    assert await coord._gate3() is True
+    assert await gates.gate3() is True
     monkeypatch.setattr(vram, "free_vram_gb", lambda: 2.0)    # tight
-    coord._vram_cache = None
-    assert await coord._gate3() is False
+    gates._vram_cache = None
+    assert await gates.gate3() is False
 
 
 # ---------------------------------------------------------------------------

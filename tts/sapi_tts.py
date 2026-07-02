@@ -3,9 +3,9 @@
 Uses the built-in Windows Speech API (SAPI 5) via win32com (pywin32, already a
 project dependency). No network, no GPU, no model download — it speaks through
 the OS voices (Settings → Time & Language → Speech). The voice is more robotic
-than Polly/Chatterbox, but it needs no install and works on any Windows box.
+than Polly, but it needs no install and works on any Windows box.
 
-Mirrors the PollyStreamClient / ChatterboxClient interface so
+Mirrors the PollyStreamClient interface so
 polly_stream.get_client() can dispatch here when tts_backend == "sapi".
 
 Thread-safety: speak_sync() creates the SpVoice inside the calling thread with

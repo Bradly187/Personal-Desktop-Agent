@@ -153,7 +153,7 @@ Cursor gravity (magnetic snap toward clickable UI targets) assists levels 2–3,
 ├── desktop/                 # ui_automation, vision_grounder, action_verifier,
 │                            #   target_cache, flick_engine
 ├── calibration/             # acoustic_profiler, voice_calibrator, gyro_bias
-├── tts/ + tts_service/      # Polly streaming sidecar (Node) + local Chatterbox GPU TTS
+├── tts/ + tts_service/      # Polly streaming sidecar (Node) + Kokoro local ONNX TTS
 ├── monitoring/              # metrics, tracing (DA_TRACE), benchmark_models
 ├── mcp_server/              # MCP stdio server + tool modules (mouse, keyboard,
 │                            #   screen, windows, handwriting)

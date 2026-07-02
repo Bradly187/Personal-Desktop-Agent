@@ -247,16 +247,20 @@ def test_operational_read_helpers(tmp_path):
 
 
 def test_no_mutation_routes_for_operational_panels():
-    """R8.3 — the dashboard registers GET-only; no approve/deny (or any) mutation
-    route exists. Guards against a future POST that would bypass the voice gate.
-    Sole allowed exception: the chat-attachment /upload POST
-    (specs/chat-context-attachments) — it feeds chat context, not the panels."""
+    """R8.3 — the operational/approval surface is GET-only; no approve/deny (or any
+    mutation) route exists that could bypass the voice gate. The sole permitted
+    mutation route is ``/upload`` (chat file attachments, specs/chat-context-attachments
+    R2.1) — a hardened endpoint that never touches the approval gate. Any new
+    mutation route on an ``/api/*`` or approve/deny path must fail this guard."""
     import inspect
+    import re
     from core.chat_server import ChatServer
     src = inspect.getsource(ChatServer.start)
     assert 'add_get("/api/escalations"' in src
     assert 'add_get("/api/goals"' in src
     assert 'add_get("/api/corrections"' in src
-    mutations = [ln.strip() for ln in src.splitlines()
-                 if any(m in ln for m in ("add_post", "add_put", "add_delete"))]
-    assert mutations == ['app.router.add_post("/upload", self._upload_handler)']
+    # Every mutation route registered must be on the allowlist of known-safe paths.
+    _MUTATION_ALLOWLIST = {"/upload"}
+    mutation_paths = re.findall(r'add_(?:post|put|delete)\(\s*"([^"]+)"', src)
+    assert set(mutation_paths) <= _MUTATION_ALLOWLIST, (
+        f"unexpected mutation route(s): {set(mutation_paths) - _MUTATION_ALLOWLIST}")

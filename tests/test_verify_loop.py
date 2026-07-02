@@ -191,9 +191,9 @@ def _voice_click(text="click submit") -> Command:
 async def test_resolve_miss_converts_to_clarify():
     ex = _ScriptedExecutor(["resolve_miss"])
     coord = _coord(ex)
-    coord._ground_target = AsyncMock(return_value=None)  # no vision coords
+    coord._action_executor.ground_target = AsyncMock(return_value=None)  # no vision coords
 
-    result = await coord._execute_action("CLICK submit", _voice_click(), route_label="local")
+    result = await coord._action_executor.execute_action("CLICK submit", _voice_click(), route_label="local")
 
     assert result["status"] == "resolve_miss"          # reported as a failure to route()
     assert result["spoke_clarification"] is True
@@ -206,9 +206,9 @@ async def test_resolve_miss_converts_to_clarify():
 async def test_verify_failed_no_vision_converts_to_clarify():
     ex = _ScriptedExecutor(["verify_failed"])
     coord = _coord(ex)
-    coord._ground_target = AsyncMock(return_value=None)
+    coord._action_executor.ground_target = AsyncMock(return_value=None)
 
-    result = await coord._execute_action("CLICK submit", _voice_click(), route_label="local")
+    result = await coord._action_executor.execute_action("CLICK submit", _voice_click(), route_label="local")
 
     assert result["status"] == "verify_failed"
     assert result["spoke_clarification"] is True
@@ -219,9 +219,9 @@ async def test_vision_click_verify_failed_retries_via_uia_then_ok():
     # First (vision-coords) click verify-fails; the one retry succeeds.
     ex = _ScriptedExecutor(["verify_failed", "ok"])
     coord = _coord(ex)
-    coord._ground_target = AsyncMock(return_value=(100, 200))  # vision succeeds
+    coord._action_executor.ground_target = AsyncMock(return_value=(100, 200))  # vision succeeds
 
-    result = await coord._execute_action("CLICK submit", _voice_click(), route_label="local")
+    result = await coord._action_executor.execute_action("CLICK submit", _voice_click(), route_label="local")
 
     assert result["status"] == "ok"
     action_calls = [c for c in ex.calls if c.action == "CLICK"]
@@ -235,9 +235,9 @@ async def test_vision_click_double_verify_failed_clarifies():
     # Vision click fails, the UIA retry also fails → honest CLARIFY.
     ex = _ScriptedExecutor(["verify_failed", "verify_failed"])
     coord = _coord(ex)
-    coord._ground_target = AsyncMock(return_value=(100, 200))
+    coord._action_executor.ground_target = AsyncMock(return_value=(100, 200))
 
-    result = await coord._execute_action("CLICK submit", _voice_click(), route_label="local")
+    result = await coord._action_executor.execute_action("CLICK submit", _voice_click(), route_label="local")
 
     assert result["status"] == "verify_failed"
     assert len([c for c in ex.calls if c.action == "CLICK"]) == 2
@@ -247,9 +247,9 @@ async def test_vision_click_double_verify_failed_clarifies():
 async def test_successful_click_does_not_clarify():
     ex = _ScriptedExecutor(["ok"])
     coord = _coord(ex)
-    coord._ground_target = AsyncMock(return_value=(100, 200))
+    coord._action_executor.ground_target = AsyncMock(return_value=(100, 200))
 
-    result = await coord._execute_action("CLICK submit", _voice_click(), route_label="local")
+    result = await coord._action_executor.execute_action("CLICK submit", _voice_click(), route_label="local")
 
     assert result["status"] == "ok"
     assert not any(c.action == "CLARIFY" for c in ex.calls)

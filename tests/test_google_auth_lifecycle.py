@@ -20,7 +20,8 @@ import pytest
 from skills import google_setup as gs
 from skills.servers.google_pim_server import _auth_guard, _NotAuthorized, RECONNECT_MSG
 from core.email_watcher import EmailWatcher
-from core.hybrid_coordinator import HybridCoordinator, _is_system_control_voice
+from core.hybrid_coordinator import _is_system_control_voice
+from core.voice_system_control import VoiceSystemControl
 
 _MANIFEST_DIR = Path(__file__).parent.parent / "skills" / "manifests"
 
@@ -220,10 +221,21 @@ def _silence_tts(monkeypatch):
         speak=AsyncMock(), speak_sync=lambda *_: True))
 
 
-def _coord():
-    c = HybridCoordinator.__new__(HybridCoordinator)
-    c._skill_registry = None
-    return c
+def _coord() -> VoiceSystemControl:
+    box = {"skill_registry": None}
+
+    async def _noop(*a, **k):
+        return None
+
+    vsc = VoiceSystemControl(
+        whisper=lambda: None, agent_db=lambda: None, twin=lambda: None,
+        profiler=lambda: None, calibrator=lambda: None, dev_agent=lambda: None,
+        personal_kb=lambda: None, skill_registry=lambda: box["skill_registry"],
+        audit=lambda: None, tts_speak=_noop, approval_config=lambda: {},
+        switch_condition=_noop, run_calibration=_noop,
+    )
+    vsc._box = box  # test-only handle for mutating skill_registry
+    return vsc
 
 
 def test_connect_phrases_are_system_control():
@@ -255,11 +267,11 @@ async def test_connect_flow_hot_starts_on_success(monkeypatch):
     monkeypatch.setattr(gsetup, "run_auth_flow",
                         AsyncMock(return_value=(True, "Google connected.")))
     c = _coord()
-    c._skill_registry = MagicMock()
-    c._skill_registry.start_skill = AsyncMock(return_value=True)
+    c._box["skill_registry"] = MagicMock()
+    c._box["skill_registry"].start_skill = AsyncMock(return_value=True)
     c._tts_speak = AsyncMock()
     await c._google_connect_flow()
-    c._skill_registry.start_skill.assert_awaited_once_with("google_pim")
+    c._box["skill_registry"].start_skill.assert_awaited_once_with("google_pim")
     assert "connected" in c._tts_speak.await_args.args[0].lower()
 
 

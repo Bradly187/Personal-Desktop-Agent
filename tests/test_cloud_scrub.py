@@ -1,9 +1,9 @@
-"""Regression test for HybridCoordinator._run_cloud secret-scrub path.
+"""Regression test for InferenceRunner.run_cloud secret-scrub path.
 
-The migration's _run_cloud rebuilt the Command with a nonexistent `_gaze_coords`
+The migration's run_cloud rebuilt the Command with a nonexistent `_gaze_coords`
 kwarg, so every cloud call that followed a ContentFilter redaction raised
 TypeError. The existing test missed it because its payload tripped Gate 0
-(forced local) and never reached _run_cloud. This drives _run_cloud directly.
+(forced local) and never reached run_cloud. This drives run_cloud directly.
 """
 
 import asyncio
@@ -33,7 +33,7 @@ def test_run_cloud_scrub_path_rebuilds_command_without_typeerror():
 
     cmd = Command(text="my api key is sk-abc123", action="CLARIFY",
                   source="voice", gaze_coords=(10, 20))
-    out = asyncio.run(coord._run_cloud(cmd))  # must not raise TypeError
+    out = asyncio.run(coord._inference.run_cloud(cmd))  # must not raise TypeError
 
     assert out == "CLICK ok"
     assert coord._cloud.received is not None
@@ -52,6 +52,6 @@ def test_run_cloud_without_findings_passes_through():
     coord._cloud = _Cloud()
 
     cmd = Command(text="open the browser", action="OPEN", source="voice")
-    out = asyncio.run(coord._run_cloud(cmd))
+    out = asyncio.run(coord._inference.run_cloud(cmd))
     assert out == "CLICK ok"
     assert coord._cloud.received.text == "open the browser"  # untouched

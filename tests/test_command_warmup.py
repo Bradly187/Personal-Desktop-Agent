@@ -178,3 +178,54 @@ async def test_base_warmup_is_noop_for_other_backends():
     server = VLLMServerInference()
     ok = await server.warmup()
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# _chat structured-output pass-through (specs/dev-agent-plan-fidelity R1.1)
+# ---------------------------------------------------------------------------
+
+class _ChatResp:
+    """Mock /api/chat response; records the POST json onto the class."""
+    status = 200
+    captured: dict = {}
+
+    async def json(self):
+        return {"message": {"content": "ok"}}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        pass
+
+
+class _ChatSession:
+    def __init__(self):
+        _ChatResp.captured = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        pass
+
+    def post(self, *_a, **kw):
+        _ChatResp.captured = kw.get("json", {})
+        return _ChatResp()
+
+
+async def test_chat_omits_format_by_default():
+    """Byte-identical legacy call: no `format` key when none is passed."""
+    inf = OllamaInference()
+    with patch("aiohttp.ClientSession", return_value=_ChatSession()):
+        await inf._chat([{"role": "user", "content": "hi"}])
+    assert "format" not in _ChatResp.captured
+
+
+async def test_chat_includes_format_when_passed():
+    """A grammar dict is forwarded verbatim as Ollama's `format` (production parity)."""
+    inf = OllamaInference()
+    schema = {"type": "object", "properties": {"steps": {"type": "array"}}}
+    with patch("aiohttp.ClientSession", return_value=_ChatSession()):
+        await inf._chat([{"role": "user", "content": "hi"}], format=schema)
+    assert _ChatResp.captured.get("format") == schema

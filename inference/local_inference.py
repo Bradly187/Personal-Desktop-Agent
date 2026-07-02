@@ -627,11 +627,17 @@ class OllamaInference(LocalInference):
             self._available = False
             return "CLARIFY the local model is unavailable right now. Please try again."
 
-    async def _chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    async def _chat(self, messages: list[dict], tools: list[dict] | None = None,
+                    format: dict | None = None) -> dict:
         """POST /api/chat and return the parsed JSON response.
 
         Isolated so the tool path is unit-testable without mocking aiohttp —
         tests monkeypatch this method with a canned response dict.
+
+        ``format`` is Ollama's structured-output grammar (a JSON Schema dict).
+        When provided, the model is constrained to emit conforming JSON — the
+        same mechanism the plan profile uses in production via
+        ``payload["format"]``. Omitted (None) → byte-identical to the legacy call.
         """
         import aiohttp
 
@@ -643,6 +649,8 @@ class OllamaInference(LocalInference):
         }
         if tools:
             payload["tools"] = tools
+        if format is not None:
+            payload["format"] = format
 
         async with aiohttp.ClientSession() as session:
             async with session.post(

@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core import cloud_backend as cb
-from core.hybrid_coordinator import _CloudInference
+from core.inference_runner import _CloudInference
 
 _HAIKU_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _OPUS_BEDROCK = "us.anthropic.claude-opus-4-8"

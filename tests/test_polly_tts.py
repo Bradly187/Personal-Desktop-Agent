@@ -8,7 +8,7 @@ Covers:
   5. Message > 3000 chars → truncated to exactly 3000 before API call
   6. Graceful degradation — bad credentials → False, no exception
   7. Graceful degradation — sounddevice unavailable → False, no exception
-  8. HybridCoordinator cloud CLARIFY → Polly invoked via _execute_action route_label
+  8. HybridCoordinator cloud CLARIFY → Polly invoked via execute_action route_label
 
 Run:
     python tests/test_polly_tts.py

@@ -58,11 +58,25 @@ class RateLimiter:
     def __init__(self, db: "AgentDB") -> None:
         self._db = db
         self._buckets: dict[str, _TokenBucket] = {}
+        # Per-resource init locks: prevents two concurrent first-callers for the
+        # same resource from both entering the DB fetch (double-init race, #9).
+        # asyncio.Lock is safe here because _get_bucket is only called from the
+        # event loop (never from a thread). The lock dict itself is written
+        # without an await between check and set, so no race on dict mutation.
+        self._init_locks: dict[str, asyncio.Lock] = {}
 
     async def _get_bucket(self, resource: str) -> _TokenBucket:
         if resource not in self._buckets:
-            max_rps, burst = await self._db.get_rate_limit_config(resource)
-            self._buckets[resource] = _TokenBucket(max_rps, burst)
+            # Create the per-resource lock if needed. No await between the check
+            # and the assignment, so this dict write is race-free in the event loop.
+            if resource not in self._init_locks:
+                self._init_locks[resource] = asyncio.Lock()
+            async with self._init_locks[resource]:
+                # Double-check: another coroutine may have populated the bucket
+                # while we were waiting for the lock.
+                if resource not in self._buckets:
+                    max_rps, burst = await self._db.get_rate_limit_config(resource)
+                    self._buckets[resource] = _TokenBucket(max_rps, burst)
         return self._buckets[resource]
 
     async def check(

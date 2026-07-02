@@ -31,7 +31,7 @@ Generated: 2026-05-25
 | AgentDB (db.py) | ✅ 42 tables at v8, WAL mode, MiniLM retrieval |
 | Continuous trainer (continuous_trainer.py) | ✅ Threshold adaptation, pain-day −30% |
 | Acoustic profiler (acoustic_profiler.py) | ✅ VAD/logprob calibration, drift detection |
-| TTS (kokoro_tts.py default / polly_stream.py / chatterbox / sapi) | ✅ Kokoro local ONNX (default); Polly Danielle / local GPU / SAPI selectable via `tts_backend` |
+| TTS (kokoro_tts.py default / polly_stream.py / sapi) | ✅ Kokoro local ONNX (default); Polly Danielle / SAPI selectable via `tts_backend` |
 | Approval hook (approval_hook.py) | ✅ PreToolUse voice gate |
 | MCP server (desktop_mcp_server.py) | ✅ 14 tools, stdio |
 
