@@ -19,7 +19,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 
 ## Current Status (2026-06-28)
 
-> **Schema:** `agent.db` at `PRAGMA user_version = 8`. Do not rely on table counts in this file — `storage/db.py` is the authoritative source per AGENTS.md #1.
+> **Schema:** `agent.db` at `PRAGMA user_version = 9`. Do not rely on table counts in this file — `storage/db.py` is the authoritative source per AGENTS.md #1.
 
 Phases 1–6 + Sprints A–C / 5–7 / G1–G5 / N–Q + cloud plan routing (PR #150) + chat attachments (PR #149) shipped and merged. Full dated history → [`docs/CHANGELOG.md`](docs/CHANGELOG.md). Day-by-day notes → `docs/daily/`.
 
@@ -130,6 +130,9 @@ PC → iPad (12 types): `ack` `pong` `status` `screenshot` `handwriting_result` 
 ## Feature Flags (DA_* environment variables)
 
 Set `=0` / `=false` for byte-identical legacy behavior unless noted otherwise.
+This table lists the headline flags; the authoritative registry of **all** DA_*
+flags (incl. tuning knobs) is `core/flags.py`, validated at startup and enforced
+by `tests/test_flags_registry.py`.
 
 | Flag | Default | Summary | Decision | Spec |
 |------|---------|---------|----------|------|
@@ -138,16 +141,18 @@ Set `=0` / `=false` for byte-identical legacy behavior unless noted otherwise.
 | `DA_CRITIC` | ON | Review diffs pre-disk-commit; REVISE drives replan | D007 | `specs/dev-agent-critic/` |
 | `DA_TESTER` | ON | Auto-pytest after `.py` writes; failure = safe-observation, never rollback | D008 | `specs/dev-agent-critic/` |
 | `DA_PLAN_REPAIR` | ON | Re-prompt planner on unknown-verb / unparseable plan (max `DA_PLAN_REPAIR_MAX=1`) | — | `specs/dev-agent-plan-contract/` |
-| `DA_REPO_CONTEXT` | ON | Inject stable repo facts (AGENTS.md/CLAUDE.md, layout, git) ahead of RAG | — | `specs/repo-context-ingestion/` |
+| `DA_REPO_CONTEXT` | OFF | Inject stable repo facts (AGENTS.md/CLAUDE.md, layout, git) ahead of RAG | — | `specs/repo-context-ingestion/` |
 | `DA_TRAJECTORY_DEDUP` | ON | Drop superseded duplicate reads from trajectory | — | `specs/trajectory-read-dedup/` |
 | `DA_RESUME_MEMORY` | ON | Seed crash-resumed plans from prior run's `agent_steps` | — | `specs/resume-working-memory/` |
 | `DA_SESSION_MEMORY` | OFF | Cross-session seed from related prior runs (Jaccard); precondition unmet — see D014 | D014 | `specs/resume-working-memory/` |
-| `DA_DELEGATE` | ON | Planner `[DELEGATE q]`: bounded read-only sub-agent investigation | — | `specs/dev-agent-delegate-verb/` |
+| `DA_DELEGATE` | OFF | Planner `[DELEGATE q]`: bounded read-only sub-agent investigation | — | `specs/dev-agent-delegate-verb/` |
 | `DA_SAGA_ANNOUNCE` | ON | Speak TTS summary after saga rollback | — | `specs/dev-agent-sagas/` |
 | `DA_SAGA_GIT_BACKEND` | OFF | git-blob snapshots instead of file-copy (no 256 KB cap) | D009 | `specs/dev-agent-sagas/` |
 | `DA_DOMAIN_LEARN` | OFF | Dynamic domain-keyword overlay learning via `ContinuousTrainer` | — | — |
 
 ## Known Gotchas
+
+- **The chat UI (`:8770`) requires an access token on every route except `/health`.** Token lives at `~/.claude/chat_server/token` (separate from the iPad pairing token — D020); present it via `X-Agent-Token`, `?token=`, or the session cookie set on the first tokened request. main.py opens the browser with the tokened URL; a 401 means reopen the URL logged at startup.
 
 - **Voice approval gate requires an explicit confirmation word.** `WhisperStream._handle_approval_gate()` writes a response ONLY when `core/approval_keywords.classify_confirmation` detects a deliberate approve/deny. Ambient audio returns `None` → gate keeps waiting. Deny wins ties; utterances longer than `MAX_ANSWER_WORDS` (6) are treated as ambient. TTS echo suppressed 1.0s to prevent self-approval. Timeout/ambiguity/silence **fail safe to DENY**.
 

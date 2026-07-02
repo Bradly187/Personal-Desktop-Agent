@@ -248,11 +248,15 @@ def test_operational_read_helpers(tmp_path):
 
 def test_no_mutation_routes_for_operational_panels():
     """R8.3 — the dashboard registers GET-only; no approve/deny (or any) mutation
-    route exists. Guards against a future POST that would bypass the voice gate."""
+    route exists. Guards against a future POST that would bypass the voice gate.
+    Sole allowed exception: the chat-attachment /upload POST
+    (specs/chat-context-attachments) — it feeds chat context, not the panels."""
     import inspect
     from core.chat_server import ChatServer
     src = inspect.getsource(ChatServer.start)
     assert 'add_get("/api/escalations"' in src
     assert 'add_get("/api/goals"' in src
     assert 'add_get("/api/corrections"' in src
-    assert "add_post" not in src and "add_put" not in src and "add_delete" not in src
+    mutations = [ln.strip() for ln in src.splitlines()
+                 if any(m in ln for m in ("add_post", "add_put", "add_delete"))]
+    assert mutations == ['app.router.add_post("/upload", self._upload_handler)']

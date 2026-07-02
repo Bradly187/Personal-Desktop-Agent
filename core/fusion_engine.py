@@ -170,6 +170,12 @@ class FusionConfig:
 # ---------------------------------------------------------------------------
 
 class FusionEngine:
+    # Window in seconds within which a 1 Hz telemetry row is correlated to the
+    # most recently dispatched command's trace_id (same rationale and value as
+    # IPadBridge._TRACE_WINDOW_S — covers the sensor round-trip without false
+    # attribution to long-gone commands).
+    _TRACE_WINDOW_S: float = 2.0
+
     def __init__(
         self,
         screen_width: int,
@@ -279,6 +285,12 @@ class FusionEngine:
         self._session_id: int = -1     # set via set_session_id()
         self._last_active_source: Optional[str] = None   # tracks most recent source for telemetry
         self._last_gesture_conf: Optional[float] = None  # last gesture confidence for telemetry
+        # Sensor→command trace correlation (mirrors IPadBridge._TRACE_WINDOW_S):
+        # the most recent completed command's trace_id + when it landed. The 1 Hz
+        # telemetry sampler stamps rows falling inside the window so ambient
+        # sensor state joins to commands.trace_id in AgentDB.
+        self._active_trace_id: Optional[str] = None
+        self._active_trace_ts: float = 0.0
         self._acoustic_profiler = None  # AcousticProfiler — wired by main.py for rms_ambient
         self._running = False
         # Tracked set prevents fire-and-forget tasks from being GC'd before completion
@@ -836,6 +848,12 @@ class FusionEngine:
             # Cursor position from cache (updated at 10 Hz by _cursor_cache_loop)
             _cursor_x, _cursor_y = self._cursor_pos
 
+            # Correlate to the most recent command if it landed inside the window.
+            _trace_id = None
+            if (self._active_trace_id
+                    and time.time() - self._active_trace_ts < self._TRACE_WINDOW_S):
+                _trace_id = self._active_trace_id
+
             fire_and_log(
                 self._db.insert_sensor_telemetry(
                     self._session_id,
@@ -853,6 +871,7 @@ class FusionEngine:
                     active_source=self._last_active_source,
                     gesture_conf=self._last_gesture_conf,
                     rms_ambient=_rms,
+                    trace_id=_trace_id,
                 ),
                 log, "sensor_telemetry write",
             )
@@ -932,6 +951,12 @@ class FusionEngine:
             if _tracer.enabled and not cmd.trace_id:
                 cmd.trace_id = _tracer.new_trace(source=cmd.source)
                 _tracer.record_span("enqueue", trace_id=cmd.trace_id, source=cmd.source)
+            # Remember the dispatched command's trace so the 1 Hz telemetry
+            # sampler can stamp rows landing within _TRACE_WINDOW_S — joins
+            # ambient sensor state to this command (sensor_telemetry.trace_id).
+            if cmd.trace_id:
+                self._active_trace_id = cmd.trace_id
+                self._active_trace_ts = time.time()
             if self._scheduler is not None:
                 # Priority-aware dispatch: DEV_AGENT/BACKGROUND tasks are gated
                 # so they cannot starve accessibility commands during a flare.

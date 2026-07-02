@@ -68,6 +68,7 @@ TOPIC_GOAL_DEQUEUED     = "goal.dequeued"
 TOPIC_GOAL_COMPLETED    = "goal.completed"
 TOPIC_VRAM_EVICTED      = "vram.evicted"
 TOPIC_VRAM_RESTORED     = "vram.restored"
+TOPIC_MODEL_DOWNGRADED  = "model.downgraded"  # VRAM fallback picked a weaker model
 TOPIC_BREAKER_OPENED    = "breaker.opened"
 TOPIC_INFERENCE_STALLED = "inference.stalled"
 # Alerting topics — surfaced on the dashboard Activity feed / Alerts panel.

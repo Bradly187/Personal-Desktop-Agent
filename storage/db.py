@@ -623,7 +623,11 @@ CREATE TABLE IF NOT EXISTS sensor_telemetry (
     pain_day_active  INTEGER NOT NULL DEFAULT 0,
     active_source    TEXT,
     gesture_conf     REAL,
-    rms_ambient      REAL
+    rms_ambient      REAL,
+    -- v9: most recent command trace within FusionEngine._TRACE_WINDOW_S at
+    -- sample time (NULL when no command ran recently). Same semantics as
+    -- ipad_logs.trace_id — joins ambient sensor state to commands.trace_id.
+    trace_id         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_st_session ON sensor_telemetry(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_st_ts      ON sensor_telemetry(ts);
@@ -865,8 +869,10 @@ CREATE INDEX IF NOT EXISTS idx_usercorr_ts ON user_corrections(ts);
 # a table created before that column existed. Bump _AGENT_DB_SCHEMA_VERSION and
 # append a row when introducing a new additive column; the batch is gated by
 # PRAGMA user_version so it runs at most once per database file.
-_AGENT_DB_SCHEMA_VERSION = 8
+_AGENT_DB_SCHEMA_VERSION = 9
 _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # v8→9: sensor→command trace correlation (mirrors ipad_logs.trace_id)
+    ("sensor_telemetry", "trace_id", "TEXT"),
     # v7→8 (Sprint S3.0)
     ("commands", "resolved_by", "TEXT"),
     # v1→2
@@ -897,6 +903,7 @@ _AGENT_DB_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 # this idempotent.
 _DEFERRED_INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_goalq_sched ON goal_queue(execute_at)",
+    "CREATE INDEX IF NOT EXISTS idx_st_trace ON sensor_telemetry(trace_id)",
 )
 
 
@@ -1226,6 +1233,7 @@ class AgentDB:
         active_source: Optional[str] = None,
         gesture_conf: Optional[float] = None,
         rms_ambient: Optional[float] = None,
+        trace_id: Optional[str] = None,
     ) -> None:
         """Write one 1-Hz sensor telemetry row. Non-fatal on any error."""
         if not self._conn:
@@ -1235,8 +1243,9 @@ class AgentDB:
                 """INSERT INTO sensor_telemetry
                    (session_id, ts, tilt_rx, tilt_ry, gaze_dx, gaze_dy, gaze_conf,
                     head_pitch, head_yaw, cursor_x, cursor_y,
-                    pain_day_active, active_source, gesture_conf, rms_ambient)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    pain_day_active, active_source, gesture_conf, rms_ambient,
+                    trace_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     session_id, ts,
                     tilt_rx, tilt_ry,
@@ -1246,6 +1255,7 @@ class AgentDB:
                     int(pain_day_active),
                     active_source,
                     gesture_conf, rms_ambient,
+                    trace_id,
                 ),
             )
             await self._conn.commit()

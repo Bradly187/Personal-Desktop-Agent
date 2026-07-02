@@ -30,9 +30,11 @@ blocked on the approval gate inside route().
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -64,6 +66,47 @@ _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 # scratch dir under the active root; only these types/size are accepted.
 _UPLOAD_DIRNAME = ".chat_uploads"
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB cap (R2.1)
+
+# ---------------------------------------------------------------------------
+# Access token — authenticate every request (mirrors the iPad bridge C1 gate)
+# ---------------------------------------------------------------------------
+# A separate token from the iPad pairing token so either can be rotated
+# without re-pairing the other surface. Delivered browser-style: main.py opens
+# the UI at /?token=…, the middleware answers with an HttpOnly cookie, and all
+# follow-up requests (static assets, /chat WS handshake, fetch) ride the cookie.
+
+_CHAT_TOKEN_DIR = Path.home() / ".claude" / "chat_server"
+_CHAT_TOKEN_PATH = _CHAT_TOKEN_DIR / "token"
+_TOKEN_COOKIE = "da_chat_token"
+
+
+def _load_or_create_chat_token() -> str:
+    """Return the chat-server access token, generating one on first run.
+
+    Stored at ``~/.claude/chat_server/token`` (0600). Every request except
+    ``/health`` must present it (``X-Agent-Token`` header, ``?token=`` query,
+    or the session cookie) or it is rejected with 401. Fail-closed: if the
+    token cannot be read or created we raise rather than serve unauthenticated.
+    """
+    try:
+        if _CHAT_TOKEN_PATH.exists():
+            tok = _CHAT_TOKEN_PATH.read_text(encoding="utf-8").strip()
+            if tok:
+                return tok
+        _CHAT_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        tok = secrets.token_urlsafe(32)
+        _CHAT_TOKEN_PATH.write_text(tok, encoding="utf-8")
+        try:
+            os.chmod(_CHAT_TOKEN_PATH, 0o600)
+        except OSError:
+            pass  # best-effort; Windows ACLs differ
+        return tok
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot read or create the chat server access token at "
+            f"{_CHAT_TOKEN_PATH}: {exc}. Refusing to start an unauthenticated "
+            f"chat server."
+        ) from exc
 
 
 def _live_session_kpis(db_path: str, session_id: int) -> dict:
@@ -260,10 +303,15 @@ class ChatServer:
     """aiohttp server hosting the desktop chat UI and live DAG feed."""
 
     def __init__(self, *, host: str = "127.0.0.1", port: int = 8770,
-                 allow_destructive: bool = True) -> None:
+                 allow_destructive: bool = True,
+                 token: Optional[str] = None) -> None:
         self._host = host
         self._port = port
         self._allow_destructive = allow_destructive
+
+        # Access token: required on every request except /health. Injectable
+        # for tests; defaults to the persisted per-install token (fail-closed).
+        self._token = token or _load_or_create_chat_token()
 
         # Injected pipeline references (set_* before run()).
         self._coordinator = None
@@ -296,8 +344,9 @@ class ChatServer:
         self._agent_db = db
         self._session_id = session_id
 
-    def url(self) -> str:
-        return f"http://{self._host}:{self._port}/"
+    def url(self, *, with_token: bool = False) -> str:
+        base = f"http://{self._host}:{self._port}/"
+        return f"{base}?token={self._token}" if with_token else base
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -305,7 +354,7 @@ class ChatServer:
 
         Lets main.py open the desktop shell only once the server is reachable.
         """
-        app = web.Application()
+        app = web.Application(middlewares=[self._auth_middleware])
         app.router.add_get("/", self._index_handler)
         app.router.add_get("/chat", self._ws_handler)
         app.router.add_get("/health", self._health_handler)
@@ -338,6 +387,7 @@ class ChatServer:
         if self._event_bus is not None:
             self._pump_task = asyncio.create_task(self._event_pump())
         log.info("ChatServer listening on %s", self.url())
+        log.info("  → open with the access token: %s", self.url(with_token=True))
 
     async def run(self) -> None:
         """Start the server and run until cancelled (standalone / test use)."""
@@ -365,6 +415,36 @@ class ChatServer:
 
     def is_healthy(self) -> bool:
         return self._running
+
+    # ── auth ────────────────────────────────────────────────────────────────
+    @web.middleware
+    async def _auth_middleware(self, request: web.Request, handler):
+        """Token gate on every route except /health (liveness probe only).
+
+        Accepts the token via ``X-Agent-Token`` header, ``?token=`` query, or
+        the session cookie; compares constant-time; rejects with 401 before the
+        handler runs. When the token arrived via header/query, the response
+        sets an HttpOnly cookie so the static UI's follow-up requests (assets,
+        the /chat WS handshake, fetch calls) authenticate without JS changes.
+        """
+        if request.path == "/health":
+            return await handler(request)
+        supplied = (request.headers.get("X-Agent-Token")
+                    or request.query.get("token", "")
+                    or request.cookies.get(_TOKEN_COOKIE, ""))
+        if not supplied or not hmac.compare_digest(
+                supplied.encode("utf-8"), self._token.encode("utf-8")):
+            log.warning("ChatServer: rejected unauthenticated request to %s "
+                        "from %s", request.path, request.remote)
+            return web.Response(status=401, text="chat token missing or invalid")
+        resp = await handler(request)
+        # WebSocket/streaming responses are already prepared inside the handler
+        # — headers are gone; only plain responses can still carry the cookie.
+        if (request.cookies.get(_TOKEN_COOKIE, "") != self._token
+                and not resp.prepared):
+            resp.set_cookie(_TOKEN_COOKIE, self._token,
+                            httponly=True, samesite="Strict", path="/")
+        return resp
 
     # ── HTTP handlers ───────────────────────────────────────────────────────
     async def _index_handler(self, request: web.Request) -> web.StreamResponse:

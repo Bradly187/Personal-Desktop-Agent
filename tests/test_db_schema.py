@@ -23,11 +23,10 @@ import pytest
 
 from storage.db import AGENT_DB_SCHEMA, _AGENT_DB_SCHEMA_VERSION
 
-# Authoritative as of 2026-06-26 (master): 49 tables at user_version 8.
-# (PR #137 added `agent_workflows` — additive, no user_version bump. This truth-up
-# was missed by that merge; corrected here alongside the Gap-A–D work, AGENTS.md #1.)
+# Authoritative as of 2026-07-01: 49 tables at user_version 9
+# (v9 = sensor_telemetry.trace_id, sensor→command trace correlation).
 _EXPECTED_TABLE_COUNT = 49
-_EXPECTED_USER_VERSION = 8
+_EXPECTED_USER_VERSION = 9
 
 # Paren-anchored so a stray "CREATE TABLE IF NOT EXISTS is a …" in a comment is
 # NOT counted (the name must be immediately followed by the column list).
