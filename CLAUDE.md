@@ -12,7 +12,7 @@ Multimodal accessibility desktop control for a single user with rheumatoid arthr
 The user controls a Windows desktop through voice, hand gesture, iPad tilt, and direct touch — all mapped to a 16-verb action vocabulary (11 accessibility + 5 dev-agent). (Eye-gaze and head-pose control were removed — the standard iPad lacks the required TrueDepth sensor.) Sensor data streams over WebSocket from a native Swift iPad app to a Python backend on the PC. The PC runs local LLM inference (Ollama → vLLM in production) and executes commands via pyautogui/Win32.
 
 - Full requirements (17): `specs/ipad-sensor-focus/requirements.md`
-- Architecture diagrams (13): `specs/ipad-sensor-focus/diagrams/00-index.md`
+- Architecture diagrams (15): `specs/ipad-sensor-focus/diagrams/00-index.md`
 - Tech stack: `specs/steering/tech.md`
 - Open tasks: `specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
