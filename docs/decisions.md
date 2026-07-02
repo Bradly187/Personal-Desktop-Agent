@@ -9,7 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
-- [D018 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d018)
+- [D022 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d022)
 - [D017 — 2026-06-28 — Pre-commit hook is the mechanical doc-drift enforcement boundary](#d017)
 - [D016 — 2026-06-28 — /doc-update is a slash command, not a Stop hook](#d016)
 - [D015 — 2026-06-28 — DA_CLOUD_PLAN routes plan domain only, not full DevAgent](#d015)
@@ -34,7 +34,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ---
 
-### D018 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved {#d018}
+### D022 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved {#d022}
 **Date:** 2026-07-01
 **Chose:** During the HybridCoordinator decomposition (`specs/hybrid-coordinator-decomposition/`), `_switch_condition`/`_run_calibration` stay defined on `HybridCoordinator` and are passed into `VoiceSystemControl` as narrow async delegate callables (`switch_condition`, `run_calibration`), rather than moving the method bodies into `VoiceSystemControl` itself.
 **Rejected:** Move both methods' full bodies into `VoiceSystemControl` alongside the rest of the voice-keyword block they're triggered from.

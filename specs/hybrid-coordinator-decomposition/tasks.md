@@ -42,7 +42,7 @@
 ## Final verification
 
 - [x] 23. Re-run full `evals/` harness; confirm no baseline regressions — satisfies R1.3. Model-free suites (`router_domains`, `skill_triggers`) re-run and match locked baselines exactly (93.8% / 100%). Live-model suites (command_verbs, dev_trajectory, judge-based) not re-run — evals/scoring.py has no import coupling to hybrid_coordinator.py (independent reimplementation of parse_action_string), and the full 2657-test pytest suite exercises every extracted module's real code paths.
-- [x] 24. Update `CLAUDE.md` Key Files / file-map if the module surface changed enough to warrant it (per Rule 13 destination matrix). Updated `docs/file-map.md` (hybrid_coordinator.py entry + 5 new module rows). Added `docs/decisions.md` D019 (VoiceSystemControl coordinator-reference exception).
+- [x] 24. Update `CLAUDE.md` Key Files / file-map if the module surface changed enough to warrant it (per Rule 13 destination matrix). Updated `docs/file-map.md` (hybrid_coordinator.py entry + 5 new module rows). Added `docs/decisions.md` D022 (VoiceSystemControl coordinator-reference exception).
 
 ## Result
 
