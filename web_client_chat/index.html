@@ -15,6 +15,7 @@
         <h1>Desktop Agent</h1>
         <span class="sub" id="conn-label">connecting…</span>
         <a class="navlink" href="/dashboard" style="color:var(--accent);text-decoration:none;font-size:13px;margin-left:16px;">Dashboard →</a>
+        <button type="button" id="clear-history" class="tool" title="Clear the local transcript (agent history is unaffected)">Clear</button>
       </header>
       <div id="transcript" aria-live="polite"></div>
       <form id="composer" autocomplete="off">
@@ -62,6 +63,11 @@
     window.__mermaid = mermaid;
     window.dispatchEvent(new Event("mermaid-ready"));
   </script>
+  <!-- Vendored (offline-safe): the transcript renderer must not depend on a CDN
+       (specs/chat-workbench-parity R2.5) — unlike mermaid above, which only
+       powers the optional DAG pane. -->
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
   <script src="/static/dag.js"></script>
   <script src="/static/chat.js"></script>
 </body>

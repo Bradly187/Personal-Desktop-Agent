@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog
@@ -39,6 +39,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class Finding:
     """A single detected secret or PII instance."""
+
     pattern_name: str
     matched_text: str  # first 8 chars + "..." for logging (never full secret)
     start: int
@@ -50,6 +51,7 @@ class Finding:
 # Pattern definitions
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _Pattern:
     name: str
@@ -60,45 +62,75 @@ class _Pattern:
 
 _PATTERNS: list[_Pattern] = [
     # AWS
-    _Pattern("aws_access_key", re.compile(r'AKIA[0-9A-Z]{16}'), "critical"),
-    _Pattern("aws_secret_key", re.compile(r'(?i)aws[_\-]?secret[_\-]?access[_\-]?key[\s]*[=:]\s*["\']?([A-Za-z0-9/+=]{40})["\']?'), "critical"),
-
+    _Pattern("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}"), "critical"),
+    _Pattern(
+        "aws_secret_key",
+        re.compile(
+            r'(?i)aws[_\-]?secret[_\-]?access[_\-]?key[\s]*[=:]\s*["\']?([A-Za-z0-9/+=]{40})["\']?'
+        ),
+        "critical",
+    ),
     # Anthropic
-    _Pattern("anthropic_api_key", re.compile(r'sk-ant-[a-zA-Z0-9\-_]{20,}'), "critical"),
-
+    _Pattern(
+        "anthropic_api_key", re.compile(r"sk-ant-[a-zA-Z0-9\-_]{20,}"), "critical"
+    ),
     # OpenAI
-    _Pattern("openai_api_key", re.compile(r'sk-[a-zA-Z0-9]{20,}'), "critical"),
-
+    _Pattern("openai_api_key", re.compile(r"sk-[a-zA-Z0-9]{20,}"), "critical"),
     # GitHub
-    _Pattern("github_token", re.compile(r'gh[pousr]_[A-Za-z0-9_]{36,}'), "critical"),
-    _Pattern("github_fine_grained", re.compile(r'github_pat_[A-Za-z0-9_]{22,}'), "critical"),
-
+    _Pattern("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9_]{36,}"), "critical"),
+    _Pattern(
+        "github_fine_grained", re.compile(r"github_pat_[A-Za-z0-9_]{22,}"), "critical"
+    ),
     # Google (#4 — the Gmail/Calendar skill egresses Google data; the prior
     # pattern set had no Google coverage). OAuth refresh tokens start "1//",
     # access tokens "ya29.", API keys "AIza".
-    _Pattern("google_api_key", re.compile(r'AIza[0-9A-Za-z\-_]{35}'), "critical"),
-    _Pattern("google_oauth_refresh", re.compile(r'1//[0-9A-Za-z\-_]{20,}'), "critical"),
-    _Pattern("google_oauth_access", re.compile(r'ya29\.[0-9A-Za-z\-_]{20,}'), "critical"),
-
+    _Pattern("google_api_key", re.compile(r"AIza[0-9A-Za-z\-_]{35}"), "critical"),
+    _Pattern("google_oauth_refresh", re.compile(r"1//[0-9A-Za-z\-_]{20,}"), "critical"),
+    _Pattern(
+        "google_oauth_access", re.compile(r"ya29\.[0-9A-Za-z\-_]{20,}"), "critical"
+    ),
     # Generic bearer token in an Authorization header / JSON field.
-    _Pattern("bearer_token", re.compile(r'(?i)bearer\s+[A-Za-z0-9\-._~+/]{16,}=*'), "critical"),
-
+    _Pattern(
+        "bearer_token",
+        re.compile(r"(?i)bearer\s+[A-Za-z0-9\-._~+/]{16,}=*"),
+        "critical",
+    ),
     # Generic high-entropy secrets (env var assignments)
-    _Pattern("env_secret", re.compile(r'(?i)(?:api[_\-]?key|secret|token|password|passwd)\s*[=:]\s*["\']?([A-Za-z0-9/+=\-_]{16,})["\']?'), "warning"),
-
+    _Pattern(
+        "env_secret",
+        re.compile(
+            r'(?i)(?:api[_\-]?key|secret|token|password|passwd)\s*[=:]\s*["\']?([A-Za-z0-9/+=\-_]{16,})["\']?'
+        ),
+        "warning",
+    ),
     # Private keys
-    _Pattern("private_key", re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'), "critical"),
-    _Pattern("pgp_private", re.compile(r'-----BEGIN PGP PRIVATE KEY BLOCK-----'), "critical"),
-
+    _Pattern(
+        "private_key",
+        re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
+        "critical",
+    ),
+    _Pattern(
+        "pgp_private", re.compile(r"-----BEGIN PGP PRIVATE KEY BLOCK-----"), "critical"
+    ),
     # Connection strings
-    _Pattern("database_url", re.compile(r'(?i)(?:postgres|mysql|mongodb|redis|amqp)://[^\s"\']+:[^\s"\']+@[^\s"\']+'), "critical"),
-
+    _Pattern(
+        "database_url",
+        re.compile(
+            r'(?i)(?:postgres|mysql|mongodb|redis|amqp)://[^\s"\']+:[^\s"\']+@[^\s"\']+'
+        ),
+        "critical",
+    ),
     # PII
-    _Pattern("ssn", re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), "warning"),
-    _Pattern("credit_card", re.compile(r'\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b'), "warning"),
-
+    _Pattern("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "warning"),
+    _Pattern(
+        "credit_card",
+        re.compile(r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b"),
+        "warning",
+    ),
     # WireGuard private keys (base64, 44 chars)
-    _Pattern("wireguard_key", re.compile(r'PrivateKey\s*=\s*[A-Za-z0-9+/]{43}='), "critical"),
+    _Pattern(
+        "wireguard_key", re.compile(r"PrivateKey\s*=\s*[A-Za-z0-9+/]{43}="), "critical"
+    ),
 ]
 
 
@@ -122,15 +154,19 @@ class ContentFilter:
             for match in pattern.regex.finditer(text):
                 matched = match.group(0)
                 # Truncate for safe logging — never store full secret
-                safe_preview = matched[:8] + "..." if len(matched) > 8 else matched[:4] + "..."
+                safe_preview = (
+                    matched[:8] + "..." if len(matched) > 8 else matched[:4] + "..."
+                )
 
-                findings.append(Finding(
-                    pattern_name=pattern.name,
-                    matched_text=safe_preview,
-                    start=match.start(),
-                    end=match.end(),
-                    severity=pattern.severity,
-                ))
+                findings.append(
+                    Finding(
+                        pattern_name=pattern.name,
+                        matched_text=safe_preview,
+                        start=match.start(),
+                        end=match.end(),
+                        severity=pattern.severity,
+                    )
+                )
 
                 # Redact in output
                 placeholder = f"[REDACTED:{pattern.name}]"
@@ -140,7 +176,9 @@ class ContentFilter:
         if findings and self._audit and self._audit.available:
             await self._audit.log_security_event(
                 detail=f"Content filter: {len(findings)} secret(s)/PII detected and redacted",
-                severity="warning" if all(f.severity == "warning" for f in findings) else "critical",
+                severity="warning"
+                if all(f.severity == "warning" for f in findings)
+                else "critical",
                 params={
                     "pattern_names": list(set(f.pattern_name for f in findings)),
                     "count": len(findings),
@@ -164,15 +202,19 @@ class ContentFilter:
         for pattern in self._patterns:
             for match in pattern.regex.finditer(text):
                 matched = match.group(0)
-                safe_preview = matched[:8] + "..." if len(matched) > 8 else matched[:4] + "..."
+                safe_preview = (
+                    matched[:8] + "..." if len(matched) > 8 else matched[:4] + "..."
+                )
 
-                findings.append(Finding(
-                    pattern_name=pattern.name,
-                    matched_text=safe_preview,
-                    start=match.start(),
-                    end=match.end(),
-                    severity=pattern.severity,
-                ))
+                findings.append(
+                    Finding(
+                        pattern_name=pattern.name,
+                        matched_text=safe_preview,
+                        start=match.start(),
+                        end=match.end(),
+                        severity=pattern.severity,
+                    )
+                )
 
                 placeholder = f"[REDACTED:{pattern.name}]"
                 redacted = redacted.replace(matched, placeholder, 1)

@@ -266,12 +266,12 @@ Each acceptance criterion in §3 maps to ≥1 test or eval case above.
 
 ## 6. Tasks
 
-- [ ] 1. Add `inference/trajectory.py` with `render_trajectory()` — satisfies R1.1–R1.6, R3.1–R3.3.
-- [ ] 2. Refactor `_replan`/`_try_replan` to call it (flag-gated; `enabled=False` = legacy) — R2.1, R2.4.
-- [ ] 3. Refactor `_reflect` to call it with the 200/600 budget — R2.2.
-- [ ] 4. Record `traj_*` span attrs when enabled — R3.4 (needs Rec #2 cost spans).
+- [x] 1. Add `inference/trajectory.py` with `render_trajectory()` — satisfies R1.1–R1.6, R3.1–R3.3.
+- [x] 2. Refactor `_replan`/`_try_replan` to call it (flag-gated; `enabled=False` = legacy) — R2.1, R2.4.
+- [x] 3. Refactor `_reflect` to call it with the 200/600 budget — R2.2.
+- [x] 4. Record `traj_*` span attrs when enabled — R3.4 (needs Rec #2 cost spans).
 - [x] 5. Add `tests/test_trajectory_reduction.py` (one test per criterion) + golden byte-identical test — R2.4. **(11 tests, green.)**
 - [x] 6. Add long-prefix eval cases; lock baseline; confirm no replan-success regression — R2.3. **(New `replan` eval mode + `dev_replan` suite + baseline; gate PASSES at 87.5% with one reproducible ordering miss — see §5.)**
 - [x] 6b. Compactor mitigation: keep the last read-only step of a collapsed run verbatim (R1.5 refinement) — applied + unit-tested. Preserves the diagnostic but did NOT recover the build-missing-module case (residual cause is re-investigation, not info loss — §5).
-- [ ] 7. **DECISION PENDING (Brad):** flip `DA_TRAJECTORY_REDUCE` default on? Gate passes (87.5% ≥ 85%, safety 100%) but there's a measured, reproducible ~12.5pt recovery-ordering cost on the long-prefix build-shape (§5), and the cheap compactor tweak did not eliminate it. Further fixes would require weakening the eval or nudging the production prompt — neither pursued. Trade-off call. Record token delta in `docs/daily/` when/if flipped.
+- [x] 7. **DECISION PENDING (Brad):** flip `DA_TRAJECTORY_REDUCE` default on? Gate passes (87.5% ≥ 85%, safety 100%) but there's a measured, reproducible ~12.5pt recovery-ordering cost on the long-prefix build-shape (§5), and the cheap compactor tweak did not eliminate it. Further fixes would require weakening the eval or nudging the production prompt — neither pursued. Trade-off call. Record token delta in `docs/daily/` when/if flipped. **(DECISION: Default flipped to ON by user request on 2026-07-02)**
 - [x] 8. Update `CLAUDE.md` Known Gotchas (new flag) — done.

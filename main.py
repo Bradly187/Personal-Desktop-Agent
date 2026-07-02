@@ -980,6 +980,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         dev_router.set_rate_limiter(rate_limiter)
     dev_agent.set_event_bus(event_bus)
     trainer.set_event_bus(event_bus)   # per-domain SLO breaches → slo.breached alerts
+    router.set_event_bus(event_bus)    # VRAM fallback picks → model.downgraded
     # Surface silent backend events: Ollama hang (inference.stalled) + breaker open
     # (breaker.opened). No-op on backends without a set_event_bus method.
     if hasattr(local, "set_event_bus"):
@@ -1348,7 +1349,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # once it is actually listening.
     if chat_server is not None:
         await chat_server.start()
-        _open_chat_shell(chat_server.url(), getattr(args, "chat_window", False))
+        _open_chat_shell(chat_server.url(with_token=True),
+                         getattr(args, "chat_window", False))
 
     # Wait for Ctrl-C
     await shutdown.wait_for_shutdown()
@@ -1682,6 +1684,11 @@ def main() -> None:
     args = _parse_args()
 
     _configure_logging(args.debug)
+
+    # DA_* flag hygiene: warn on typo'd/unparseable flags, log the active
+    # non-default set so a session's configuration is visible in the log head.
+    from core.flags import report_da_flags
+    report_da_flags()
 
     # Register a last-resort trace dump so the in-memory ring buffer survives
     # unclean exits (OOM, uncaught exception, kill -9 on parent process).

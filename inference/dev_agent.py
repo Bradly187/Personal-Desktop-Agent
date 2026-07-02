@@ -43,6 +43,7 @@ from core.events import (
     TOPIC_REPLAN_EXHAUSTED, TOPIC_STEP_FAILED,
     TOPIC_PLAN_GENERATED, TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
     TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
+    TOPIC_DAG_WALKTHROUGH, TOPIC_DAG_RUN_FINALIZED,
     TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
 )
 from inference.edit_format import (
@@ -659,9 +660,13 @@ class DevAgent:
         except Exception as exc:
             log.debug("DevAgent: %s publish failed: %s", topic, exc)
 
-    @staticmethod
-    def _result_snippet(step: "AgentStep") -> str:
-        """A short, secret-safe one-liner for a completed step.
+    # Step-card snippet caps (specs/chat-workbench-parity R3.3; spec allows ≤2000).
+    _RESULT_SNIPPET_CHARS = 600
+    _ARGS_SNIPPET_CHARS = 200
+
+    @classmethod
+    def _result_snippet(cls, step: "AgentStep") -> str:
+        """A short, secret-safe excerpt for a completed step.
 
         Never surfaces WRITE_FILE/EDIT_FILE bodies or RUN_TERMINAL stdout (may
         contain secrets) — only a generic status for those verbs; reads/EXPLAIN
@@ -670,7 +675,13 @@ class DevAgent:
         action = step.action.upper()
         if action in ("WRITE_FILE", "EDIT_FILE", "RUN_TERMINAL"):
             return "ok" if step.success else "failed"
-        return (step.result or "")[:120]
+        return (step.result or "")[:cls._RESULT_SNIPPET_CHARS]
+
+    @classmethod
+    def _args_snippet(cls, step: "AgentStep") -> str:
+        """What the step was asked to do — file path / command / query,
+        truncated for the chat step card (specs/chat-workbench-parity R3.3)."""
+        return (step.args or "")[:cls._ARGS_SNIPPET_CHARS]
 
     async def _emit_step_started(self, step: "AgentStep") -> None:
         n = self._step_seq.get(id(step))
@@ -688,6 +699,7 @@ class DevAgent:
             "success": bool(step.success),
             "latency_ms": round(step.latency_ms, 1),
             "result_snippet": self._result_snippet(step),
+            "args_snippet": self._args_snippet(step),
         })
 
     def set_indexer(self, indexer: "CodebaseIndexer") -> None:
@@ -2175,7 +2187,14 @@ class DevAgent:
             # we promote them to 'checkpoint' so VoiceRewindHandler can restore them.
             # For failed/cancelled runs (already rolled back), any leftovers are skipped.
             new_status = 'checkpoint' if result.success else 'skipped'
-            await db.skip_pending_compensations(run_id, new_status=new_status)
+            promoted = await db.skip_pending_compensations(run_id, new_status=new_status)
+            # Chat undo affordance (specs/chat-workbench-parity R8.2): a run that
+            # persisted checkpoints can be rolled back ("undo this run"), so tell
+            # the originating chat turn. No-op for non-chat runs.
+            if result.success and promoted > 0:
+                await self._publish_live(TOPIC_DAG_RUN_FINALIZED, {
+                    "run_id": run_id, "status": status, "rewindable": True,
+                })
         except Exception as exc:
             log.debug("DevAgent._finalize_run failed: %s", exc)
 
@@ -2509,6 +2528,34 @@ class DevAgent:
         n = min(len(steps), self.MAX_STEPS)
         message = f"I'll run {n} step{'s' if n != 1 else ''}: {verb_summary}. Approve all?"
 
+        if os.environ.get("DA_PLAN_PREVIEW", "0").strip().lower() in ("1", "true", "yes", "on"):
+            threshold = int(os.environ.get("DA_PLAN_PREVIEW_THRESHOLD", "3"))
+            if len(steps) >= threshold:
+                try:
+                    actions = []
+                    for s in steps[:self.MAX_STEPS]:
+                        if s.action:
+                            args_trunc = str(s.args)[:80] if s.args else ""
+                            actions.append(f"Step {s.step_num}: {s.action} {args_trunc}")
+                    prompt = (
+                        f"Goal: {goal}\n"
+                        f"Steps proposed:\n" + "\n".join(actions) + "\n\n"
+                        "Provide a 1-sentence plain English spoken summary of what this plan intends to do. "
+                        "Do NOT list the API verbs (like write_file). Just summarize the outcome."
+                    )
+                    res = await asyncio.wait_for(
+                        self._router.infer(domain="plan", user_text=prompt, context=None),
+                        timeout=5.0
+                    )
+                    if res and res.ok and res.text:
+                        preview = res.text.strip()
+                        if preview.startswith('"') and preview.endswith('"'):
+                            preview = preview[1:-1]
+                        if preview:
+                            message = f"{preview} Approve all?"
+                except Exception as exc:
+                    log.warning("DevAgent._approve_plan_upfront: preview generation failed: %s", exc)
+
         log.info("DevAgent: requesting plan approval — %s", message)
 
         plan_is_destructive = any(
@@ -2519,8 +2566,17 @@ class DevAgent:
         # whether it's destructive). The actual yes/no still flows through the
         # shared ~/.claude/approval signal files below — the chat just becomes
         # another responder. No-op when no chat request is in flight.
+        # The proposed steps ride along so the chat renders a reviewable plan-
+        # preview card instead of a bare question (specs/chat-workbench-parity
+        # R5/R6) — additive payload; old clients ignore the extra keys.
         await self._publish_live(TOPIC_DAG_APPROVAL, {
             "message": message, "destructive": plan_is_destructive,
+            "goal": goal[:200],
+            "steps": [
+                {"n": s.step_num or i, "action": s.action,
+                 "args": (s.args or "")[:self._ARGS_SNIPPET_CHARS]}
+                for i, s in enumerate(steps[: self.MAX_STEPS], 1)
+            ],
         })
 
         def _grant(verdict: str) -> str:
@@ -2621,8 +2677,12 @@ class DevAgent:
             # A cancel that rolled back edits used to be silent about it (R2.2).
             msg += self._rollback_notice()
         elif result.success:
-            summary = (result.response_text or "")[:80].replace("\n", " ")
-            msg = f"Done. {summary}" if summary else "Plan complete."
+            spoken_msg = await self._generate_walkthrough(result)
+            if spoken_msg:
+                msg = spoken_msg
+            else:
+                summary = (result.response_text or "")[:80].replace("\n", " ")
+                msg = f"Done. {summary}" if summary else "Plan complete."
         else:
             failed = [s for s in result.steps if not s.success]
             first_err = (failed[0].result or "")[:60] if failed else ""
@@ -2638,6 +2698,54 @@ class DevAgent:
             asyncio.create_task(_get_tts().speak(msg))
         except Exception as exc:
             log.debug("DevAgent._speak_plan_completion: TTS failed: %s", exc)
+
+    async def _generate_walkthrough(self, result: AgentResult) -> Optional[str]:
+        if not os.environ.get("DA_POST_RUN_WALKTHROUGH", "0").strip().lower() in ("1", "true", "yes", "on"):
+            return None
+            
+        try:
+            actions = []
+            for s in result.steps:
+                if s.action:
+                    args_trunc = str(s.args)[:80] if s.args else ""
+                    actions.append(f"Step {s.step_num}: {s.action} {args_trunc}")
+            
+            prompt = (
+                f"Goal: {self._current_goal}\n"
+                f"Steps taken:\n" + "\n".join(actions) + "\n\n"
+                "Write a markdown walkthrough summarizing the changes made.\n"
+                "Also, provide a 1-sentence spoken summary wrapped in <spoken> tags."
+            )
+            
+            res = await asyncio.wait_for(
+                self._router.infer(domain="plan", user_text=prompt, context=None),
+                timeout=15.0
+            )
+            
+            if res and res.ok and res.text:
+                text = res.text
+                spoken_msg = None
+                
+                if "<spoken>" in text and "</spoken>" in text:
+                    start = text.find("<spoken>") + 8
+                    end = text.find("</spoken>")
+                    spoken_msg = text[start:end].strip()
+                    text = text[:text.find("<spoken>")] + text[end+9:]
+                
+                with open("walkthrough.md", "w", encoding="utf-8") as f:
+                    f.write(text.strip())
+
+                # Chat artifact card (specs/chat-workbench-parity R8.1): surface
+                # the walkthrough markdown in the transcript, not just TTS+disk.
+                # No-op for non-chat runs (_publish_live gates on trace_id).
+                await self._publish_live(TOPIC_DAG_WALKTHROUGH,
+                                         {"markdown": text.strip()})
+
+                return spoken_msg
+        except Exception as exc:
+            log.warning("DevAgent._generate_walkthrough failed: %s", exc)
+            
+        return None
 
     def _rollback_notice(self) -> str:
         """Spoken addendum describing a saga rollback (DA_SAGA_ANNOUNCE).
@@ -2852,8 +2960,11 @@ class DevAgent:
 
             if self._critic is None or not self._critic_enabled:
                 # ── Legacy path (Critic OFF) — byte-identical to pre-feature ──
+                # (The edit is applied AFTER approval here, so the chat card can
+                # only carry the target path — no diff exists yet; R5.4.)
                 if not await self._confirm_destructive_op(
-                    f"Approve writing file {target[:60]}?"
+                    f"Approve writing file {target[:60]}?",
+                    card={"file_path": target},
                 ):
                     return f"{action} cancelled by user"
                 # Lint-gate + format-aware apply BEFORE snapshot/write so a
@@ -2889,9 +3000,13 @@ class DevAgent:
                 return self._critic_reject_message(step, verdict)
             # PASS: a non-pass-confidence verdict forces an explicit confirm even
             # for an upfront-authorized plan; it can never WEAKEN an existing gate
-            # (R2.2, R2.3).
+            # (R2.2, R2.3). new_text exists here, so the chat approval card can
+            # show the exact pending diff (specs/chat-workbench-parity R5.1).
             if not await self._confirm_destructive_op(
-                f"Approve writing file {target[:60]}?", force=verdict.escalate
+                f"Approve writing file {target[:60]}?", force=verdict.escalate,
+                card={"file_path": target,
+                      "diff": await asyncio.to_thread(
+                          self._diff_for_confirm, step.args, new_text)},
             ):
                 return f"{action} cancelled by user"
             step.comp_args = json.dumps(await asyncio.to_thread(
@@ -2903,7 +3018,8 @@ class DevAgent:
         if action == "RUN_TERMINAL":
             cmd = step.args or step.body
             if not await self._confirm_destructive_op(
-                f"Approve running command: {cmd.strip()[:60]}?"
+                f"Approve running command: {cmd.strip()[:60]}?",
+                card={"command": cmd.strip()[:500]},
             ):
                 return "RUN_TERMINAL cancelled by user"
             return await asyncio.to_thread(self._run_terminal, cmd)
@@ -2965,7 +3081,8 @@ class DevAgent:
             if not msg:
                 raise ValueError("GIT_COMMIT requires a commit message")
             if not await self._confirm_destructive_op(
-                f"Approve git commit: {msg[:60]}?"
+                f"Approve git commit: {msg[:60]}?",
+                card={"command": f"git commit -m {msg[:200]!r}"},
             ):
                 return "GIT_COMMIT cancelled by user"
             return await asyncio.to_thread(self._git_commit, msg)
@@ -2974,7 +3091,8 @@ class DevAgent:
             # args: [-b] <branch>
             branch_args = (step.args or "").strip()
             if not await self._confirm_destructive_op(
-                f"Approve git checkout {branch_args[:40]}?"
+                f"Approve git checkout {branch_args[:40]}?",
+                card={"command": f"git checkout {branch_args[:200]}"},
             ):
                 return "GIT_CHECKOUT cancelled by user"
             return await asyncio.to_thread(self._git_checkout, branch_args)
@@ -3376,6 +3494,36 @@ class DevAgent:
             current, body, edit_format=edit_format, path=str(path)
         )
 
+    # Approval-card diff cap (specs/chat-workbench-parity R5.1).
+    _CONFIRM_DIFF_MAX_LINES = 400
+
+    @classmethod
+    def _diff_for_confirm(cls, path_str: str, new_text: str) -> str:
+        """Unified diff of a pending WRITE_FILE/EDIT_FILE for the chat approval
+        card (specs/chat-workbench-parity R5.1). Presentation only — computed
+        from the same resolved path `_apply_edit`/`_write_file` use; truncated;
+        never raises (an unreadable file degrades to a message-only card)."""
+        import difflib
+        try:
+            path = Path(path_str.strip().strip("'\""))
+            current = (
+                path.read_text(encoding="utf-8", errors="replace")
+                if path.exists() else ""
+            )
+            lines = list(difflib.unified_diff(
+                current.splitlines(keepends=True),
+                (new_text or "").splitlines(keepends=True),
+                fromfile=f"a/{path.name}", tofile=f"b/{path.name}",
+            ))
+            if len(lines) > cls._CONFIRM_DIFF_MAX_LINES:
+                dropped = len(lines) - cls._CONFIRM_DIFF_MAX_LINES
+                lines = lines[: cls._CONFIRM_DIFF_MAX_LINES]
+                lines.append(f"… {dropped} more lines\n")
+            return "".join(lines)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("DevAgent._diff_for_confirm failed: %s", exc)
+            return ""
+
     @staticmethod
     def _write_file(path_str: str, content: str) -> str:
         path = Path(path_str.strip().strip("'\""))
@@ -3445,11 +3593,19 @@ class DevAgent:
         "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR"
     })
 
-    async def revert_last_run(self) -> bool:
+    async def revert_last_run(self, *, trace_id: str = "") -> bool:
         """VoiceRewindHandler: Revert the most recently finalized run.
-        
+
         Promotes checkpoints back to pending, then runs compensations.
+
+        ``trace_id`` (specs/chat-workbench-parity R8.3): set by the chat server's
+        "Undo this run" control so the confirm gate surfaces as an in-chat
+        approval card on the requesting socket. The gate itself is unchanged —
+        _confirm_destructive_op keeps its fail-safe DENY; voice callers pass
+        nothing and are byte-identical.
         """
+        if trace_id:
+            self._active_trace_id = trace_id
         db = self._db()
         if not db or not getattr(db, "available", False):
             return False
@@ -3465,8 +3621,24 @@ class DevAgent:
             
         run_id = row["id"]
         goal = row["goal"]
-        
-        if not await self._confirm_destructive_op(f"Undo the run: {goal[:60]}?"):
+
+        # Chat card context (specs/chat-workbench-parity R8.3): list the files a
+        # rollback would restore, read-only — nothing is promoted until approval.
+        files: list[str] = []
+        try:
+            for comp in await db.get_checkpoint_compensations(run_id):
+                try:
+                    p = json.loads(comp.get("compensation_args") or "{}").get("path")
+                except Exception:
+                    p = None
+                if p and p not in files:
+                    files.append(p)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("VoiceRewindHandler: checkpoint listing failed: %s", exc)
+        card = {"command": "restore: " + ", ".join(files[:20])} if files else None
+
+        if not await self._confirm_destructive_op(f"Undo the run: {goal[:60]}?",
+                                                  card=card):
             log.info("VoiceRewindHandler: user declined revert of run %s", run_id)
             return False
             
@@ -3482,7 +3654,8 @@ class DevAgent:
         )
         return True
 
-    async def _confirm_destructive_op(self, description: str, *, force: bool = False) -> bool:
+    async def _confirm_destructive_op(self, description: str, *, force: bool = False,
+                                      card: Optional[dict] = None) -> bool:
         """Speak the action description and wait for voice confirmation.
 
         This op is destructive by definition, so it fails SAFE to DENY: only an
@@ -3494,6 +3667,11 @@ class DevAgent:
         ``force`` bypasses the upfront-plan-authorization short-circuit so the
         Critic can ESCALATE a risky edit to an explicit confirm (specs/dev-agent-
         critic R2.2). It only ever ADDS friction — it can never weaken a gate.
+
+        ``card`` (specs/chat-workbench-parity R5) is optional extra context for
+        the in-chat approval card — {file_path, diff} for a pending write or
+        {command} for a terminal/git op. Only used when a chat request is in
+        flight; the yes/no authority is unchanged (signal file / voice).
         """
         # If the user already approved the entire plan upfront, skip per-op
         # confirmation — unless a caller (the Critic) forces an explicit confirm.
@@ -3504,21 +3682,83 @@ class DevAgent:
         # Serialize: DAG waves may run two destructive steps concurrently;
         # overlapping TTS prompts + mic captures would garble both answers.
         async with self._confirm_lock:
-            return await self._confirm_destructive_op_locked(description)
+            return await self._confirm_destructive_op_locked(description, card=card)
 
-    async def _confirm_destructive_op_locked(self, description: str) -> bool:
+    async def _confirm_destructive_op_locked(self, description: str,
+                                             card: Optional[dict] = None) -> bool:
         import numpy as np
 
         log.info("DevAgent: confirmation required — %s", description)
 
+        # Chat responder (specs/chat-workbench-parity R5): when a chat request is
+        # in flight, surface the confirm as an in-chat approval card (with the
+        # pending diff/command when the caller supplied one) and accept a yes/no
+        # through the shared signal file — same protocol the plan gate already
+        # uses; chat is just another responder. Non-chat runs are byte-identical.
+        chat_live = self._event_bus is not None and bool(self._active_trace_id)
+        if chat_live:
+            payload = {"message": description, "destructive": True}
+            if card:
+                payload.update({k: v for k, v in card.items() if v})
+            await self._publish_live(TOPIC_DAG_APPROVAL, payload)
+        chat_window_s = getattr(self, "_chat_confirm_window_s", 7.0)
+
         # --- 1. Speak via TTS ------------------------------------------------
+        tts_ok = True
         try:
             from tts.polly_stream import get_client as _get_tts
             _tts = _get_tts()
             await asyncio.to_thread(_tts.speak_sync, description)
         except Exception as exc:
-            log.info("DevAgent._confirm: TTS unavailable (%s) — DENY (fail-safe)", exc)
-            return False
+            if not chat_live:
+                log.info("DevAgent._confirm: TTS unavailable (%s) — DENY (fail-safe)", exc)
+                return False
+            # A chat card is on screen — an explicit click can still answer.
+            # Timeout below still fails safe to DENY.
+            log.info("DevAgent._confirm: TTS unavailable (%s) — chat card only", exc)
+            tts_ok = False
+
+        # --- 1b. Chat/signal-file window (chat requests only) -----------------
+        # Mirrors _approve_plan_upfront: write `pending`, poll `response` for 7 s.
+        # The response may come from the chat card click, the iPad, or the
+        # WhisperStream approval gate. Explicit deny blocks; explicit yes grants;
+        # ambiguity/timeout falls through to the mic capture below (which keeps
+        # its own fail-safe DENY).
+        if chat_live:
+            _appr_dir = Path.home() / ".claude" / "approval"
+            _pending = _appr_dir / "pending"
+            _response = _appr_dir / "response"
+            try:
+                _appr_dir.mkdir(parents=True, exist_ok=True)
+                _response.unlink(missing_ok=True)
+                _pending.write_text(str(time.monotonic()), encoding="utf-8")
+                deadline = time.monotonic() + chat_window_s
+                transcript: Optional[str] = None
+                while time.monotonic() < deadline:
+                    if _response.exists():
+                        transcript = _response.read_text(encoding="utf-8-sig").strip()
+                        break
+                    await asyncio.sleep(0.1)
+            except OSError as exc:
+                log.debug("DevAgent._confirm: signal-file window failed: %s", exc)
+                transcript = None
+            finally:
+                _pending.unlink(missing_ok=True)
+                _response.unlink(missing_ok=True)
+            if transcript is not None:
+                verdict = classify_confirmation(transcript)
+                if verdict == "deny":
+                    log.info("DevAgent._confirm: REJECTED via signal file — %r", transcript)
+                    return False
+                if verdict == "approve":
+                    log.info("DevAgent._confirm: approved via signal file — %r", transcript)
+                    return True
+            if not tts_ok:
+                # No spoken prompt was delivered, so a mic answer can't be an
+                # informed one — and the chat window elapsed without an explicit
+                # yes. Fail safe to DENY rather than transcribing ambient audio.
+                log.info("DevAgent._confirm: no TTS and no chat answer → DENY (fail-safe)")
+                return False
 
         # --- 2. Record 4 s of mic audio --------------------------------------
         try:

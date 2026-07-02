@@ -169,8 +169,17 @@ class ProactiveScheduler:
 
     async def _maybe_nudge_escalations(self) -> None:
         """Fire a one-shot notification (per session) the first tick that finds a
-        non-empty dev-escalation backlog (E13). Best-effort — never breaks a tick.
+        non-empty dev-escalation backlog (E13). Best-effort - never breaks a tick.
         """
+        if getattr(self, "_dev_agent", None) and hasattr(self._dev_agent, "_router"):
+            try:
+                from inference.adjudicator import LocalAdjudicator
+                if not hasattr(self, "_adjudicator"):
+                    self._adjudicator = LocalAdjudicator(self._db, self._dev_agent._router)
+                await self._adjudicator.adjudicate_pending()
+            except Exception as exc:
+                log.warning("Adjudicator hook failed: %s", exc)
+
         if self._notifier is None or self._nudged_escalations:
             return
         try:

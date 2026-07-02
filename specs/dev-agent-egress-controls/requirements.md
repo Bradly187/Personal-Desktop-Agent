@@ -6,7 +6,7 @@
 
 DevAgent's `_fetch_url` verb currently has no outbound restrictions, meaning it can hit any scheme and any IP. This introduces an SSRF vulnerability where a malicious or hallucinated prompt could exfiltrate data or interact with local services like the chat server (`:8770`), Ollama (`:11434`), or the bridge (`:8765`). While we have inbound taint screening (MCPTrustClassifier), lacking an outbound allowlist is a significant security gap compared to leading agents (Codex, Claude Code, Antigravity). This small, fail-closed fix implements those outbound restrictions.
 
-**Status:** In Progress
+**Status:** Done
 **Approved:** Brad, 2026-07-02
 **Owner / author session:** Antigravity
 
@@ -79,7 +79,7 @@ dev_agent_egress:
 
 ## 6. Tasks
 
-- [ ] 1. Implement `EgressController` in `core/` or `utils/` with IP resolution and checking (R1, R2).
-- [ ] 2. Wire `EgressController` into `DevAgent._fetch_url`.
-- [ ] 3. Audit `CommandExecutor` sandbox proxy/firewall for equivalent outbound rules (R3).
-- [ ] 4. Add unit tests for localhost, private IP, and invalid schemes.
+- [x] 1. Implement `EgressController` in `core/` or `utils/` with IP resolution and checking (R1, R2).
+- [x] 2. Wire `EgressController` into `DevAgent._fetch_url`.
+- [x] 3. Audit `CommandExecutor` sandbox proxy/firewall for equivalent outbound rules (R3).
+- [x] 4. Add unit tests for localhost, private IP, and invalid schemes.

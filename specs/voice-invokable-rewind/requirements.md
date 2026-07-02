@@ -6,7 +6,7 @@
 
 Currently, PDA's DevAgent only unwinds saga snapshots on failure (`_halt_and_compensate`). If a successful run commits changes that the user realizes are conceptually wrong, there is no one-shot undo. This is a crucial accessibility-native safety feature: for a voice-first user on a pain day, saying "undo that run" is vastly cheaper than manually identifying and reverting the changes. This spec promotes existing saga snapshots to named, per-run checkpoints that can be explicitly restored via voice command.
 
-**Status:** In Progress
+**Status:** Done
 **Approved:** Brad, 2026-07-02
 **Owner / author session:** Antigravity
 
@@ -73,8 +73,8 @@ voice_rewind:
 
 ## 6. Tasks
 
-- [ ] 1. Enable `DA_SAGA_GIT_BACKEND` on a feature branch and soak test it.
-- [ ] 2. Update `DevAgent` run lifecycle to persist checkpoints on success (R1).
-- [ ] 3. Implement `VoiceRewindHandler` and wire up the `REVERT_RUN` intent from the voice parser (R2).
-- [ ] 4. Add unit tests for successful rewind and missing-checkpoint edges.
-- [ ] 5. Update CLAUDE.md to document the new voice capability.
+- [x] 1. Enable `DA_SAGA_GIT_BACKEND` on a feature branch and soak test it.
+- [x] 2. Update `DevAgent` run lifecycle to persist checkpoints on success (R1).
+- [x] 3. Implement `VoiceRewindHandler` and wire up the `REVERT_RUN` intent from the voice parser (R2).
+- [x] 4. Add unit tests for successful rewind and missing-checkpoint edges.
+- [x] 5. Update CLAUDE.md to document the new voice capability.

@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 
 
 def reduction_enabled() -> bool:
-    """True when DA_TRAJECTORY_REDUCE is explicitly truthy. Default OFF (spec R2.4)."""
-    return os.environ.get("DA_TRAJECTORY_REDUCE", "").strip().lower() in (
+    """True when DA_TRAJECTORY_REDUCE is explicitly truthy. Default ON."""
+    return os.environ.get("DA_TRAJECTORY_REDUCE", "1").strip().lower() in (
         "1", "true", "yes", "on",
     )
 

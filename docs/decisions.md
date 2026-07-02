@@ -9,7 +9,10 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D023 — 2026-07-02 — Chat transcript markdown renders via vendored marked+DOMPurify, not CDN or hand-rolled](#d023)
 - [D022 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d022)
+- [D021 — 2026-07-01 — Flag registry is a passive validation mirror, not a config read-through](#d021)
+- [D020 — 2026-07-01 — Chat server gets its own token (cookie-delivered), not the iPad pairing token](#d020)
 - [D019 — 2026-07-01 — Chatterbox TTS backend removed; Kokoro covers the use case](#d019)
 - [D018 — 2026-06-29 — Trajectory evals constrain the plan path with production's grammar; baselines re-locked, planner-prompt fix deferred](#d018)
 - [D017 — 2026-06-28 — Pre-commit hook is the mechanical doc-drift enforcement boundary](#d017)
@@ -36,12 +39,39 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ---
 
+### D023 — Chat transcript markdown renders via vendored marked+DOMPurify, not CDN or hand-rolled {#d023}
+**Date:** 2026-07-02
+**Chose:** The chat UI's markdown pipeline is two vendored static assets (`web_client_chat/vendor/marked.min.js` 12.0.2 + `purify.min.js` DOMPurify 3.1.6, ~57 KB total); every render passes through `DOMPurify.sanitize` and falls back to plain `textContent` when either is unavailable. Enforced by `tests/test_chat_assets.py`.
+**Rejected:** (a) CDN `import` like the mermaid DAG module — the transcript is core UX and must work offline, whereas the DAG pane is an optional enhancement; (b) a hand-rolled markdown subset — a correctness/XSS maintenance sink for zero dependency savings once sanitization is required anyway (LLM output is untrusted input).
+**Why:** Offline-safe core path with a sanitizer that has real security review; the fallback keeps the old plain-text behavior as the degraded mode.
+**Ref:** `specs/chat-workbench-parity/` R2, `web_client_chat/vendor/`, `tests/test_chat_assets.py`
+
+---
+
 ### D022 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved {#d022}
 **Date:** 2026-07-01
 **Chose:** During the HybridCoordinator decomposition (`specs/hybrid-coordinator-decomposition/`), `_switch_condition`/`_run_calibration` stay defined on `HybridCoordinator` and are passed into `VoiceSystemControl` as narrow async delegate callables (`switch_condition`, `run_calibration`), rather than moving the method bodies into `VoiceSystemControl` itself.
 **Rejected:** Move both methods' full bodies into `VoiceSystemControl` alongside the rest of the voice-keyword block they're triggered from.
 **Why:** `_switch_condition` calls `self._profiler.apply_to(self._whisper, coordinator=self)` — an external `ConditionProfiler` API that takes the *real* `HybridCoordinator` instance as a `coordinator=` kwarg. Moving the method into `VoiceSystemControl` would force it to hold a back-reference to the full coordinator, violating the module's explicit-DI requirement (spec R3 — no back-reference, only named accessor callables). Leaving the method on the coordinator and injecting it as a delegate satisfies both the external API contract and the DI requirement; the fallback matches spec R4.3 ("if a branch can't be cleanly attributed, leave it in HybridCoordinator").
 **Ref:** `core/hybrid_coordinator.py` (`_switch_condition`, `_run_calibration`), `core/voice_system_control.py`
+
+---
+
+### D021 — Flag registry is a passive validation mirror, not a config read-through {#d021}
+**Date:** 2026-07-01
+**Chose:** `core/flags.py` declares every DA_* flag (name/kind/default); main.py validates the environment once at startup (WARN on unknown or unparseable, INFO the active set). Call sites keep reading `os.environ` exactly as before; `tests/test_flags_registry.py` sweeps the source tree to keep registry and code in lockstep both directions.
+**Rejected:** Refactor all 25+ call sites to read through a central config object.
+**Why:** The failure mode being fixed is *silent* misconfiguration (typo'd name, malformed value), which validation alone eliminates. A read-through refactor would touch every module (large conflict surface against the open PR #153 decomposition), change flag-read timing semantics (several sites deliberately re-read per call), and risk behavior drift for zero additional safety. The sweep test gives the lockstep guarantee a read-through would have provided structurally.
+**Ref:** `core/flags.py`, `tests/test_flags_registry.py`
+
+---
+
+### D020 — Chat server gets its own token (cookie-delivered), not the iPad pairing token {#d020}
+**Date:** 2026-07-01
+**Chose:** Separate per-install token at `~/.claude/chat_server/token`, required on every route except `/health` via aiohttp middleware (header / `?token=` query / HttpOnly cookie, constant-time compare). main.py opens the UI at `/?token=…`; the response cookie authenticates the static assets, `/chat` WS handshake, and fetches with zero JS changes.
+**Rejected (primary):** Reuse the iPad bridge pairing token. **Rejected (secondary):** Keep relying on the 127.0.0.1 default bind as the only protection.
+**Why:** A shared token couples rotation — revoking a lost iPad would break the desktop chat UI and vice versa. Loopback-only binding is one constructor argument away from LAN exposure, and the chat socket reaches DevAgent with file-write and terminal rights plus an open `/upload`; the bridge (same trust boundary) was already token-gated, so the asymmetry was the anomaly. Cookie delivery (Jupyter pattern) was chosen over query-token-everywhere because the WS handshake and asset fetches inherit it for free.
+**Ref:** `core/chat_server.py`, `tests/test_chat_server_auth.py`
 
 ---
 

@@ -905,6 +905,11 @@ class ModelRouter:
         self._timeout = timeout
         self._profiles = _PROFILES.copy()
         self._vllm_pool: Optional[VLLMSpecialistPool] = None
+        # Downgrade observability: EventBus (optional, set_event_bus) + the
+        # last model each domain silently fell back to, so model.downgraded
+        # fires on state CHANGE, not on every request while VRAM stays tight.
+        self._event_bus = None
+        self._downgraded: dict[str, str] = {}
         # Single source of VRAM admission policy (gap B). Owns the tolerance that
         # was previously the inline `+ 2.0` magic number in select_profile.
         from core.vram_arbiter import VramArbiter
@@ -990,6 +995,44 @@ class ModelRouter:
         self._vllm_pool = pool
         log.info("ModelRouter: vLLM specialist pool wired")
 
+    def set_event_bus(self, bus) -> None:
+        """Optional EventBus for model.downgraded signals (no-op when unset)."""
+        self._event_bus = bus
+
+    def _signal_downgrade(self, domain: str, wanted: str, got: str,
+                          free_gb: float) -> None:
+        """Make a silent VRAM fallback visible (WARNING + model.downgraded).
+
+        The static chain walk is correct behavior, but without this the only
+        trace that a code query ran on the 8B generalist was an INFO line.
+        Emits on state change per domain (enter a downgrade, or move to a
+        different fallback); recovery back to the primary just clears state.
+        """
+        if got == wanted:
+            if self._downgraded.pop(domain, None) is not None:
+                log.info("ModelRouter: domain=%s recovered to primary %s",
+                         domain, wanted)
+            return
+        if self._downgraded.get(domain) == got:
+            return                              # same degraded state — already signaled
+        self._downgraded[domain] = got
+        log.warning("ModelRouter: domain=%s DOWNGRADED %s → %s (%.1f GB free)",
+                    domain, wanted, got, free_gb)
+        if self._event_bus is None:
+            return
+        from core.async_utils import fire_and_log
+        from core.events import TOPIC_MODEL_DOWNGRADED
+        # fire_and_log no-ops without a running loop (sync/test caller) — the
+        # WARNING above is the guaranteed part of the signal.
+        fire_and_log(
+            self._event_bus.publish(
+                TOPIC_MODEL_DOWNGRADED,
+                {"domain": domain, "wanted": wanted, "got": got,
+                 "free_vram_gb": round(free_gb, 1)},
+                source="model_router",
+            ),
+            log, label="model_downgraded_event")
+
     def heavy_model_names(self, min_vram_gb: float = 12.0) -> list[str]:
         """Distinct heavy specialist model names this router can load.
 
@@ -1037,6 +1080,13 @@ class ModelRouter:
             return override
 
         chain = _FALLBACK.get(domain, ["llama3.1:8b"])
+        # The chain's first resolvable entry is what this domain *wants*; any
+        # later pick is a quality downgrade worth surfacing (model.downgraded).
+        primary = next(
+            (n for n in chain
+             if any(p.name == n for p in self._profiles.values())),
+            chain[0],
+        )
 
         for model_name in chain:
             # Find profile for this model name
@@ -1051,11 +1101,14 @@ class ModelRouter:
                     "ModelRouter: domain=%s → %s (%.1f GB, %.1f GB free)",
                     domain, model_name, profile.vram_gb, free_gb,
                 )
+                self._signal_downgrade(domain, primary, model_name, free_gb)
                 return profile
 
         # Ultimate fallback
         log.warning("ModelRouter: no profile fits VRAM, falling back to llama3.1:8b")
-        return self._profiles["command"]
+        fallback = self._profiles["command"]
+        self._signal_downgrade(domain, primary, fallback.name, free_gb)
+        return fallback
 
     # ---------------------------------------------------------------------- #
     # Inference
