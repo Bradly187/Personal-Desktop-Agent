@@ -3729,8 +3729,8 @@ class AgentDB:
             log.warning("AgentDB.get_pending_compensations failed: %s", exc)
             return []
 
-    async def skip_pending_compensations(self, run_id: int) -> int:
-        """Mark all still-pending compensations for run_id as 'skipped'.
+    async def skip_pending_compensations(self, run_id: int, new_status: str = 'skipped') -> int:
+        """Mark all still-pending compensations for run_id as new_status.
 
         Called at run finalization so a successful run (or any terminal path
         that didn't roll back) doesn't leave compensation rows 'pending'
@@ -3741,15 +3741,36 @@ class AgentDB:
         try:
             cur = await self._conn.execute(
                 "UPDATE saga_compensations"
-                " SET status = 'skipped',"
+                " SET status = ?,"
                 "     finished_at = COALESCE(finished_at, ?)"
                 " WHERE run_id = ? AND status = 'pending'",
-                (time.time(), run_id),
+                (new_status, time.time(), run_id),
             )
             await self._conn.commit()
             return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         except Exception as exc:
             log.warning("AgentDB.skip_pending_compensations failed: %s", exc)
+            return 0
+
+    async def promote_checkpoints_to_pending(self, run_id: int) -> int:
+        """Mark 'checkpoint' compensations for run_id as 'pending'.
+        
+        Used by the voice-invokable rewind feature to prepare a run's 
+        checkpoints for restoration via _run_compensations.
+        """
+        if not self._conn:
+            return 0
+        try:
+            cur = await self._conn.execute(
+                "UPDATE saga_compensations"
+                " SET status = 'pending', finished_at = NULL"
+                " WHERE run_id = ? AND status = 'checkpoint'",
+                (run_id,),
+            )
+            await self._conn.commit()
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        except Exception as exc:
+            log.warning("AgentDB.promote_checkpoints_to_pending failed: %s", exc)
             return 0
 
     # ---------------------------------------------------------------------- #

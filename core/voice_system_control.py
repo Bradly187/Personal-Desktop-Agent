@@ -232,6 +232,19 @@ class VoiceSystemControl:
             return {"status": "ok", "action": "AGENT_RESUME", "offered": True,
                     "goal": pending[0].get("goal", "")[:80]}
 
+        # "undo that run" — Revert the most recent dev agent run (VoiceRewindHandler)
+        elif _lower in ("undo that run", "undo run", "revert run", "undo last task", "revert last task", 
+                        "undo the run", "undo the last run", "undo task"):
+            dev_agent = self._dev_agent()
+            if dev_agent is None:
+                from core.async_utils import fire_and_log
+                fire_and_log(self._tts_speak("No agent available to undo."), log, label="tts undo none")
+                return {"status": "ok", "action": "REVERT_RUN", "offered": False}
+                
+            t = asyncio.create_task(dev_agent.revert_last_run())
+            t.add_done_callback(lambda t: self._on_task_done(t, "revert_last_run"))
+            return {"status": "ok", "action": "REVERT_RUN", "offered": True}
+
         # "hey agent authorize <goal>" — create a standalone goal session
         elif _lower.startswith("hey agent authorize ") or _lower.startswith("authorize "):
             goal_text = (cmd.text.split("authorize ", 1)[-1]).strip(" .,!?\"'")

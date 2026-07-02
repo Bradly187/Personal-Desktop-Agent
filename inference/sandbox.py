@@ -97,6 +97,13 @@ def command_needs_network(command: str) -> bool:
     inside the jail while `pytest`, `ls`, and arbitrary commands stay offline.
     Still gated by the goal-session allowlist upstream — network is only granted
     to a command that already passed approval AND matches a known network op.
+
+    GAP-3 (Pillar 1 — Egress Governance): While `DevAgent._fetch_url` uses
+    an active IP blocklist to prevent SSRF against RFC-1918 / loopback, the
+    terminal sandbox (`bwrap`/`firejail`) handles egress control via this coarse
+    all-or-nothing boolean. It is not practical to enforce a granular IP deny-list
+    at the OS namespace level without a proxy or iptables inside the jail. The
+    attack surface is bounded upstream by the strict voice-approval gate for commands.
     """
     import re
     import shlex

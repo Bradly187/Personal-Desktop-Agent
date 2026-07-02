@@ -429,13 +429,13 @@ async def test_finalize_run_skips_leftover_pending_compensations(tmp_path):
                          steps=[step], success=True)
     await agent._finalize_run(run_id, result, "completed")
 
-    # No pending rows linger; the row is 'skipped', not 'done'.
+    # No pending rows linger; the row is 'checkpoint', not 'done'.
     assert await db.get_pending_compensations(run_id) == []
     async with db._conn.execute(
         "SELECT status FROM saga_compensations WHERE run_id = ?", (run_id,)
     ) as cur:
         rows = await cur.fetchall()
-    assert all(r["status"] == "skipped" for r in rows)
+    assert all(r["status"] == "checkpoint" for r in rows)
     await db.close()
 
 

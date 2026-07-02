@@ -155,7 +155,7 @@ Set `=0` / `=false` for byte-identical legacy behavior unless noted otherwise.
 
 - **`WRITE_FILE` and `EDIT_FILE` are fail-closed.** Every write routes through `inference/edit_format.py` before touching disk; broken result → `EditError` (file untouched, feeds replan). `EDIT_FILE` SEARCH must match EXACTLY ONCE — stale/ambiguous → `EditError` (D013). Format per model via `edit_format_aci.per_model`; default `whole_file` (D006). Spec: `specs/edit-format-aci/`.
 
-- **DevAgent saga: per-step compensation, not whole-tree git stash (D009).** `_snapshot_for_write` backs up individual files pre-write; `_halt_and_compensate` unwinds in reverse. Two preserved non-goals: Critic REVISE doesn't snapshot (pre-disk, D007); Tester failure never rolls back a good write (D008). Spec: `specs/dev-agent-sagas/`.
+- **DevAgent saga: per-step compensation, not whole-tree git stash (D009).** `_snapshot_for_write` backs up individual files pre-write; `_halt_and_compensate` unwinds in reverse. Successful runs persist checkpoints which can be rolled back via VoiceRewindHandler ("undo that run"). Two preserved non-goals: Critic REVISE doesn't snapshot (pre-disk, D007); Tester failure never rolls back a good write (D008). Spec: `specs/dev-agent-sagas/`.
 
 - **WSL terminal routing is ON by default.** Without it, bwrap/firejail never applies on a Windows host — `RUN_TERMINAL` falls through to allowlist-only silently. Windows-only commands (PowerShell/cmd/`*.exe`) stay native; `enabled: false` to opt out. Spec: `specs/wsl-terminal-routing/`.
 
