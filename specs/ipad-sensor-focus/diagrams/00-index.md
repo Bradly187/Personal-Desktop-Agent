@@ -10,7 +10,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 | # | File | Contents |
 |---|------|----------|
 | 01 | [01-system-architecture.md](01-system-architecture.md) | High-level system architecture, iPad↔PC split, WebSocket protocol |
-| 02 | [02-class-diagram.md](02-class-diagram.md) | Class diagram for both iPad-side (Swift) and PC-side (Python) |
+| 02 | [02-class-diagram.md](02-class-diagram.md) | Class diagram for iPad-side (Swift); PC-side moved to #16 |
 | 03 | [03-sequence-diagrams.md](03-sequence-diagrams.md) | Interaction flows for all 8 input modalities (gaze/head removed 2026-05-30) |
 | 04 | [04-state-machines.md](04-state-machines.md) | State machines: iPad app/sensors + backend agent kernel (circuit breaker, gyro calibrator, resource governor, supervisor, goal/run lifecycles) |
 | 05 | [05-data-flow.md](05-data-flow.md) | iPad sensor data flows, WebSocket message schema, persistent storage |
@@ -23,6 +23,7 @@ architecture where a native Swift/SwiftUI app replaces all standalone sensor har
 | 12 | [12-nemoclaw-inference-tiers.md](12-nemoclaw-inference-tiers.md) | Local inference backends mapped against RTX 5090 VRAM budget |
 | 14 | [14-database-schema.md](14-database-schema.md) | agent.db (32 tables) + analytics.duckdb ER diagrams; pipeline write topology; index coverage |
 | 15 | [15-sprint-roadmap.md](15-sprint-roadmap.md) | Sprint 5–7 planning: vision grounding, UIAutomation, action verification loop |
+| 16 | [16-python-class-diagrams.md](16-python-class-diagrams.md) | PC-side (Python) class diagrams, 8 concern-focused layers (post-#153 decomposition; verified against code 2026-07-02) |
 
 ---
 
