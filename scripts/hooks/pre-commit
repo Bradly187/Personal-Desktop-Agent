@@ -32,10 +32,10 @@ if [[ "${DA_SKIP_SECRET_SCAN:-0}" == "0" ]]; then
             continue
         fi
         for PATTERN in "${PATTERNS[@]}"; do
-            if git diff --cached "$FILE" | grep -E "$PATTERN" > /dev/null 2>&1; then
+            if git diff --cached -- "$FILE" | grep -E "$PATTERN" > /dev/null 2>&1; then
                 echo "❌ secret-scan: potential secret detected in $FILE"
                 echo "   Pattern: $PATTERN"
-                git diff --cached "$FILE" | grep -E "$PATTERN" | head -1 | sed 's/^/   /'
+                git diff --cached -- "$FILE" | grep -E "$PATTERN" | head -1 | sed 's/^/   /'
                 FOUND_SECRETS=1
             fi
         done
