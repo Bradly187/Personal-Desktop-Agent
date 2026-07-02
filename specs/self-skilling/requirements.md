@@ -33,14 +33,14 @@ Related: `../dev-agent-critic/` (Critic+Tester reused as the codegen gate),
 
 - **Macro (rung 2)**: a named, replayable sequence composed *only* of
   already-vetted verbs/skill-tools. New behavior, **no new code, no new egress**.
-- **Skill proposal (rung 3)**: a drafted FastMCP server + manifest + generated
-  pytest, staged for human approval. Greenfield code, gated, never auto-enabled.
+- **Skill proposal (rung 3)**: a drafted `SKILL.md` file (instructions + YAML frontmatter)
+  staged for human approval. Greenfield capability, gated, never auto-enabled.
 - **Capability gap**: a recurring intent for which no existing verb or skill tool
   fits — detected from repeated `pipeline_failure` episodes with no matching tool.
 - **MacroDetector / GapDetector**: offline miners over episodic memory + the
   escalation/failure record that emit candidates.
 - **SkillProposer**: the DevAgent path that scaffolds a rung-3 draft, routed
-  through the existing lint → Critic → Tester gates.
+  through the lint → Critic → Tester gates.
 - **`self_evolution_candidates`**: existing staging table
   (`kind`, `text`, `action_or_wrong`, `domain`, `reason`, `source_refs`, `status`,
   `eval_delta`, `decided_ts`; `UNIQUE(kind,text,action_or_wrong)`; statuses
@@ -104,31 +104,27 @@ lack of a tool, so it can propose building one instead of failing silently again
    `rejected`, THEN THE detector SHALL NOT re-stage it (respect a prior human
    "no").
 
-### Requirement 3: Skill drafting (rung 3, gated codegen)
+### Requirement 3: Skill drafting (rung 3, gated drafting)
 
-**User Story:** As Brad, I want a proposed skill to arrive fully scaffolded and
-self-tested, so my only job is to review and approve.
+**User Story:** As Brad, I want a proposed skill to arrive fully scaffolded as a
+`SKILL.md` instruction file, so my only job is to review the instructions and approve.
 
 #### Acceptance Criteria
 1. WHEN a `skill_proposal` candidate is selected for drafting, THE `SkillProposer`
-   SHALL generate a FastMCP server file, a manifest (`enabled: false`), and a
-   pytest, written **only** within the skills scope
-   (`skills/servers/`, `skills/manifests/`, `tests/`).
+   SHALL generate a `skills/<skill_name>/SKILL.md` file (and optional helper
+   scripts or resources), written **only** within the skills scope (`skills/`).
    <!-- AGENTS.md #7: respect writable_roots; never write outside scope. -->
-2. THE generated server SHALL pass the existing pre-write lint gate
-   (`inference/edit_format.py` `ast.parse`, fail-closed) BEFORE any file is
+2. THE generated `SKILL.md` SHALL pass a structural lint gate (verifying valid
+   YAML frontmatter with `name` and `description`) BEFORE any file is
    written; IF it fails, THEN no file SHALL be written and the failure SHALL be
    recorded on the candidate.
 3. THE generated diff SHALL pass the independent Critic (`inference/critic.py`);
    IF the Critic returns REVISE/BLOCK, THEN drafting SHALL stop and surface the
-   diagnostic (no partial skill left enabled).
-4. THE generated pytest SHALL run one-shot in the sandbox
+   diagnostic.
+4. ANY helper scripts (if applicable) SHALL run one-shot in the sandbox
    (`inference/tester.py` → `inference/sandbox.run_sandboxed`); a failing test
    SHALL be surfaced as an observation on the candidate, NOT auto-rolled-back and
    NOT auto-approved.
-5. THE drafted manifest SHALL declare every external-effect tool in `send_tools`
-   so it is gated by default; IF tool effect is unknown, THEN it SHALL be treated
-   as a send (`is_send_tool` fail-safe).
 
 ### Requirement 4: Human approval gate (the rung-4 firewall)
 
@@ -139,12 +135,12 @@ so self-skilling can never widen my attack surface behind my back.
 1. THE system SHALL NEVER set a self-authored skill `enabled: true` without an
    explicit human approval recorded against the candidate.
 2. WHEN a draft is ready, THE system SHALL surface it via an approval chip
-   (`spawn_task`) summarizing the capability, the source episodes, and the
-   generated test outcome — and SHALL take no enabling action on silence/timeout.
+   (`spawn_task`) summarizing the capability, the source episodes, and any
+   test outcomes — and SHALL take no enabling action on silence/timeout.
    <!-- AGENTS.md #4: fail-safe to DENY on silence. -->
-3. IF approved, THEN the system SHALL write the enabled-state to
-   `~/.claude/skills/enabled.json` (user state, never the checked-in manifest) and
-   hot-load via `SkillRegistry.start_skill()`; the candidate moves to `promoted`.
+3. IF approved, THEN the system SHALL register the new `SKILL.md` directory in the
+   agent's customization root (via automatic discovery or updating `skills.json`);
+   the candidate moves to `promoted`.
 4. IF rejected (or on timeout), THEN the candidate SHALL move to `rejected` and
    SHALL NOT be re-proposed (R2.4).
 5. THE system SHALL NEVER self-provision a credential or secret for a drafted
@@ -176,8 +172,8 @@ so self-skilling can never widen my attack surface behind my back.
   (`MacroDetector`, `GapDetector`) cloned from the `ProactiveScheduler` /
   `ResourceGovernor` supervised-loop pattern — **never** the tick loop. Drafting
   reuses the DevAgent WRITE_FILE path (lint → Critic → Tester) with scope pinned
-  to `skills/`. Approval reuses the chip (`spawn_task`) + `enabled.json` +
-  `SkillRegistry.start_skill()` hot-load.
+  to `skills/`. Approval reuses the chip (`spawn_task`) and triggers skill registry
+  reload or discovery.
 - **New `Command` fields:** none. Macros/proposals live in the DB, not on the
   `Command` DTO.
 - **Models / VRAM:** drafting runs on the already-loaded plan/general model with a
@@ -205,9 +201,7 @@ self_skilling:
     min_occurrences: 3        # recurring no-tool failures before a proposal
   draft:
     writable_roots:           # AGENTS.md #7 — drafting is pinned to skills scope
-      - skills/servers
-      - skills/manifests
-      - tests
+      - skills
   approval:
     auto_enable: false        # MUST stay false — rung-4 firewall (R4.1)
     auto_provision_credentials: false   # MUST stay false (R4.5)
@@ -239,8 +233,8 @@ self_skilling:
 - [ ] 2. `GapDetector` offline miner + gap/macro arbitration — satisfies R2.1–R2.4
       *(rung 3 — deferred behind task 8 gate)*
 - [ ] 3. `SkillProposer` drafting through lint→Critic→Tester, scope-pinned to
-      `skills/` — satisfies R3.1–R3.5 *(rung 3 — deferred)*
-- [ ] 4. Approval surface: chip + `enabled.json` write + `start_skill()` hot-load;
+      `skills/` with `SKILL.md` generation — satisfies R3.1–R3.4 *(rung 3 — deferred)*
+- [ ] 4. Approval surface: chip + registration in customization root;
       reject/timeout → `rejected` — satisfies R4.1–R4.6 *(rung 3 — deferred)*
 - [x] 5. Macro promotion + safe replay through `CommandExecutor` — satisfies R5.1–R5.3
       *(core/macro_store.py; voice approval + main.py wiring; promote_macro_candidate)*
