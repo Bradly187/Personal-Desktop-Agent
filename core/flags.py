@@ -62,7 +62,7 @@ REGISTRY: dict[str, FlagSpec] = {f.name: f for f in (
     _S("DA_SAGA_ANNOUNCE", "bool", "1", "TTS summary after saga rollback"),
     _S("DA_SAGA_GIT_BACKEND", "bool", "0", "git-blob saga snapshots"),
     # ── trajectory / memory (inference/) ────────────────────────────────────
-    _S("DA_TRAJECTORY_REDUCE", "bool", "0", "compact trajectory tokens"),
+    _S("DA_TRAJECTORY_REDUCE", "bool", "1", "compact trajectory tokens"),
     _S("DA_TRAJECTORY_DEDUP", "bool", "1", "drop superseded duplicate reads"),
     _S("DA_RESUME_MEMORY", "bool", "1", "seed crash-resumed plans"),
     _S("DA_SESSION_MEMORY", "bool", "0", "cross-session plan seeding"),

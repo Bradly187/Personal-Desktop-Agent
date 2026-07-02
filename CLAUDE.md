@@ -137,7 +137,7 @@ by `tests/test_flags_registry.py`.
 | Flag | Default | Summary | Decision | Spec |
 |------|---------|---------|----------|------|
 | `DA_CLOUD_PLAN` | OFF | Route `domain="plan"` to Bedrock Sonnet; avoids 18 GB model eviction | D015 | `specs/cloud-plan-routing/` |
-| `DA_TRAJECTORY_REDUCE` | OFF | Compact trajectory tokens; held for ~12.5pt ordering regression | D011 | `specs/trajectory-reduction/` |
+| `DA_TRAJECTORY_REDUCE` | ON | Compact trajectory tokens; flipped to ON despite ~12.5pt ordering regression | D011 | `specs/trajectory-reduction/` |
 | `DA_CRITIC` | ON | Review diffs pre-disk-commit; REVISE drives replan | D007 | `specs/dev-agent-critic/` |
 | `DA_TESTER` | ON | Auto-pytest after `.py` writes; failure = safe-observation, never rollback | D008 | `specs/dev-agent-critic/` |
 | `DA_PLAN_REPAIR` | ON | Re-prompt planner on unknown-verb / unparseable plan (max `DA_PLAN_REPAIR_MAX=1`) | — | `specs/dev-agent-plan-contract/` |

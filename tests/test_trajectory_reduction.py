@@ -176,10 +176,10 @@ def test_r1_1_deterministic():
 
 # --- R2.4 flag default: reduction OFF unless explicitly enabled ---------------
 
-def test_flag_default_off(monkeypatch):
+def test_flag_default_on(monkeypatch):
     monkeypatch.delenv("DA_TRAJECTORY_REDUCE", raising=False)
-    assert reduction_enabled() is False
-    monkeypatch.setenv("DA_TRAJECTORY_REDUCE", "1")
     assert reduction_enabled() is True
+    monkeypatch.setenv("DA_TRAJECTORY_REDUCE", "0")
+    assert reduction_enabled() is False
     monkeypatch.setenv("DA_TRAJECTORY_REDUCE", "off")
     assert reduction_enabled() is False
