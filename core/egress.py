@@ -59,9 +59,9 @@ class EgressController:
             except ValueError:
                 continue
 
-            if ip_obj.is_private:
-                raise EgressError(f"Resolved IP {ip_str} for {hostname} is a private address.")
             if ip_obj.is_loopback:
                 raise EgressError(f"Resolved IP {ip_str} for {hostname} is a loopback address.")
+            if ip_obj.is_private:
+                raise EgressError(f"Resolved IP {ip_str} for {hostname} is a private address.")
             if ip_obj.is_link_local or ip_obj.is_multicast:
                 raise EgressError(f"Resolved IP {ip_str} for {hostname} is an invalid address type.")

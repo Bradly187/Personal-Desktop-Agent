@@ -329,7 +329,7 @@ def test_replan_predictor_reduce_flag_compacts_prompt(monkeypatch):
     reply = '{"steps": [{"action": "EXPLAIN"}]}'
 
     # Flag OFF → legacy rendering: no collapsed read-only summary line.
-    monkeypatch.delenv("DA_TRAJECTORY_REDUCE", raising=False)
+    monkeypatch.setenv("DA_TRAJECTORY_REDUCE", "0")
     cap_off: dict = {}
     replan_predictor(_fake_infer_text(reply, cap_off))(case)
     assert "read-only steps:" not in cap_off["user"]
