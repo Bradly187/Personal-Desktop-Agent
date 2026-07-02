@@ -2621,8 +2621,12 @@ class DevAgent:
             # A cancel that rolled back edits used to be silent about it (R2.2).
             msg += self._rollback_notice()
         elif result.success:
-            summary = (result.response_text or "")[:80].replace("\n", " ")
-            msg = f"Done. {summary}" if summary else "Plan complete."
+            spoken_msg = await self._generate_walkthrough(result)
+            if spoken_msg:
+                msg = spoken_msg
+            else:
+                summary = (result.response_text or "")[:80].replace("\n", " ")
+                msg = f"Done. {summary}" if summary else "Plan complete."
         else:
             failed = [s for s in result.steps if not s.success]
             first_err = (failed[0].result or "")[:60] if failed else ""
@@ -2638,6 +2642,48 @@ class DevAgent:
             asyncio.create_task(_get_tts().speak(msg))
         except Exception as exc:
             log.debug("DevAgent._speak_plan_completion: TTS failed: %s", exc)
+
+    async def _generate_walkthrough(self, result: AgentResult) -> Optional[str]:
+        if not os.environ.get("DA_POST_RUN_WALKTHROUGH", "0").strip().lower() in ("1", "true", "yes", "on"):
+            return None
+            
+        try:
+            actions = []
+            for s in result.steps:
+                if s.action:
+                    args_trunc = str(s.args)[:80] if s.args else ""
+                    actions.append(f"Step {s.step_num}: {s.action} {args_trunc}")
+            
+            prompt = (
+                f"Goal: {self._current_goal}\n"
+                f"Steps taken:\n" + "\n".join(actions) + "\n\n"
+                "Write a markdown walkthrough summarizing the changes made.\n"
+                "Also, provide a 1-sentence spoken summary wrapped in <spoken> tags."
+            )
+            
+            res = await asyncio.wait_for(
+                self._router.infer(domain="plan", user_text=prompt, context=None),
+                timeout=15.0
+            )
+            
+            if res and res.ok and res.text:
+                text = res.text
+                spoken_msg = None
+                
+                if "<spoken>" in text and "</spoken>" in text:
+                    start = text.find("<spoken>") + 8
+                    end = text.find("</spoken>")
+                    spoken_msg = text[start:end].strip()
+                    text = text[:text.find("<spoken>")] + text[end+9:]
+                
+                with open("walkthrough.md", "w", encoding="utf-8") as f:
+                    f.write(text.strip())
+                    
+                return spoken_msg
+        except Exception as exc:
+            log.warning("DevAgent._generate_walkthrough failed: %s", exc)
+            
+        return None
 
     def _rollback_notice(self) -> str:
         """Spoken addendum describing a saga rollback (DA_SAGA_ANNOUNCE).
