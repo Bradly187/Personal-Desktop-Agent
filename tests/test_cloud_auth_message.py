@@ -22,7 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.command_executor import Command
-from core.hybrid_coordinator import _CloudInference
+from core.inference_runner import _CloudInference
 
 
 def _run(coro):

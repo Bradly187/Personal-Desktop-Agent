@@ -41,6 +41,7 @@ time.monotonic (never the wall clock — immune to NTP steps).
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Callable
 
@@ -84,41 +85,46 @@ class CircuitBreaker:
         # current (a lost probe that finally returns after a fresh probe was
         # admitted) is ignored, so two probes' outcomes can't be conflated (#16).
         self._probe_gen = 0
+        # RLock so record_success/record_failure can call _open while already
+        # holding the lock (reentrant). Protects all state reads/writes from
+        # concurrent asyncio.to_thread workers (#10).
+        self._lock = threading.RLock()
 
     # ── Query ────────────────────────────────────────────────────────────────
 
     def allow(self) -> bool:
         """True if a call should proceed now. Side-effect: an open breaker whose
         cooldown has elapsed transitions to half-open and admits ONE probe."""
-        if self._state == "closed":
+        with self._lock:
+            if self._state == "closed":
+                return True
+            if self._state == "open":
+                if self._now() - self._opened_at >= self._cooldown_s:
+                    self._state = "half_open"
+                    self._half_open_probe_inflight = True
+                    self._probe_started_at = self._now()
+                    self._probe_gen += 1
+                    log.info("CircuitBreaker[%s]: half-open — admitting one probe", self._name)
+                    return True
+                return False
+            # half_open: admit exactly one probe; reject concurrent callers meanwhile.
+            # Self-heal: if a probe was admitted but never reported its outcome (the
+            # caller was cancelled before record_success/record_failure), the flag
+            # would wedge the breaker shut forever. After cooldown_s with no outcome,
+            # treat the probe as lost and admit a fresh one.
+            if self._half_open_probe_inflight:
+                if self._now() - self._probe_started_at >= self._cooldown_s:
+                    log.warning("CircuitBreaker[%s]: half-open probe lost (no outcome "
+                                "in %.0fs) — admitting a fresh probe", self._name,
+                                self._cooldown_s)
+                    self._probe_started_at = self._now()
+                    self._probe_gen += 1   # supersede the lost probe's outcome
+                    return True
+                return False
+            self._half_open_probe_inflight = True
+            self._probe_started_at = self._now()
+            self._probe_gen += 1
             return True
-        if self._state == "open":
-            if self._now() - self._opened_at >= self._cooldown_s:
-                self._state = "half_open"
-                self._half_open_probe_inflight = True
-                self._probe_started_at = self._now()
-                self._probe_gen += 1
-                log.info("CircuitBreaker[%s]: half-open — admitting one probe", self._name)
-                return True
-            return False
-        # half_open: admit exactly one probe; reject concurrent callers meanwhile.
-        # Self-heal: if a probe was admitted but never reported its outcome (the
-        # caller was cancelled before record_success/record_failure), the flag
-        # would wedge the breaker shut forever. After cooldown_s with no outcome,
-        # treat the probe as lost and admit a fresh one.
-        if self._half_open_probe_inflight:
-            if self._now() - self._probe_started_at >= self._cooldown_s:
-                log.warning("CircuitBreaker[%s]: half-open probe lost (no outcome "
-                            "in %.0fs) — admitting a fresh probe", self._name,
-                            self._cooldown_s)
-                self._probe_started_at = self._now()
-                self._probe_gen += 1   # supersede the lost probe's outcome
-                return True
-            return False
-        self._half_open_probe_inflight = True
-        self._probe_started_at = self._now()
-        self._probe_gen += 1
-        return True
 
     @property
     def state(self) -> str:
@@ -134,41 +140,43 @@ class CircuitBreaker:
 
     def record_success(self, gen: int | None = None,
                         latency_s: float | None = None) -> None:
-        if gen is not None and gen != self._probe_gen:
-            return   # outcome from a superseded probe (#16) — ignore
-        # Slow-but-successful: the backend is degrading, not down. Count it toward
-        # opening so a hang-then-barely-respond loop stops costing near-timeout
-        # latency on every call. A slow half-open probe is NOT a clean recovery.
-        if (self._slow_call_s is not None and latency_s is not None
-                and latency_s >= self._slow_call_s):
+        with self._lock:
+            if gen is not None and gen != self._probe_gen:
+                return   # outcome from a superseded probe (#16) — ignore
+            # Slow-but-successful: the backend is degrading, not down. Count it toward
+            # opening so a hang-then-barely-respond loop stops costing near-timeout
+            # latency on every call. A slow half-open probe is NOT a clean recovery.
+            if (self._slow_call_s is not None and latency_s is not None
+                    and latency_s >= self._slow_call_s):
+                self._half_open_probe_inflight = False
+                self._consecutive_slow += 1
+                if self._state == "half_open":
+                    self._open(reason=f"slow probe ({latency_s:.1f}s)")
+                    return
+                if self._consecutive_slow >= self._slow_threshold:
+                    self._open(reason=f"{self._consecutive_slow} slow call(s) "
+                                      f">= {self._slow_call_s:.1f}s")
+                return   # slow but tolerated — stay in current state (closed)
+            # Fast, clean success → fully close and reset both counters.
+            if self._state != "closed":
+                log.info("CircuitBreaker[%s]: success — closing", self._name)
+            self._state = "closed"
+            self._consecutive_failures = 0
+            self._consecutive_slow = 0
             self._half_open_probe_inflight = False
-            self._consecutive_slow += 1
-            if self._state == "half_open":
-                self._open(reason=f"slow probe ({latency_s:.1f}s)")
-                return
-            if self._consecutive_slow >= self._slow_threshold:
-                self._open(reason=f"{self._consecutive_slow} slow call(s) "
-                                  f">= {self._slow_call_s:.1f}s")
-            return   # slow but tolerated — stay in current state (closed)
-        # Fast, clean success → fully close and reset both counters.
-        if self._state != "closed":
-            log.info("CircuitBreaker[%s]: success — closing", self._name)
-        self._state = "closed"
-        self._consecutive_failures = 0
-        self._consecutive_slow = 0
-        self._half_open_probe_inflight = False
 
     def record_failure(self, gen: int | None = None) -> None:
-        if gen is not None and gen != self._probe_gen:
-            return   # outcome from a superseded probe (#16) — ignore
-        self._half_open_probe_inflight = False
-        if self._state == "half_open":
-            # Probe failed → straight back to open for another cooldown.
-            self._open(reason="probe failed")
-            return
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self._fail_threshold:
-            self._open(reason=f"{self._consecutive_failures} failure(s)")
+        with self._lock:
+            if gen is not None and gen != self._probe_gen:
+                return   # outcome from a superseded probe (#16) — ignore
+            self._half_open_probe_inflight = False
+            if self._state == "half_open":
+                # Probe failed → straight back to open for another cooldown.
+                self._open(reason="probe failed")
+                return
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._fail_threshold:
+                self._open(reason=f"{self._consecutive_failures} failure(s)")
 
     def _open(self, reason: str = "") -> None:
         _transition = self._state != "open"
@@ -187,13 +195,14 @@ class CircuitBreaker:
                 pass
 
     def get_status(self) -> dict:
-        return {
-            "name": self._name,
-            "state": self._state,
-            "consecutive_failures": self._consecutive_failures,
-            "fail_threshold": self._fail_threshold,
-            "cooldown_s": self._cooldown_s,
-            "consecutive_slow": self._consecutive_slow,
-            "slow_call_s": self._slow_call_s,
-            "slow_threshold": self._slow_threshold,
-        }
+        with self._lock:
+            return {
+                "name": self._name,
+                "state": self._state,
+                "consecutive_failures": self._consecutive_failures,
+                "fail_threshold": self._fail_threshold,
+                "cooldown_s": self._cooldown_s,
+                "consecutive_slow": self._consecutive_slow,
+                "slow_call_s": self._slow_call_s,
+                "slow_threshold": self._slow_threshold,
+            }

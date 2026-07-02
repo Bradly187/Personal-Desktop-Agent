@@ -461,8 +461,8 @@ async def test_handle_macro_save_no_pending_R4_1():
     try:
         coord = _coord_with(db)
         coord.set_macro_store(MacroStore(known_verbs=set(_VERBS)))
-        coord._pending_macro = None
-        res = await coord._handle_macro_save("anything")
+        coord._workflow._pending_macro = None
+        res = await coord._workflow.handle_macro_save("anything")
         assert res["action"] == "MACRO_SAVE_NONE"   # nothing pending → promote nothing
     finally:
         await db.close()
@@ -479,8 +479,8 @@ async def test_handle_macro_save_promotes_and_routes():
         coord = _coord_with(db)
         store = MacroStore(known_verbs=set(_VERBS))
         coord.set_macro_store(store)
-        coord._pending_macro = {"id": cid, "name": "open and click"}
-        res = await coord._handle_macro_save("morning setup")
+        coord._workflow._pending_macro = {"id": cid, "name": "open and click"}
+        res = await coord._workflow.handle_macro_save("morning setup")
         assert res == {"status": "ok", "action": "MACRO_SAVE", "name": "morning setup"}
         # persisted: promoted, renamed, survives a fresh load
         row = await db.get_evolution_candidate(cid)
@@ -488,7 +488,7 @@ async def test_handle_macro_save_promotes_and_routes():
         fresh = MacroStore(known_verbs=set(_VERBS))
         assert await fresh.load_promoted(db) == 1
         assert fresh.match("run morning setup please").name == "morning setup"
-        assert coord._pending_macro is None
+        assert coord._workflow._pending_macro is None
     finally:
         await db.close()
         d.cleanup()
@@ -506,7 +506,7 @@ async def test_maybe_handle_macro_replays_through_executor():
         coord.set_macro_store(store)
         coord._executor = _FakeExec()
         cmd = Command(text="run morning setup", action="", source="voice")
-        res = await coord._maybe_handle_macro(cmd)
+        res = await coord._workflow.maybe_handle_macro(cmd)
         assert res["action"] == "MACRO_REPLAY" and res["status"] == "ok"
         assert [c[0] for c in coord._executor.calls] == ["OPEN", "CLICK"]
     finally:
@@ -529,7 +529,7 @@ async def test_macro_does_not_shadow_system_control():
         coord.set_macro_store(store)
         coord._executor = _FakeExec()
         cmd = Command(text="help", action="", source="voice")
-        assert await coord._maybe_handle_macro(cmd) is None  # built-in wins
+        assert await coord._workflow.maybe_handle_macro(cmd) is None  # built-in wins
         assert coord._executor.calls == []
     finally:
         await db.close()

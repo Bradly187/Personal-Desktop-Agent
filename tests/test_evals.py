@@ -26,7 +26,7 @@ from evals.runner import run_suite
 
 
 # --------------------------------------------------------------------------- #
-# parse_action_string (mirrors HybridCoordinator._parse_action)
+# parse_action_string (mirrors ActionExecutor.parse_action)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("raw,verb,target", [

@@ -1,6 +1,6 @@
 """Scoring: parse a model action string, compare to a case, aggregate a report.
 
-`parse_action_string` mirrors HybridCoordinator._parse_action (verb = first token,
+`parse_action_string` mirrors ActionExecutor.parse_action (verb = first token,
 target = remainder, tolerating a leading "Action:"/"Command:" label) so the eval's
 notion of correctness matches what production actually dispatches. It is replicated
 here rather than imported to keep the evals package free of heavy coordinator deps.

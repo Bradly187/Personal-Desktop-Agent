@@ -1,17 +1,15 @@
-"""Integration tests for the workflow voice trigger glue in HybridCoordinator.
+"""Integration tests for the workflow voice trigger glue in WorkflowHandler.
 
-These exercise ``_maybe_handle_workflow`` end-to-end (decompose → fan_out →
+These exercise ``maybe_handle_workflow`` end-to-end (decompose → fan_out →
 synthesize → speak) with a fake ModelRouter and the *real* WorkflowRunner, so
-the orchestration wiring — the novel part this feature adds — is covered. The
-coordinator is built via ``__new__`` to skip its heavy constructor; only the
-attributes the method touches are set.
+the orchestration wiring — the novel part this feature adds — is covered.
 """
 
 import types
 
 import pytest
 
-from core.hybrid_coordinator import HybridCoordinator
+from core.workflow_handler import WorkflowHandler
 from inference.workflow import WorkflowRunner
 
 pytestmark = pytest.mark.asyncio
@@ -50,20 +48,26 @@ class _FakeDevAgent:
         self._router = router
 
 
-def _coordinator(runner, router, *, twin=None):
-    c = HybridCoordinator.__new__(HybridCoordinator)
-    c._workflow_runner = runner
-    c._dev_agent = _FakeDevAgent(router) if router is not None else None
-    c._wf_cfg = {"enabled": True}
-    c._twin = twin
-    c._whisper = None
-    c._spoken = []
+def _handler(runner, router, *, twin=None):
+    spoken: list = []
 
-    async def _record(text):
-        c._spoken.append(text)
+    async def _speak_and_suppress(text):
+        spoken.append(text)
 
-    c._tts_speak = _record   # shadow the real (Polly-importing) TTS
-    return c
+    wh = WorkflowHandler(
+        workflow_runner=lambda: runner,
+        dev_agent=lambda: (_FakeDevAgent(router) if router is not None else None),
+        wf_cfg=lambda: {"enabled": True},
+        twin=lambda: twin,
+        conv_mode=lambda: None,
+        macro_store=lambda: None,
+        agent_db=lambda: None,
+        executor=lambda: None,
+        tts_speak=_speak_and_suppress,
+        speak_and_suppress=_speak_and_suppress,
+    )
+    wh._spoken = spoken
+    return wh
 
 
 def _cmd(text):
@@ -73,15 +77,15 @@ def _cmd(text):
 async def test_happy_path_decomposes_fans_out_and_synthesizes():
     router = _FakeRouter()
     runner = WorkflowRunner(router=router, enabled=True)
-    c = _coordinator(runner, router)
+    wh = _handler(runner, router)
 
-    result = await c._maybe_handle_workflow(_cmd("research transformers"))
+    result = await wh.maybe_handle_workflow(_cmd("research transformers"))
 
     assert result is not None
     assert result["action"] == "WORKFLOW"
     assert result["spoken"] == "This is the synthesized spoken answer."
     assert result["subtasks"] == 3
-    assert c._spoken == ["This is the synthesized spoken answer."]
+    assert wh._spoken == ["This is the synthesized spoken answer."]
     # 1 decompose + 3 angles + 1 synthesis = 5 inference calls.
     assert len(router.calls) == 5
 
@@ -89,16 +93,16 @@ async def test_happy_path_decomposes_fans_out_and_synthesizes():
 async def test_not_a_trigger_returns_none():
     router = _FakeRouter()
     runner = WorkflowRunner(router=router, enabled=True)
-    c = _coordinator(runner, router)
-    assert await c._maybe_handle_workflow(_cmd("open chrome")) is None
+    wh = _handler(runner, router)
+    assert await wh.maybe_handle_workflow(_cmd("open chrome")) is None
     assert router.calls == []
 
 
 async def test_disabled_runner_returns_none():
     router = _FakeRouter()
     runner = WorkflowRunner(router=router, enabled=False)
-    c = _coordinator(runner, router)
-    assert await c._maybe_handle_workflow(_cmd("research transformers")) is None
+    wh = _handler(runner, router)
+    assert await wh.maybe_handle_workflow(_cmd("research transformers")) is None
     assert router.calls == []
 
 
@@ -113,18 +117,18 @@ async def test_flare_falls_through_to_ordinary_routing():
         async def get_snapshot(self):
             return _Snap()
 
-    c = _coordinator(runner, router, twin=_Twin())
+    wh = _handler(runner, router, twin=_Twin())
     # A flare returns None (fall through) and issues no inference.
-    assert await c._maybe_handle_workflow(_cmd("research transformers")) is None
+    assert await wh.maybe_handle_workflow(_cmd("research transformers")) is None
     assert router.calls == []
 
 
 async def test_decompose_failure_degrades_to_single_angle():
     router = _FakeRouter(decompose_ok=False)
     runner = WorkflowRunner(router=router, enabled=True)
-    c = _coordinator(runner, router)
+    wh = _handler(runner, router)
 
-    result = await c._maybe_handle_workflow(_cmd("research transformers"))
+    result = await wh.maybe_handle_workflow(_cmd("research transformers"))
 
     assert result is not None
     assert result["subtasks"] == 1   # single-angle fallback on the raw goal
@@ -134,19 +138,18 @@ async def test_decompose_failure_degrades_to_single_angle():
 async def test_all_subagents_failing_speaks_apology():
     router = _FakeRouter(angle_ok=False)
     runner = WorkflowRunner(router=router, enabled=True)
-    c = _coordinator(runner, router)
+    wh = _handler(runner, router)
 
-    result = await c._maybe_handle_workflow(_cmd("research transformers"))
+    result = await wh.maybe_handle_workflow(_cmd("research transformers"))
 
     assert result is not None
     assert result["action"] == "WORKFLOW"
     assert "couldn't" in result["spoken"].lower()
-    assert c._spoken and "couldn't" in c._spoken[0].lower()
+    assert wh._spoken and "couldn't" in wh._spoken[0].lower()
 
 
 async def test_missing_router_returns_none():
     router = _FakeRouter()
     runner = WorkflowRunner(router=router, enabled=True)
-    c = _coordinator(runner, router=None)   # no dev agent / router wired
-    c._workflow_runner = runner
-    assert await c._maybe_handle_workflow(_cmd("research transformers")) is None
+    wh = _handler(runner, router=None)   # no dev agent / router wired
+    assert await wh.maybe_handle_workflow(_cmd("research transformers")) is None

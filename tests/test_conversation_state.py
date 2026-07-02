@@ -170,8 +170,8 @@ def _make_coord():
 
     coord = HybridCoordinator(config=CoordinatorConfig())
     # Force the local path deterministically (Gate 3 does a real VRAM probe).
-    coord._gate3 = AsyncMock(return_value=True)
-    coord._ground_target = AsyncMock(return_value=None)
+    coord._gates.gate3 = AsyncMock(return_value=True)
+    coord._action_executor.ground_target = AsyncMock(return_value=None)
     coord._executor.execute = AsyncMock(
         return_value={"status": "ok", "action": "CLICK"}
     )
@@ -182,7 +182,7 @@ def _make_coord():
 async def test_execute_action_records_turn():
     coord = _make_coord()
     cmd = Command(text="click the save button", action="", source="voice")
-    await coord._execute_action("CLICK Save button", cmd, route_label="local")
+    await coord._action_executor.execute_action("CLICK Save button", cmd, route_label="local")
     last = coord._conversation.last
     assert last is not None
     assert last.verb == "CLICK"
@@ -199,7 +199,7 @@ async def test_route_rewrites_anaphora_before_inference():
         seen.append(cmd.text)
         return "CLICK Save button"
 
-    coord._run_local = fake_local
+    coord._inference.run_local = fake_local
 
     # First turn establishes the antecedent.
     await coord.route(Command(text="click the save button", action="", source="voice"))
@@ -220,7 +220,7 @@ async def test_route_appends_last_action_hint_to_context():
         seen_ctx.append(list(cmd.session_context or []))
         return "TYPE hello"
 
-    coord._run_local = fake_local
+    coord._inference.run_local = fake_local
 
     await coord.route(Command(text="type hello", action="", source="voice"))
     # No hint yet on the first command.

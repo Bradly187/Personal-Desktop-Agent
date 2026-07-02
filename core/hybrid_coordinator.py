@@ -45,44 +45,33 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
+from core.gate_evaluator import GateEvaluator, _EFFECTIVE_CFG
+from core.inference_runner import InferenceRunner, _CloudInference, _PENDING_INFERENCE_IDS
+from core.action_executor import ActionExecutor
+from core.workflow_handler import WorkflowHandler
+from core.voice_system_control import VoiceSystemControl
 from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
     OllamaInference,
     _build_prompt,
-    _SYSTEM_PROMPT,
     get_inference_capture,
     set_inference_capture,
 )
 from desktop.vision_grounder import VisionGrounder
 from core.conversation_state import ConversationState
-from core.workflow_voice import (
-    parse_workflow_request,
-    parse_decomposition,
-    build_decompose_prompt,
-    build_synthesis_prompt,
-    workflow_voice_config,
-    fanout_n_from_config,
-    verify_enabled,
-)
+from core.workflow_voice import workflow_voice_config
 from core.conversation_mode import ConversationMode, conversation_mode_config
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
 from monitoring.cost_ledger import estimate_cost
-from contextvars import ContextVar
-
-# Task-local accumulator linking inference rows to their command row (the
-# inference insert happens before insert_command, so command_id is unknown at
-# write time and backfilled by route() — see AgentDB.link_inferences_to_command).
-_PENDING_INFERENCE_IDS: ContextVar[Optional[list]] = ContextVar(
-    "da_pending_inference_ids", default=None
-)
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog
@@ -94,28 +83,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Cloud system prompt — mirrors local _SYSTEM_PROMPT but adds misrecognition
-# guidance specific to voice+accessibility input.  Kept separate so we can
-# tune cloud behaviour independently of the local LLM prompt.
-_CLOUD_SYSTEM_PROMPT = (
-    _SYSTEM_PROMPT
-    + "\n\nAdditional guidance for cloud disambiguation:\n"
-    "- Common voice misrecognitions to correct automatically:\n"
-    '  "clothes"→CLOSE  "scroll done"→SCROLL down  "hot key"→HOTKEY\n'
-    '  "oh pen"→OPEN  "clique"→CLICK  "tight"→TYPE\n'
-    "- For multi-step commands (\"close then open\"): execute the FIRST action "
-    "and emit CLARIFY for the remaining steps.\n"
-    "- For gesture-source commands: POINT→CLICK FIST→CLOSE PALM→SCROLL up."
-)
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-_COMPLEXITY_KEYWORDS = (
-    "and then", "after that", "for each", "followed by",
-    "then open", "then click", "then type", "while", "repeat",
-)
 
 
 @dataclass
@@ -179,100 +149,6 @@ class CoordinatorConfig:
 
 
 # ---------------------------------------------------------------------------
-# Cloud inference (Anthropic API)
-# ---------------------------------------------------------------------------
-
-class _CloudInference:
-    """Anthropic SDK Claude backend. Lazy import."""
-
-    def __init__(self, model: str) -> None:
-        self._model = model
-        self._client = None
-        self._effective_model = model   # backend-mapped at client-build time
-        self._backend = "bedrock"
-
-    def _get_client(self):
-        if self._client is None:
-            try:
-                import anthropic
-            except ImportError:
-                raise RuntimeError("anthropic not installed — run: pip install anthropic")
-            # Resolve the backend (direct Anthropic vs Amazon Bedrock) and the
-            # credential in one place. resolve_backend() raises a clear, actionable
-            # message when the needed key is missing, instead of the raw SDK "Could
-            # not resolve authentication method" traceback at request time.
-            from core.cloud_backend import resolve_backend
-            backend = resolve_backend()
-            self._client = backend.make_client()
-            self._backend = backend.name
-            self._effective_model = backend.map_model(self._model)
-        return self._client
-
-    async def infer(self, cmd: Command) -> str:
-        try:
-            client = self._get_client()
-        except RuntimeError as exc:
-            log.error("CloudInference unavailable: %s", exc)
-            return f"CLARIFY cloud unavailable: {exc}"
-
-        context_lines = ""
-        if cmd.session_context:
-            joined = "\n".join(f"- {c}" for c in cmd.session_context[-5:])
-            context_lines = f"\n\nRecent commands:\n{joined}"
-
-        user_content = f"Command: {cmd.text}{context_lines}"
-        # Task-local fine-tuning capture (see inference.local_inference) — a
-        # ContextVar so concurrent route() tasks can't misattribute prompts.
-        prompt_json = json.dumps([
-            {"role": "system", "content": _CLOUD_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ])
-        set_inference_capture(prompt_json)
-
-        t0 = time.monotonic()
-        try:
-            response = await asyncio.to_thread(
-                client.messages.create,
-                model=self._effective_model,
-                max_tokens=64,
-                temperature=0.0,
-                system=_CLOUD_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_content}],
-            )
-            action = response.content[0].text.strip().splitlines()[0].strip()
-            if hasattr(response, "usage") and response.usage:
-                set_inference_capture(
-                    prompt_json,
-                    response.usage.input_tokens, response.usage.output_tokens,
-                )
-            latency_ms = (time.monotonic() - t0) * 1000
-            log.info("CloudInference[%s]: %r → %r (%.0f ms)",
-                     self._backend, cmd.text, action, latency_ms)
-            return action
-        except Exception as exc:
-            # Surface authentication problems (invalid/expired/empty key, 401) with
-            # an actionable hint rather than the raw SDK error text. AuthenticationError
-            # subclasses the SDK's APIStatusError with status 401.
-            msg = str(exc)
-            is_auth = (
-                type(exc).__name__ == "AuthenticationError"
-                or getattr(exc, "status_code", None) == 401
-                or "authentication" in msg.lower()
-                or "x-api-key" in msg.lower()
-            )
-            if is_auth:
-                log.error("CloudInference auth failure: %s", exc)
-                return (
-                    "CLARIFY cloud auth failed: AWS_BEARER_TOKEN_BEDROCK is missing or invalid. "
-                    "Set a valid Amazon Bedrock API key and restart the agent."
-                )
-            # Raw SDK/network error stays in the log; the user hears a stable
-            # sentence rather than leaked internals (E16).
-            log.error("CloudInference failed: %s", exc)
-            return "CLARIFY the cloud service had an error. Please try again."
-
-
-# ---------------------------------------------------------------------------
 # Gate 1 — voice confidence fallback
 # ---------------------------------------------------------------------------
 
@@ -297,6 +173,10 @@ _VOICE_CORRECTIONS: dict[str, str] = {
     "diskord":     "discord",
     "dis cord":    "discord",
 }
+# RLock so add_personal_corrections (write) and _apply_vocabulary_corrections
+# (read-then-iterate) are safe when called concurrently from asyncio.to_thread
+# workers on different threads (#3).
+_VOICE_CORRECTIONS_LOCK = threading.RLock()
 
 
 def _apply_vocabulary_corrections(text: str) -> tuple[str, bool]:
@@ -306,15 +186,30 @@ def _apply_vocabulary_corrections(text: str) -> tuple[str, bool]:
     'scroll done' beats 'done' matching nothing.
     """
     lower = text.lower()
-    # Longest-phrase-first so "scroll done" beats a single-word match
-    for wrong, right in sorted(_VOICE_CORRECTIONS.items(), key=lambda kv: -len(kv[0])):
+    # Snapshot the corrections dict under the lock so a concurrent write from
+    # add_personal_corrections doesn't mutate the dict mid-iteration (#3).
+    with _VOICE_CORRECTIONS_LOCK:
+        corrections_snapshot = sorted(
+            _VOICE_CORRECTIONS.items(), key=lambda kv: -len(kv[0])
+        )
+    for wrong, right in corrections_snapshot:
         if wrong in lower:
             corrected = lower.replace(wrong, right)
-            # Restore original capitalisation pattern (title-case first word)
-            parts = corrected.split()
-            if parts:
-                parts[0] = parts[0].capitalize()
-            return " ".join(parts), True
+            # Restore capitalisation: capitalize the first token; preserve
+            # all-caps acronyms (VS, AI, etc.) from the original where they
+            # weren't part of the corrected span (#17).
+            orig_tokens = text.split()
+            corr_tokens = corrected.split()
+            result_tokens = []
+            for i, tok in enumerate(corr_tokens):
+                orig_tok = orig_tokens[i] if i < len(orig_tokens) else ""
+                if i == 0:
+                    result_tokens.append(tok.capitalize())
+                elif orig_tok.isupper() and len(orig_tok) > 1:
+                    result_tokens.append(tok.upper())
+                else:
+                    result_tokens.append(tok)
+            return " ".join(result_tokens), True
     return text, False
 
 
@@ -472,14 +367,35 @@ class HybridCoordinator:
         self._skill_registry = None     # SkillRegistry | None — voice 'help' listing
         self._personal_kb = None        # PersonalKB | None — voice 'index my notes'
         self._macro_store = None        # MacroStore | None — self-skilling rung 2
-        self._pending_macro = None      # {id, name} — last detected macro awaiting
-                                        # "save that as ..." approval (R4 fail-safe)
         self._agent_db = agent_db
         self._session_id = session_id
         self._content_filter = content_filter
         self._audit = audit_log
         self._twin = twin_state
-        self._latency_ema: Optional[float] = None
+        self._inference = InferenceRunner(
+            self._cfg,
+            # Late-bound: several of these (rate_limiter especially) are wired
+            # onto the coordinator *after* construction via a set_* method, and
+            # tests routinely monkeypatch coord._content_filter / coord._cloud /
+            # etc. post-construction — a captured-by-value reference would
+            # silently go stale.
+            local=lambda: self._local,
+            cloud=lambda: self._cloud,
+            trainer=lambda: self._trainer,
+            agent_db=lambda: self._agent_db,
+            content_filter=lambda: self._content_filter,
+            rate_limiter=lambda: self._rate_limiter,
+            note_cloud_call=lambda: self._gates.note_cloud_call(),
+        )
+        self._gates = GateEvaluator(
+            self._cfg,
+            # Late-bound for the same reason as InferenceRunner above.
+            run_local=lambda cmd: self._inference.run_local(cmd),
+            run_cloud=lambda cmd: self._inference.run_cloud(cmd),
+            approval_config=lambda: self._approval_config(),
+            audit=self._audit,
+            tts_speak=lambda text: self._tts_speak(text),
+        )
         self._grounder = VisionGrounder()
         self._whisper = whisper_stream
         self._fusion = None   # set via set_fusion_engine() after FusionEngine is created
@@ -494,6 +410,25 @@ class HybridCoordinator:
         # (Phase 3 prototype, flag-gated by DA_A2UI_CLICK_TARGETS).
         self._target_cache = None
         self._conversation = ConversationState()  # voice anaphora + last-action hint
+        self._action_executor = ActionExecutor(
+            # Late-bound for the same reason as InferenceRunner/GateEvaluator
+            # above — several of these (metrics, whisper, bridge, target_cache)
+            # are wired onto the coordinator after construction via a set_*
+            # method.
+            executor=lambda: self._executor,
+            grounder=lambda: self._grounder,
+            conversation=lambda: self._conversation,
+            metrics=lambda: self._metrics,
+            whisper=lambda: self._whisper,
+            bridge=lambda: self._bridge,
+            target_cache=lambda: self._target_cache,
+            get_pending_clarification=lambda: self._pending_clarification,
+            set_pending_clarification=lambda v: setattr(self, "_pending_clarification", v),
+            get_active_clarify_surface_id=lambda: self._active_clarify_surface_id,
+            set_active_clarify_surface_id=lambda v: setattr(self, "_active_clarify_surface_id", v),
+            get_recent_open_targets=lambda: self._recent_open_targets,
+            set_recent_open_targets=lambda v: setattr(self, "_recent_open_targets", v),
+        )
         # Multi-agent workflow voice trigger ("think hard about …"). Default OFF;
         # the runner is injected by main.py and gates itself on
         # workflow_orchestration.enabled. Spec: specs/workflow-orchestration/.
@@ -503,9 +438,47 @@ class HybridCoordinator:
         # OFF; reads conversation_mode.enabled from ~/.claude/ipad_bridge/config.json.
         # Spec: specs/conversation-mode/.
         self._conv_mode = ConversationMode.from_config(conversation_mode_config())
-        self._lecture_mode: bool = False
+        self._workflow = WorkflowHandler(
+            # Late-bound for the same reason as the other extracted modules —
+            # workflow_runner/dev_agent/macro_store are wired onto the
+            # coordinator after construction via a set_* method, and tests
+            # routinely set attributes like coord._wf_cfg / coord._twin
+            # directly.
+            workflow_runner=lambda: self._workflow_runner,
+            dev_agent=lambda: self._dev_agent,
+            wf_cfg=lambda: self._wf_cfg,
+            twin=lambda: self._twin,
+            conv_mode=lambda: self._conv_mode,
+            macro_store=lambda: self._macro_store,
+            agent_db=lambda: self._agent_db,
+            executor=lambda: self._executor,
+            tts_speak=lambda text: self._tts_speak(text),
+            speak_and_suppress=lambda text: self._speak_and_suppress(text),
+        )
         self._profiler = None    # set via set_profiler()
         self._calibrator = None  # set via set_calibrator()
+        self._voice_control = VoiceSystemControl(
+            # Explicit DI (specs/hybrid-coordinator-decomposition R3): every
+            # dependency is a named accessor, no back-reference to self. Late-
+            # bound for the same reason as the other extracted modules.
+            whisper=lambda: self._whisper,
+            agent_db=lambda: self._agent_db,
+            twin=lambda: self._twin,
+            profiler=lambda: self._profiler,
+            calibrator=lambda: self._calibrator,
+            dev_agent=lambda: self._dev_agent,
+            personal_kb=lambda: self._personal_kb,
+            skill_registry=lambda: self._skill_registry,
+            audit=lambda: self._audit,
+            tts_speak=lambda text: self._tts_speak(text),
+            approval_config=lambda: self._approval_config(),
+            # condition switching / calibration must run on the real
+            # coordinator: ConditionProfiler.apply_to() takes coordinator= as
+            # an external API kwarg, so these stay coordinator methods and
+            # are passed through as narrow delegates rather than moved.
+            switch_condition=lambda condition: self._switch_condition(condition),
+            run_calibration=lambda condition, quick: self._run_calibration(condition, quick),
+        )
         # D8: correction tracking
         self._last_executed_action: str = ""
         self._last_command_id: int = -1
@@ -518,12 +491,6 @@ class HybridCoordinator:
         self._drift_streak: int = 0
         self._drift_warned: bool = False
 
-        # Gate 3 VRAM cache — avoid calling pynvml on every command
-        self._vram_cache: tuple[bool, float] | None = None  # (result, monotonic_time)
-        self._vram_cache_ttl: float = 2.0  # seconds
-        # Hard bound on the NVML probe await (E9): a wedged driver must not stall
-        # the command path. Generous vs. a healthy probe (~ms), tight vs. a hang.
-        self._vram_probe_timeout_s: float = 1.0
         self._metrics = None   # set via set_metrics()
 
         self._memory = None   # MemoryManager — wired via set_memory()
@@ -540,10 +507,6 @@ class HybridCoordinator:
         # as context without a DB round-trip in the hot path.
         self._recent_dev_commands: list[str] = []
 
-        # GAP-10: denial-of-wallet tripwire. Count cloud API calls this session
-        # and speak a one-time warning once they exceed cloud_call_budget.
-        self._session_cloud_calls: int = 0
-        self._cloud_budget_warned: bool = False
 
     # ---------------------------------------------------------------------- #
     # Internal helpers
@@ -617,78 +580,9 @@ class HybridCoordinator:
 
     async def note_pending_macro(self, summaries: list) -> None:
         """Detector callback: a macro was detected — announce it and arm the
-        "save that as ..." approval. Announcement only; nothing is enabled here
-        (spec R4 fail-safe-DENY — only an explicit save promotes)."""
-        if not summaries:
-            return
-        latest = summaries[-1]
-        self._pending_macro = {"id": latest["id"], "name": latest.get("name", "")}
-        await self._tts_speak(
-            "I noticed you often repeat a series of steps. To save it as a "
-            "command, say: save that as a command called, then a name."
-        )
-
-    async def _maybe_handle_macro(self, cmd) -> Optional[dict]:
-        """Route a voice utterance to the macro subsystem, else None.
-
-        A "save that as ..." approval always wins (it's the human-approval edge,
-        spec R4). A macro replay never shadows a built-in system-control phrase.
-        """
-        from core.macro_store import parse_macro_save
-        name = parse_macro_save(cmd.text)
-        if name is not None:
-            return await self._handle_macro_save(name)
-        if _is_system_control_voice(cmd):
-            return None
-        macro = self._macro_store.match(cmd.text)
-        if macro is not None:
-            return await self._handle_macro_replay(macro, cmd)
-        return None
-
-    async def _handle_macro_save(self, name: str) -> dict:
-        """Promote the pending detected macro under the user-chosen name.
-
-        Fail-safe: with nothing pending (no detection, or already saved/ignored),
-        this promotes nothing (spec R4.1/R4.2)."""
-        pending = self._pending_macro
-        if not pending:
-            await self._tts_speak("I don't have a suggested command to save right now.")
-            return {"status": "ok", "action": "MACRO_SAVE_NONE"}
-        row = None
-        if self._agent_db and getattr(self._agent_db, "available", False):
-            row = await self._agent_db.get_evolution_candidate(pending["id"])
-        if not row:
-            self._pending_macro = None
-            await self._tts_speak("Sorry, I couldn't find that suggestion anymore.")
-            return {"status": "ok", "action": "MACRO_SAVE_MISSING"}
-        macro = self._macro_store.register(row, name=name, keywords=[name.lower()])
-        if macro is None:
-            await self._tts_speak("Sorry, I couldn't save that one.")
-            return {"status": "ok", "action": "MACRO_SAVE_FAILED"}
-        import json as _json
-        try:
-            refs = _json.loads(row.get("source_refs") or "{}")
-        except (ValueError, TypeError):
-            refs = {}
-        refs["name"] = name
-        refs["keywords"] = [name.lower()]
-        await self._agent_db.promote_macro_candidate(row["id"], name, _json.dumps(refs))
-        self._pending_macro = None
-        await self._tts_speak(f"Saved. Say {name} to run it.")
-        return {"status": "ok", "action": "MACRO_SAVE", "name": name}
-
-    async def _handle_macro_replay(self, macro, cmd) -> dict:
-        """Replay a matched macro through the executor (every gate still fires)."""
-        result = await self._macro_store.replay(macro, self._executor)
-        status = (result or {}).get("status")
-        if status == "clarify":
-            await self._tts_speak(
-                "I couldn't run that command. " + result.get("reason", ""))
-        elif status == "error":
-            await self._tts_speak(
-                f"The command stopped at step {result.get('step', 0) + 1}.")
-        return {"status": status or "error", "action": "MACRO_REPLAY",
-                "macro": macro.name, "result": result}
+        "save that as ..." approval. Public API — wired by main.py as the
+        macro detector's on_staged callback."""
+        await self._workflow.note_pending_macro(summaries)
 
     def set_cloud_dev_agent(
         self,
@@ -752,10 +646,11 @@ class HybridCoordinator:
     def add_personal_corrections(self, corrections: dict) -> None:
         """Merge condition-specific corrections into the live _VOICE_CORRECTIONS map."""
         global _VOICE_CORRECTIONS
-        for heard, expected in corrections.items():
-            if heard not in _VOICE_CORRECTIONS:
-                _VOICE_CORRECTIONS[heard] = expected
-                log.info("Personal correction loaded: %r → %r", heard, expected)
+        with _VOICE_CORRECTIONS_LOCK:  # guard concurrent reads in _apply_vocabulary_corrections (#3)
+            for heard, expected in corrections.items():
+                if heard not in _VOICE_CORRECTIONS:
+                    _VOICE_CORRECTIONS[heard] = expected
+                    log.info("Personal correction loaded: %r → %r", heard, expected)
 
     async def _switch_condition(self, condition: str) -> None:
         """Load and apply a voice profile for the given condition."""
@@ -807,162 +702,27 @@ class HybridCoordinator:
         palette of on-screen elements (Phase 3 prototype)."""
         self._target_cache = cache
 
-    def _maybe_emit_clarify_surface(self, message: Optional[str]) -> None:
-        """Push a tappable A2UI choice card for enumerable CLARIFYs (token-free).
-
-        No-op when no bridge is wired or the message isn't an enumerable shape.
-        Never raises — the voice clarification path is authoritative.
-        """
-        if self._bridge is None or not message:
-            return
-        try:
-            from core import a2ui
-            surface = a2ui.template_for_clarify(message, recent_apps=self._recent_open_targets)
-            if surface is None and a2ui.is_click_target_clarify(message):
-                surface = self._build_click_target_surface()
-            if surface is None:
-                return
-            self._active_clarify_surface_id = surface["surface_id"]
-            asyncio.create_task(self._bridge.send_a2ui_surface(surface))
-        except Exception as exc:
-            log.debug("a2ui: clarify surface emit failed: %s", exc)
-
-    @staticmethod
-    def _rank_click_targets(snapshot, cursor, limit: int = 8) -> list[tuple[str, int, int]]:
-        """Filter + rank clickable targets into (name, cx, cy), nearest-first.
-
-        Drops unnamed / tiny / oversized elements, dedups by name (keeping the
-        nearest), and ranks by squared distance to the cursor (or reading order
-        when no cursor is available). Pure + cursor-injectable for testing.
-        """
-        scored: list[tuple[int, str, int, int]] = []
-        for t in snapshot:
-            name = (getattr(t, "name", "") or "").strip()
-            if not name:
-                continue
-            try:
-                left, top, right, bottom = t.bounds
-            except Exception:
-                continue
-            w, h = right - left, bottom - top
-            if w < 8 or h < 8 or w > 1400 or h > 1000:
-                continue
-            cx, cy = (left + right) // 2, (top + bottom) // 2
-            if cursor is not None:
-                d = (cx - cursor[0]) ** 2 + (cy - cursor[1]) ** 2
-            else:
-                d = cy * 100000 + cx          # top-to-bottom, left-to-right
-            scored.append((d, name, cx, cy))
-        scored.sort(key=lambda z: z[0])
-        seen: set[str] = set()
-        ranked: list[tuple[str, int, int]] = []
-        for _d, name, cx, cy in scored:
-            key = name.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            ranked.append((name, cx, cy))
-            if len(ranked) >= limit:
-                break
-        return ranked
-
-    def _build_click_target_surface(self) -> Optional[dict]:
-        """Build a tappable element palette from the live UI tree, or None.
-
-        Flag-gated (DA_A2UI_CLICK_TARGETS=1) while we evaluate whether a ranked
-        list beats voice. Logs the ranked names at INFO so they can be eyeballed.
-        """
-        if self._target_cache is None:
-            return None
-        if os.environ.get("DA_A2UI_CLICK_TARGETS", "0") != "1":
-            return None
-        try:
-            snapshot = self._target_cache.snapshot()
-        except Exception as exc:
-            log.debug("a2ui: target_cache.snapshot failed: %s", exc)
-            return None
-        if not snapshot:
-            return None
-        cursor = None
-        try:
-            import pyautogui
-            cursor = pyautogui.position()
-        except Exception:
-            cursor = None
-        ranked = self._rank_click_targets(snapshot, cursor)
-        if not ranked:
-            return None
-        log.info("a2ui: click-target palette (%d): %s",
-                 len(ranked), [r[0] for r in ranked])
-        try:
-            from core import a2ui
-            return a2ui.click_target_surface(ranked)
-        except Exception as exc:
-            log.debug("a2ui: click_target_surface build failed: %s", exc)
-            return None
-
-    def _record_open_target(self, target: str) -> None:
-        """Push an opened app/file to the front of the recent-targets buffer
-        (deduped, capped at 8) so the 'what would you like to open?' card can
-        offer the user's actual apps."""
-        t = target.strip()
-        if not t:
-            return
-        lower = t.lower()
-        self._recent_open_targets = [t] + [
-            x for x in self._recent_open_targets if x.lower() != lower
-        ]
-        if len(self._recent_open_targets) > 8:
-            self._recent_open_targets = self._recent_open_targets[:8]
-
-    def _clear_clarify_surface(self) -> None:
-        """Dismiss a live CLARIFY card once the clarification has resolved."""
-        sid = self._active_clarify_surface_id
-        if not sid or self._bridge is None:
-            self._active_clarify_surface_id = None
-            return
-        self._active_clarify_surface_id = None
-        try:
-            asyncio.create_task(self._bridge.clear_a2ui_surface(sid))
-        except Exception as exc:
-            log.debug("a2ui: clarify surface clear failed: %s", exc)
-
     def _approval_config(self) -> dict:
-        """Load approval_config.json; returns {} on failure (safe defaults used by callers)."""
+        """Load approval_config.json; returns {} on failure (safe defaults used by callers).
+
+        Result is cached for 60 s so repeated calls in the hot path (authorize,
+        cloud-budget check) don't pay a disk read on every cloud call (#6).
+        """
+        now = time.monotonic()
+        cache = getattr(self, "_approval_cfg_cache", None)
+        if cache is not None:
+            cached_at, cached_val = cache
+            if now - cached_at < 60.0:
+                return cached_val
         try:
-            import json
+            import json as _json
             from pathlib import Path
             p = Path(__file__).parent.parent / "approval_config.json"
-            return json.loads(p.read_text(encoding="utf-8"))
+            result = _json.loads(p.read_text(encoding="utf-8"))
         except Exception:
-            return {}
-
-    def _capability_summary(self) -> str:
-        """A concise spoken summary of what the user can ask for (GAP-4).
-
-        Static core abilities plus the DYNAMIC skill intents from the registry
-        and proactivity/personal-KB availability — so the summary never goes
-        stale as skills are added by manifest.
-        """
-        parts = [
-            "I can control the desktop: click, scroll, type, open and close apps, "
-            "take screenshots, and dictate.",
-            "I can write code, run plans, and answer technical questions.",
-            "You can set reminders, like: every morning at 8, brief me. "
-            "Say 'what are my reminders' to review them.",
-        ]
-        if self._personal_kb is not None and getattr(self._personal_kb, "available", False):
-            parts.append("I can search your own documents — ask things like: "
-                         "what did I write in my notes about a topic.")
-        if self._skill_registry is not None and self._skill_registry.has_skills():
-            kws: list[str] = []
-            for action in self._skill_registry.list_actions()[:6]:
-                if action.get("keywords"):
-                    kws.append(action["keywords"][0])
-            if kws:
-                parts.append("Connected skills also let you say: " + "; ".join(kws) + ".")
-        parts.append("Say 'pain day on' when you're flaring and I'll adapt.")
-        return " ".join(parts)
+            result = {}
+        self._approval_cfg_cache: tuple[float, dict] = (now, result)
+        return result
 
     async def _tts_speak(self, text: str) -> None:
         """Speak text via the configured TTS backend (fire-and-forget safe)."""
@@ -998,314 +758,6 @@ class HybridCoordinator:
             except Exception as exc:
                 log.debug("tts: post-speak suppress failed: %s", exc)
 
-    async def _maybe_handle_workflow(self, cmd: Command) -> Optional[dict]:
-        """Handle a voice 'think hard about …' / 'research …' request.
-
-        Decomposes the goal into N sub-angles, fans them out as fresh-context
-        sub-agents via ``WorkflowRunner.fan_out``, then synthesizes + speaks one
-        answer. **Pure talk — no desktop actions, no command-pipeline bypass.**
-        Returns a handled result dict, or ``None`` to fall through to ordinary
-        routing (not a trigger, a flare, or any error — fail-safe, AGENTS.md #4).
-        """
-        runner = self._workflow_runner
-        if runner is None or not runner.enabled:
-            return None
-        try:
-            req = parse_workflow_request(cmd.text or "")
-            if req is None:
-                return None  # not a workflow request — ordinary routing
-            # Skip-on-flare (AGENTS.md #5): a multi-call fan-out is heavy. During a
-            # flare let the request fall through to the ordinary single-model path
-            # so the user still gets an answer with minimal friction.
-            if await self._workflow_flare_active():
-                log.info("HybridCoordinator: workflow trigger skipped (flare) — "
-                         "falling through to ordinary routing")
-                return None
-            router = getattr(self._dev_agent, "_router", None) if self._dev_agent else None
-            if router is None:
-                return None
-            log.info("HybridCoordinator: workflow trigger — goal=%r", req.goal)
-            n = fanout_n_from_config(self._wf_cfg)
-            subtasks = await self._decompose_goal(router, req.goal, n)
-            if not subtasks:
-                return None
-            verify_criterion = (
-                f"The answer is a correct, relevant, substantive response to: {req.goal}"
-                if verify_enabled(self._wf_cfg) else None
-            )
-            result = await runner.fan_out(
-                subtasks, name="voice_workflow", goal=req.goal,
-                verify_criterion=verify_criterion,
-            )
-            # Keep successful (and, if verification ran, verified) sub-answers.
-            texts = [
-                r.text for r in result.results
-                if r.ok and r.text.strip() and (r.verified is None or r.verified)
-            ]
-            if not texts:
-                msg = "Sorry, I couldn't work that one out just now."
-                await self._speak_and_suppress(msg)
-                return {"status": "ok", "action": "WORKFLOW", "spoken": msg,
-                        "source": cmd.source, "trace_id": cmd.trace_id}
-            answer = await self._synthesize_workflow(router, req.goal, texts)
-            await self._speak_and_suppress(answer)
-            return {"status": "ok", "action": "WORKFLOW", "spoken": answer,
-                    "subtasks": len(subtasks), "verified": result.verified_count,
-                    "source": cmd.source, "trace_id": cmd.trace_id}
-        except Exception as exc:  # never strand the user — fall through
-            log.warning("HybridCoordinator: workflow handling failed (%s)", exc)
-            return None
-
-    async def _decompose_goal(self, router, goal: str, n: int) -> list:
-        """Split ``goal`` into ``n`` sub-angles via the resident general model.
-
-        Returns a list of ``SubTask``. Degrades to a single sub-agent on the raw
-        goal if decomposition fails or yields nothing, so the feature always
-        produces an answer rather than going silent."""
-        from inference.workflow import SubTask
-        try:
-            r = await router.infer(
-                domain="general", user_text=build_decompose_prompt(goal, n),
-                context="",
-            )
-            if getattr(r, "ok", True):
-                lines = parse_decomposition(getattr(r, "text", "") or "", n)
-                if lines:
-                    return [SubTask(name=f"angle{i + 1}", prompt=line)
-                            for i, line in enumerate(lines)]
-        except Exception as exc:
-            log.debug("workflow: decomposition failed (%s) — single-angle fallback", exc)
-        return [SubTask(name="angle1", prompt=goal)]
-
-    async def _synthesize_workflow(self, router, goal: str, texts: list[str]) -> str:
-        """Synthesize sub-answers into one concise spoken reply. Degrades to the
-        first sub-answer (truncated) if the synthesis call fails."""
-        try:
-            r = await router.infer(
-                domain="general", user_text=build_synthesis_prompt(goal, texts),
-                context="",
-            )
-            ans = (getattr(r, "text", "") or "").strip()
-            if getattr(r, "ok", True) and ans:
-                return ans
-        except Exception as exc:
-            log.debug("workflow: synthesis failed (%s) — first-angle fallback", exc)
-        return texts[0].strip()[:600]
-
-    async def _workflow_flare_active(self) -> bool:
-        """True if a pain-day flare is active (AGENTS.md #5). A twin-snapshot
-        error fails safe to 'no flare' so a telemetry hiccup never silently
-        disables the feature."""
-        if self._twin is None:
-            return False
-        try:
-            snap = await self._twin.get_snapshot()
-            return bool(getattr(snap, "pain_day_active", False))
-        except Exception as exc:
-            log.debug("workflow: twin snapshot failed (%s) — assuming no flare", exc)
-            return False
-
-    async def _maybe_handle_conversation(self, cmd: Command) -> Optional[dict]:
-        """Handle a voice utterance under conversation mode.
-
-        Returns a result dict when the utterance was consumed by conversation
-        mode (entering, replying, or leaving), or ``None`` to let the normal
-        command/dev pipeline handle it (mode inactive and not a wake phrase).
-        Fail-safe: any error degrades to ``None`` so a fault never strands the
-        user — the utterance just routes as an ordinary command.
-        """
-        try:
-            text = (cmd.text or "").strip()
-            if not text:
-                return None
-            conv = self._conv_mode
-
-            if not conv.active:
-                matched, remainder = conv.match_wake(text)
-                if not matched:
-                    return None  # ordinary command — fall through to the pipeline
-                conv.enter()
-                log.info("HybridCoordinator: entered conversation mode")
-                if remainder:
-                    # "conversation mode, <question>" — wake word and the first
-                    # turn arrived together; answer it straight away instead of
-                    # speaking a greeting that would leave the user waiting.
-                    reply = await self._converse(remainder)
-                    conv.record("user", remainder)
-                    conv.record("assistant", reply)
-                    await self._speak_and_suppress(reply)
-                    return {"status": "ok", "action": "CONVERSATION_START",
-                            "spoken": reply, "source": cmd.source,
-                            "trace_id": cmd.trace_id}
-                await self._speak_and_suppress(
-                    "Okay, I'm listening. Say 'that's all' when you're done."
-                )
-                return {"status": "ok", "action": "CONVERSATION_START",
-                        "source": cmd.source, "trace_id": cmd.trace_id}
-
-            # --- active conversation ---
-            if conv.detect_sleep(text):
-                conv.exit()
-                log.info("HybridCoordinator: left conversation mode")
-                await self._speak_and_suppress("Okay, talk to you later.")
-                return {"status": "ok", "action": "CONVERSATION_END",
-                        "source": cmd.source, "trace_id": cmd.trace_id}
-
-            reply = await self._converse(text)
-            conv.record("user", text)
-            conv.record("assistant", reply)
-            await self._speak_and_suppress(reply)
-            return {"status": "ok", "action": "CONVERSATION_REPLY",
-                    "spoken": reply, "source": cmd.source, "trace_id": cmd.trace_id}
-        except Exception as exc:  # never strand the user mid-conversation
-            log.warning("HybridCoordinator: conversation handling failed (%s)", exc)
-            return None
-
-    async def _converse(self, text: str) -> str:
-        """Answer one conversational turn with the resident general model.
-
-        Reuses ``ModelRouter.infer(domain="general", ...)`` (gemma4:12b — already
-        resident, so no extra VRAM and no eviction churn, AGENTS.md #6), threading
-        the running dialogue in as prompt context. Degrades to a spoken apology if
-        no router is wired or inference fails — never raises.
-        """
-        router = getattr(self._dev_agent, "_router", None) if self._dev_agent else None
-        if router is None:
-            return "Sorry, the conversation model isn't available right now."
-        try:
-            context = self._conv_mode.build_context()
-            result = await router.infer(
-                domain="general", user_text=text, context=context,
-            )
-            reply = (getattr(result, "text", "") or "").strip()
-            if getattr(result, "ok", True) and reply:
-                return reply
-            log.debug("conversation: empty/failed general reply (%r)",
-                      getattr(result, "error", None))
-        except Exception as exc:
-            log.warning("conversation: general inference failed (%s)", exc)
-        return "Sorry, I didn't catch that. Could you say it another way?"
-
-    async def _handle_google_connect(self) -> dict:
-        """Start the Google OAuth consent flow by voice (setup or recovery).
-
-        Speaks any setup blocker (libraries / client secret) with the exact fix;
-        otherwise launches the browser consent flow in the background and, on
-        success, hot-starts the google_pim skill — no agent restart.
-        """
-        from skills import google_setup
-        blocker = google_setup.setup_blocker()
-        if blocker:
-            asyncio.create_task(self._tts_speak(blocker))
-            return {"status": "ok", "action": "GOOGLE_CONNECT_BLOCKED",
-                    "reason": blocker}
-        from core.async_utils import fire_and_log
-        asyncio.create_task(self._tts_speak(
-            "Opening Google sign-in in your browser — approve access there, "
-            "and I'll tell you when it's done."))
-        fire_and_log(self._google_connect_flow(), log, label="google connect flow")
-        return {"status": "ok", "action": "GOOGLE_CONNECT_STARTED"}
-
-    async def _google_connect_flow(self) -> None:
-        """Background half of the connect flow: await consent, hot-start, report."""
-        from skills.google_setup import run_auth_flow
-        ok, message = await run_auth_flow()
-        if ok and self._skill_registry is not None:
-            try:
-                started = await self._skill_registry.start_skill("google_pim")
-                if not started:
-                    message += " The skill will start on the next agent launch."
-            except Exception as exc:
-                log.warning("google_pim hot-start failed: %s", exc)
-                message += " The skill will start on the next agent launch."
-        await self._tts_speak(message)
-
-    async def _handle_schedule_command(self, spec: Optional[dict]) -> dict:
-        """Act on a parsed voice schedule / reminder / event-rule / management
-        command (N+2). Writes to AgentDB; the ProactiveScheduler and
-        EventRuleEngine pick the new rows up on their next tick/event."""
-        if spec is None:
-            asyncio.create_task(self._tts_speak(
-                "Sorry, I didn't catch that. Try 'every morning at 8 brief me'."))
-            return {"status": "ok", "action": "SCHEDULE_UNPARSED"}
-        db = self._agent_db
-        if not (db and db.available):
-            return {"status": "ok", "action": "SCHEDULE_NOOP"}
-        kind = spec.get("kind")
-
-        if kind == "schedule":
-            key = f"sched:{spec['goal'][:60]}:{spec['execute_at']:.0f}"
-            await db.enqueue_scheduled_goal(
-                spec["goal"], execute_at=spec["execute_at"],
-                recurrence=spec.get("recurrence"), source_trigger="schedule",
-                idempotency_key=key)
-            asyncio.create_task(self._tts_speak(spec.get("spoken", "Reminder set.")))
-            return {"status": "ok", "action": "SCHEDULE_SET", "goal": spec["goal"]}
-
-        if kind == "event_rule":
-            await db.insert_event_rule(
-                topic_pattern=spec["topic_pattern"], goal_template=spec["goal_template"],
-                name=spec.get("name"), predicate=spec.get("predicate"),
-                action_kind=spec.get("action_kind", "notify"))
-            asyncio.create_task(self._tts_speak(spec.get("spoken", "Rule set.")))
-            return {"status": "ok", "action": "EVENT_RULE_SET"}
-
-        if kind == "list":
-            scheds = await db.list_schedules()
-            rules = await db.list_event_rules()
-            total = len(scheds) + len(rules)
-            if not total:
-                msg = "You have no reminders set."
-            else:
-                parts = [s["goal"][:40] for s in scheds[:5]]
-                parts += [(r.get("name") or r["topic_pattern"]) for r in rules[:5]]
-                msg = f"You have {total} reminder{'s' if total != 1 else ''}: " + "; ".join(parts) + "."
-            asyncio.create_task(self._tts_speak(msg))
-            return {"status": "ok", "action": "SCHEDULE_LIST", "count": total}
-
-        if kind == "cancel":
-            q = (spec.get("query") or "").strip().lower()
-            cancelled = 0
-            for s in await db.list_schedules():
-                if not q or q in s["goal"].lower():
-                    if await db.cancel_schedule(s["id"]):
-                        cancelled += 1
-            asyncio.create_task(self._tts_speak(
-                f"Cancelled {cancelled} reminder{'s' if cancelled != 1 else ''}."))
-            return {"status": "ok", "action": "SCHEDULE_CANCEL", "count": cancelled}
-
-        return {"status": "ok", "action": "SCHEDULE_NOOP"}
-
-    async def _audit_history_summary(self, n: int = 5) -> str:
-        """Query audit.db for the last `n` mcp_call events and return a spoken summary."""
-        if self._audit is None:
-            return "Audit log not available."
-        try:
-            rows = await self._audit.get_recent_mcp_calls(n=n)
-            if not rows:
-                return "No recent actions recorded."
-            parts = []
-            for r in rows:
-                tool = r.get("tool", "unknown")
-                params = r.get("params") or ""
-                # Extract the most readable param for speech
-                try:
-                    import json as _json
-                    p = _json.loads(params) if isinstance(params, str) else params
-                    detail = (
-                        p.get("command", "")[:30] or
-                        p.get("text", "")[:30] or
-                        p.get("title_substring", "")[:30] or
-                        p.get("key", "") or ""
-                    )
-                except Exception:
-                    detail = ""
-                parts.append(f"{tool}{' ' + detail if detail else ''}")
-            return "Last " + str(len(parts)) + " actions: " + ", ".join(parts) + "."
-        except Exception as exc:
-            log.debug("HybridCoordinator._audit_history_summary failed: %s", exc)
-            return "Could not retrieve history."
-
     async def route(self, cmd: Command) -> dict:
         """Route a Command, then durably persist its trace for eval replay (GAP-4).
 
@@ -1340,7 +792,9 @@ class HybridCoordinator:
         if _tracer.enabled:
             _tid = cmd.trace_id or _tracer.new_trace(source=cmd.source)
             if not cmd.trace_id:
-                cmd.trace_id = _tid
+                # Use _dc_replace so the original Command object is never mutated
+                # (concurrent route() tasks share the same reference until here).
+                cmd = _dc_replace(cmd, trace_id=_tid)  # fix #1
             _tracer.set_current(_tid)
 
         # De-glue an ASR-concatenated leading command verb ("OpenVSCode" ->
@@ -1355,14 +809,14 @@ class HybridCoordinator:
             if deglued != cmd.text:
                 log.info("HybridCoordinator: de-glued command verb %r -> %r",
                          cmd.text, deglued)
-                cmd.text = deglued
+                cmd = _dc_replace(cmd, text=deglued)  # fix #1 — never mutate in place
 
         # --- Self-skilling rung 2: macro replay + "save that as ..." approval ---
         # Runs before the dev pre-gate so a saved macro routes by its own name
         # rather than being classified to an LLM. Voice-only; built-in
         # system-control phrases still take priority (see _maybe_handle_macro).
         if self._macro_store is not None and cmd.source in ("voice", "voice_local"):
-            macro_result = await self._maybe_handle_macro(cmd)
+            macro_result = await self._workflow.maybe_handle_macro(cmd)
             if macro_result is not None:
                 return macro_result
 
@@ -1374,7 +828,7 @@ class HybridCoordinator:
         # flare, or any error returns None → ordinary routing below.
         if (self._workflow_runner is not None and self._workflow_runner.enabled
                 and cmd.source in ("voice", "voice_local")):
-            wf_result = await self._maybe_handle_workflow(cmd)
+            wf_result = await self._workflow.maybe_handle_workflow(cmd)
             if wf_result is not None:
                 return wf_result
 
@@ -1383,7 +837,7 @@ class HybridCoordinator:
         # conversational turn answered by the resident general model — the entire
         # command/dev pipeline below is bypassed. Default OFF (experimental).
         if self._conv_mode.enabled and cmd.source in ("voice", "voice_local"):
-            conv_result = await self._maybe_handle_conversation(cmd)
+            conv_result = await self._workflow.maybe_handle_conversation(cmd)
             if conv_result is not None:
                 return conv_result
 
@@ -1417,7 +871,7 @@ class HybridCoordinator:
                     # Questions about the user's OWN documents answer from the
                     # local PersonalKB — the query itself must never go to cloud.
                     route_cloud = False
-                if route_cloud and not self._gate0(cmd):
+                if route_cloud and not self._gates.gate0(cmd):
                     log.info("HybridCoordinator: dev-domain=%s contains sensitive "
                              "data — forcing LOCAL DevAgent (Gate 0)", domain)
                     route_cloud = False
@@ -1446,7 +900,7 @@ class HybridCoordinator:
                         "source": cmd.source,
                         "trace_id": cmd.trace_id,
                     }
-                    self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
+                    self._gates.note_cloud_call()  # GAP-10: denial-of-wallet tripwire
                     # Clear the task-local capture so a stale prompt/token count
                     # from a prior inference in this task can't be attributed to
                     # this cloud-dev call (mirrors _run_cloud).
@@ -1513,262 +967,15 @@ class HybridCoordinator:
                 }
 
         # System control commands — intercept before gate evaluation
-        if cmd.source in ("voice", "voice_local"):
-            # Strip surrounding whitespace AND punctuation: Whisper routinely
-            # appends a period ("pain day on." / "lecture mode on?") which would
-            # otherwise miss every exact-match keyword below.
-            _lower = cmd.text.lower().strip(" \t\n.,!?;:\"'")
-
-            # Lecture mode
-            if _lower in ("start lecture mode", "lecture mode on", "begin lecture mode"):
-                self._lecture_mode = True
-                if self._whisper:
-                    self._whisper.set_lecture_mode(True)
-                log.info("Lecture mode ON")
-                return {"status": "ok", "action": "LECTURE_MODE", "enabled": True}
-            elif _lower in ("stop lecture mode", "lecture mode off", "end lecture mode"):
-                self._lecture_mode = False
-                if self._whisper:
-                    self._whisper.set_lecture_mode(False)
-                log.info("Lecture mode OFF")
-                return {"status": "ok", "action": "LECTURE_MODE", "enabled": False}
-
-            # Lecture notes search — "search my lecture notes for X"
-            elif "lecture notes" in _lower and (
-                _lower.startswith("search") or "search" in _lower
-            ):
-                # Extract query after "for" or "about"
-                for sep in ("for ", "about ", "on "):
-                    if sep in _lower:
-                        search_q = cmd.text[_lower.index(sep) + len(sep):].strip()
-                        break
-                else:
-                    search_q = cmd.text  # fallback: search whole phrase
-                if self._agent_db and self._agent_db.available and search_q:
-                    rows = await self._agent_db.search_lecture_notes(search_q, limit=10)
-                    if rows:
-                        summary = "\n".join(f"- {r['text']}" for r in rows[:5])
-                        log.info("Lecture notes search %r: %d results", search_q, len(rows))
-                        return {"status": "ok", "action": "LECTURE_SEARCH",
-                                "query": search_q, "results": len(rows),
-                                "preview": summary}
-                    else:
-                        return {"status": "ok", "action": "LECTURE_SEARCH",
-                                "query": search_q, "results": 0,
-                                "preview": "No lecture notes found for that query."}
-
-            # Manual pain day toggle
-            elif _lower in ("pain day on", "flare day on", "bad day"):
-                if self._twin:
-                    self._twin.set_manual_pain_day(True)
-                # Immediately relax the recognizer (VAD + logprob floor) for the
-                # next utterance, before route() reconciles on the next command.
-                if self._whisper is not None:
-                    self._whisper.apply_pain_day(True)
-                return {"status": "ok", "action": "PAIN_DAY", "enabled": True}
-            elif _lower in ("pain day off", "flare day off", "feeling better"):
-                if self._twin:
-                    self._twin.set_manual_pain_day(False)
-                if self._whisper is not None:
-                    self._whisper.apply_pain_day(False)
-                return {"status": "ok", "action": "PAIN_DAY", "enabled": False}
-
-            # Condition switching — loads calibrated voice profile for condition
-            _CONDITION_TRIGGERS: dict[str, str] = {
-                "this is a good day":      "good_day",
-                "good day mode":           "good_day",
-                "feeling well":            "good_day",
-                "this is a flare day":     "flare_day",
-                "flare day":               "flare_day",
-                "flare mode":              "flare_day",
-                "this is an allergy day":  "allergy_day",
-                "allergy day":             "allergy_day",
-                "allergy mode":            "allergy_day",
-            }
-            if _lower in _CONDITION_TRIGGERS and self._profiler:
-                condition = _CONDITION_TRIGGERS[_lower]
-                t = asyncio.create_task(self._switch_condition(condition))
-                t.add_done_callback(lambda t: self._on_task_done(t, "_switch_condition"))
-                return {"status": "ok", "action": "CONDITION_SWITCH",
-                        "condition": condition}
-
-            # Calibration triggers
-            _CALIBRATION_TRIGGERS: dict[str, tuple[str, bool]] = {
-                "run voice calibration":   ("good_day",    False),
-                "calibrate my voice":      ("good_day",    False),
-                "quick calibration":       ("good_day",    True),
-                "calibrate flare day":     ("flare_day",   False),
-                "calibrate allergy day":   ("allergy_day", False),
-            }
-            if _lower in _CALIBRATION_TRIGGERS and self._calibrator:
-                condition, quick = _CALIBRATION_TRIGGERS[_lower]
-                t = asyncio.create_task(self._run_calibration(condition, quick))
-                t.add_done_callback(lambda t: self._on_task_done(t, "_run_calibration"))
-                return {"status": "ok", "action": "CALIBRATION_START",
-                        "condition": condition, "quick": quick}
-
-            # ── Goal-level agent control ──────────────────────────────────────
-
-            # "hey agent status" / "what are you doing"
-            if _lower in ("hey agent status", "what are you doing", "agent status",
-                          "status", "what's happening"):
-                if self._dev_agent is not None:
-                    ps = self._dev_agent.get_plan_status()
-                    if ps.get("active"):
-                        msg = (f"Running step {ps['step']} of {ps['total_steps']}: "
-                               f"{ps.get('goal', '')[:50]}")
-                    else:
-                        msg = "No active task."
-                    asyncio.create_task(self._tts_speak(msg))
-                    return {"status": "ok", "action": "AGENT_STATUS", "plan": ps}
-
-            # "hey agent stop" / "cancel task" / "cancel agent"
-            elif _lower in ("hey agent stop", "cancel task", "cancel agent", "stop agent",
-                            "stop the agent", "cancel the task"):
-                if self._dev_agent is not None:
-                    self._dev_agent.request_cancel()
-                    asyncio.create_task(self._tts_speak("Cancelling after current step."))
-                    return {"status": "ok", "action": "AGENT_CANCEL"}
-                return {"status": "ok", "action": "AGENT_CANCEL", "note": "no active agent"}
-
-            # "resume task" — offer to resume the most recent interrupted plan
-            # (post-crash recovery; advertised by the crash-notice TTS in
-            # main.py). Safe to fire-and-forget: resume_pending_plan() is
-            # itself gated on an explicit spoken confirmation, so this phrase
-            # alone can never re-run a plan with destructive steps.
-            elif _lower in ("resume task", "resume the task", "hey agent resume",
-                            "resume work", "resume interrupted task"):
-                pending: list = []
-                if self._agent_db and self._agent_db.available:
-                    pending = await self._agent_db.get_interrupted_runs(limit=1)
-                if self._dev_agent is None or not pending:
-                    asyncio.create_task(self._tts_speak("No interrupted task to resume."))
-                    return {"status": "ok", "action": "AGENT_RESUME", "offered": False}
-                t = asyncio.create_task(self._dev_agent.resume_pending_plan())
-                t.add_done_callback(lambda t: self._on_task_done(t, "resume_pending_plan"))
-                return {"status": "ok", "action": "AGENT_RESUME", "offered": True,
-                        "goal": pending[0].get("goal", "")[:80]}
-
-            # "hey agent authorize <goal>" — create a standalone goal session
-            elif _lower.startswith("hey agent authorize ") or _lower.startswith("authorize "):
-                goal_text = (cmd.text.split("authorize ", 1)[-1]).strip(" .,!?\"'")
-                if goal_text:
-                    from core.goal_session import GoalSessionStore
-                    duration = self._approval_config().get("goal_session_duration_s", 900)
-                    max_act = self._approval_config().get("goal_session_max_actions", 50)
-                    GoalSessionStore.create(goal=goal_text, domain="plan",
-                                            duration_s=duration, max_actions=max_act)
-                    # Durable goal backlog (gap D): persist the goal so it survives a
-                    # crash/restart, then kick the drainer to run it. idempotency_key
-                    # is unique per authorize so a re-issue can't double-queue.
-                    if self._agent_db and self._agent_db.available:
-                        import time as _t
-                        key = f"authorize:{goal_text[:80]}:{_t.time():.0f}"
-                        await self._agent_db.enqueue_goal(
-                            goal_text, domain="plan", idempotency_key=key,
-                        )
-                        if self._dev_agent is not None:
-                            asyncio.create_task(self._dev_agent.drain_goal_queue())
-                    mins = int(duration / 60)
-                    asyncio.create_task(
-                        self._tts_speak(f"Goal authorized for {mins} minutes: {goal_text[:40]}")
-                    )
-                    return {"status": "ok", "action": "GOAL_AUTHORIZE", "goal": goal_text}
-
-            # ── Proactive scheduling / reminders / event rules (N+2) ──────────
-            elif is_schedule_phrase(_lower):
-                import time as _t
-                return await self._handle_schedule_command(
-                    parse_schedule(cmd.text, _t.time()))
-
-            # "hey agent history" / "what did you do"
-            elif _lower in ("hey agent history", "what did you do", "agent history",
-                            "show history", "recent actions"):
-                summary = await self._audit_history_summary(n=5)
-                asyncio.create_task(self._tts_speak(summary))
-                return {"status": "ok", "action": "AGENT_HISTORY", "summary": summary}
-
-            # "review queue" / "what needs review" — dev plans that exhausted
-            # their replan/step budget, were rolled back, and now need a human
-            # decision (R-10 escalation queue)
-            elif _lower in ("review queue", "show review queue", "what needs review",
-                            "hey agent review queue", "show escalations",
-                            "pending reviews"):
-                items: list = []
-                total = 0
-                if self._agent_db and self._agent_db.available:
-                    total = await self._agent_db.count_pending_escalations()
-                    items = await self._agent_db.get_pending_escalations(limit=5)
-                if total:
-                    newest = items[0]
-                    msg = (f"{total} plan{'s' if total != 1 else ''} need review. "
-                           f"Most recent: {newest['goal'][:50]}, "
-                           f"{newest['reason'].replace('_', ' ')}.")
-                else:
-                    msg = "Review queue is empty."
-                asyncio.create_task(self._tts_speak(msg))
-                return {"status": "ok", "action": "AGENT_ESCALATIONS",
-                        "count": total, "items": items}
-
-            # "clear review queue" — acknowledge every pending escalation
-            elif _lower in ("clear review queue", "dismiss reviews",
-                            "clear escalations"):
-                cleared = 0
-                if self._agent_db and self._agent_db.available:
-                    cleared = await self._agent_db.resolve_escalations(
-                        status="acknowledged")
-                asyncio.create_task(self._tts_speak(
-                    f"Cleared {cleared} review item{'s' if cleared != 1 else ''}."))
-                return {"status": "ok", "action": "AGENT_ESCALATIONS_CLEAR",
-                        "count": cleared}
-
-            # Mic mute — voice one-way; unmute via iPad mic_mute message
-            elif _lower in ("mute mic", "mute microphone", "mic off", "silence mic"):
-                if self._whisper is not None:
-                    self._whisper.set_muted(True)
-                asyncio.create_task(self._tts_speak("Microphone muted. Tap the iPad to unmute."))
-                return {"status": "ok", "action": "MIC_MUTE", "muted": True}
-
-            # Capability discovery — "help" / "what can you do" (GAP-4)
-            elif _lower in ("help", "what can you do", "what can i say",
-                            "list your skills"):
-                summary = self._capability_summary()
-                asyncio.create_task(self._tts_speak(summary))
-                return {"status": "ok", "action": "HELP", "summary": summary}
-
-            # Personal KB maintenance — "index my notes"
-            elif _lower in ("index my notes", "reindex my notes",
-                            "index my documents"):
-                if self._personal_kb is not None and getattr(
-                        self._personal_kb, "available", False):
-                    from core.async_utils import fire_and_log
-                    if self._personal_kb.get_status().get("paused"):
-                        asyncio.create_task(self._tts_speak(
-                            "Indexing is paused during the flare — I'll be able "
-                            "to index after it passes."))
-                        return {"status": "ok", "action": "PERSONAL_KB_PAUSED"}
-                    fire_and_log(self._personal_kb.index(), log,
-                                 label="voice personal_kb index")
-                    asyncio.create_task(self._tts_speak(
-                        "Okay, indexing your documents in the background."))
-                    return {"status": "ok", "action": "PERSONAL_KB_INDEX"}
-                asyncio.create_task(self._tts_speak(
-                    "The personal knowledge base isn't available."))
-                return {"status": "ok", "action": "PERSONAL_KB_UNAVAILABLE"}
-
-            # Google PIM auth — "connect google" / "reconnect google".
-            # One spoken phrase + one browser consent click replaces the old
-            # env-var + script + manifest-edit setup; also the recovery path
-            # the expired-token messages name.
-            elif _lower in ("connect google", "reconnect google",
-                            "connect gmail", "set up gmail", "set up google"):
-                return await self._handle_google_connect()
+        vsc_result = await self._voice_control.maybe_handle(cmd)
+        if vsc_result is not None:
+            return vsc_result
 
         t0 = time.monotonic()
         route_label = "local"
         gate_that_decided = "all_pass"
         action_str: Optional[str] = None
-        success: Optional[bool] = None
+        success: bool = False  # default False so a pre-action exception never sends None to metrics (#11)
         error_msg: Optional[str] = None
         command_id: int = -1
         # Per-command accumulator for inference row ids written by
@@ -1847,9 +1054,12 @@ class HybridCoordinator:
                 ctx = [clarify_ctx] + list(cmd.session_context or [])
                 cmd = _dc_replace(cmd, session_context=ctx)
 
-            # Temporarily apply effective_cfg for gate evaluation
-            _original_cfg = self._cfg
-            self._cfg = effective_cfg
+            # Gate evaluation — set effective_cfg in a task-local ContextVar so
+            # concurrent route() tasks each see their own pain-day-adjusted config
+            # without mutating the shared self._cfg (#4). Gate/inference helpers
+            # read it via effective_cfg(), which falls back to their own self._cfg
+            # when unset.
+            _cfg_token = _EFFECTIVE_CFG.set(effective_cfg)
             try:
                 # --- Bypass path (touch / multimodal) --------------------------
                 # These sources always run local and never reach the cloud, so
@@ -1866,25 +1076,25 @@ class HybridCoordinator:
                     if cmd.source == "touch" and cmd.action in _VALID_COMMAND_VERBS:
                         action_str = cmd.action
                     else:
-                        action_str = await self._run_local(cmd)
+                        action_str = await self._inference.run_local(cmd)
                     route_label = "local"
                     gate_that_decided = "bypass"
 
                 # --- Gate 0 — Privacy (force local for cloud-eligible sources) --
-                elif not self._gate0(cmd):
+                elif not self._gates.gate0(cmd):
                     log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
-                    action_str = await self._run_local(cmd)
+                    action_str = await self._inference.run_local(cmd)
                     route_label = "local"
                     gate_that_decided = "gate0_privacy"
 
                 # --- Skip Gate 1 path ------------------------------------------
                 elif source in _SKIP_GATE1_SOURCES:
-                    action_str, gate_that_decided, route_label = await self._gates_2_to_4(cmd)
+                    action_str, gate_that_decided, route_label = await self._gates.gates_2_to_4(cmd)
 
                 # --- Full 4-gate path -------------------------------------------
                 else:
                     # Gate 1 — Confidence
-                    passed, cmd = await self._gate1(cmd)
+                    passed, cmd = await self._gates.gate1(cmd)
                     if passed is None:
                         # Gesture low confidence — discard. Record it (E10) so the
                         # drop is visible to retraining and analytics instead of
@@ -1918,24 +1128,24 @@ class HybridCoordinator:
                         if vocab_corrected:
                             cmd = await _retranscribe(cmd)
                             action_str, gate_that_decided, route_label = \
-                                await self._gates_2_to_4(cmd)
+                                await self._gates.gates_2_to_4(cmd)
                         else:
                             log.info(
                                 "Gate 1 voice low-confidence (logprob=%.3f) — "
                                 "escalating to cloud for misrecognition repair",
                                 cmd.whisper_logprob,
                             )
-                            action_str = await self._run_cloud(cmd)
+                            action_str = await self._inference.run_cloud(cmd)
                             gate_that_decided = "gate1_voice_conf"
                             route_label = "cloud"
                     else:
                         action_str, gate_that_decided, route_label = \
-                            await self._gates_2_to_4(cmd)
+                            await self._gates.gates_2_to_4(cmd)
             finally:
-                self._cfg = _original_cfg
+                _EFFECTIVE_CFG.reset(_cfg_token)
 
             # --- Execute the action ----------------------------------------
-            result = await self._execute_action(action_str, cmd, route_label=route_label)
+            result = await self._action_executor.execute_action(action_str, cmd, route_label=route_label)
             success = result.get("status") == "ok"
 
             # E17: record a concrete failure reason so root-cause analysis does
@@ -2068,7 +1278,7 @@ class HybridCoordinator:
             # never recovers. So only local routes update the Gate 4 EMA; when a
             # burst goes to cloud the EMA stays low and local is retried promptly.
             if route_label == "local":
-                self._update_ema(latency_ms)
+                self._gates.update_ema(latency_ms)
             # Record outcome in metrics singleton (non-fatal)
             if self._metrics is not None:
                 try:
@@ -2212,591 +1422,6 @@ class HybridCoordinator:
                 cmd.text or "", prior_action or "", domain),
             log, label="harvest correction")
 
-    def _cloud_call_budget(self) -> int:
-        try:
-            return int(self._approval_config().get("cloud_call_budget", 20))
-        except Exception:
-            return 20
-
-    def _note_cloud_call(self) -> None:
-        """GAP-10: count cloud API calls per session; warn once past the budget.
-
-        Denial-of-wallet tripwire — slow loops under the per-call cap can still
-        accumulate significant cost. Advisory (warn + audit, fire-and-forget): it
-        does NOT hard-block the cloud path, so a legitimate long session is never
-        wedged mid-task. The counter resets each session.
-        """
-        self._session_cloud_calls += 1
-        budget = self._cloud_call_budget()
-        if self._session_cloud_calls <= budget or self._cloud_budget_warned:
-            return
-        self._cloud_budget_warned = True
-        log.warning(
-            "HybridCoordinator: cloud-call budget exceeded (%d > %d) — DoW tripwire",
-            self._session_cloud_calls, budget,
-        )
-        from core.async_utils import fire_and_log
-        if self._audit and getattr(self._audit, "available", False):
-            fire_and_log(
-                self._audit.log_security_event(
-                    detail=(f"denial-of-wallet tripwire: {self._session_cloud_calls} "
-                            f"cloud calls this session (budget {budget})"),
-                    severity="warning",
-                    params={"cloud_calls": self._session_cloud_calls, "budget": budget}),
-                log, label="audit dow")
-        msg = (f"Heads up — this session has made {self._session_cloud_calls} cloud "
-               "calls, over the budget. Keeping an eye on cost.")
-        fire_and_log(self._tts_speak(msg), log, label="dow warning")
-
-    def _gate0(self, cmd: Command) -> bool:
-        """Gate 0 — Privacy. True = pass (safe to consider cloud).
-
-        Checks command text against patterns for credentials, financial data,
-        and PII. A match forces local routing regardless of subsequent gates.
-        """
-        # Personal-document queries always stay local — this covers the COMMAND
-        # path too (e.g. "open my notes about <topic>" classifies as command,
-        # where Gates 1–4 could otherwise escalate the text to cloud). Checked
-        # before the enabled flag: disabling keyword Gate-0 must not disable it.
-        if _is_personal_query(cmd.text):
-            return False
-        if not self._cfg.gate0_enabled:
-            return True
-        text = cmd.text.lower()
-        return not any(pat in text for pat in self._cfg.gate0_sensitive_patterns)
-
-    async def _gate1(self, cmd: Command) -> tuple[bool | None, Command]:
-        """Gate 1 — Confidence.
-
-        Returns:
-          (True,  cmd) — pass
-          (False, cmd) — fail-voice (low whisper logprob)
-          (None,  cmd) — fail-gesture (discard)
-        """
-        cfg = self._cfg
-        logprob_ok = cmd.whisper_logprob >= cfg.whisper_logprob_min
-        gesture_ok = cmd.gesture_confidence >= cfg.gesture_confidence_min
-
-        if logprob_ok and gesture_ok:
-            return True, cmd
-
-        # Distinguish gesture failure (source=gesture) vs voice failure
-        if cmd.source == "gesture" and not gesture_ok:
-            return None, cmd  # discard
-
-        # Voice low confidence — signal for re-transcription
-        log.debug(
-            "Gate 1 fail (voice): logprob=%.3f gesture=%.3f",
-            cmd.whisper_logprob,
-            cmd.gesture_confidence,
-        )
-        return False, cmd
-
-    async def _gates_2_to_4(
-        self, cmd: Command
-    ) -> tuple[str, str, str]:
-        """Run Gates 2-4. Returns (action_str, gate_that_decided, route_label)."""
-        # Gate 2 — Complexity
-        if not self._gate2(cmd):
-            log.debug("Gate 2 fail (complexity): %r", cmd.text)
-            return await self._run_cloud(cmd), "gate2_complexity", "cloud"
-
-        # Gate 3 — VRAM
-        if not await self._gate3():
-            log.debug("Gate 3 fail (VRAM)")
-            return await self._run_cloud(cmd), "gate3_vram", "cloud"
-
-        # Gate 4 — Latency EMA
-        if not self._gate4():
-            log.debug(
-                "Gate 4 fail (latency EMA=%.0f ms)", self._latency_ema or 0
-            )
-            return await self._run_cloud(cmd), "gate4_latency", "cloud"
-
-        return await self._run_local(cmd), "all_pass", "local"
-
-    def _gate2(self, cmd: Command) -> bool:
-        """Gate 2 — Complexity. True = pass (route local)."""
-        text = cmd.text.lower()
-        if any(kw in text for kw in _COMPLEXITY_KEYWORDS):
-            return False
-        token_count = len(cmd.text.split())
-        return token_count <= self._cfg.max_local_tokens
-
-    async def _gate3(self) -> bool:
-        """Gate 3 — VRAM. True = pass.
-
-        Caches the result for 2 seconds to avoid probing the GPU on every command.
-        The probe (pynvml: nvmlInit/GetMemoryInfo/nvmlShutdown) is a blocking CUDA
-        driver round-trip, so on a cache miss it runs in a thread — never on the
-        event loop, where it would stall every concurrent accessibility/voice
-        task for the duration of the probe (#6).
-        """
-        now = time.monotonic()
-        if self._vram_cache is not None:
-            cached_result, cached_time = self._vram_cache
-            if now - cached_time < self._vram_cache_ttl:
-                return cached_result
-
-        try:
-            from core import vram
-            # vram.free_vram_gb returns UNKNOWN_FREE_GB (fail-open) if pynvml is
-            # unavailable, so an unmeasurable GPU still passes (don't penalise local).
-            # Bound the await (E9): a wedged NVML/CUDA driver can hang the worker
-            # thread, and asyncio.to_thread is not cancellable — without the
-            # wait_for, this route() task would block indefinitely. On timeout the
-            # orphaned thread keeps running but we fail-open and move on.
-            probe_timeout = getattr(self, "_vram_probe_timeout_s", 1.0)
-            free_gb = await asyncio.wait_for(
-                asyncio.to_thread(vram.free_vram_gb), timeout=probe_timeout
-            )
-            result = free_gb >= self._cfg.vram_free_min_gb
-        except TimeoutError:
-            log.warning("Gate 3 VRAM probe timed out after %.1fs — assuming pass",
-                        getattr(self, "_vram_probe_timeout_s", 1.0))
-            result = True
-        except Exception as exc:
-            log.debug("Gate 3 VRAM probe error (assuming pass): %s", exc)
-            result = True
-
-        self._vram_cache = (result, now)
-        return result
-
-    def _gate4(self) -> bool:
-        """Gate 4 — Latency EMA. True = pass.
-
-        Budget is sourced per-domain via the SLO layer (gap H); the gated path is
-        the command domain, so this resolves to the command budget (600 ms default)
-        unless the trainer has set a per-domain override.
-        """
-        if self._latency_ema is None:
-            return True  # no history yet — optimistically run local
-        return self._latency_ema <= self._cfg.latency_budget_for("command")
-
-    # ---------------------------------------------------------------------- #
-    # Inference helpers
-    # ---------------------------------------------------------------------- #
-
-    async def _run_local(self, cmd: Command) -> str:
-        examples = (
-            await self._trainer.get_few_shot_examples(cmd)
-            if self._trainer else None
-        )
-        counterexamples = (
-            await self._trainer.get_few_shot_counterexamples(cmd)
-            if self._trainer else None
-        )
-        # Clear the task-local capture so a backend that doesn't set it (or a
-        # mocked infer in tests) can't surface a previous command's prompt.
-        set_inference_capture(None)
-        t0 = time.monotonic()
-        # Circuit-breaker: a wedged local backend (Ollama hung, GPU stuck during
-        # a flare, stalled model reload) must not stall the pipeline forever.
-        # On timeout, degrade to CLARIFY rather than blocking the accessibility
-        # path indefinitely. Mirrors the cloud-path guard in _run_cloud().
-        try:
-            async with asyncio.timeout(self._cfg.local_timeout_s):
-                action_str = await self._local.infer(
-                    cmd, few_shot_examples=examples, counterexamples=counterexamples
-                )
-        except TimeoutError:
-            log.error(
-                "HybridCoordinator: local inference timed out after %.0fs — CLARIFY fallback",
-                self._cfg.local_timeout_s,
-            )
-            return "CLARIFY local inference timed out"
-        latency_ms = (time.monotonic() - t0) * 1000
-        # NOTE: Do NOT call _update_ema here — route()'s finally block already
-        # updates EMA with the total route latency (which includes inference).
-        # Calling it here too would double-count inference time in Gate 4's EMA.
-        if self._agent_db and self._agent_db.available:
-            status = self._local.get_status()
-            error = action_str if action_str.startswith("CLARIFY inference") else None
-            _prompt, _tokens_in, _tokens_out = get_inference_capture()
-            _inf_id = await self._agent_db.insert_inference(
-                command_id=None,   # backfilled by route() via link_inferences_to_command
-                model=status.get("model", "unknown"),
-                domain="command",
-                prompt=_prompt,
-                response=action_str,
-                tokens_in=_tokens_in,
-                tokens_out=_tokens_out,
-                latency_ms=latency_ms,
-                backend=status.get("backend", "ollama"),
-                error=error,
-            )
-            _ids = _PENDING_INFERENCE_IDS.get()
-            if _ids is not None and _inf_id and _inf_id > 0:
-                _ids.append(_inf_id)
-        try:
-            _st = self._local.get_status()
-            _ti, _to = get_inference_capture()[1:]
-            get_tracer().record_span(
-                "inference", route="local", backend=_st.get("backend"),
-                model=_st.get("model"), dur_ms=round(latency_ms, 1),
-                tokens_in=_ti, tokens_out=_to,
-                cost_usd=estimate_cost(_st.get("model", ""), _ti, _to) or None,
-            )
-        except Exception:
-            pass
-        return action_str
-
-    _CLOUD_TIMEOUT_S = 10.0  # circuit-breaker: cloud inference must complete within this window
-
-    async def _run_cloud(self, cmd: Command) -> str:
-        """Route to Anthropic API (Claude).
-
-        Content filter scrubs secrets/PII from the command text before
-        transmitting to external APIs. Findings are logged to the audit trail.
-
-        A 10-second asyncio.timeout acts as a circuit-breaker: if the API hangs
-        (network drop, service hiccup) the coroutine is cancelled and the
-        pipeline degrades to a CLARIFY response rather than stalling indefinitely.
-        """
-        self._note_cloud_call()  # GAP-10: denial-of-wallet tripwire
-        # Scrub secrets before sending to external API — from BOTH the command
-        # text AND the session_context the cloud prompt embeds. A sensitive
-        # prior command that Gate 0 correctly forced local must not leak later
-        # inside an innocuous command's context window.
-        if self._content_filter:
-            clean_text, findings = await self._content_filter.scrub(cmd.text)
-            total = len(findings)
-            ctx_overrides: dict = {}
-            if cmd.session_context:
-                clean_ctx = []
-                for line in cmd.session_context:
-                    cl, f = await self._content_filter.scrub(line)
-                    clean_ctx.append(cl)
-                    total += len(f)
-                ctx_overrides["session_context"] = clean_ctx
-            if total:
-                log.info("ContentFilter: redacted %d secret(s) before cloud call", total)
-            # replace() preserves every field (action, source, params, …) and
-            # only overrides text/context — the manual rebuild dropped the
-            # required `action` and used a nonexistent `_gaze_coords` kwarg.
-            if findings or ctx_overrides:
-                cmd = _dc_replace(cmd, text=clean_text, **ctx_overrides)
-
-        # Clear the task-local capture so a stale prompt from a previous
-        # inference in this task can't be attributed to this cloud call.
-        set_inference_capture(None)
-        t0 = time.monotonic()
-        try:
-            async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
-                # Throttle cloud egress INSIDE the timeout (#18): a saturated
-                # 'anthropic' bucket otherwise stalled the command path past the
-                # advertised budget. Fail-open if no limiter/bucket is configured;
-                # shares the bucket with CloudDevAgent.
-                if self._rate_limiter is not None:
-                    await self._rate_limiter.check("anthropic")
-                action_str = await self._cloud.infer(cmd)
-        except TimeoutError:
-            log.error(
-                "HybridCoordinator: cloud inference timed out after %.0fs — CLARIFY fallback",
-                self._CLOUD_TIMEOUT_S,
-            )
-            # Record the timed-out call as a span too (was previously invisible).
-            try:
-                get_tracer().record_span(
-                    "inference", route="cloud", model=self._cfg.anthropic_model,
-                    dur_ms=round((time.monotonic() - t0) * 1000, 1), status="timeout",
-                )
-            except Exception:
-                pass
-            return "CLARIFY cloud inference timed out"
-        latency_ms = (time.monotonic() - t0) * 1000
-        # Capture token usage once: shared by the trace span (cost-per-step in the
-        # replay timeline) and the durable inferences row below.
-        _prompt, _tokens_in, _tokens_out = get_inference_capture()
-        try:
-            get_tracer().record_span(
-                "inference", route="cloud", model=self._cfg.anthropic_model,
-                dur_ms=round(latency_ms, 1),
-                tokens_in=_tokens_in, tokens_out=_tokens_out,
-                cost_usd=estimate_cost(self._cfg.anthropic_model, _tokens_in, _tokens_out) or None,
-            )
-        except Exception:
-            pass
-        if self._agent_db and self._agent_db.available:
-            error = action_str if action_str.startswith("CLARIFY") else None
-            _inf_id = await self._agent_db.insert_inference(
-                command_id=None,   # backfilled by route() via link_inferences_to_command
-                model=self._cfg.anthropic_model,
-                domain="command",
-                prompt=_prompt,
-                response=action_str,
-                tokens_in=_tokens_in,
-                tokens_out=_tokens_out,
-                latency_ms=latency_ms,
-                backend="anthropic",
-                error=error,
-            )
-            _ids = _PENDING_INFERENCE_IDS.get()
-            if _ids is not None and _inf_id and _inf_id > 0:
-                _ids.append(_inf_id)
-        return action_str
-
-    # ---------------------------------------------------------------------- #
-    # Action execution
-    # ---------------------------------------------------------------------- #
-
-    async def _execute_action(
-        self, action_str: str, cmd: Command, route_label: str = "local"
-    ) -> dict:
-        """Parse the LLM's action string and execute it via CommandExecutor."""
-        if not action_str:
-            return {"status": "error", "error": "empty action string"}
-
-        verb, target = self._parse_action(action_str)
-
-        # Output-schema validation: the command-path LLM must answer with one of
-        # the 11 accessibility verbs. A response whose first token is anything
-        # else (prose, a hallucinated verb, a refusal) is malformed — degrade to
-        # CLARIFY so the user is re-prompted instead of dispatching a bad verb
-        # that would surface as a raw "Unknown action" error. The original
-        # malformed action_str is still recorded to agent.db by route() for
-        # later analysis.
-        if verb not in _VALID_COMMAND_VERBS:
-            log.warning(
-                "Malformed LLM action %r — first token %r not in command "
-                "vocabulary; degrading to CLARIFY",
-                action_str, verb,
-            )
-            if self._metrics is not None:
-                _rec = getattr(self._metrics, "record_malformed_action", None)
-                if _rec is not None:
-                    try:
-                        _rec(action_str)
-                    except Exception:
-                        pass
-            verb = "CLARIFY"
-            target = "Sorry, I didn't catch that. Could you say it again?"
-
-        params = self._parse_params(verb, target, cmd)
-        # CLARIFY from a cloud route should speak via Polly TTS
-        if route_label == "cloud":
-            params["route"] = "cloud"
-
-        # Vision grounding: resolve named CLICK targets to pixel coords.
-        # Only runs when there's a named target and no coords already supplied
-        # (explicit click coords or x/y from touch). Falls through silently on
-        # any failure — CommandExecutor's Tesseract + cursor fallback takes over.
-        grounded_coords = cmd.gaze_coords
-        used_vision = False
-        if verb == "CLICK" and target and "x" not in params:
-            vision_coords = await self._ground_target(target)
-            if vision_coords:
-                params["x"], params["y"] = vision_coords
-                grounded_coords = vision_coords
-                used_vision = True
-
-        exec_cmd = Command(
-            text=target or cmd.text,
-            action=verb,
-            source=cmd.source,
-            whisper_logprob=cmd.whisper_logprob,
-            gesture_confidence=cmd.gesture_confidence,
-            session_context=cmd.session_context,
-            gaze_coords=grounded_coords,
-            params=params,
-        )
-
-        # Pre-suppress: flush buffer and block mic BEFORE TTS starts playing.
-        # This prevents Danielle's voice from accumulating in the WhisperStream
-        # buffer and being transcribed as a new command mid-playback.
-        if verb == "CLARIFY" and self._whisper is not None:
-            word_count = len((target or "").split())
-            # Generative TTS is ~0.45s/word; add 1s safety margin before + tail
-            pre_suppress_s = max(3.0, word_count * 0.45 + 1.0)
-            self._whisper.suppress(pre_suppress_s)
-            log.debug("Pre-CLARIFY mic suppressed for %.1fs", pre_suppress_s)
-
-        with get_tracer().timed("execute", verb=verb):
-            result = await self._executor.execute(exec_cmd)
-
-        # EH-1 (E1): a vision-resolved CLICK that produced no visible change gets
-        # ONE corrective retry forcing the structured (UIAutomation) resolver —
-        # the vision coords may simply have been wrong. Strictly one attempt; a
-        # second miss falls through to the CLARIFY conversion below.
-        if (result.get("status") == "verify_failed" and verb == "CLICK"
-                and used_vision):
-            log.info(
-                "CLICK %r verify-failed on vision coords — retrying via UIAutomation",
-                target,
-            )
-            retry_params = {k: v for k, v in params.items() if k not in ("x", "y")}
-            retry_cmd = _dc_replace(exec_cmd, params=retry_params, gaze_coords=None)
-            with get_tracer().timed("execute", verb=verb):
-                result = await self._executor.execute(retry_cmd)
-
-        # EH-1 (E1/E2): a verifiable action that still had no effect, or a named
-        # target nothing could resolve, becomes an honest CLARIFY instead of a
-        # silently-recorded miss. The original action_str is reported as the
-        # outcome (status != "ok") so route() persists and learns it as a
-        # failure, while the clarification is spoken to the user.
-        miss_status = result.get("status")
-        if miss_status in ("verify_failed", "resolve_miss"):
-            if miss_status == "resolve_miss" and target:
-                msg = f"I couldn't find {target}. Could you say it another way?"
-            elif target:
-                msg = (f"I tried to {verb.lower()} {target}, but nothing seemed "
-                       "to happen. Could you say it another way?")
-            else:
-                msg = ("I tried that, but nothing seemed to happen. Could you say "
-                       "it another way?")
-            await self._execute_action(f"CLARIFY {msg}", cmd, route_label=route_label)
-            return {
-                "status": miss_status,
-                "action": verb,
-                "spoke_clarification": True,
-                "verification": result.get("verification"),
-            }
-
-        # Post-action suppression:
-        #   CLARIFY  — long suppress covers TTS echo (already pre-suppressed too)
-        #   All else — short cooldown prevents app-startup sounds / utterance
-        #              tail from being transcribed as a second command.
-        if verb == "CLARIFY":
-            self._pending_clarification = target or "unclear command"
-            # A2UI (token-free): if this clarification is an enumerable shape,
-            # push a tappable choice card. Free-form CLARIFYs return no template
-            # and stay voice-only. Best-effort — never blocks the voice path.
-            self._maybe_emit_clarify_surface(target)
-            if self._whisper is not None:
-                self._whisper.suppress(1.5)
-                self._whisper.set_awaiting_clarification(True)
-                log.debug("Post-CLARIFY mic suppressed 1.5s; wake-phrase bypassed")
-        else:
-            self._pending_clarification = None
-            self._clear_clarify_surface()   # answer arrived (tap or voice) → dismiss card
-            # Remember successful OPEN targets for the "what would you like to
-            # open?" choice card (most-recent first, deduped, capped).
-            if verb == "OPEN" and target and result.get("status") == "ok":
-                self._record_open_target(target)
-            if self._whisper is not None:
-                self._whisper.set_awaiting_clarification(False)
-                if result.get("status") == "ok":
-                    self._whisper.suppress(0.8)
-                    log.debug("Post-action mic cooldown 0.8s (verb=%s)", verb)
-
-        # Record the resolved turn so the NEXT utterance can resolve anaphora
-        # ("do that again", "click it") and the prompt can carry a last-action
-        # hint. Best-effort — never let bookkeeping fail a command.
-        try:
-            self._conversation.record(
-                command_text=cmd.text,
-                verb=verb,
-                target=target or "",
-                coords=grounded_coords,
-                success=result.get("status") == "ok",
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("ConversationState.record failed: %s", exc)
-
-        return result
-
-    async def _ground_target(self, target: str) -> Optional[tuple[int, int]]:
-        """Screenshot the desktop and ask VisionGrounder to resolve the target."""
-        try:
-            # mcp_server/ is already in sys.path via command_executor import
-            from tools import screen as _screen
-            screenshot_result = await asyncio.to_thread(_screen.screenshot)
-            screenshot_b64: str = screenshot_result.get("image_base64", "")
-            if not screenshot_b64:
-                return None
-            result = await asyncio.to_thread(
-                self._grounder.ground, target, screenshot_b64
-            )
-            if result is None:
-                return None
-            return (result.x, result.y)
-        except Exception as exc:
-            log.warning("_ground_target failed for %r: %s", target, exc)
-            return None
-
-    @staticmethod
-    def _parse_action(action_str: str) -> tuple[str, str]:
-        """Split a raw LLM action string into (verb, target).
-
-        verb is upper-cased; target is the remainder (may be empty). Callers
-        validate verb against _VALID_COMMAND_VERBS before dispatch. Tolerates a
-        single leading "Action:"/"ACTION:" label some models prepend, but does
-        not otherwise hunt for a verb mid-string — an accessibility tool should
-        re-prompt rather than guess at a destructive action.
-        """
-        text = action_str.strip()
-        # Strip one optional leading label, e.g. "Action: CLICK button".
-        low = text.lower()
-        for label in ("action:", "command:"):
-            if low.startswith(label):
-                text = text[len(label):].strip()
-                break
-        parts = text.split(None, 1)
-        if not parts:
-            return "", ""
-        verb = parts[0].upper().rstrip(":")
-        target = parts[1].strip() if len(parts) > 1 else ""
-        return verb, target
-
-    @staticmethod
-    def _parse_params(verb: str, target: str, original: Command) -> dict:
-        """Extract verb-specific params from the LLM target string."""
-        params: dict = {}
-
-        if verb == "SCROLL":
-            words = target.lower().split()
-            direction = "down"
-            for w in words:
-                if w in ("up", "down", "left", "right"):
-                    direction = w
-                    break
-            amount = 3
-            for w in words:
-                try:
-                    amount = int(w)
-                    break
-                except ValueError:
-                    pass
-            params = {"direction": direction, "amount": amount}
-
-        elif verb == "CLICK":
-            # Carry through explicit touch coords (tilt-tap pins cursor x/y +
-            # snap_nearest in FusionEngine.on_touch). Without this the coords are
-            # dropped and the click falls back to re-searching UIA for the text.
-            if "x" in original.params and "y" in original.params:
-                params = {"x": original.params["x"], "y": original.params["y"]}
-                if original.params.get("snap_nearest"):
-                    params["snap_nearest"] = True
-            elif original.gaze_coords:
-                x, y = original.gaze_coords
-                params = {"x": x, "y": y}
-
-        elif verb == "TYPE":
-            params = {"text": target}
-
-        elif verb == "OPEN":
-            params = {"target": target}
-
-        elif verb == "HOTKEY":
-            keys = [k.strip() for k in target.replace("+", " ").split() if k.strip()]
-            params = {"keys": keys}
-
-        elif verb == "CLARIFY":
-            params = {"message": target}
-
-        return params
-
-    # ---------------------------------------------------------------------- #
-    # Latency EMA
-    # ---------------------------------------------------------------------- #
-
-    def _update_ema(self, latency_ms: float) -> None:
-        α = self._cfg.latency_ema_alpha
-        if self._latency_ema is None:
-            self._latency_ema = latency_ms
-        else:
-            self._latency_ema = α * latency_ms + (1 - α) * self._latency_ema
-
     # ---------------------------------------------------------------------- #
     # Correction API — user feedback loop
     # ---------------------------------------------------------------------- #
@@ -2842,7 +1467,7 @@ class HybridCoordinator:
     def get_status(self) -> dict:
         return {
             "local_backend": self._local.get_status(),
-            "latency_ema_ms": round(self._latency_ema, 1) if self._latency_ema else None,
+            "latency_ema_ms": round(self._gates.latency_ema, 1) if self._gates.latency_ema else None,
             "config": {
                 "whisper_logprob_min": self._cfg.whisper_logprob_min,
                 "gesture_confidence_min": self._cfg.gesture_confidence_min,

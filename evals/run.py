@@ -56,15 +56,28 @@ def _infer_text(model: str | None, *, timeout: float = 120.0):
     oi = (OllamaInference(model=model, timeout=timeout) if model
           else OllamaInference(timeout=timeout))
 
-    async def infer_text(system: str, user: str) -> str:
+    async def infer_text(system: str, user: str, format: dict | None = None) -> str:
         resp = await oi._chat([
             {"role": "system", "content": system},
             {"role": "user", "content": user},
-        ])
+        ], format=format)
         msg = (resp or {}).get("message", {})
         return msg.get("content", "") if isinstance(msg, dict) else ""
 
     return oi, infer_text
+
+
+def _plan_grammar() -> dict | None:
+    """Production's plan-output grammar (``_PLAN_JSON_SCHEMA``), imported — never
+    copied — so the eval constrains the plan path EXACTLY as the live agent does
+    (specs/dev-agent-plan-fidelity R1.1, R1.3). Returns None if the inference
+    package is unavailable, so the caller can degrade to an unconstrained call and
+    say so rather than silently claim parity."""
+    try:
+        from inference.model_router import _PLAN_JSON_SCHEMA
+        return _PLAN_JSON_SCHEMA
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -98,7 +111,10 @@ def _run_trajectory(args):
         print("no cases to run", file=sys.stderr)
         return None
     _, infer_text = _infer_text(args.model)
-    return run_trajectory_suite(cases, plan_predictor(infer_text, timeout_s=args.timeout))
+    fmt = _plan_grammar()
+    print(f"plan grammar: {'CONSTRAINED (production _PLAN_JSON_SCHEMA)' if fmt else 'UNCONSTRAINED (schema import failed)'}",
+          file=sys.stderr)
+    return run_trajectory_suite(cases, plan_predictor(infer_text, timeout_s=args.timeout, format=fmt))
 
 
 def _run_replan(args):
