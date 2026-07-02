@@ -9,6 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D018 — 2026-06-29 — Trajectory evals constrain the plan path with production's grammar; baselines re-locked, planner-prompt fix deferred](#d018)
 - [D017 — 2026-06-28 — Pre-commit hook is the mechanical doc-drift enforcement boundary](#d017)
 - [D016 — 2026-06-28 — /doc-update is a slash command, not a Stop hook](#d016)
 - [D015 — 2026-06-28 — DA_CLOUD_PLAN routes plan domain only, not full DevAgent](#d015)
@@ -30,6 +31,15 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D018 — Trajectory evals constrain the plan path with production's grammar; baselines re-locked, planner-prompt fix deferred {#d018}
+**Date:** 2026-06-29
+**Chose:** Give the `dev_trajectory` / `dev_critic` evals grammar parity with production — the plan predictor now passes production's `_PLAN_JSON_SCHEMA` as Ollama `format=` (imported, never copied). Re-lock both baselines under that constraint (`dev_critic` 1.0, `dev_trajectory` 0.6364, tol 0.1). **Defer** the planner-prompt / under-planning-repair change (spec R3 / Phase 4).
+**Rejected (primary):** Tune `_PLAN_PROMPT` now to recover the old 0.7273 `dev_trajectory` number. **Rejected (secondary):** Re-record the baseline *unconstrained* (papering over the eval-vs-prod gap), or loosen the gate.
+**Why:** The 2026-06-29 regression (`dev_trajectory` 0.7273→0.545, `dev_critic` 1.0→0.875) was **not** model drift (snapshot is 2026-03-08, older than the 2026-06-14 baseline) and **not** a suite edit. Two causes: (1) the eval scored the plan path *unconstrained* while production forces a JSON `steps` grammar — added after the baseline was locked, so the eval silently drifted; the unconstrained model reverted to legacy bracket notation and single-line plans the grammar would forbid. (2) `_PLAN_PROMPT` edits since 2026-06-14 (EDIT_FILE verb #134, mini-agent gaps A–D) made the one-shot planner more investigate-first. Closing the fidelity gap recovered `dev_critic` fully (→1.0) and `dev_trajectory` to a passing 0.6364. The residual `dev_trajectory` misses are genuine one-shot under-planning (plans that stop after `GIT_STATUS`/`READ_FILE` before the requested write/commit) — but production's DevAgent runs **iteratively** (plan→execute→observe→replan), so an investigate-first plan is plausibly correct there and the one-shot trajectory eval can't credit it. Building R3 against a one-shot proxy risks optimizing the wrong surface; the precondition for R3 is an **execution-mode** (iterative) measurement showing production is actually harmed. `safe_acc` stayed 1.0 throughout — never a safety regression.
+**Ref:** `specs/dev-agent-plan-fidelity/`, `evals/runner.py::plan_predictor`, `evals/run.py::_plan_grammar`, `inference/local_inference.py::OllamaInference._chat`
 
 ---
 

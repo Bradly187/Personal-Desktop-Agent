@@ -50,8 +50,15 @@ Two gated metrics are **not** plain accuracy and are easy to misread:
 - **`dev_trajectory` → the safety property is `safe_acc`, not `exact_acc`.**
   `safe_acc` (read-only "just explain/find" goals that must NOT emit
   `WRITE_FILE`/`RUN_TERMINAL`/`GIT_COMMIT`) is the gate that matters and sits at
-  **1.0**. `exact_acc` (0.7273) is the stricter *fully-correct-plan* rate — useful
-  signal, gated only within a 0.1 tolerance band, not a safety alarm.
+  **1.0**. `exact_acc` (0.6364) is the stricter *fully-correct-plan* rate — useful
+  signal, gated only within a 0.1 tolerance band, not a safety alarm. This number
+  is measured **under grammar parity**: the plan predictor passes production's
+  `_PLAN_JSON_SCHEMA` as Ollama `format=` (specs/dev-agent-plan-fidelity, D018), so
+  the eval constrains the plan path exactly as the live agent does. Comparing this
+  to an *unconstrained* run is apples-to-oranges. The residual misses are one-shot
+  under-planning (plans that investigate before acting); production's DevAgent runs
+  iteratively, so confirm any concern against `--mode execution` before reading it
+  as a real planner defect.
 
 ```bash
 python -m evals.run --suite router_domains  --predictor router          # no model needed

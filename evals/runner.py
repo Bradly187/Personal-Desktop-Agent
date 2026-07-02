@@ -542,18 +542,28 @@ def replan_predictor(infer_text: TextFn, *, timeout_s: float = 60.0):
     return predict
 
 
-def plan_predictor(infer_text: TextFn, *, timeout_s: float = 30.0):
+def plan_predictor(infer_text: TextFn, *, timeout_s: float = 30.0,
+                   format: dict | None = None):
     """Build a plan_fn: ask the model to plan the goal, extract the verb sequence
-    exactly as dev_agent would parse it."""
+    exactly as dev_agent would parse it.
+
+    ``format`` is production's plan-output grammar (``_PLAN_JSON_SCHEMA``). When
+    supplied, the eval constrains the plan path the SAME way the live agent does
+    (the plan profile sets it as Ollama ``format=``) — closing the eval-vs-prod
+    fidelity gap from specs/dev-agent-plan-fidelity R1. None → legacy unconstrained
+    call (byte-identical to before this change)."""
     system = _plan_system()
 
     def predict(case) -> TrajPrediction:
         ctx = "\n".join(getattr(case, "context", []) or [])
         user = (f"Context:\n{ctx}\n\nGoal: {case.goal}" if ctx else f"Goal: {case.goal}")
         t0 = time.monotonic()
+        # Pass `format` only when set, so a 2-arg infer_text stub (model-free tests)
+        # still works; production's infer_text accepts the optional grammar arg.
+        coro = (infer_text(system, user, format) if format is not None
+                else infer_text(system, user))
         try:
-            raw = asyncio.run(asyncio.wait_for(
-                infer_text(system, user), timeout_s))
+            raw = asyncio.run(asyncio.wait_for(coro, timeout_s))
         except Exception as exc:
             return TrajPrediction(error=f"{type(exc).__name__}: {exc}",
                                   latency_ms=(time.monotonic() - t0) * 1000)
