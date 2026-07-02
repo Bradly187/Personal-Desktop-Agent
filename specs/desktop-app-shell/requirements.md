@@ -8,7 +8,7 @@ Brad drives the agent through the browser chat UI (`:8770/`) and dashboard (`:87
 
 Related: `../chat-workbench-parity/` (the chat UI this shell embeds), `../dashboard-observability-gaps/` (the dashboard it embeds).
 
-**Status:** Building
+**Status:** Shipped (PR #160)
 **Approved:** Brad, 2026-07-02 (spec + tasks approved in-session via plan approval; layout, whole-filesystem scope, and backend-lifecycle-owner decisions confirmed by Brad in the same session)
 **Owner / author session:** Claude Code
 
