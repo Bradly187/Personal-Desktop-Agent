@@ -37,7 +37,7 @@ block-beta
     block:cloud["Cloud (AWS)"]:1
         bedrock["Bedrock Haiku ✅\nfallback active"]
         transcribe["Transcribe ✅\nGate 1 fallback"]
-        polly["Polly / Chatterbox ✅\nTTS live"]
+        polly["Polly / Kokoro / SAPI ✅\nTTS live"]
         agentcore["AgentCore ⏸️\ndeploy deferred"]
     end
 ```

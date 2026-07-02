@@ -10,6 +10,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ## Index (newest first)
 
 - [D022 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d022)
+- [D019 — 2026-07-01 — Chatterbox TTS backend removed; Kokoro covers the use case](#d019)
 - [D018 — 2026-06-29 — Trajectory evals constrain the plan path with production's grammar; baselines re-locked, planner-prompt fix deferred](#d018)
 - [D017 — 2026-06-28 — Pre-commit hook is the mechanical doc-drift enforcement boundary](#d017)
 - [D016 — 2026-06-28 — /doc-update is a slash command, not a Stop hook](#d016)
@@ -41,6 +42,21 @@ See AGENTS.md Rule 12 for when and how to add entries.
 **Rejected:** Move both methods' full bodies into `VoiceSystemControl` alongside the rest of the voice-keyword block they're triggered from.
 **Why:** `_switch_condition` calls `self._profiler.apply_to(self._whisper, coordinator=self)` — an external `ConditionProfiler` API that takes the *real* `HybridCoordinator` instance as a `coordinator=` kwarg. Moving the method into `VoiceSystemControl` would force it to hold a back-reference to the full coordinator, violating the module's explicit-DI requirement (spec R3 — no back-reference, only named accessor callables). Leaving the method on the coordinator and injecting it as a delegate satisfies both the external API contract and the DI requirement; the fallback matches spec R4.3 ("if a branch can't be cleanly attributed, leave it in HybridCoordinator").
 **Ref:** `core/hybrid_coordinator.py` (`_switch_condition`, `_run_calibration`), `core/voice_system_control.py`
+
+---
+
+### D019 — Chatterbox TTS backend removed; Kokoro covers the use case {#d019}
+**Date:** 2026-07-01
+**Chose:** Delete `tts/chatterbox_tts.py` and all config/requirement references.
+**Rejected:** Keep Chatterbox as a documented optional path.
+**Why:** Chatterbox was added before Kokoro existed. It hard-pins `torch==2.6.0`
+(incompatible with the current `torch 2.12.0` stack), causing it to be moved to
+"install-separately" in PR #125. `chatterbox_voice_ref` has been `null` since
+initial config — the zero-shot voice-cloning feature was never exercised.
+Kokoro (local ONNX, default since 2026-06-23) covers local/offline/zero-cost TTS
+without the torch conflict, with GPU auto-selection on `onnxruntime-gpu`. Keeping
+Chatterbox is dead code maintenance burden on a production accessibility dependency.
+**Ref:** `specs/chatterbox-removal/`, PR #125 (original demotion to install-separately)
 
 ---
 
