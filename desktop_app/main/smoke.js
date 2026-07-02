@@ -9,7 +9,7 @@ const os = require("os");
 const path = require("path");
 const { app, session } = require("electron");
 
-const SETTLE_MS = 25000;
+const SETTLE_MS = parseInt(process.env.SHELL_SMOKE_SETTLE_MS, 10) || 25000;
 
 async function run(win) {
   const consoleErrors = [];
