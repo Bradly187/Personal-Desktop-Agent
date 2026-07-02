@@ -205,6 +205,44 @@ def _recent_alerts(db_path: str, limit: int = 50) -> dict:
     return {"alerts": alerts}
 
 
+def _trace_usage(db_path: str, trace_id: str) -> dict:
+    """Aggregate a completed trace's inference rows into a per-turn usage badge
+    (specs/chat-workbench-parity R8.4): models used, token totals, estimated
+    cloud cost. Read-only; never raises; {} when nothing was recorded."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        with con:
+            rows = con.execute(
+                "SELECT i.model, i.backend, i.tokens_in, i.tokens_out, i.latency_ms"
+                " FROM inferences i JOIN commands c ON i.command_id = c.id"
+                " WHERE c.trace_id = ?",
+                (trace_id,),
+            ).fetchall()
+        con.close()
+    except Exception:
+        return {}
+    if not rows:
+        return {}
+    try:
+        from monitoring.cost_ledger import estimate_cost
+    except Exception:
+        estimate_cost = lambda m, ti, to: 0.0  # noqa: E731
+    tokens_in = sum(r["tokens_in"] or 0 for r in rows)
+    tokens_out = sum(r["tokens_out"] or 0 for r in rows)
+    cost = sum(estimate_cost(r["model"] or "", r["tokens_in"] or 0,
+                             r["tokens_out"] or 0) for r in rows)
+    models = list(dict.fromkeys(r["model"] for r in rows if r["model"]))
+    return {
+        "models": models,
+        "inferences": len(rows),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": round(cost, 6),
+    }
+
+
 def _ro_query(db_path: str, sql: str, params: tuple = ()) -> list[dict]:
     """Read-only list-of-dicts query. Returns [] on any error (missing table,
     bad path) so every operational panel degrades to an empty state (R8.5)."""
@@ -323,6 +361,10 @@ class ChatServer:
         self._clients: dict[str, _ChatClient] = {}      # ws_id -> client
         self._active: dict[str, str] = {}               # trace_id -> ws_id
         self._requests: dict[str, asyncio.Task] = {}    # trace_id -> route task
+        # Traces the USER cancelled via the chat Stop control (R4) — lets
+        # _run_request distinguish a deliberate stop (push a cancelled final)
+        # from a shutdown cancellation (re-raise).
+        self._user_cancelled: set[str] = set()
 
         self._runner: Optional[web.AppRunner] = None
         self._pump_task: Optional[asyncio.Task] = None
@@ -730,6 +772,10 @@ class ChatServer:
                 await self._start_request(client, text, attachment_ids)
         elif mtype == "approval_response":
             await self._write_approval(bool(msg.get("approve")))
+        elif mtype == "cancel":
+            self._cancel_request(msg.get("trace_id") or "")
+        elif mtype == "rewind":
+            self._start_rewind(client)
         elif mtype == "list_dirs":
             client.push({"type": "dirs", **self._list_dirs()})
         elif mtype == "set_active_dir":
@@ -764,10 +810,78 @@ class ChatServer:
             return
         trace_id = uuid.uuid4().hex
         self._active[trace_id] = client.ws_id
+        # Bind the client's pending turn to this trace BEFORE any event frame
+        # can arrive for it (specs/chat-workbench-parity R1) — the client keys
+        # its transcript turns on trace_id.
+        client.push({"type": "accepted", "trace_id": trace_id})
         task = asyncio.create_task(
             self._run_request(client, trace_id, text, attachment_ids or []))
         self._requests[trace_id] = task
-        task.add_done_callback(lambda _t, tid=trace_id: self._requests.pop(tid, None))
+        task.add_done_callback(
+            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))
+
+    def _on_request_done(self, task: asyncio.Task, trace_id: str,
+                         client: _ChatClient) -> None:
+        """Request-task bookkeeping. Also covers the cancel race where the task
+        is cancelled before its coroutine ever ran (no except handler executed) —
+        the user's Stop must still resolve the turn (R4.1)."""
+        self._requests.pop(trace_id, None)
+        if task.cancelled() and trace_id in self._user_cancelled:
+            self._user_cancelled.discard(trace_id)
+            self._active.pop(trace_id, None)
+            client.push({"type": "final", "trace_id": trace_id,
+                         "cancelled": True,
+                         "result": {"response": "(cancelled)"}})
+
+    def _cancel_request(self, trace_id: str) -> None:
+        """Stop an in-flight chat request (R4). Idempotent — an unknown or
+        already-finished trace_id is ignored (R4.3). Never touches the approval
+        signal file, so a cancel during a blocked approval gate leaves the gate
+        to resolve exactly as it does on silence: DENY (R4.4)."""
+        task = self._requests.get(trace_id)
+        if task is None or task.done():
+            return
+        self._user_cancelled.add(trace_id)
+        # Graceful stop for the actual work: cancelling our await below does NOT
+        # kill the scheduler-dispatched coroutine, so signal the DevAgent to
+        # halt after the current step (its saga owns any rollback — R4.2).
+        try:
+            if self._coordinator is not None:
+                self._coordinator.request_dev_cancel()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("ChatServer: request_dev_cancel failed: %s", exc)
+        task.cancel()
+
+    def _start_rewind(self, client: _ChatClient) -> None:
+        """Chat "Undo this run" (R8.3): run the DevAgent's rewind path as its
+        own pseudo-request so the confirm approval card lands on this socket.
+        The rollback stays gated on the existing fail-safe-DENY confirm."""
+        if self._coordinator is None:
+            client.push({"type": "error", "error": "agent pipeline not wired"})
+            return
+        trace_id = uuid.uuid4().hex
+        self._active[trace_id] = client.ws_id
+        client.push({"type": "accepted", "trace_id": trace_id})
+        task = asyncio.create_task(self._run_rewind(client, trace_id))
+        self._requests[trace_id] = task
+        task.add_done_callback(
+            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))
+
+    async def _run_rewind(self, client: _ChatClient, trace_id: str) -> None:
+        try:
+            ok = await self._coordinator.revert_last_dev_run(trace_id=trace_id)
+            text = ("Rollback started — restoring the run's file snapshots."
+                    if ok else "Nothing to undo (no run with checkpoints, or the "
+                               "rollback was declined).")
+            client.push({"type": "final", "trace_id": trace_id,
+                         "result": {"response": text}})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ChatServer: rewind failed: %s", exc)
+            client.push({"type": "error", "trace_id": trace_id, "error": str(exc)})
+        finally:
+            self._active.pop(trace_id, None)
 
     def _build_attachment_params(self, attachment_ids: list) -> dict:
         """Extract uploaded attachments into Command.params (R2.4). Off the hot
@@ -801,15 +915,39 @@ class ChatServer:
                 label="chat", trace_id=trace_id,
             )
             result = await fut
-            client.push({"type": "final", "trace_id": trace_id,
-                         "result": result if isinstance(result, dict) else {"response": str(result)}})
+            frame = {"type": "final", "trace_id": trace_id,
+                     "result": result if isinstance(result, dict) else {"response": str(result)}}
+            usage = await self._usage_for_trace(trace_id)
+            if usage:
+                frame["usage"] = usage
+            client.push(frame)
         except asyncio.CancelledError:
+            # A deliberate chat Stop (R4.1) resolves the turn as cancelled; any
+            # other cancellation (shutdown) propagates unchanged.
+            if trace_id in self._user_cancelled:
+                self._user_cancelled.discard(trace_id)
+                client.push({"type": "final", "trace_id": trace_id,
+                             "cancelled": True,
+                             "result": {"response": "(cancelled)"}})
+                return
             raise
         except Exception as exc:  # noqa: BLE001
             log.warning("ChatServer: request failed: %s", exc)
             client.push({"type": "error", "trace_id": trace_id, "error": str(exc)})
         finally:
             self._active.pop(trace_id, None)
+            self._user_cancelled.discard(trace_id)
+
+    async def _usage_for_trace(self, trace_id: str) -> dict:
+        """Per-turn tokens/cost footer (specs/chat-workbench-parity R8.4).
+
+        Read-only aggregation over the trace's inference rows, off the loop.
+        Returns {} on any error or when nothing was recorded — the badge is
+        simply omitted (never an error)."""
+        path = self._db_path()
+        if not path:
+            return {}
+        return await asyncio.to_thread(_trace_usage, path, trace_id)
 
     async def _write_approval(self, approve: bool) -> None:
         """Answer the agent's approval gate via the shared signal-file protocol.
@@ -853,6 +991,9 @@ class ChatServer:
                     continue
                 frame = self._to_frame(ev)
                 if frame is not None:
+                    # Every trace-targeted frame carries its trace_id so the
+                    # client can key concurrent turns correctly (R1.1).
+                    frame["trace_id"] = tid
                     client.push(frame)
         except asyncio.CancelledError:
             pass
@@ -880,10 +1021,24 @@ class ChatServer:
             return {"type": "node", "n": p.get("n"),
                     "status": "success" if p.get("success") else "failed",
                     "action": p.get("action"), "latency_ms": p.get("latency_ms"),
-                    "result": p.get("result_snippet")}
+                    "result": p.get("result_snippet"),
+                    "args": p.get("args_snippet")}
         if topic == "dag.approval_requested":
-            return {"type": "approval", "message": p.get("message"),
-                    "destructive": bool(p.get("destructive"))}
+            frame = {"type": "approval", "message": p.get("message"),
+                     "destructive": bool(p.get("destructive"))}
+            # Informed-approval context (specs/chat-workbench-parity R5/R6):
+            # pending diff / exact command / proposed plan steps, when the
+            # publisher supplied them. Absent keys → the card renders as today.
+            for key in ("file_path", "diff", "command", "goal", "steps"):
+                if p.get(key):
+                    frame[key] = p[key]
+            return frame
+        if topic == "dag.walkthrough":
+            return {"type": "walkthrough", "markdown": p.get("markdown", "")}
+        if topic == "dag.run_finalized":
+            return {"type": "run_finalized", "run_id": p.get("run_id"),
+                    "status": p.get("status"),
+                    "rewindable": bool(p.get("rewindable"))}
         if topic == "chat.token":
             return {"type": "token", "text": p.get("text", "")}
         if topic == "step.failed":

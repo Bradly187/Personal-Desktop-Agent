@@ -18,6 +18,10 @@ Topic namespace (dotted paths):
   dag.step_started   — a plan step began executing; payload: {n, action}
   dag.step_completed — a plan step finished; payload: {n, action, success, latency_ms, result_snippet}
   chat.token         — a streamed LLM text chunk for the chat UI; payload: {text}
+  dag.walkthrough    — post-run walkthrough markdown (DA_POST_RUN_WALKTHROUGH);
+                       payload: {markdown}
+  dag.run_finalized  — a plan run finalized with rewind checkpoints persisted;
+                       payload: {run_id, status, rewindable}
 
   The plan.generated / dag.* / chat.token topics carry a trace_id and drive the
   live DAG + token stream in the PC desktop chat UI (core/chat_server.py).
@@ -62,7 +66,9 @@ TOPIC_PLAN_GENERATED    = "plan.generated"
 TOPIC_DAG_STEP_STARTED  = "dag.step_started"
 TOPIC_DAG_STEP_DONE     = "dag.step_completed"
 TOPIC_CHAT_TOKEN        = "chat.token"
-TOPIC_DAG_APPROVAL      = "dag.approval_requested"  # {message, destructive} — chat approval card
+TOPIC_DAG_APPROVAL      = "dag.approval_requested"  # {message, destructive, file_path?, diff?, command?, goal?, steps?} — chat approval card
+TOPIC_DAG_WALKTHROUGH   = "dag.walkthrough"         # {markdown} — post-run walkthrough artifact (chat card)
+TOPIC_DAG_RUN_FINALIZED = "dag.run_finalized"       # {run_id, status, rewindable} — undo-this-run affordance
 # Background-work observability topics (2026-06-19) — make autonomous actions visible.
 TOPIC_GOAL_DEQUEUED     = "goal.dequeued"
 TOPIC_GOAL_COMPLETED    = "goal.completed"

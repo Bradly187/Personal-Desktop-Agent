@@ -32,6 +32,10 @@ def dev_agent(mock_router):
     agent = object.__new__(DevAgent)
     agent._router = mock_router
     agent._current_goal = "Test goal"
+    # _generate_walkthrough publishes a dag.walkthrough chat event
+    # (specs/chat-workbench-parity R8.1) via _publish_live, which reads these.
+    agent._event_bus = None
+    agent._active_trace_id = ""
     return agent
 
 @pytest.mark.asyncio

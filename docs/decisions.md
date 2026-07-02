@@ -9,6 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D023 — 2026-07-02 — Chat transcript markdown renders via vendored marked+DOMPurify, not CDN or hand-rolled](#d023)
 - [D022 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d022)
 - [D021 — 2026-07-01 — Flag registry is a passive validation mirror, not a config read-through](#d021)
 - [D020 — 2026-07-01 — Chat server gets its own token (cookie-delivered), not the iPad pairing token](#d020)
@@ -35,6 +36,15 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D023 — Chat transcript markdown renders via vendored marked+DOMPurify, not CDN or hand-rolled {#d023}
+**Date:** 2026-07-02
+**Chose:** The chat UI's markdown pipeline is two vendored static assets (`web_client_chat/vendor/marked.min.js` 12.0.2 + `purify.min.js` DOMPurify 3.1.6, ~57 KB total); every render passes through `DOMPurify.sanitize` and falls back to plain `textContent` when either is unavailable. Enforced by `tests/test_chat_assets.py`.
+**Rejected:** (a) CDN `import` like the mermaid DAG module — the transcript is core UX and must work offline, whereas the DAG pane is an optional enhancement; (b) a hand-rolled markdown subset — a correctness/XSS maintenance sink for zero dependency savings once sanitization is required anyway (LLM output is untrusted input).
+**Why:** Offline-safe core path with a sanitizer that has real security review; the fallback keeps the old plain-text behavior as the degraded mode.
+**Ref:** `specs/chat-workbench-parity/` R2, `web_client_chat/vendor/`, `tests/test_chat_assets.py`
 
 ---
 

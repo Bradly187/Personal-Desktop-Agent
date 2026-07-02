@@ -62,11 +62,14 @@ class _DemoCoordinator:
     async def route(self, cmd) -> dict:
         tid, text = cmd.trace_id, cmd.text.lower()
 
-        # 1) Conversational → stream tokens.
+        # 1) Conversational → stream tokens (with markdown, R2).
         if text.startswith("explain") or "how" in text:
-            answer = ("The fusion engine runs a 60 Hz loop with a 6-level sensor "
-                      "priority: touch first, then voice-click, tilt, gesture, "
-                      "on-device keyword, and finally Whisper voice. ")
+            answer = ("The **fusion engine** runs a 60 Hz loop with a 6-level "
+                      "sensor priority:\n\n"
+                      "1. touch\n2. voice-click\n3. tilt\n4. gesture\n"
+                      "5. on-device keyword\n6. Whisper voice\n\n"
+                      "```python\nasync def tick():\n    await fuse(sensors)\n```\n"
+                      "See `core/fusion_engine.py` for details. ")
             for word in answer.split(" "):
                 await self._pub("chat.token", {"text": word + " "}, tid)
                 await asyncio.sleep(0.05)
@@ -85,10 +88,20 @@ class _DemoCoordinator:
             # step 1 (read) runs immediately
             await self._run_node(1, "READ_FILE", tid)
 
-            # approval card before the destructive write
+            # approval card before the destructive write — carries the plan steps
+            # and the pending diff (specs/chat-workbench-parity R5/R6).
             await self._pub("dag.approval_requested",
                             {"message": "I'll run WRITE_FILE, RUN_TERMINAL. Approve all?",
-                             "destructive": True}, tid)
+                             "destructive": True,
+                             "goal": cmd.text,
+                             "steps": [{"n": s["n"], "action": s["action"],
+                                        "args": s["args"]} for s in steps],
+                             "file_path": "fizzbuzz.py",
+                             "diff": ("--- a/fizzbuzz.py\n+++ b/fizzbuzz.py\n"
+                                      "@@ -0,0 +1,3 @@\n"
+                                      "+for i in range(1, 101):\n"
+                                      "+    s = 'Fizz'*(i%3==0) + 'Buzz'*(i%5==0)\n"
+                                      "+    print(s or i)\n")}, tid)
             approved = await self._await_approval()
             if not approved:
                 return {"status": "ok", "action": "dev_agent",
@@ -96,8 +109,16 @@ class _DemoCoordinator:
 
             await self._run_node(2, "WRITE_FILE", tid)
             await self._run_node(3, "RUN_TERMINAL", tid)
+            # Post-run artifacts (R8): walkthrough card + rewindable marker.
+            await self._pub("dag.walkthrough",
+                            {"markdown": "## Walkthrough\n\n- Wrote `fizzbuzz.py`"
+                                         " (3 lines)\n- Ran it: output `1 2 Fizz"
+                                         " 4 Buzz …`\n"}, tid)
+            await self._pub("dag.run_finalized",
+                            {"run_id": 1, "status": "completed",
+                             "rewindable": True}, tid)
             return {"status": "ok", "action": "dev_agent",
-                    "response": "Created fizzbuzz.py and ran it. Output: 1 2 Fizz 4 Buzz …",
+                    "response": "Created `fizzbuzz.py` and ran it. Output: 1 2 Fizz 4 Buzz …",
                     "domain": "plan", "model": "qwen3-coder:30b", "steps": 3}
 
         # 3) Simple command → 4-gate flow.
@@ -114,7 +135,19 @@ class _DemoCoordinator:
         await self._pub("dag.step_started", {"n": n, "action": action}, tid)
         await asyncio.sleep(0.7)
         await self._pub("dag.step_completed", {"n": n, "action": action, "success": True,
-                                              "latency_ms": 120, "result_snippet": "ok"}, tid)
+                                              "latency_ms": 120, "result_snippet": "ok",
+                                              "args_snippet": "fizzbuzz.py"}, tid)
+
+    # Chat run controls (specs/chat-workbench-parity R4/R8.3) — scripted.
+    def request_dev_cancel(self) -> bool:
+        return True
+
+    async def revert_last_dev_run(self, trace_id: str = "") -> bool:
+        await self._pub("dag.approval_requested",
+                        {"message": "Undo the run: create fizzbuzz?",
+                         "destructive": True,
+                         "command": "restore: fizzbuzz.py"}, trace_id)
+        return await self._await_approval()
 
     async def _await_approval(self, timeout_s: float = 12.0) -> bool:
         resp = _APPROVAL_DIR / "response"

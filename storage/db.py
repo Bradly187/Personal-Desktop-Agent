@@ -3739,6 +3739,27 @@ class AgentDB:
             log.warning("AgentDB.get_pending_compensations failed: %s", exc)
             return []
 
+    async def get_checkpoint_compensations(self, run_id: int) -> list[dict]:
+        """Return 'checkpoint' compensations for run_id (read-only; reverse step
+        order). Used by the rewind confirm to show WHAT a rollback would restore
+        (specs/chat-workbench-parity R8.3) before anything is promoted."""
+        if not self._conn:
+            return []
+        try:
+            async with self._conn.execute(
+                "SELECT sc.id, sc.step_id, sc.compensation_action, sc.compensation_args,"
+                "       as2.step_num"
+                " FROM saga_compensations sc"
+                " JOIN agent_steps as2 ON as2.id = sc.step_id"
+                " WHERE sc.run_id = ? AND sc.status = 'checkpoint'"
+                " ORDER BY as2.step_num DESC",
+                (run_id,),
+            ) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception as exc:
+            log.warning("AgentDB.get_checkpoint_compensations failed: %s", exc)
+            return []
+
     async def skip_pending_compensations(self, run_id: int, new_status: str = 'skipped') -> int:
         """Mark all still-pending compensations for run_id as new_status.
 

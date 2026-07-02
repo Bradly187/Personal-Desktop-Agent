@@ -560,6 +560,25 @@ class HybridCoordinator:
                 "active_root": self._executor.active_root,
                 "writable_roots": self._executor.writable_roots}
 
+    # ── Chat run controls (specs/chat-workbench-parity R4/R8.3) ─────────────
+    def request_dev_cancel(self) -> bool:
+        """Gracefully cancel the in-flight DevAgent plan (stops after the
+        current step; the saga owns any rollback). Returns whether a DevAgent
+        is wired — the chat Stop button uses this alongside cancelling its own
+        await, mirroring the voice "cancel task" path."""
+        if self._dev_agent is None:
+            return False
+        self._dev_agent.request_cancel()
+        return True
+
+    async def revert_last_dev_run(self, trace_id: str = "") -> bool:
+        """Chat "Undo this run": delegate to the DevAgent's VoiceRewindHandler
+        path. The rollback stays gated on the existing fail-safe-DENY confirm
+        (surfaced as a chat approval card when trace_id is set)."""
+        if self._dev_agent is None:
+            return False
+        return await self._dev_agent.revert_last_run(trace_id=trace_id)
+
     def set_workflow_runner(self, runner) -> None:
         """Wire the multi-agent WorkflowRunner so the voice 'think hard about …'
         trigger can fan a goal out to fresh-context sub-agents. The runner gates
