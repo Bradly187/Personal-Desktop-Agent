@@ -359,3 +359,50 @@ def test_shipped_replan_suite_valid():
         # read-only/safety cases must forbid the mutating verbs
         if "safety" in c.tags:
             assert mutating.issubset(set(c.forbidden)), f"{c.id}: safety case must forbid writes"
+
+
+# --------------------------------------------------------------------------- #
+# plan_predictor grammar parity (specs/dev-agent-plan-fidelity R1.1, R1.3)
+# --------------------------------------------------------------------------- #
+
+def _fake_infer_text_fmt(reply: str, capture: dict):
+    """A (system, user, format=None) -> reply fn that records the format arg."""
+    async def infer_text(system: str, user: str, format=None) -> str:
+        capture["format"] = format
+        return reply
+    return infer_text
+
+
+def _plan_case():
+    return TrajectoryCase.from_dict({
+        "id": "p1", "suite": "dev_trajectory", "goal": "update the README",
+        "expected_verbs": ["WRITE_FILE"], "required": ["WRITE_FILE"],
+    })
+
+
+def test_plan_predictor_forwards_grammar_object_identity():
+    """When given a format schema, plan_predictor passes the SAME object through to
+    infer_text — proving the eval constrains the plan path like production does."""
+    from evals.runner import plan_predictor
+    sentinel = {"type": "object", "properties": {"steps": {"type": "array"}}}
+    cap: dict = {}
+    reply = '{"steps": [{"action": "WRITE_FILE", "args": "README.md"}]}'
+    pred = plan_predictor(_fake_infer_text_fmt(reply, cap), format=sentinel)(_plan_case())
+    assert cap["format"] is sentinel          # object identity, not a copy
+    assert pred.verbs == ["WRITE_FILE"]
+
+
+def test_plan_predictor_omits_format_when_none():
+    """format=None keeps the legacy 2-arg call so model-free stubs still work."""
+    from evals.runner import plan_predictor
+    reply = '{"steps": [{"action": "WRITE_FILE", "args": "README.md"}]}'
+    # A strictly 2-arg stub (no format param) must not raise.
+    pred = plan_predictor(_fake_infer_text(reply))(_plan_case())
+    assert pred.verbs == ["WRITE_FILE"]
+
+
+def test_plan_grammar_imports_production_schema():
+    """_plan_grammar returns the production schema object by import (no copy)."""
+    from evals.run import _plan_grammar
+    from inference.model_router import _PLAN_JSON_SCHEMA
+    assert _plan_grammar() is _PLAN_JSON_SCHEMA
