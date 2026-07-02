@@ -171,7 +171,7 @@ by `tests/test_flags_registry.py`.
 
 - **Self-skilling rung 4 (autonomous authoring) is explicitly forbidden (D010).** Voice phrase `"save that as a command called X"` is the only macro promotion path. Nothing executes on silence. Spec: `specs/self-skilling/`.
 
-- **Multi-agent workflow orchestration is OFF by default.** Voice triggers: `"think hard about …"` / `"research …"` / `"brainstorm …"`. Pure inference — no desktop/file/shell actions. `pipeline` mode specced but not built. Spec: `specs/workflow-orchestration/`.
+- **Multi-agent workflow orchestration is OFF by default.** Voice triggers: `"think hard about …"` / `"research …"` / `"brainstorm …"`. Pure inference — no desktop/file/shell actions. `pipeline` mode is shipped and fully functional. Spec: `specs/workflow-orchestration/`.
 
 - **VRAM model roster (RTX 5090; source of truth: `inference/model_router.py`):** baseline 8.3 GB + Whisper 4.2 GB → ~19 GB free for LLM. Command domain: `llama3.1:8b` (4.6 GB). Specialists: `qwen3-coder:30b` code+plan (thinking ON), `deepseek-r1:8b` math, `qwen3-vl:30b` vision, `gemma4:12b` general (D003; co-resides with command+Whisper). Flare fallback: `gemma4:e4b-it-qat`. `llama3.1:70b` does not fit alongside Whisper.
 

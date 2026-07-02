@@ -29,8 +29,8 @@ parallelize nor stay safe. The realistic, safe primitive is to orchestrate
 `agent_workflows` ledger table; `core/workflow_voice.py` parses the spoken
 trigger and `HybridCoordinator._maybe_handle_workflow` drives
 decompose→fan_out→synthesize→speak. **Experimental + OFF by default**
-(`workflow_orchestration.enabled`). The **`pipeline` (per-item staged) mode is now
-specced** (R7 + tasks 5a–5e, 2026-06-28) but **not yet built** — it is purely
+(`workflow_orchestration.enabled`). The **`pipeline` (per-item staged) mode is shipped**
+(tasks 5a–5e completed) and fully functional; it is purely
 additive (the `agent_workflows.mode` column already reserves `'pipeline'`, no
 schema/`user_version` change). A live voice trigger for it and an MCP-tool trigger
 remain out of scope (the MCP server process has no `ModelRouter`, so a tool there
@@ -223,7 +223,7 @@ no-CoT-carryover invariant (AGENTS.md #6) holds exactly as in `fan_out`.
         suite 71 green incl. the `_maybe_verify` refactor on `fan_out`) — R7.1–R7.6.
   - [x] 5d. Adversarial `verify_criterion` final-stage pass reuses `_verify_one`
         via a shared `_maybe_verify` helper (fan_out + pipeline) — R7.6.
-  - [ ] 5e. Update `CLAUDE.md` Known Gotchas (the workflow-orchestration bullet
+  - [x] 5e. Update `CLAUDE.md` Known Gotchas (the workflow-orchestration bullet
         currently says "Still deferred: pipeline mode" — flip to "shipped") and
         this spec's §1 Status + §3 R7 once merged.
 - [~] 6. **Live trigger for `pipeline`** — *intentionally left to a follow-up.* A
