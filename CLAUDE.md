@@ -38,6 +38,12 @@ python mcp_server/desktop_mcp_server.py
 # iPad WebSocket bridge (standalone, without FusionEngine)
 python ipad_bridge.py [--port 8765] [--no-mdns] [--debug]
 
+# Electron desktop shell — chat + dashboard iframes, file tree, Monaco editor,
+# pty terminal. Attaches to a running backend, else spawns
+# `main.py --chat --chat-no-browser` and owns its lifecycle.
+# Spec: specs/desktop-app-shell/
+cd desktop_app && npm install && npm start
+
 # End-to-end integration test (start bridge first in another terminal)
 python tests/test_bridge_client.py
 

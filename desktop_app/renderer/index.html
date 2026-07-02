@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Desktop Agent</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="layout.css" />
+</head>
+<body>
+  <div id="shell">
+    <!-- Left: file tree -->
+    <aside id="tree-panel">
+      <div class="panel-title">Files</div>
+      <div id="tree" role="tree"></div>
+    </aside>
+
+    <div class="splitter v" id="split-left" tabindex="0" role="separator" aria-label="Resize file tree"></div>
+
+    <!-- Center: tabbed dashboard / editor -->
+    <main id="center-panel">
+      <div id="tabbar" role="tablist"></div>
+      <div id="center-body">
+        <div id="dashboard-host" class="center-view">
+          <div class="frame-placeholder" id="dashboard-placeholder">Waiting for backend…</div>
+          <iframe id="dashboard-frame" title="Dashboard"></iframe>
+        </div>
+        <div id="editor-host" class="center-view" hidden>
+          <div id="editor"></div>
+        </div>
+      </div>
+    </main>
+
+    <div class="splitter v" id="split-right" tabindex="0" role="separator" aria-label="Resize chat"></div>
+
+    <!-- Right: backend status + chat -->
+    <aside id="chat-panel">
+      <div id="backend-bar">
+        <button id="backend-pill" class="pill down" title="Backend status">backend: …</button>
+        <span id="token-warning" hidden>token missing</span>
+      </div>
+      <div id="chat-host">
+        <div class="frame-placeholder" id="chat-placeholder">Waiting for backend…</div>
+        <iframe id="chat-frame" title="Chat"></iframe>
+        <div id="backend-overlay" hidden>
+          <div class="overlay-head">
+            <span id="overlay-mode"></span>
+            <button id="backend-start">Start</button>
+            <button id="backend-stop">Stop</button>
+            <button id="overlay-close">✕</button>
+          </div>
+          <pre id="backend-log"></pre>
+        </div>
+      </div>
+    </aside>
+
+    <div class="splitter h" id="split-bottom" tabindex="0" role="separator" aria-label="Resize terminal"></div>
+
+    <!-- Bottom: terminal (center column) -->
+    <section id="terminal-panel">
+      <div id="terminal"></div>
+    </section>
+  </div>
+
+  <!-- xterm UMD must load BEFORE Monaco's AMD loader: with an AMD `define`
+       present the UMD wrappers would register as modules instead of setting
+       window.Terminal / window.FitAddon. -->
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../node_modules/monaco-editor/min/vs/loader.js"></script>
+
+  <script src="splitters.js"></script>
+  <script src="backend-panel.js"></script>
+  <script src="fs-tree.js"></script>
+  <script src="terminal.js"></script>
+  <script src="editor.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

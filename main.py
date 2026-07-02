@@ -1349,8 +1349,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # once it is actually listening.
     if chat_server is not None:
         await chat_server.start()
-        _open_chat_shell(chat_server.url(with_token=True),
-                         getattr(args, "chat_window", False))
+        if not getattr(args, "chat_no_browser", False):
+            _open_chat_shell(chat_server.url(with_token=True),
+                             getattr(args, "chat_window", False))
 
     # Wait for Ctrl-C
     await shutdown.wait_for_shutdown()
@@ -1535,6 +1536,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Bind host for the chat UI server (default: 127.0.0.1, localhost-only)")
     p.add_argument("--chat-window", action="store_true",
                    help="Open the chat UI in a native window (pywebview) instead of the browser")
+    p.add_argument("--chat-no-browser", action="store_true",
+                   help="Don't auto-open the chat UI anywhere (for launchers that "
+                        "embed it themselves, e.g. the desktop_app Electron shell)")
     p.add_argument("--chat-readonly", action="store_true",
                    help="Disable in-chat approval of destructive dev steps (voice/iPad approval only)")
     # ── Backend selection (roadmap item #1, #6) ──────────────────────────────

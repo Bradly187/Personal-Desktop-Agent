@@ -1,0 +1,235 @@
+:root {
+  --left: 260px;
+  --right: 400px;
+  --bottom: 240px;
+  --bg: #1e1e1e;
+  --bg-panel: #252526;
+  --bg-hover: #2a2d2e;
+  --bg-active: #37373d;
+  --fg: #cccccc;
+  --fg-dim: #8a8a8a;
+  --accent: #0e639c;
+  --border: #3c3c3c;
+  --error: #f48771;
+  --ok: #89d185;
+  --warn: #e5c07b;
+}
+
+* { box-sizing: border-box; }
+
+/* Author display rules (flex/grid) would otherwise beat the UA's
+   [hidden] { display: none } — keep the hidden attribute authoritative. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+#shell {
+  display: grid;
+  height: 100vh;
+  grid-template-columns: var(--left) 8px minmax(200px, 1fr) 8px var(--right);
+  grid-template-rows: minmax(120px, 1fr) 8px var(--bottom);
+  grid-template-areas:
+    "tree  sl center sr chat"
+    "tree  sl sb     sr chat"
+    "tree  sl term   sr chat";
+}
+
+#tree-panel     { grid-area: tree;   background: var(--bg-panel); overflow: auto; min-width: 0; }
+#split-left     { grid-area: sl; }
+#center-panel   { grid-area: center; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#split-right    { grid-area: sr; }
+#chat-panel     { grid-area: chat;   display: flex; flex-direction: column; background: var(--bg-panel); min-width: 0; }
+#split-bottom   { grid-area: sb; }
+#terminal-panel { grid-area: term;   background: #181818; min-height: 0; position: relative; }
+
+/* ---- Splitters: 8px visible + ±6px invisible hit area (RA-friendly) ---- */
+.splitter {
+  background: var(--bg);
+  position: relative;
+  z-index: 10;
+}
+.splitter::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.splitter.v { cursor: col-resize; }
+.splitter.h { cursor: row-resize; }
+.splitter.v::before { left: -6px; right: -6px; }
+.splitter.h::before { top: -6px; bottom: -6px; }
+.splitter:hover, .splitter.dragging { background: var(--accent); }
+.splitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---- Panels ---- */
+.panel-title {
+  padding: 8px 12px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+/* ---- File tree ---- */
+#tree { user-select: none; padding-bottom: 12px; }
+.tree-row {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-row:hover { background: var(--bg-hover); }
+.tree-row.selected { background: var(--bg-active); }
+.tree-row .chevron {
+  width: 18px;
+  flex: none;
+  text-align: center;
+  color: var(--fg-dim);
+  transition: transform 0.1s;
+}
+.tree-row.expanded .chevron { transform: rotate(90deg); }
+.tree-row .icon { width: 20px; flex: none; text-align: center; }
+.tree-row.error-row { color: var(--error); font-style: italic; cursor: default; }
+.tree-children { margin-left: 14px; }
+
+/* ---- Tabs ---- */
+#tabbar {
+  display: flex;
+  flex: none;
+  height: 38px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 120px;
+  max-width: 220px;
+  padding: 0 12px;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--fg-dim);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab.active { background: var(--bg); color: var(--fg); border-top: 2px solid var(--accent); }
+.tab .dirty-dot { color: var(--warn); font-size: 18px; line-height: 1; visibility: hidden; }
+.tab.dirty .dirty-dot { visibility: visible; }
+.tab .close {
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.tab .close:hover { background: var(--bg-active); color: var(--fg); }
+
+#center-body { flex: 1; position: relative; min-height: 0; }
+.center-view { position: absolute; inset: 0; }
+#editor { position: absolute; inset: 0; }
+
+iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--bg);
+}
+.frame-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-dim);
+  font-size: 15px;
+}
+#dashboard-host iframe, #chat-host iframe { position: absolute; inset: 0; }
+#dashboard-host, #chat-host { position: relative; flex: 1; min-height: 0; }
+
+/* ---- Backend bar / overlay ---- */
+#backend-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 40px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+.pill {
+  min-height: 28px;
+  padding: 2px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-active);
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pill.owned    { border-color: var(--ok);    color: var(--ok); }
+.pill.attached { border-color: var(--accent); color: #6cb6e4; }
+.pill.starting { border-color: var(--warn);  color: var(--warn); }
+.pill.down     { border-color: var(--error); color: var(--error); }
+#token-warning { color: var(--error); font-size: 12px; }
+
+#backend-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.overlay-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.overlay-head button {
+  min-height: 30px;
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--fg);
+  cursor: pointer;
+}
+.overlay-head button:disabled { opacity: 0.4; cursor: default; }
+#overlay-close { margin-left: auto; }
+#backend-log {
+  flex: 1;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---- Terminal ---- */
+#terminal { position: absolute; inset: 4px 0 0 4px; }
+
+/* Tree hidden via Ctrl+B */
+#shell.tree-hidden { grid-template-columns: 0 8px minmax(200px, 1fr) 8px var(--right); }
+#shell.tree-hidden #tree-panel { display: none; }

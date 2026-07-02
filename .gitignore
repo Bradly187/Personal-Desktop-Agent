@@ -67,6 +67,7 @@ logs/
 
 # Misc large/generated
 tts_service/node_modules/
+desktop_app/node_modules/
 _archive/
 
 # Certificates and sensitive credentials (keep out of git entirely)
