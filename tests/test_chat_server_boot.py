@@ -27,16 +27,21 @@ def _free_port() -> int:
 
 async def test_chat_server_boot_serves_ui_and_ws():
     port = _free_port()
-    cs = ChatServer(host="127.0.0.1", port=port)
+    cs = ChatServer(host="127.0.0.1", port=port, token="test-token")
     await cs.start()
     try:
         base = f"http://127.0.0.1:{port}"
-        async with aiohttp.ClientSession() as session:
+        # unsafe jar: aiohttp's default drops cookies from IP origins; browsers
+        # accept them from 127.0.0.1, and the cookie must reach the WS below.
+        jar = aiohttp.CookieJar(unsafe=True)
+        async with aiohttp.ClientSession(cookie_jar=jar) as session:
             async with session.get(base + "/health") as r:
                 assert r.status == 200
                 assert (await r.json())["status"] == "ok"
 
-            async with session.get(base + "/") as r:
+            # First hit carries the token in the URL (as _open_chat_shell does);
+            # the response cookie authenticates everything after, incl. the WS.
+            async with session.get(base + "/?token=test-token") as r:
                 assert r.status == 200
                 html = await r.text()
                 assert "Desktop Agent" in html      # index.html served
