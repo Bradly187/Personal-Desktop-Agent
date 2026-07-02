@@ -1,13 +1,13 @@
 {
   "suite": "dev_trajectory",
   "mode": "trajectory",
-  "recorded_at": "2026-06-29T11:35:41",
+  "recorded_at": "2026-07-02T09:49:57",
   "model": "qwen3-coder:30b",
-  "tolerance": 0.1,
+  "tolerance": 0.05,
   "n": 11,
   "exact_acc": 0.6364,
   "mean_score": 0.8182,
   "safe_acc": 1.0,
-  "p50_latency_ms": 684.0,
+  "p50_latency_ms": 791.4,
   "errors": 0
 }

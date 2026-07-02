@@ -540,7 +540,7 @@ class DevAgent:
         # (DA_REPO_CONTEXT) until the eval baseline locks; off == byte-identical.
         # _workspace_block is the memoized block (R2.1); None = not yet built.
         self._repo_context_enabled: bool = os.environ.get(
-            "DA_REPO_CONTEXT", "0").strip().lower() in ("1", "true", "on", "yes")
+            "DA_REPO_CONTEXT", "1").strip().lower() in ("1", "true", "on", "yes")
         self._workspace_block: Optional[str] = None
         self._workspace_built: bool = False
         # Repo root for workspace-fact collection (cwd is the repo root in prod —
@@ -555,7 +555,7 @@ class DevAgent:
         # Default OFF (DA_DELEGATE) until the eval baseline locks; off == the verb is
         # absent from the planner vocabulary and a stray DELEGATE is a safe no-op.
         self._delegate_enabled: bool = os.environ.get(
-            "DA_DELEGATE", "0").strip().lower() in ("1", "true", "on", "yes")
+            "DA_DELEGATE", "1").strip().lower() in ("1", "true", "on", "yes")
         try:
             self._max_delegate_depth: int = max(
                 1, int(os.environ.get("DA_DELEGATE_MAX_DEPTH", "1")))
@@ -2171,9 +2171,11 @@ class DevAgent:
                 error=result.error,
             )
             # Any compensation still 'pending' here was never triggered (the run
-            # succeeded, or a path that didn't roll back) — mark it skipped so it
-            # never lingers as an un-actioned pending row.
-            await db.skip_pending_compensations(run_id)
+            # succeeded, or a path that didn't roll back). For successful runs,
+            # we promote them to 'checkpoint' so VoiceRewindHandler can restore them.
+            # For failed/cancelled runs (already rolled back), any leftovers are skipped.
+            new_status = 'checkpoint' if result.success else 'skipped'
+            await db.skip_pending_compensations(run_id, new_status=new_status)
         except Exception as exc:
             log.debug("DevAgent._finalize_run failed: %s", exc)
 
@@ -3443,6 +3445,43 @@ class DevAgent:
         "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR"
     })
 
+    async def revert_last_run(self) -> bool:
+        """VoiceRewindHandler: Revert the most recently finalized run.
+        
+        Promotes checkpoints back to pending, then runs compensations.
+        """
+        db = self._db()
+        if not db or not getattr(db, "available", False):
+            return False
+            
+        # Get the most recent run (completed or failed, but not active)
+        cur = await db._conn.execute(
+            "SELECT id, goal FROM agent_runs ORDER BY id DESC LIMIT 1"
+        )
+        row = await cur.fetchone()
+        if not row:
+            log.info("VoiceRewindHandler: no run found to revert")
+            return False
+            
+        run_id = row["id"]
+        goal = row["goal"]
+        
+        if not await self._confirm_destructive_op(f"Undo the run: {goal[:60]}?"):
+            log.info("VoiceRewindHandler: user declined revert of run %s", run_id)
+            return False
+            
+        log.info("VoiceRewindHandler: reverting run %d (%s)", run_id, goal)
+        await db.promote_checkpoints_to_pending(run_id)
+        
+        # We need to run compensations in a background task so we don't block voice
+        from core.async_utils import fire_and_log
+        fire_and_log(
+            self._run_compensations(run_id, triggered_by="voice_rewind"), 
+            log, 
+            label=f"voice_rewind_run_{run_id}"
+        )
+        return True
+
     async def _confirm_destructive_op(self, description: str, *, force: bool = False) -> bool:
         """Speak the action description and wait for voice confirmation.
 
@@ -3621,6 +3660,12 @@ class DevAgent:
         payloads) are withheld, MEDIUM-risk pages are kept but flagged. The content
         is capped (default 4000 chars) to bound the injection surface.
         """
+        from core.egress import EgressController, EgressError
+        try:
+            await EgressController.validate_url(url)
+        except EgressError as e:
+            raise RuntimeError(f"Egress policy violation: {e}")
+
         try:
             import aiohttp
         except ImportError:
