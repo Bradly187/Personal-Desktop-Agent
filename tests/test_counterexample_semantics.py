@@ -246,22 +246,26 @@ class TestInferenceCaptureContextVar:
         assert get_inference_capture() == (None, None, None)
 
 
-def _make_coordinator(infer):
-    from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
-    hc = HybridCoordinator.__new__(HybridCoordinator)
-    hc._cfg = CoordinatorConfig()
-    hc._local = MagicMock()
-    hc._local.infer = infer
-    hc._local.get_status = MagicMock(
+def _make_runner(infer):
+    from core.inference_runner import InferenceRunner
+    from core.hybrid_coordinator import CoordinatorConfig
+    local = MagicMock()
+    local.infer = infer
+    local.get_status = MagicMock(
         return_value={"model": "llama3.1:8b", "backend": "ollama"}
     )
-    hc._trainer = None
-    hc._agent_db = MagicMock()
-    hc._agent_db.available = True
-    hc._agent_db.insert_inference = AsyncMock(return_value=1)
-    hc._latency_ema = None
-    hc._ema_alpha = 0.2
-    return hc
+    agent_db = MagicMock()
+    agent_db.available = True
+    agent_db.insert_inference = AsyncMock(return_value=1)
+    runner = InferenceRunner(
+        CoordinatorConfig(),
+        local=lambda: local, cloud=lambda: None,
+        trainer=lambda: None, agent_db=lambda: agent_db,
+        content_filter=lambda: None, rate_limiter=lambda: None,
+        note_cloud_call=lambda: None,
+    )
+    runner._agent_db_mock = agent_db  # test-only handle for assertions
+    return runner
 
 
 class TestRunLocalCapture:
@@ -273,9 +277,9 @@ class TestRunLocalCapture:
             set_inference_capture("captured-prompt", 11, 3)
             return "CLICK ok"
 
-        hc = _make_coordinator(_infer)
-        await hc._run_local(_Cmd("click ok"))
-        kwargs = hc._agent_db.insert_inference.call_args.kwargs
+        runner = _make_runner(_infer)
+        await runner.run_local(_Cmd("click ok"))
+        kwargs = runner._agent_db_mock.insert_inference.call_args.kwargs
         assert kwargs["prompt"] == "captured-prompt"
         assert kwargs["tokens_in"] == 11
         assert kwargs["tokens_out"] == 3
@@ -290,15 +294,15 @@ class TestRunLocalCapture:
             return "CLICK ok"   # sets nothing
 
         set_inference_capture("stale-prompt-from-previous-command", 99, 99)
-        hc = _make_coordinator(_infer)
-        await hc._run_local(_Cmd("click ok"))
-        kwargs = hc._agent_db.insert_inference.call_args.kwargs
+        runner = _make_runner(_infer)
+        await runner.run_local(_Cmd("click ok"))
+        kwargs = runner._agent_db_mock.insert_inference.call_args.kwargs
         assert kwargs["prompt"] is None
         assert kwargs["tokens_in"] is None
 
     @pytest.mark.asyncio
     async def test_concurrent_run_local_no_misattribution(self):
-        """Regression for the audit race: two overlapping _run_local calls in
+        """Regression for the audit race: two overlapping run_local calls in
         separate tasks must each log their own prompt. With the old instance
         attributes, the slower inference's read picked up the faster task's
         prompt."""
@@ -310,14 +314,14 @@ class TestRunLocalCapture:
             await asyncio.sleep(0.03 if cmd.text == "slow" else 0.0)
             return f"CLICK {cmd.text}"
 
-        hc = _make_coordinator(_infer)
+        runner = _make_runner(_infer)
         await asyncio.gather(
-            asyncio.create_task(hc._run_local(_Cmd("slow"))),
-            asyncio.create_task(hc._run_local(_Cmd("fast"))),
+            asyncio.create_task(runner.run_local(_Cmd("slow"))),
+            asyncio.create_task(runner.run_local(_Cmd("fast"))),
         )
         by_response = {
             c.kwargs["response"]: c.kwargs["prompt"]
-            for c in hc._agent_db.insert_inference.call_args_list
+            for c in runner._agent_db_mock.insert_inference.call_args_list
         }
         assert by_response["CLICK slow"] == "prompt::slow"
         assert by_response["CLICK fast"] == "prompt::fast"

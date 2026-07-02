@@ -106,14 +106,17 @@ async def test_route_produces_trace_when_enabled():
     try:
         coord = HybridCoordinator(config=CoordinatorConfig())
         coord._executor.execute = AsyncMock(return_value={"status": "ok"})
-        # Bypass touch command with a resolved verb → executes without inference.
+        # Pre-supply a trace_id: route() is now immutable (uses _dc_replace
+        # internally) so the caller's cmd object is not mutated.  Supplying
+        # the id up-front lets us verify the tracer recorded spans under it.
+        pre_tid = tracer.new_trace(source="touch")
         cmd = Command(text="click", action="CLICK", source="touch",
-                      params={"x": 10, "y": 20})
+                      params={"x": 10, "y": 20}, trace_id=pre_tid)
         await coord.route(cmd)
 
-        assert cmd.trace_id, "route() should assign a trace_id when enabled"
-        tr = tracer.get_trace(cmd.trace_id)
-        assert tr is not None
+        assert cmd.trace_id == pre_tid, "pre-supplied trace_id should be unchanged"
+        tr = tracer.get_trace(pre_tid)
+        assert tr is not None, "tracer should have recorded spans for the trace"
         stages = [s["stage"] for s in tr["spans"]]
         assert "execute" in stages
         assert "route_decision" in stages

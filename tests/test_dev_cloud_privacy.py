@@ -107,7 +107,7 @@ def test_run_cloud_scrubs_session_context():
         text="open the file", action="OPEN", source="voice",
         session_context=[f"earlier: my key is {_SECRET}", "later: open editor"],
     )
-    out = asyncio.run(coord._run_cloud(cmd))
+    out = asyncio.run(coord._inference.run_cloud(cmd))
     assert out == "CLICK ok"
     ctx = coord._cloud.received.session_context
     joined = "\n".join(ctx)
@@ -122,7 +122,7 @@ def test_run_cloud_clean_context_passes_through():
 
     cmd = Command(text="open the file", action="OPEN", source="voice",
                   session_context=["earlier: scroll down", "later: open editor"])
-    asyncio.run(coord._run_cloud(cmd))
+    asyncio.run(coord._inference.run_cloud(cmd))
     assert coord._cloud.received.session_context == [
         "earlier: scroll down", "later: open editor",
     ]

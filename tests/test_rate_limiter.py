@@ -239,7 +239,7 @@ def test_run_cloud_calls_rate_limiter():
 
     coord._rate_limiter = _RL()
     cmd = Command(text="open browser", action="OPEN", source="voice")
-    out = asyncio.run(coord._run_cloud(cmd))
+    out = asyncio.run(coord._inference.run_cloud(cmd))
     assert out == "CLICK ok"
     assert checked == ["anthropic"]
 

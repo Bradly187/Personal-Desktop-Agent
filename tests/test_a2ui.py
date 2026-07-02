@@ -224,7 +224,7 @@ class _FakeTarget:
 
 
 def test_rank_click_targets_filters_dedups_and_orders():
-    from core.hybrid_coordinator import HybridCoordinator
+    from core.action_executor import ActionExecutor
     snap = [
         _FakeTarget("", (0, 0, 50, 20)),            # unnamed → dropped
         _FakeTarget("Tiny", (0, 0, 4, 4)),          # too small → dropped
@@ -233,47 +233,54 @@ def test_rank_click_targets_filters_dedups_and_orders():
         _FakeTarget("Far", (900, 900, 940, 920)),   # center (920,910)
         _FakeTarget("Near", (100, 100, 140, 120)),  # dup name → dropped
     ]
-    ranked = HybridCoordinator._rank_click_targets(snap, cursor=(120, 110))
+    ranked = ActionExecutor.rank_click_targets(snap, cursor=(120, 110))
     names = [r[0] for r in ranked]
     assert names == ["Near", "Far"]          # nearest first, deduped, filtered
     assert ranked[0][1:] == (120, 110)       # center coords
 
 
 def test_rank_click_targets_reading_order_without_cursor():
-    from core.hybrid_coordinator import HybridCoordinator
+    from core.action_executor import ActionExecutor
     snap = [
         _FakeTarget("Bottom", (10, 500, 60, 520)),
         _FakeTarget("Top", (10, 10, 60, 30)),
     ]
-    ranked = HybridCoordinator._rank_click_targets(snap, cursor=None)
+    ranked = ActionExecutor.rank_click_targets(snap, cursor=None)
     assert [r[0] for r in ranked] == ["Top", "Bottom"]
 
 
 def test_record_open_target_dedup_recency_and_cap():
-    """Coordinator's recent-OPEN buffer: most-recent-first, deduped, capped."""
-    from core.hybrid_coordinator import HybridCoordinator
+    """ActionExecutor's recent-OPEN buffer: most-recent-first, deduped, capped."""
+    from core.action_executor import ActionExecutor
 
-    # Bypass the heavy __init__ — exercise only the buffer logic.
-    coord = object.__new__(HybridCoordinator)
-    coord._recent_open_targets = []
+    state = {"recent": []}
+    ae = ActionExecutor(
+        executor=lambda: None, grounder=lambda: None, conversation=lambda: None,
+        metrics=lambda: None, whisper=lambda: None, bridge=lambda: None,
+        target_cache=lambda: None,
+        get_pending_clarification=lambda: None, set_pending_clarification=lambda v: None,
+        get_active_clarify_surface_id=lambda: None, set_active_clarify_surface_id=lambda v: None,
+        get_recent_open_targets=lambda: state["recent"],
+        set_recent_open_targets=lambda v: state.__setitem__("recent", v),
+    )
 
     for app in ["Chrome", "vscode", "Slack"]:
-        coord._record_open_target(app)
-    assert coord._recent_open_targets == ["Slack", "vscode", "Chrome"]
+        ae.record_open_target(app)
+    assert state["recent"] == ["Slack", "vscode", "Chrome"]
 
     # Re-open vscode → moves to front, no duplicate (case-insensitive).
-    coord._record_open_target("vscode")
-    assert coord._recent_open_targets == ["vscode", "Slack", "Chrome"]
+    ae.record_open_target("vscode")
+    assert state["recent"] == ["vscode", "Slack", "Chrome"]
 
     # Blank target is ignored.
-    coord._record_open_target("   ")
-    assert coord._recent_open_targets == ["vscode", "Slack", "Chrome"]
+    ae.record_open_target("   ")
+    assert state["recent"] == ["vscode", "Slack", "Chrome"]
 
     # Cap at 8.
     for i in range(10):
-        coord._record_open_target(f"App{i}")
-    assert len(coord._recent_open_targets) == 8
-    assert coord._recent_open_targets[0] == "App9"
+        ae.record_open_target(f"App{i}")
+    assert len(state["recent"]) == 8
+    assert state["recent"][0] == "App9"
 
 
 # --------------------------------------------------------------------------- #

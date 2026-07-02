@@ -84,9 +84,8 @@ _action_verifier: "ActionVerifier | None" = None
 # clickable target within this distance of the cursor instead of the exact pixel,
 # so coarse tilt positioning is enough. Env-overridable for live tuning without a
 # restart-edit; 0 (or negative) disables snapping → click lands at the cursor.
-import os as _os
 try:
-    _SNAP_RADIUS_PX = int(_os.environ.get("DA_SNAP_RADIUS_PX", "300"))
+    _SNAP_RADIUS_PX = int(os.environ.get("DA_SNAP_RADIUS_PX", "300"))
 except ValueError:
     _SNAP_RADIUS_PX = 200
 
@@ -237,26 +236,47 @@ def _get_ui_provider():
 # ---------------------------------------------------------------------------
 # Known-app registry — bypass Win+S for apps that Win Search misfires on.
 # Keys are lowercased voice aliases; value is the absolute exe path.
+# Paths use os.path.expandvars so they resolve to the running user's profile
+# rather than being baked to a single username (#12).
 # ---------------------------------------------------------------------------
+
+
+def _find_discord_exe() -> str:
+    """Return the Discord exe path, resolving the current version via glob.
+
+    Discord updates silently and changes its `app-<version>` subdirectory on
+    every release. A pinned path goes stale after any update. Glob picks the
+    lexicographically latest version folder (newest version first when sorted
+    in reverse). Falls back to the env-var expanded canonical path if no match
+    is found (e.g. Discord not installed).
+    """
+    import glob
+    pattern = os.path.expandvars(r"%LOCALAPPDATA%\Discord\app-*\Discord.exe")
+    matches = sorted(glob.glob(pattern), reverse=True)  # newest version first
+    if matches:
+        return matches[0]
+    return os.path.expandvars(r"%LOCALAPPDATA%\Discord\Discord.exe")
+
+
 _KNOWN_APPS: dict[str, str] = {
     # VS Code
-    "vs code":          r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    "vscode":           r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    "visual studio code": r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    "code":             r"C:\Users\bradt\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    # Terminal — "terminal" opens PowerShell (Brad's preference); the literal
+    "vs code":          os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+    "vscode":           os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+    "visual studio code": os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+    "code":             os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+    # Terminal — "terminal" opens PowerShell (user preference); the literal
     # "windows terminal" still launches the Windows Terminal app (wt.exe).
     "terminal":         r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
     "powershell":       r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
     "power shell":      r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-    "windows terminal": r"C:\Users\bradt\AppData\Local\Microsoft\WindowsApps\wt.exe",
+    "windows terminal": os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe"),
     # Chrome
     "chrome":           r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     "google chrome":    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     # Slack
-    "slack":            r"C:\Users\bradt\AppData\Local\slack\slack.exe",
-    # Discord
-    "discord":          r"C:\Users\bradt\AppData\Local\Discord\app-1.0.9237\Discord.exe",
+    "slack":            os.path.expandvars(r"%LOCALAPPDATA%\slack\slack.exe"),
+    # Discord — discovered at startup via glob so a version update doesn't break OPEN
+    "discord":          _find_discord_exe(),
 }
 
 # Detached-launch registry for the OPEN verb. Launched GUI apps must OUTLIVE the
@@ -306,9 +326,8 @@ def _open_target_window_present(target: str) -> bool:
     """
     import re as _re
     try:
-        import sys as _sys
-        from pathlib import Path as _Path
-        _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "mcp_server"))
+        # mcp_server is already on sys.path from the module-level insert at the
+        # top of this file (inside `if not _PROXY_URL:`). No insert needed here.
         from tools import windows as win_tools
     except Exception:
         return False
@@ -356,6 +375,11 @@ _POLLY_SAMPLE_RATE = 16_000       # 16 kHz PCM matches sounddevice default input
 _POLLY_MAX_CHARS = 3_000          # Polly hard limit for standard text input
 _POLLY_TIMEOUT_S = 5              # boto3 connect + read timeout
 
+# Module-level singleton: boto3 clients are thread-safe and reusable; recreating
+# one on every TTS call pays a TCP connection setup for each spoken clarification.
+# Reset to None if credentials change (not expected at runtime) or on ImportError.
+_POLLY_CLIENT = None  # boto3.client("polly") instance
+
 
 def _polly_speak(message: str) -> bool:
     """Speak a clarification message via Amazon Polly Neural TTS.
@@ -367,6 +391,8 @@ def _polly_speak(message: str) -> bool:
     (missing credentials, network timeout, sounddevice failure, etc.).
     All exceptions are caught internally — never raises.
     """
+    global _POLLY_CLIENT
+
     if not message:
         return False
 
@@ -378,13 +404,17 @@ def _polly_speak(message: str) -> bool:
         from botocore.config import Config
         import numpy as np
         import sounddevice as sd
+        import threading as _threading
     except ImportError as exc:
         log.debug("Polly TTS: dependency missing (%s) — install boto3, numpy, sounddevice", exc)
         return False
 
     try:
-        cfg = Config(connect_timeout=_POLLY_TIMEOUT_S, read_timeout=_POLLY_TIMEOUT_S)
-        polly = boto3.client("polly", region_name="us-east-1", config=cfg)
+        # Reuse the cached client; create on first call (#F).
+        if _POLLY_CLIENT is None:
+            cfg = Config(connect_timeout=_POLLY_TIMEOUT_S, read_timeout=_POLLY_TIMEOUT_S)
+            _POLLY_CLIENT = boto3.client("polly", region_name="us-east-1", config=cfg)
+        polly = _POLLY_CLIENT
 
         resp = polly.synthesize_speech(
             Text=message,
@@ -402,16 +432,27 @@ def _polly_speak(message: str) -> bool:
 
         audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         duration_s = len(audio) / _POLLY_SAMPLE_RATE
-        timeout_s = duration_s + _POLLY_TIMEOUT_S  # audio duration + network buffer
+        # Allow the audio duration plus a small network/device buffer for the
+        # timeout. sd.wait() blocks until playback finishes naturally; we join
+        # the wait-thread with this deadline to guard against a wedged audio
+        # driver without reverting to a 50ms poll loop (#8).
+        timeout_s = duration_s + _POLLY_TIMEOUT_S
 
         sd.play(audio, samplerate=_POLLY_SAMPLE_RATE)
-        deadline = time.monotonic() + timeout_s
-        while sd.get_stream() and sd.get_stream().active:
-            if time.monotonic() > deadline:
-                sd.stop()
-                log.warning("Polly TTS: playback timed out after %.1fs", timeout_s)
-                return False
-            time.sleep(0.05)
+        # Run sd.wait() on a daemon thread so we can join() with a timeout.
+        # If the join times out, stop() the stream and return False.
+        _wait_done = _threading.Event()
+
+        def _wait_worker():
+            sd.wait()
+            _wait_done.set()
+
+        _t = _threading.Thread(target=_wait_worker, daemon=True)
+        _t.start()
+        if not _wait_done.wait(timeout=timeout_s):
+            sd.stop()
+            log.warning("Polly TTS: playback timed out after %.1fs", timeout_s)
+            return False
 
         log.info("Polly TTS: spoke %d chars (%.1fs) via voice=%s",
                  len(message), duration_s, _POLLY_VOICE)

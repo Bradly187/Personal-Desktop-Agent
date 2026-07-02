@@ -9,6 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D022 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d022)
 - [D018 — 2026-06-29 — Trajectory evals constrain the plan path with production's grammar; baselines re-locked, planner-prompt fix deferred](#d018)
 - [D017 — 2026-06-28 — Pre-commit hook is the mechanical doc-drift enforcement boundary](#d017)
 - [D016 — 2026-06-28 — /doc-update is a slash command, not a Stop hook](#d016)
@@ -31,6 +32,15 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D022 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved {#d022}
+**Date:** 2026-07-01
+**Chose:** During the HybridCoordinator decomposition (`specs/hybrid-coordinator-decomposition/`), `_switch_condition`/`_run_calibration` stay defined on `HybridCoordinator` and are passed into `VoiceSystemControl` as narrow async delegate callables (`switch_condition`, `run_calibration`), rather than moving the method bodies into `VoiceSystemControl` itself.
+**Rejected:** Move both methods' full bodies into `VoiceSystemControl` alongside the rest of the voice-keyword block they're triggered from.
+**Why:** `_switch_condition` calls `self._profiler.apply_to(self._whisper, coordinator=self)` — an external `ConditionProfiler` API that takes the *real* `HybridCoordinator` instance as a `coordinator=` kwarg. Moving the method into `VoiceSystemControl` would force it to hold a back-reference to the full coordinator, violating the module's explicit-DI requirement (spec R3 — no back-reference, only named accessor callables). Leaving the method on the coordinator and injecting it as a delegate satisfies both the external API contract and the DI requirement; the fallback matches spec R4.3 ("if a branch can't be cleanly attributed, leave it in HybridCoordinator").
+**Ref:** `core/hybrid_coordinator.py` (`_switch_condition`, `_run_calibration`), `core/voice_system_control.py`
 
 ---
 
