@@ -42,7 +42,7 @@ const App = (() => {
       btn.append(dot, label);
 
       if (tab.id !== DASHBOARD_TAB) {
-        if (Editor.isDirty(tab.id)) btn.classList.add("dirty");
+        if (Editor.isDirty(tab.path || tab.id)) btn.classList.add("dirty");
         const close = document.createElement("button");
         close.className = "close";
         close.textContent = "✕";
@@ -68,12 +68,17 @@ const App = (() => {
     
     const imageHost = document.getElementById("image-host");
     if (imageHost) imageHost.hidden = !tab.isImage;
-    
-    editorHost.hidden = (id === DASHBOARD_TAB) || tab.isImage;
-    
+
+    const diffHost = document.getElementById("diff-host");
+    diffHost.hidden = !tab.isDiff;
+
+    editorHost.hidden = (id === DASHBOARD_TAB) || tab.isImage || tab.isDiff;
+
     if (tab.isImage && imageHost) {
       const img = document.getElementById("image-preview");
       img.src = `data:${tab.mimeType};base64,${tab.base64}`;
+    } else if (tab.isDiff) {
+      Editor.activateDiff(tab.path);
     } else if (id !== DASHBOARD_TAB) {
       Editor.activate(id);
     }
@@ -132,27 +137,60 @@ const App = (() => {
     if (!existing) {
       tabs.push({ id: path, title: path.split(/[\\/]/).pop() });
     }
+    Palette.noteRecent(path);
     selectTab(path);
+  }
+
+  // Diff of the working copy (live model) vs git HEAD, as its own tab.
+  async function openDiffTab(path) {
+    const diffId = `diff:${path}`;
+    const result = await Editor.openDiff(path);
+    if (result.notRepo) { alert(`${path}\n\nNot inside a git repository.`); return; }
+    if (result.error) { alert(`Could not diff ${path}\n\n${result.error}`); return; }
+    if (!result.ok) { alert(`${path}\n\nBinary or oversized file — not diffing.`); return; }
+    if (!tabs.some((t) => t.id === diffId)) {
+      tabs.push({ id: diffId, title: `⇄ ${path.split(/[\\/]/).pop()}`, isDiff: true, path });
+    }
+    selectTab(diffId);
   }
 
   function closeTab(id) {
     if (id === DASHBOARD_TAB) return;
-    if (Editor.isDirty(id) && !confirm(`${id} has unsaved changes.\n\nClose without saving?`)) {
+    const tab = tabs.find((t) => t.id === id);
+    const path = tab && tab.isDiff ? tab.path : id;
+    const counterpartOpen = tab && tab.isDiff
+      ? tabs.some((t) => t.id === path) // plain tab still shows this file
+      : tabs.some((t) => t.isDiff && t.path === id); // diff tab still shows it
+    if (!counterpartOpen && Editor.isDirty(path) &&
+        !confirm(`${path} has unsaved changes.\n\nClose without saving?`)) {
       return;
     }
-    Editor.close(id);
+    if (tab && tab.isDiff) {
+      Editor.closeDiff(path);
+      if (!counterpartOpen) Editor.close(path); // model was opened for the diff only
+    } else {
+      // Closing the file also closes its diff view — they share the live model.
+      const diffId = `diff:${id}`;
+      if (tabs.some((t) => t.id === diffId)) {
+        Editor.closeDiff(id);
+        tabs = tabs.filter((t) => t.id !== diffId);
+      }
+      Editor.close(id);
+    }
     tabs = tabs.filter((t) => t.id !== id);
-    if (activeId === id) selectTab(DASHBOARD_TAB);
+    if (!tabs.some((t) => t.id === activeId)) selectTab(DASHBOARD_TAB);
     else renderTabs();
     persist();
   }
 
   async function saveActive() {
     if (activeId === DASHBOARD_TAB) return;
-    const result = await Editor.save(activeId);
+    const tab = tabs.find((t) => t.id === activeId);
+    const path = tab && tab.isDiff ? tab.path : activeId;
+    const result = await Editor.save(path);
     if (result && result.conflict) {
-      if (confirm(`${activeId}\n\nChanged on disk since you opened it. Overwrite?`)) {
-        await Editor.save(activeId, { force: true });
+      if (confirm(`${path}\n\nChanged on disk since you opened it. Overwrite?`)) {
+        await Editor.save(path, { force: true });
       }
     } else if (result && result.error) {
       alert(`Save failed: ${result.error}`);
@@ -163,7 +201,7 @@ const App = (() => {
   // ---- Persistence ---------------------------------------------------------
 
   function persist() {
-    const files = tabs.filter((t) => t.id !== DASHBOARD_TAB).map((t) => t.id);
+    const files = tabs.filter((t) => t.id !== DASHBOARD_TAB && !t.isDiff).map((t) => t.id);
     localStorage.setItem("openFiles", JSON.stringify(files));
     localStorage.setItem("activeTab", activeId);
   }
@@ -210,8 +248,16 @@ const App = (() => {
       case "tabPrev": cycleTab(-1); break;
       case "closeTab": closeTab(activeId); break;
       case "save": saveActive(); break;
+      case "diffActive": {
+        const tab = tabs.find((t) => t.id === activeId);
+        if (tab && tab.id !== DASHBOARD_TAB && !tab.isImage) openDiffTab(tab.isDiff ? tab.path : tab.id);
+        break;
+      }
       case "toggleTree": document.getElementById("shell").classList.toggle("tree-hidden"); break;
       case "focusTerminal": Term.focus(); break;
+      case "tabId": selectTab(arg); break;
+      case "paletteFiles": Palette.open("files"); break;
+      case "paletteCommands": Palette.open("commands"); break;
     }
   }
 
@@ -220,6 +266,8 @@ const App = (() => {
   async function init() {
     Splitters.initAll();
     BackendPanel.init();
+    Palette.init();
+    Sessions.init();
     FsTree.init((path) => openFile(path));
     Term.init();
     await Editor.boot();
@@ -231,5 +279,11 @@ const App = (() => {
 
   window.addEventListener("DOMContentLoaded", init);
 
-  return { openFile, renderTabs };
+  return {
+    openFile,
+    openDiffTab,
+    renderTabs,
+    command: (action, arg) => handleShortcut({ action, arg }),
+    listTabs: () => tabs.map((t) => ({ id: t.id, title: t.title, path: t.path, isDiff: !!t.isDiff })),
+  };
 })();

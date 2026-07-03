@@ -124,8 +124,45 @@ async function readFileBase64(filePath) {
   }
 }
 
+// Flat file index for the fuzzy opener (Ctrl+P). BFS with an ignore set so
+// node_modules/.venv can't swamp it; capped, and the cap is reported so the
+// palette can say "index truncated" instead of silently missing files.
+const INDEX_IGNORE = new Set([
+  "node_modules", ".git", ".venv", "venv", "__pycache__", ".mypy_cache",
+  ".pytest_cache", "dist", "build", "out", "logs", "chroma_db", ".idea", ".vscode",
+]);
+const INDEX_MAX_FILES = 20000;
+
+async function listFilesRec(rootPath) {
+  const root = norm(rootPath);
+  const files = [];
+  const queue = [root];
+  let truncated = false;
+  while (queue.length > 0 && !truncated) {
+    const dir = queue.shift();
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue; // unreadable subtree — skip, never fail the index
+    }
+    for (const e of entries) {
+      if (e.isSymbolicLink()) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (!INDEX_IGNORE.has(e.name)) queue.push(full);
+      } else if (e.isFile()) {
+        files.push(full);
+        if (files.length >= INDEX_MAX_FILES) { truncated = true; break; }
+      }
+    }
+  }
+  return { root, files, truncated };
+}
+
 function register() {
   ipcMain.handle("fs:listDrives", () => listDrives());
+  ipcMain.handle("fs:listFilesRec", (_e, p) => listFilesRec(p));
   ipcMain.handle("fs:listDir", (_e, p) => listDir(p));
   ipcMain.handle("fs:readFile", (_e, p, opts) => readFile(p, opts));
   ipcMain.handle("fs:readFileBase64", (_e, p) => readFileBase64(p));

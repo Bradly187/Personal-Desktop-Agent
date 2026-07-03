@@ -47,6 +47,22 @@ async function run(win) {
       await App.openFile(${JSON.stringify(tmpFile)});
       out.tabCount = document.querySelectorAll("#tabbar .tab").length;
       out.backend = await agent.backend.status();
+
+      // v1.1 surfaces (gap analysis 2026-07-03) ------------------------------
+      // Diff (R6): a tracked file diffs ok end-to-end (git IPC + Monaco models).
+      const diffTry = await Editor.openDiff(${JSON.stringify(path.join(__dirname, "..", "package.json"))});
+      out.diffOk = !!diffTry.ok;
+      // Palette (R8): opens, lists commands, closes.
+      await Palette.open("commands");
+      out.paletteRows = document.querySelectorAll("#palette-overlay .palette-row").length;
+      out.paletteVisible = !document.getElementById("palette-overlay").hidden;
+      Palette.close();
+      // Runs panel (R9): rendered something (rows, "No runs yet", or offline note).
+      out.runsPanelPopulated = document.getElementById("runs-list").children.length > 0;
+      // Toast IPC (R7): reachable without throwing (suppressed while focused).
+      agent.notify.toast("smoke", "toast IPC reachable");
+      out.toastIpcOk = true;
+
       localStorage.clear(); // don't leak the smoke tab into real sessions
       return out;
     })()`);
