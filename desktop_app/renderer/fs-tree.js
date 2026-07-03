@@ -74,12 +74,30 @@ const FsTree = (() => {
     });
   }
 
+  function collapseAll() {
+    const expandedRows = document.querySelectorAll(".tree-row.expanded");
+    expandedRows.forEach(row => {
+      // Simulate click on the row if it's expanded, or just toggle classes manually.
+      // Easiest way is to toggle its hidden property directly
+      row.classList.remove("expanded");
+      const nextSibling = row.nextElementSibling;
+      if (nextSibling && nextSibling.classList.contains("tree-children")) {
+        nextSibling.hidden = true;
+      }
+    });
+  }
+
   async function init(openFileCallback) {
     onOpenFile = openFileCallback;
     const tree = document.getElementById("tree");
     const drives = await window.agent.fs.listDrives();
     for (const drive of drives) addDirNode(tree, drive, drive);
+
+    const collapseBtn = document.getElementById("btn-collapse-all");
+    if (collapseBtn) {
+      collapseBtn.addEventListener("click", collapseAll);
+    }
   }
 
-  return { init };
+  return { init, collapseAll };
 })();

@@ -3,7 +3,7 @@
 // Spec: specs/desktop-app-shell/requirements.md
 
 const path = require("path");
-const { app, BrowserWindow, Menu, shell } = require("electron");
+const { app, BrowserWindow, Menu, shell, nativeTheme } = require("electron");
 
 const auth = require("./main/auth");
 const backend = require("./main/backend");
@@ -89,6 +89,7 @@ function buildMenu() {
 }
 
 app.whenReady().then(() => {
+  nativeTheme.themeSource = "dark";
   auth.installAuthInjection();
   fsIpc.register();
   ptyIpc.register();

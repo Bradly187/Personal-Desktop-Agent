@@ -11,6 +11,7 @@
     <!-- Left: chat -->
     <section id="chat-pane">
       <header class="pane-head">
+        <button type="button" class="collapse-btn tool" title="Toggle Chat Panel" onclick="document.getElementById('chat-pane').classList.toggle('collapsed')">▼</button>
         <span class="dot" id="conn-dot" title="disconnected"></span>
         <h1>Desktop Agent</h1>
         <span class="sub" id="conn-label">connecting…</span>
@@ -43,6 +44,7 @@
     <!-- Right: live DAG preview -->
     <section id="dag-pane">
       <header class="pane-head">
+        <button type="button" class="collapse-btn tool" title="Toggle Execution Graph" onclick="document.getElementById('dag-pane').classList.toggle('collapsed')">▼</button>
         <h2>Execution graph</h2>
         <span class="sub" id="dag-sub">idle</span>
       </header>

@@ -34,6 +34,14 @@ body {
 .pane-head h1, .pane-head h2 { font-size: 15px; margin: 0; font-weight: 600; }
 .pane-head .sub { color: var(--text-dim); font-size: 12px; margin-left: auto; }
 
+.collapse-btn { padding: 4px 8px; border: none; background: transparent; cursor: pointer; color: var(--text-dim); }
+.collapse-btn:hover { color: var(--text); }
+.collapsed .collapse-btn { transform: rotate(-90deg); }
+
+#chat-pane.collapsed, #dag-pane.collapsed { flex: 0 0 auto !important; height: auto !important; min-height: 0; }
+#chat-pane.collapsed > :not(.pane-head), #dag-pane.collapsed > :not(.pane-head) { display: none !important; }
+
+
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fail); flex: none; }
 .dot.on { background: var(--ok); }
 

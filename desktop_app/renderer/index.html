@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <title>Desktop Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
   <link rel="stylesheet" href="layout.css" />
 </head>
@@ -10,7 +13,10 @@
   <div id="shell">
     <!-- Left: file tree -->
     <aside id="tree-panel">
-      <div class="panel-title">Files</div>
+      <div class="panel-title" style="display: flex; justify-content: space-between; align-items: center;">
+        <span>Files</span>
+        <button id="btn-collapse-all" class="icon-button" title="Collapse All Folders" aria-label="Collapse All Folders" style="cursor: pointer; background: transparent; border: none; color: var(--fg-dim); font-weight: bold;">[-]</button>
+      </div>
       <div id="tree" role="tree"></div>
     </aside>
 
@@ -26,6 +32,9 @@
         </div>
         <div id="editor-host" class="center-view" hidden>
           <div id="editor"></div>
+        </div>
+        <div id="image-host" class="center-view" hidden style="display: flex; justify-content: center; align-items: center; background: #0a0b0f; overflow: auto; padding: 20px;">
+          <img id="image-preview" src="" alt="Image preview" style="max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 4px 12px rgba(0,0,0,0.3);" />
         </div>
       </div>
     </main>

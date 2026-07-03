@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("agent", {
     listDrives: () => ipcRenderer.invoke("fs:listDrives"),
     listDir: (path) => ipcRenderer.invoke("fs:listDir", path),
     readFile: (path, opts) => ipcRenderer.invoke("fs:readFile", path, opts),
+    readFileBase64: (path) => ipcRenderer.invoke("fs:readFileBase64", path),
     writeFile: (args) => ipcRenderer.invoke("fs:writeFile", args),
     stat: (path) => ipcRenderer.invoke("fs:stat", path),
   },

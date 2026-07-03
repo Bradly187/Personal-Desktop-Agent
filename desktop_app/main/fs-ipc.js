@@ -101,10 +101,34 @@ async function stat(filePath) {
   }
 }
 
+async function readFileBase64(filePath) {
+  const file = norm(filePath);
+  try {
+    const st = await fsp.stat(file);
+    if (!st.isFile()) return { error: "not a file" };
+    // Increased size limit slightly for images up to 25MB
+    if (st.size > FILE_OPEN_WARN_BYTES * 5) return { error: "file too large for base64" };
+    
+    const buffer = await fsp.readFile(file);
+    let mimeType = "application/octet-stream";
+    const ext = path.extname(file).toLowerCase();
+    if (ext === ".png") mimeType = "image/png";
+    else if (ext === ".jpg" || ext === ".jpeg") mimeType = "image/jpeg";
+    else if (ext === ".gif") mimeType = "image/gif";
+    else if (ext === ".svg") mimeType = "image/svg+xml";
+    else if (ext === ".webp") mimeType = "image/webp";
+    
+    return { base64: buffer.toString("base64"), mimeType };
+  } catch (err) {
+    return { error: err.code || String(err.message) };
+  }
+}
+
 function register() {
   ipcMain.handle("fs:listDrives", () => listDrives());
   ipcMain.handle("fs:listDir", (_e, p) => listDir(p));
   ipcMain.handle("fs:readFile", (_e, p, opts) => readFile(p, opts));
+  ipcMain.handle("fs:readFileBase64", (_e, p) => readFileBase64(p));
   ipcMain.handle("fs:writeFile", (_e, args) => writeFile(args));
   ipcMain.handle("fs:stat", (_e, p) => stat(p));
   ipcMain.handle("app:pickFolder", async () => {

@@ -19,6 +19,15 @@ const App = (() => {
 
   function renderTabs() {
     tabbar.textContent = "";
+    
+    const toggleBtn = document.createElement("button");
+    toggleBtn.className = "icon-button";
+    toggleBtn.textContent = "☰";
+    toggleBtn.title = "Toggle Sidebar (Ctrl+B)";
+    toggleBtn.style.cssText = "background: transparent; border: none; color: var(--fg-dim); cursor: pointer; padding: 0 12px; font-size: 16px; border-right: 1px solid var(--border);";
+    toggleBtn.onclick = () => document.getElementById("shell").classList.toggle("tree-hidden");
+    tabbar.appendChild(toggleBtn);
+
     for (const tab of tabs) {
       const btn = document.createElement("button");
       btn.className = "tab" + (tab.id === activeId ? " active" : "");
@@ -52,10 +61,22 @@ const App = (() => {
   function selectTab(id) {
     if (!tabs.some((t) => t.id === id)) return;
     activeId = id;
+    const tab = tabs.find(t => t.id === id);
+    
     // Hide, never unmount: the dashboard iframe keeps its WebSocket alive.
     dashboardHost.hidden = id !== DASHBOARD_TAB;
-    editorHost.hidden = id === DASHBOARD_TAB;
-    if (id !== DASHBOARD_TAB) Editor.activate(id);
+    
+    const imageHost = document.getElementById("image-host");
+    if (imageHost) imageHost.hidden = !tab.isImage;
+    
+    editorHost.hidden = (id === DASHBOARD_TAB) || tab.isImage;
+    
+    if (tab.isImage && imageHost) {
+      const img = document.getElementById("image-preview");
+      img.src = `data:${tab.mimeType};base64,${tab.base64}`;
+    } else if (id !== DASHBOARD_TAB) {
+      Editor.activate(id);
+    }
     renderTabs();
     persist();
   }
@@ -84,6 +105,23 @@ const App = (() => {
       return;
     }
     if (result.binary) {
+      const ext = path.toLowerCase().split('.').pop();
+      if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext)) {
+        const b64Result = await window.agent.fs.readFileBase64(path);
+        if (b64Result.error) {
+          alert(`Could not open image ${path}\n\n${b64Result.error}`);
+          return;
+        }
+        if (!existing) {
+          tabs.push({ id: path, title: path.split(/[\\/]/).pop(), isImage: true, base64: b64Result.base64, mimeType: b64Result.mimeType });
+        } else {
+          existing.isImage = true;
+          existing.base64 = b64Result.base64;
+          existing.mimeType = b64Result.mimeType;
+        }
+        selectTab(path);
+        return;
+      }
       alert(`${path}\n\nBinary file — not opening in the editor.`);
       return;
     }
