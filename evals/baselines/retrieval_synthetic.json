@@ -1,0 +1,15 @@
+{
+  "suite": "retrieval_synthetic",
+  "mode": "retrieval",
+  "recorded_at": "2026-07-03T18:14:23",
+  "model": "default",
+  "tolerance": 0.1,
+  "n": 46,
+  "mrr": 0.7535,
+  "exact_acc": 0.7535,
+  "hit_rate": 0.913,
+  "found_rate": 1.0,
+  "p50_latency_ms": 10.3,
+  "errors": 0,
+  "note": "exact_acc == MRR@10 over file-level targets (a regression gate, not an absolute benchmark: the generation-time self-retrieval filter admits only questions the retriever already answers at rank <= 10, so found_rate starts at 1.0 by construction). Tolerance 0.10: scoring is deterministic on a fixed index, but the index churns with the code; the gate targets the silently-broken-embedder/index class. Regenerate the suite (scripts/generate_retrieval_eval_data.py) when errors exceed ~10% of n."
+}

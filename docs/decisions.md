@@ -9,6 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D028 — 2026-07-03 — Retrieval quality measured natively in evals/, not via pgvector migration + deepeval](#d028)
 - [D027 — 2026-07-03 — Staleness check on resume seed and replayed reads](#d027)
 - [D026 — 2026-07-03 — Cross-model verify judge for workflow fan-out](#d026)
 - [D025 — 2026-07-03 — Independent review of recovery plans (replan critic)](#d025)
@@ -40,6 +41,14 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D028 — Retrieval quality measured natively in evals/, not via pgvector migration + deepeval {#d028}
+**Date:** 2026-07-03
+**Chose:** A retrieval-rank eval mode (`--mode retrieval`, MRR gated + Hit@5) in the existing `evals/` harness, with ground truth generated locally (`scripts/generate_retrieval_eval_data.py`, Ollama `llama3.1:8b`, self-retrieval filter). Targets match on `(file, name)` hit metadata, never chroma ids (ids hash mtime and churn on reindex).
+**Rejected:** (a) Migrating vector memory to PostgreSQL+pgvector via Docker — `docs/architecture/database-design.md` §1 already rejects a DB server as overkill for a single-user local tool, and ChromaDB provides the same vector+metadata hybrid queries; (b) SQS/Lambda queue-driven ingestion — violates the single-machine local-first posture (D015; `specs/behavioral-twin-state` no-cloud requirement) with no throughput problem to solve; (c) a deepeval/pytest parallel harness — AGENTS.md Rule 9 routes behavioral verification into `evals/`, and MRR/Hit@K are ~20 lines of arithmetic; (d) NDCG — with one relevant chunk per case it is a monotone transform of MRR.
+**Ref:** `specs/retrieval-quality-eval/`, `evals/retrieval.py`, `scripts/generate_retrieval_eval_data.py`
 
 ---
 

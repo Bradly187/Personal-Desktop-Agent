@@ -224,6 +224,58 @@ def _run_dev_critic(args):
     return run_dev_critic_suite(cases, router, timeout_s=args.timeout)
 
 
+def _run_retrieval(args):
+    """Rank known-target chunks against the persisted chroma_db (no reindex, no
+    generation — same live-index precedent as _build_dev_agent_with_rag). Skips
+    (exit 2, no baseline) when ChromaDB or the codebase collection is missing."""
+    from evals.retrieval import load_retrieval_suite, run_retrieval_suite
+    cases = load_retrieval_suite(args.suite)
+    if not cases:
+        print("no cases to run", file=sys.stderr)
+        return None
+
+    async def _build():
+        import asyncio as _a
+        from pathlib import Path as _P
+        from inference.codebase_indexer import CodebaseIndexer
+        root = str(_P(__file__).resolve().parents[1])
+        idx = CodebaseIndexer(project_root=root, embedder=None)
+        if not await idx.start():
+            print("CodebaseIndexer unavailable — skipping retrieval eval", file=sys.stderr)
+            return None
+        status = await idx.get_status()
+        if not status.get("codebase_chunks"):
+            print("codebase collection is empty — build the index first "
+                  "(python inference/codebase_indexer.py); skipping", file=sys.stderr)
+            return None
+
+        async def retrieve(question, collection, n):
+            if collection == "documents":
+                return await idx.query_docs(question, n)
+            if collection == "combined":
+                return await idx.query_combined(question, n)
+            return await idx.query_codebase(question, n)
+
+        # Stale-target guard (specs/retrieval-quality-eval R1.2): a deleted /
+        # renamed file becomes a surfaced ERROR, not a silent rank-0 miss.
+        # Private collection handles — the indexer has no metadata-lookup API
+        # and adding one for an eval isn't warranted.
+        async def file_exists(target_file, collection):
+            cols = ([idx._documents_col] if collection == "documents"
+                    else [idx._codebase_col] if collection == "codebase"
+                    else [idx._codebase_col, idx._documents_col])
+            for col in cols:
+                got = await _a.to_thread(
+                    col.get, where={"file": {"$eq": target_file}}, limit=1, include=[])
+                if got.get("ids"):
+                    return True
+            return False
+
+        return retrieve, file_exists
+
+    return run_retrieval_suite(cases, _build, timeout_s=args.timeout)
+
+
 def _run_ablation(args):
     from evals.ablation import load_ablation_suite
     from evals.runner import run_ablation_suite
@@ -247,6 +299,22 @@ def _print_ablation(report, *, show: int = 20) -> None:
                 f"(d{r.delta:+.0%}; {r.with_hits}/{r.n_anchors} vs {r.no_hits}/{r.n_anchors})")
         if r.error:
             line += f"  {r.error[:60]}"
+        print(line)
+
+
+def _print_retrieval(report) -> None:
+    print(report.summary())
+    print("\nper case (rank of target in top-N; hit = rank <= k):")
+    for r in report.results:
+        flag = ("ERR " if r.error else
+                "OK  " if r.hit_at_k else
+                "~   " if r.rank else "MISS")
+        line = (f"  {flag}[{r.case_id}] rank={r.rank or '-'} "
+                f"rr={r.reciprocal_rank:.2f}  {r.latency_ms:.0f}ms")
+        if r.error:
+            line += f"  {r.error[:70]}"
+        elif not r.hit_at_k:
+            line += f"  {r.detail[:70]}"
         print(line)
 
 
@@ -298,7 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--suite", required=True, help="suite name (evals/suites/<name>.jsonl)")
     ap.add_argument("--mode",
                     choices=["single", "trajectory", "judge", "execution",
-                             "ablation", "replan", "edit_ab", "dev_critic"],
+                             "ablation", "replan", "edit_ab", "dev_critic",
+                             "retrieval"],
                     default="single",
                     help="execution = run the goal through the LIVE DevAgent and "
                          "score the executed trajectory (read-only suites only); "
@@ -308,7 +377,10 @@ def main(argv: list[str] | None = None) -> int:
                          "build_replan_prompt (DA_TRAJECTORY_REDUCE toggles compaction); "
                          "edit_ab = A/B the WRITE_FILE edit format (whole_file vs "
                          "hashline) on the same fixed model, applied through the real "
-                         "EditApplier + lint gate (specs/edit-format-aci task 6)")
+                         "EditApplier + lint gate (specs/edit-format-aci task 6); "
+                         "retrieval = rank each case's known-target chunk against the "
+                         "persisted chroma_db (MRR/Hit@K, model-free scoring — isolates "
+                         "the retriever, where ablation measures the whole RAG loop)")
     ap.add_argument("--predictor",
                     choices=["command", "slots", "router", "skill_trigger"],
                     default="command",
@@ -331,7 +403,8 @@ def main(argv: list[str] | None = None) -> int:
     runner = {"single": _run_single, "trajectory": _run_trajectory,
               "judge": _run_judge, "execution": _run_execution,
               "ablation": _run_ablation, "replan": _run_replan,
-              "edit_ab": _run_edit_ab, "dev_critic": _run_dev_critic}[args.mode]
+              "edit_ab": _run_edit_ab, "dev_critic": _run_dev_critic,
+              "retrieval": _run_retrieval}[args.mode]
     report = runner(args)
     if report is None:
         return 2
@@ -350,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         _print_ablation(report)
     elif args.mode == "edit_ab":
         _print_edit_ab(report)
+    elif args.mode == "retrieval":
+        _print_retrieval(report)
     elif args.mode == "dev_critic":
         from evals.dev_critic import _print_report as _print_dc
         _print_dc(report)
