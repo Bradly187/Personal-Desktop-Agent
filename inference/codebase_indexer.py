@@ -634,7 +634,7 @@ class CodebaseIndexer:
         suffix = path.suffix.lower()
         if suffix not in (".py", ".swift"):
             return
-        if any(part in self.EXCLUDE_DIRS for part in path.parts):
+        if self._is_excluded(path):
             return
         if not path.exists():
             return
@@ -668,6 +668,21 @@ class CodebaseIndexer:
     # Indexing
     # ---------------------------------------------------------------------- #
 
+    def _is_excluded(self, path: Path) -> bool:
+        """True if *path* should be skipped because it sits under an
+        EXCLUDE_DIRS directory *inside* the project root.
+
+        Only components below the root are tested: a project root that itself
+        lives under an excluded-named ancestor (e.g. a git worktree in
+        `.claude/worktrees/<name>`) must still index its own files. Paths
+        outside the root are always excluded — they are never indexable.
+        """
+        try:
+            rel_parts = path.relative_to(self._root).parts
+        except ValueError:
+            return True
+        return any(part in self.EXCLUDE_DIRS for part in rel_parts)
+
     async def index(self, force: bool = False) -> dict:
         """Incrementally index source files and PDFs.
 
@@ -689,8 +704,9 @@ class CodebaseIndexer:
         # ── Source files ──────────────────────────────────────────────────
         for pattern in self.SOURCE_PATTERNS:
             for path in self._root.rglob(pattern):
-                # Skip excluded directories
-                if any(part in self.EXCLUDE_DIRS for part in path.parts):
+                # Skip excluded directories (relative to root — ancestor
+                # components outside the project must not match)
+                if self._is_excluded(path):
                     continue
                 if path.stat().st_size > self.MAX_FILE_BYTES:
                     log.debug("CodebaseIndexer: skipping large file %s", path)
@@ -718,6 +734,8 @@ class CodebaseIndexer:
         docs_dir = self._root / "docs"
         if docs_dir.exists():
             for path in docs_dir.rglob("*.pdf"):
+                if self._is_excluded(path):
+                    continue
                 rel = str(path.relative_to(self._root))
                 mtime = path.stat().st_mtime
                 new_state[rel] = mtime
