@@ -17,7 +17,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - Open tasks: `specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status (2026-06-28)
+## Current Status (2026-07-03)
 
 > **Schema:** `agent.db` at `PRAGMA user_version = 9`. Do not rely on table counts in this file — `storage/db.py` is the authoritative source per AGENTS.md #1.
 
