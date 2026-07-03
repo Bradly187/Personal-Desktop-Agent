@@ -45,6 +45,8 @@ _S = FlagSpec
 
 REGISTRY: dict[str, FlagSpec] = {f.name: f for f in (
     # ── dev-agent loop (inference/dev_agent.py) ─────────────────────────────
+    _S("DA_PLAN_ASSUMPTIONS", "bool", "0", "planner lists repo state assumptions"),
+    _S("DA_REPLAN_CRITIC", "bool", "0", "independent review of recovery plans"),
     _S("DA_PLAN_PREVIEW", "bool", "0", "TTS voice preview for large plans"),
     _S("DA_PLAN_PREVIEW_THRESHOLD", "int", "3", "min steps to trigger plan preview"),
     _S("DA_PLAN_REPAIR", "bool", "1", "re-prompt planner on unparseable plan"),
@@ -64,6 +66,7 @@ REGISTRY: dict[str, FlagSpec] = {f.name: f for f in (
     _S("DA_SAGA_ANNOUNCE", "bool", "1", "TTS summary after saga rollback"),
     _S("DA_SAGA_GIT_BACKEND", "bool", "0", "git-blob saga snapshots"),
     # ── trajectory / memory (inference/) ────────────────────────────────────
+    _S("DA_RESUME_STALENESS", "bool", "0", "staleness check on resume seed and replayed reads"),
     _S("DA_AUTO_ADJUDICATE", "bool", "0", "auto-dismiss hallucinated escalations"),
     _S("DA_POST_RUN_WALKTHROUGH", "bool", "0", "generate walkthrough on success"),
     _S("DA_TRAJECTORY_REDUCE", "bool", "1", "compact trajectory tokens"),
@@ -71,6 +74,7 @@ REGISTRY: dict[str, FlagSpec] = {f.name: f for f in (
     _S("DA_RESUME_MEMORY", "bool", "1", "seed crash-resumed plans"),
     _S("DA_SESSION_MEMORY", "bool", "0", "cross-session plan seeding"),
     # ── cloud routing (inference/, core/cloud_backend.py) ───────────────────
+    _S("DA_WORKFLOW_VERIFY_CLOUD", "bool", "0", "route workflow verify judge through cloud"),
     _S("DA_CLOUD_PLAN", "bool", "0", "route plan domain to Bedrock"),
     _S("DA_CLOUD_PLAN_MODEL", "str", "", "override cloud plan model"),
     _S("DA_CLOUD_PLAN_TIMEOUT_S", "int", "60", "cloud plan call timeout"),

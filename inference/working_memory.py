@@ -65,6 +65,7 @@ def summarize_run(
     max_notes: int = 5,
     max_chars: int = 1500,
     note_chars: int = 160,
+    run_end_ts: float = 0.0,
 ) -> WorkingMemory:
     """Derive a :class:`WorkingMemory` from a run's ordered steps (R1.1).
 
@@ -79,6 +80,7 @@ def summarize_run(
     files: list[str] = []          # most-recent-first, distinct
     notes: list[str] = []          # most-recent-first
     last_failure: str | None = None
+    stale_paths: set = set()
 
     for s in reversed(steps):
         action = str(s.get("action", "")).upper()
@@ -86,16 +88,36 @@ def summarize_run(
         result = s.get("result") or ""
         success = s.get("success")
 
+        path = None
+        is_stale = False
         if action in _PATH_VERBS and args:
             path = args.split()[0].strip("'\"") if action == "GREP" else args.strip("'\"")
-            if path and path not in files and len(files) < max_files:
-                files.append(path)
+            
+            if path in stale_paths:
+                is_stale = True
+            elif os.environ.get("DA_RESUME_STALENESS", "0").strip().lower() in ("1", "true", "yes", "on") and run_end_ts > 0:
+                try:
+                    if os.path.exists(path) and os.path.getmtime(path) > run_end_ts + 5.0:
+                        is_stale = True
+                    elif not os.path.exists(path):
+                        is_stale = True
+                except Exception:
+                    is_stale = True
+            
+            if is_stale and path:
+                stale_paths.add(path)
+                stale_path = f"{path} [STALE — modified after run]"
+                if stale_path not in files and path not in files and len(files) < max_files:
+                    files.append(stale_path)
+            elif not is_stale and path:
+                if path not in files and len(files) < max_files:
+                    files.append(path)
 
         if last_failure is None and success in (False, 0):
             # Full failure text preserved within the block budget (R1.2).
             last_failure = _clip(result, max_chars)
 
-        if result and result.strip() and len(notes) < max_notes:
+        if not is_stale and result and result.strip() and len(notes) < max_notes:
             notes.append(f"{action} {args[:40]}".strip() + f" → {_clip(result, note_chars)}")
 
     files.reverse()

@@ -9,6 +9,10 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D027 — 2026-07-03 — Staleness check on resume seed and replayed reads](#d027)
+- [D026 — 2026-07-03 — Cross-model verify judge for workflow fan-out](#d026)
+- [D025 — 2026-07-03 — Independent review of recovery plans (replan critic)](#d025)
+- [D024 — 2026-07-03 — Assumption surfacing in the planner prompt](#d024)
 - [D023 — 2026-07-02 — Chat transcript markdown renders via vendored marked+DOMPurify, not CDN or hand-rolled](#d023)
 - [D022 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d022)
 - [D021 — 2026-07-01 — Flag registry is a passive validation mirror, not a config read-through](#d021)
@@ -36,6 +40,42 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D027 — Staleness check on resume seed and replayed reads {#d027}
+**Date:** 2026-07-03
+**Chose:** At resume, stat each path in WorkingMemory.files; annotate entries changed since the step timestamp as stale, and drop stale notes derived from those files. Do not re-execute reads — just label, and let the planner decide to re-read.
+**Rejected:** Silently resuming with potentially outdated files, or re-executing all reads automatically.
+**Why:** Files can be modified between a crash and resume. Automatic re-execution is unnecessary and can be expensive. Flagging them as stale empowers the planner to decide if it needs fresh context.
+**Ref:** `inference/working_memory.py`, `inference/dev_agent.py`
+
+---
+
+### D026 — Cross-model verify judge for workflow fan-out {#d026}
+**Date:** 2026-07-03
+**Chose:** Route the verify judge through the Bedrock cloud backend when available (`DA_WORKFLOW_VERIFY_CLOUD`), falling back to local judge if cloud is down/disabled.
+**Rejected:** Use multiple models voting (voting judge) or run entirely locally.
+**Why:** Voting was considered and is not worth the token cost at this scale; a different-model judge captures most of the benefit of independent weights to avoid correlated reviewer blind spots.
+**Ref:** `inference/workflow.py`, `core/cloud_backend.py`
+
+---
+
+### D025 — Independent review of recovery plans (replan critic) {#d025}
+**Date:** 2026-07-03
+**Chose:** Run a bounded critic-style check over a new recovery plan after parsing (`DA_REPLAN_CRITIC`). REVISE consumes the existing replan budget.
+**Rejected:** Let recovery plans run unreviewed (since they are generated after something went wrong), or add unbounded loop.
+**Why:** Closes the only unreviewed self-grading loop. Recovery plans are generated precisely when context is most likely poisoned.
+**Ref:** `inference/dev_agent.py`
+
+---
+
+### D024 — Assumption surfacing in the planner prompt {#d024}
+**Date:** 2026-07-03
+**Chose:** Add an optional `assumptions` array to `_PLAN_JSON_SCHEMA` and instruct planner to list assumptions about repo/system state (`DA_PLAN_ASSUMPTIONS`).
+**Rejected:** Leave assumptions implicit.
+**Why:** A wrong premise enters the trajectory silently and conditions every later step. Surfacing them allows for observability and debugging, especially when plans fail.
+**Ref:** `inference/model_router.py`, `inference/dev_agent.py`
 
 ---
 

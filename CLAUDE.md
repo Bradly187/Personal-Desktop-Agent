@@ -142,6 +142,10 @@ by `tests/test_flags_registry.py`.
 
 | Flag | Default | Summary | Decision | Spec |
 |------|---------|---------|----------|------|
+| `DA_PLAN_ASSUMPTIONS` | OFF | Surface assumptions in planner prompt and persist with plan | D024 | `specs/gap-1-assumptions.md` |
+| `DA_REPLAN_CRITIC` | OFF | Run bounded critic-style check over recovery plans | D025 | `specs/gap-2-replan-critic.md` |
+| `DA_WORKFLOW_VERIFY_CLOUD` | OFF | Route workflow verify judge through cloud | D026 | `specs/gap-3-verify-cloud.md` |
+| `DA_RESUME_STALENESS` | OFF | Staleness check on resume seed and replayed reads | D027 | `specs/gap-4-resume-staleness.md` |
 | `DA_CLOUD_PLAN` | OFF | Route `domain="plan"` to Bedrock Sonnet; avoids 18 GB model eviction | D015 | `specs/cloud-plan-routing/` |
 | `DA_AUTO_ADJUDICATE` | OFF | Auto-dismiss hallucinated escalations using local model | D016 | `specs/deny-only-local-adjudicator/` |
 | `DA_POST_RUN_WALKTHROUGH` | OFF | Generate walkthrough and TTS summary on success | D017 | `specs/post-run-walkthrough/` |

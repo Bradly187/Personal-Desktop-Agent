@@ -1085,6 +1085,11 @@ class DevAgent:
                 if extra_ctx else _DELEGATE_PROMPT_INSTRUCTIONS
             )
 
+        # Assumptions (Gap 1): Ask the planner to explicitly state its assumptions about repo/system state.
+        if os.environ.get("DA_PLAN_ASSUMPTIONS", "0").strip().lower() in ("1", "true", "yes", "on"):
+            assump = "List any assumptions you are making about the codebase or system state in the `assumptions` array."
+            extra_ctx = f"{assump}\n\n{extra_ctx}" if extra_ctx else assump
+
         plan_result = await self._router.infer(
             domain="plan",
             user_text=goal,
@@ -1121,13 +1126,26 @@ class DevAgent:
 
         log.info("DevAgent: plan has %d steps", len(steps))
 
+        assumptions = []
+        if os.environ.get("DA_PLAN_ASSUMPTIONS", "0").strip().lower() in ("1", "true", "yes", "on"):
+            try:
+                import json
+                start = plan_result.text.find("{")
+                end = plan_result.text.rfind("}")
+                if start != -1 and end != -1:
+                    plan_obj = json.loads(plan_result.text[start:end+1])
+                    if isinstance(plan_obj, dict):
+                        assumptions = plan_obj.get("assumptions", [])
+            except Exception:
+                pass
+
         # Upfront plan approval gate: speak summary → voice yes/no.
         # "denied" ABORTS the plan — an explicit "no" (or fail-safe DENY on a
         # destructive plan) must stop every step, not just the three git verbs.
         # "approved" authorizes all steps; "auto" (read-only convenience grant)
         # runs the plan but leaves _plan_authorized False so any destructive
         # step a later replan injects still requires per-op confirmation.
-        verdict = await self._approve_plan_upfront(goal, steps)
+        verdict = await self._approve_plan_upfront(goal, steps, assumptions=assumptions)
         if verdict is True:        # legacy bool contract (tests / older callers)
             verdict = "approved"
         elif verdict is False:
@@ -1626,16 +1644,31 @@ class DevAgent:
         try:
             r = await self._router.infer(domain="plan", user_text=prompt, context=None)
             if r.ok and r.text:
-                # Mirror the initial-plan path: prefer structured JSON (the plan
-                # profile's Ollama `format`), fall back to the regex parser. The
-                # previous regex-only parse yielded ZERO steps on a JSON recovery
-                # plan → a spurious halt/escalation even when recovery was offered (#5).
                 try:
                     steps = _parse_plan_json(r.text)
                 except Exception:
                     steps = []
                 if not steps:
                     steps = _parse_plan(r.text)
+                
+                # Gap 2: Replan Critic
+                if steps and os.environ.get("DA_REPLAN_CRITIC", "0").strip().lower() in ("1", "true", "yes", "on"):
+                    try:
+                        from inference.critic import Critic
+                        critic = Critic(self._router, model_domain="plan")
+                        verdict = await critic.review_plan(goal, r.text)
+                        if verdict.decision in ("revise", "block"):
+                            log.warning("DevAgent: replan rejected by Critic: %s", verdict.summary())
+                            msg = f"Replan rejected by Critic ({verdict.decision}):\n"
+                            for f in verdict.findings:
+                                msg += f"- [{f.severity}] {f.message}\n"
+                            if verdict.suggested_fix:
+                                msg += f"\nSuggestion: {verdict.suggested_fix}"
+                            # Return a synthetic step to inject the critic's findings as an observation
+                            return [AgentStep(action="CRITIC_REJECT", body=msg)]
+                    except Exception as e:
+                        log.debug("DevAgent._replan critic check failed: %s", e)
+
                 return steps
         except Exception as exc:
             log.debug("DevAgent._replan failed: %s", exc)
@@ -1873,6 +1906,19 @@ class DevAgent:
         later destructive step) then goes through per-op confirmation.
         """
         new_steps = await self._replan(goal, executed, remaining)
+        
+        # Handle Critic rejection: feed it back as an error observation and recursively replan
+        if new_steps and new_steps[0].action == "CRITIC_REJECT":
+            rejection_step = AgentStep(action="PLAN", body="Proposed recovery plan")
+            rejection_step.step_num = len(executed) + 1
+            executed.append(rejection_step)
+            # Create a synthetic result for the rejected plan
+            from inference.dev_agent import AgentResult
+            critic_res = AgentResult(goal=goal, domain="plan", success=False, error=new_steps[0].body)
+            self._observations.record(rejection_step, critic_res)
+            # Return empty so the caller's loop will try replanning again if budget allows
+            return []
+
         # S2.5 / E18: Planner honesty. A replan that yields only EXPLAIN steps
         # means it cannot proceed. Filter them out so it parses to zero real steps.
         # This will return None and properly halt the plan instead of a false success.
@@ -2229,11 +2275,11 @@ class DevAgent:
         # from its persisted steps and seed the resumed plan with it, so the planner
         # recovers instead of restarting blind. Flag-gated (DA_RESUME_MEMORY) and
         # degrades to an empty seed (today's behavior) on any failure (R2, R3.2).
-        seed = await self._resume_seed_context(run.get("id"), goal)
+        seed = await self._resume_seed_context(run.get("id"), goal, run=run)
         await self.plan_and_run(goal, seed_context=seed)
         return run
 
-    async def _resume_seed_context(self, run_id, goal: str) -> str:
+    async def _resume_seed_context(self, run_id, goal: str, run: dict = None) -> str:
         """Build the resume working-memory seed block, or '' (Gap C, R2/R3).
 
         Off (DA_RESUME_MEMORY unset) or any failure → '' so resume is byte-identical
@@ -2247,7 +2293,12 @@ class DevAgent:
             steps = await db.get_steps_for_run(int(run_id))
             if not steps:
                 return ""
-            return render_seed(summarize_run(goal, steps))
+                
+            run_end_ts = 0.0
+            if run and "ts" in run:
+                run_end_ts = run["ts"] + sum(s.get("latency_ms", 0) for s in steps) / 1000.0
+                
+            return render_seed(summarize_run(goal, steps, run_end_ts=run_end_ts))
         except Exception as exc:
             log.debug("DevAgent._resume_seed_context failed: %s", exc)
             return ""
@@ -2507,7 +2558,7 @@ class DevAgent:
     # Plan-level authorization helpers
     # ---------------------------------------------------------------------- #
 
-    async def _approve_plan_upfront(self, goal: str, steps: list[AgentStep]) -> str:
+    async def _approve_plan_upfront(self, goal: str, steps: list[AgentStep], assumptions: list[str] = None) -> str:
         """Speak plan summary, capture voice yes/no, write GoalSession on approval.
 
         Returns a verdict string consumed by plan_and_run:
@@ -2537,8 +2588,12 @@ class DevAgent:
                         if s.action:
                             args_trunc = str(s.args)[:80] if s.args else ""
                             actions.append(f"Step {s.step_num}: {s.action} {args_trunc}")
+                    assumptions_text = ""
+                    if assumptions:
+                        assumptions_text = "Assumptions made by planner:\n" + "\n".join(f"- {a}" for a in assumptions) + "\n\n"
                     prompt = (
                         f"Goal: {goal}\n"
+                        f"{assumptions_text}"
                         f"Steps proposed:\n" + "\n".join(actions) + "\n\n"
                         "Provide a 1-sentence plain English spoken summary of what this plan intends to do. "
                         "Do NOT list the API verbs (like write_file). Just summarize the outcome."

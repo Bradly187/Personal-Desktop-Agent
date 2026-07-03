@@ -250,6 +250,10 @@ _PLAN_VERBS: list[str] = [
 _PLAN_JSON_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "assumptions": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
         "steps": {
             "type": "array",
             "items": {
