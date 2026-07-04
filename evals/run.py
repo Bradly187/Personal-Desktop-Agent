@@ -356,9 +356,22 @@ def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
                 why = r.error or r.detail or f"got {r.predicted_verbs}"
             elif mode == "judge":
                 why = r.error or f"overall={r.overall:.2f} :: {r.rationale}"
+            elif mode == "sandbox":
+                why = r.error or r.detail or "failed"
             else:
                 why = r.error or f"got {r.predicted_verb!r}, want {r.expected_verb!r}"
             print(f"  [{r.case_id}] {why}")
+
+
+def _run_sandbox(args):
+    from evals.sandbox import load_sandbox_suite
+    from evals.runner import run_sandbox_suite
+    cases = load_sandbox_suite(args.suite)
+    if not cases:
+        print("no cases to run", file=sys.stderr)
+        return None
+    return run_sandbox_suite(
+        cases, lambda: _build_dev_agent(args.model), timeout_s=args.timeout)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -367,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode",
                     choices=["single", "trajectory", "judge", "execution",
                              "ablation", "replan", "edit_ab", "dev_critic",
-                             "retrieval"],
+                             "retrieval", "sandbox"],
                     default="single",
                     help="execution = run the goal through the LIVE DevAgent and "
                          "score the executed trajectory (read-only suites only); "
@@ -404,7 +417,8 @@ def main(argv: list[str] | None = None) -> int:
               "judge": _run_judge, "execution": _run_execution,
               "ablation": _run_ablation, "replan": _run_replan,
               "edit_ab": _run_edit_ab, "dev_critic": _run_dev_critic,
-              "retrieval": _run_retrieval}[args.mode]
+              "retrieval": _run_retrieval,
+              "sandbox": _run_sandbox}[args.mode]
     report = runner(args)
     if report is None:
         return 2
