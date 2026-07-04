@@ -212,6 +212,12 @@ const App = (() => {
       case "save": saveActive(); break;
       case "toggleTree": document.getElementById("shell").classList.toggle("tree-hidden"); break;
       case "focusTerminal": Term.focus(); break;
+      case "reloadTts":
+        const frame = document.getElementById("chat-frame");
+        if (frame && frame.contentWindow) {
+          frame.contentWindow.postMessage({ type: "reload_tts" }, "*");
+        }
+        break;
     }
   }
 

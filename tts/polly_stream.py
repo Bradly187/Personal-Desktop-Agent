@@ -343,6 +343,41 @@ _default_client: Optional[PollyStreamClient] = None
 _sapi_client = None        # lazily created on first sapi request
 _kokoro_client = None      # lazily created on first kokoro request
 
+_tts_muted = False
+
+def set_muted(muted: bool) -> None:
+    global _tts_muted
+    _tts_muted = muted
+
+class _MutedWrapper:
+    def __init__(self, client):
+        self._client = client
+        
+    def speak_sync(self, text: str) -> bool:
+        if _tts_muted:
+            return False
+        return self._client.speak_sync(text)
+        
+    async def speak(self, text: str) -> bool:
+        if _tts_muted:
+            return False
+        return await self._client.speak(text)
+        
+    async def speak_stream(self, tokens) -> str:
+        if _tts_muted:
+            text = [t async for t in tokens]
+            return "".join(text)
+        return await self._client.speak_stream(tokens)
+        
+    def cancel(self) -> None:
+        if hasattr(self._client, "cancel"):
+            self._client.cancel()
+
+    def get_status(self) -> dict:
+        if hasattr(self._client, "get_status"):
+            return self._client.get_status()
+        return {}
+
 
 def _read_tts_config() -> dict:
     """Return approval_config.json as a dict, or {} on any error.
@@ -358,6 +393,14 @@ def _read_tts_config() -> dict:
         return json.loads(cfg_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def reload_config() -> None:
+    """Clear cached TTS clients so the next get_client() picks up changes."""
+    global _default_client, _sapi_client, _kokoro_client
+    _default_client = None
+    _sapi_client = None
+    _kokoro_client = None
 
 
 def get_client(voice: str = "Danielle", backend: str | None = None):
@@ -382,7 +425,7 @@ def get_client(voice: str = "Danielle", backend: str | None = None):
                 rate=int(cfg.get("sapi_rate", 0)),
                 voice_hint=cfg.get("sapi_voice") or None,
             )
-        return _sapi_client
+        return _MutedWrapper(_sapi_client)
 
     if backend == "kokoro":
         global _kokoro_client
@@ -393,7 +436,7 @@ def get_client(voice: str = "Danielle", backend: str | None = None):
                 voice=cfg.get("kokoro_voice", "af_bella"),
                 speed=cfg.get("kokoro_speed", 1.0),
             )
-        return _kokoro_client
+        return _MutedWrapper(_kokoro_client)
 
     # Default: Polly via Node.js sidecar
     if backend != "polly":
@@ -404,4 +447,4 @@ def get_client(voice: str = "Danielle", backend: str | None = None):
         )
     if _default_client is None:
         _default_client = PollyStreamClient(voice=voice)
-    return _default_client
+    return _MutedWrapper(_default_client)
