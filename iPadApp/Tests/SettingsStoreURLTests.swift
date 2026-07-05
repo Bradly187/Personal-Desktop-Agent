@@ -3,6 +3,7 @@ import XCTest
 
 /// Unit tests for SettingsStore.wsURL and wsURLOrDefault
 /// Validates Requirements 3.1, 3.2, 3.3, 3.4, 3.5
+@MainActor
 final class SettingsStoreURLTests: XCTestCase {
 
     // MARK: — Requirement 3.1: Empty host returns nil

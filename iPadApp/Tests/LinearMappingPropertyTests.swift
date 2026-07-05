@@ -12,6 +12,7 @@ import CoreMotion
 /// angle == -tiltRange mapping to 0.0 (or 1.0 for pitch).
 ///
 /// **Validates: Requirements 1.3, 1.4, 3.5**
+@MainActor
 final class LinearMappingPropertyTests: XCTestCase {
 
     private var suiteName: String!

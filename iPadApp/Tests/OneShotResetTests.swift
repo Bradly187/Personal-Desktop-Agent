@@ -8,6 +8,7 @@ import XCTest
 /// after the action fires exactly once, the dwell action selector SHALL reset to left-click mode.
 ///
 /// **Validates: Requirements 1.5**
+@MainActor
 final class OneShotResetTests: XCTestCase {
 
     // MARK: — Property 5: One-shot reset behavior (randomized)

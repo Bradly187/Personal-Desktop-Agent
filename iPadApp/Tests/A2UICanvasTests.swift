@@ -4,6 +4,7 @@ import XCTest
 /// Unit tests for the persistent dashboard canvas: decoding an `a2ui_canvas`
 /// payload (which omits the transient `dismissible`/`timeout_s` fields) and the
 /// `A2UISurface.merging(_:)` patch logic used by `a2ui_canvas_update`.
+@MainActor
 final class A2UICanvasTests: XCTestCase {
 
     private func decode(_ json: String) throws -> A2UISurface {
