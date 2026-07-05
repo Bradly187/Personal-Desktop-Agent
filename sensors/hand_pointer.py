@@ -50,8 +50,15 @@ def compute_homography(src: list, dst: list) -> Optional[list]:
     for (x, y), (u, v) in zip(src, dst):
         A.append([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.append(u)
         A.append([0, 0, 0, x, y, 1, -v * x, -v * y]); b.append(v)
+    A_arr = np.array(A, dtype=float)
+    # Whether an exactly-singular solve raises LinAlgError or returns a garbage
+    # solution depends on the numpy/LAPACK build — check conditioning explicitly
+    # so degenerate (collinear/coincident) points return None on every build.
+    cond = np.linalg.cond(A_arr)
+    if not np.isfinite(cond) or cond > 1e12:
+        return None
     try:
-        h = np.linalg.solve(np.array(A, dtype=float), np.array(b, dtype=float))
+        h = np.linalg.solve(A_arr, np.array(b, dtype=float))
     except np.linalg.LinAlgError:
         return None
     H = [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1.0]]
