@@ -6,6 +6,7 @@ import XCTest
 ///
 /// Property: for ANY value assigned to `tapThreshold` (negative, zero, huge),
 /// the stored value SHALL be clamped to [0.5, 3.0] g and survive a reload.
+@MainActor
 final class TapSensitivityClampingTests: XCTestCase {
 
     private var suiteName: String!

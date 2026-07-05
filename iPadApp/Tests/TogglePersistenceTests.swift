@@ -9,6 +9,7 @@ import XCTest
 /// pre-persistence values exactly.
 ///
 /// **Validates: Requirements 4.1, 4.6**
+@MainActor
 final class TogglePersistenceTests: XCTestCase {
 
     /// Unique suite name regenerated per test run to guarantee isolation.

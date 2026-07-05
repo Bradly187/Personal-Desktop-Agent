@@ -58,9 +58,13 @@ class TestVisionGrounderBasics:
     def test_get_client_raises_when_anthropic_missing(self):
         from desktop.vision_grounder import VisionGrounder
         vg = VisionGrounder()
-        with patch.dict("sys.modules", {"anthropic": None}):
-            with pytest.raises(RuntimeError, match="anthropic package"):
-                vg._get_client()
+        # Stub the Bedrock credential so resolve_backend() succeeds and the
+        # test exercises the anthropic-import failure, not credential absence
+        # (CI has no AWS_BEARER_TOKEN_BEDROCK; dev machines do).
+        with patch.dict("os.environ", {"AWS_BEARER_TOKEN_BEDROCK": "test-token"}):
+            with patch.dict("sys.modules", {"anthropic": None}):
+                with pytest.raises(RuntimeError, match="anthropic package"):
+                    vg._get_client()
 
     def test_parse_handles_markdown_fences(self):
         """Fence-stripping + JSON parsing logic works on fenced Claude output."""
