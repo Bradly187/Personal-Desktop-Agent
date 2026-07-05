@@ -16,6 +16,11 @@ on:
           - 'true'
           - 'false'
 
+# Least privilege: build/test only need checkout; signing uses repo secrets,
+# not the GITHUB_TOKEN (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-26
