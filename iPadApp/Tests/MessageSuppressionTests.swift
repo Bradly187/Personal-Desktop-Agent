@@ -194,19 +194,28 @@ final class MessageSuppressionTests: XCTestCase {
             let axis = Int.random(in: 0...2) // 0 = X only, 1 = Y only, 2 = both
             let sign = Bool.random() ? 1.0 : -1.0
 
+            // base + 0.001 can round to a computed delta just BELOW 0.001
+            // (0.001 is not representable in binary FP); nudge outward until
+            // the computed difference is genuinely at/above the threshold.
+            func atThreshold(_ base: Double) -> Double {
+                var v = base + 0.001 * sign
+                while abs(v - base) < 0.001 { v = sign > 0 ? v.nextUp : v.nextDown }
+                return v
+            }
+
             let newX: Double
             let newY: Double
 
             switch axis {
             case 0:
-                newX = baseX + 0.001 * sign
+                newX = atThreshold(baseX)
                 newY = baseY + randomSmallDelta() // Y within threshold
             case 1:
                 newX = baseX + randomSmallDelta() // X within threshold
-                newY = baseY + 0.001 * sign
+                newY = atThreshold(baseY)
             default:
-                newX = baseX + 0.001 * sign
-                newY = baseY + 0.001 * sign
+                newX = atThreshold(baseX)
+                newY = atThreshold(baseY)
             }
 
             // With delta == 0.001, the condition `abs(delta) < 0.001` is FALSE
