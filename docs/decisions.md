@@ -9,6 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D029 — 2026-07-05 — Full pytest suite gates in CI on windows-latest; ruff gate with parked style ignores](#d029)
 - [D028 — 2026-07-03 — Retrieval quality measured natively in evals/, not via pgvector migration + deepeval](#d028)
 - [D027 — 2026-07-03 — Staleness check on resume seed and replayed reads](#d027)
 - [D026 — 2026-07-03 — Cross-model verify judge for workflow fan-out](#d026)
@@ -41,6 +42,14 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D029 — Full pytest suite gates in CI on windows-latest; ruff gate with parked style ignores {#d029}
+**Date:** 2026-07-05
+**Chose:** New `tests.yml` workflow: the full unit suite (~2,750 tests) runs on `windows-latest` with the pinned `requirements.txt`, plus a `ruff check` job on ubuntu. Ruff starts with pyflakes + pycodestyle-error defaults and parks five style rules (E402/E702/E731/E741/F841) as documented ratchet ignores in `pyproject.toml`; availability-probe imports keep `# noqa: F401` (the import IS the probe — `find_spec` would not exercise side effects like `comtypes.gen` codegen).
+**Rejected:** (a) ubuntu runner with a curated dependency subset — Windows is the only ship target (pywin32, windows-curses, Win32 UIAutomation); a Linux run would validate a platform we don't ship and need a second requirements file that drifts; (b) adopting `ruff format`/black in the same change — a whole-repo reformat buries the 12 real F821/F811 findings in noise; (c) fixing all 446 lint findings at once — the parked rules are style-only debt, tightened one rule at a time.
+**Ref:** `.github/workflows/tests.yml`, `pyproject.toml` [tool.ruff], `docs/audits/2026-07-05-industry-patterns-gap-analysis.md` (IG-1/IG-2)
 
 ---
 
