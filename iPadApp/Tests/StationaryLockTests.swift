@@ -225,8 +225,13 @@ final class StationaryLockTests: XCTestCase {
             let lockedX = Double.random(in: 0.0...1.0)
             let lockedY = Double.random(in: 0.0...1.0)
 
-            // Set stationaryStartTime to exactly 200ms ago (monotonic)
-            let startTime = CACurrentMediaTime() - 0.2
+            // Set stationaryStartTime to at least 200ms ago (monotonic).
+            // now - (now - 0.2) can round to 0.19999... (0.2 is not binary-
+            // representable at this magnitude); nudge the start time earlier
+            // until the computed elapsed is genuinely >= 0.2.
+            let now = CACurrentMediaTime()
+            var startTime = now - 0.2
+            while now - startTime < 0.2 { startTime = startTime.nextDown }
             sensor.stationaryStartTime = startTime
             sensor.lockedCoords = (x: lockedX, y: lockedY)
 
