@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from inference.dev_agent import AgentStep, DevAgent, _DELEGATE_PROMPT_INSTRUCTIONS
+from inference.dev_agent import DevAgent, _DELEGATE_PROMPT_INSTRUCTIONS
 
 
 class _Result:

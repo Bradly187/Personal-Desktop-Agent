@@ -76,7 +76,7 @@ log = logging.getLogger(__name__)
 
 try:
     import mediapipe as mp
-    import numpy as np
+    import numpy as np  # noqa: F401 — the import itself is the availability probe
     from mediapipe.tasks.python import BaseOptions as _BaseOptions
     from mediapipe.tasks.python.vision import (
         HandLandmarker as _HandLandmarker,

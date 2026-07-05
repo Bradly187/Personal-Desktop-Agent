@@ -17,7 +17,6 @@ from inference.edit_format import (
     HASHLINE,
     SEARCH_REPLACE,
     SEARCH_REPLACE_PROMPT_INSTRUCTIONS,
-    UDIFF,
     WHOLE_FILE,
     hash_line,
     render_hashline,

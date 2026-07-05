@@ -413,7 +413,8 @@ class ResourceGovernor:
 
     def _post_keepalive(self, model: str, keep_alive: str) -> None:
         """POST a single keep_alive directive to Ollama for `model`."""
-        import urllib.request, json as _json
+        import urllib.request
+        import json as _json
         body = _json.dumps({"model": model, "keep_alive": keep_alive}).encode()
         req = urllib.request.Request(
             "http://localhost:11434/api/generate",

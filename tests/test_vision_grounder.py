@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import sys
-import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,7 +32,7 @@ class TestVisionGrounderBasics:
         assert vg.ground("submit button", "") is None
 
     def test_ground_cache_hit_returns_result(self):
-        from desktop.vision_grounder import VisionGrounder, GroundingResult
+        from desktop.vision_grounder import VisionGrounder
         import time
         vg = VisionGrounder()
         # Seed the cache directly
@@ -130,7 +129,7 @@ class TestVisionGrounderBasics:
 
     def test_successful_ground_populates_cache(self):
         """A successful grounding result must be cached for 2 seconds."""
-        from desktop.vision_grounder import VisionGrounder, GROUNDING_MIN_CONFIDENCE
+        from desktop.vision_grounder import VisionGrounder
         import time
         vg = VisionGrounder()
 

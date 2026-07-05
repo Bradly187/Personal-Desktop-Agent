@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import time
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 log = logging.getLogger(__name__)
 

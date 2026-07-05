@@ -330,7 +330,7 @@ def _print_report(report: DevCriticReport, *, show: int = 20) -> None:
         for btype, rs in sorted(by_type.items()):
             caught = sum(1 for r in rs if (r.arms.get(CRITIC) or ArmResult(CRITIC)).catches)
             print(f"  {btype:<14} {caught}/{len(rs)}")
-    print(f"\nper case (lint | critic -> catches):")
+    print("\nper case (lint | critic -> catches):")
     for r in report.results[:show]:
         lint = r.arms.get(LINT) or ArmResult(LINT)
         crit = r.arms.get(CRITIC) or ArmResult(CRITIC)
@@ -438,5 +438,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    import sys
     raise SystemExit(main())

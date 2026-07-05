@@ -1,9 +1,7 @@
 """Deny-Only Local Adjudicator for DevAgent (CG-4)."""
 
-import asyncio
 import logging
 import os
-from typing import Optional
 
 log = logging.getLogger(__name__)
 

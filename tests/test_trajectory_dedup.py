@@ -7,7 +7,6 @@ reduction on or off.
 
 from __future__ import annotations
 
-import pytest
 
 from inference.dev_agent import AgentStep, DevAgent
 from inference.trajectory import render_trajectory, _dedup_reads

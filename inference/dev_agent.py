@@ -62,12 +62,10 @@ from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
     from inference.codebase_indexer import CodebaseIndexer
-    from core.command_executor import Command, CommandExecutor
     from adaptive.continuous_trainer import ContinuousTrainer
     from storage.db import AgentDB
     from core.hybrid_coordinator import HybridCoordinator
     from inference.bridge_client import BridgeClient
-    from mcp_server.tools import screen as screen_tools
 
 log = logging.getLogger(__name__)
 
@@ -2755,7 +2753,7 @@ class DevAgent:
             log.debug("DevAgent._speak_plan_completion: TTS failed: %s", exc)
 
     async def _generate_walkthrough(self, result: AgentResult) -> Optional[str]:
-        if not os.environ.get("DA_POST_RUN_WALKTHROUGH", "0").strip().lower() in ("1", "true", "yes", "on"):
+        if os.environ.get("DA_POST_RUN_WALKTHROUGH", "0").strip().lower() not in ("1", "true", "yes", "on"):
             return None
             
         try:

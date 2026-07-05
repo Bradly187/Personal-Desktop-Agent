@@ -116,7 +116,6 @@ def _live_session_kpis(db_path: str, session_id: int) -> dict:
     can treat both interchangeably. Never raises; returns {} on any error.
     """
     import sqlite3
-    import statistics
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
         con.row_factory = sqlite3.Row

@@ -13,7 +13,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _SUITES_DIR = Path(__file__).parent / "suites"
 

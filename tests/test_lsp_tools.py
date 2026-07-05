@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from mcp_server.tools import lsp
 
 @pytest.fixture

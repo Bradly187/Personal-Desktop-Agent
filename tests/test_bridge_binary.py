@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import aiohttp
 import numpy as np
-import pytest
 
 import core.ipad_bridge as ipad_bridge
 from core.ipad_bridge import IPadBridge, _BIN_TAG_AUDIO_PCM16

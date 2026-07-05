@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.chat_server import ChatServer, _MAX_UPLOAD_BYTES
+from core.chat_server import ChatServer
 
 
 class _FakeCoord:

@@ -268,7 +268,6 @@ class WorkflowRunner:
             return None
 
         # Gap 3: Route workflow verify checks to the cloud model for higher capability
-        import os
         if os.environ.get("DA_WORKFLOW_VERIFY_CLOUD", "0").strip().lower() in ("1", "true", "yes", "on"):
             verify_domain = "cloud"
 

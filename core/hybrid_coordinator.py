@@ -42,13 +42,10 @@ discarded gestures (Gate 1, low confidence) return early WITHOUT a DB row, so
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
@@ -61,7 +58,6 @@ from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
     OllamaInference,
-    _build_prompt,
     get_inference_capture,
     set_inference_capture,
 )
@@ -71,7 +67,6 @@ from core.workflow_voice import workflow_voice_config
 from core.conversation_mode import ConversationMode, conversation_mode_config
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
-from monitoring.cost_ledger import estimate_cost
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog
@@ -310,7 +305,7 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "set up google",
 })
 
-from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
+from core.schedule_parser import is_schedule_phrase
 from storage.personal_kb import is_personal_query as _is_personal_query
 
 

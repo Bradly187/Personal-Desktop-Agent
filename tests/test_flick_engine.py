@@ -7,7 +7,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

@@ -4,7 +4,6 @@ Manages background pseudoterminal sessions (using subprocess and pipes)
 for interactive terminal applications.
 """
 
-import os
 import subprocess
 import threading
 import time
@@ -13,7 +12,6 @@ import logging
 from collections import deque
 from typing import Dict, Optional
 
-from inference.sandbox import sandbox_tool, command_needs_network, _enabled
 
 log = logging.getLogger(__name__)
 

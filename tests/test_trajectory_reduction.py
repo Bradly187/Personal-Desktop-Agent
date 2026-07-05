@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import copy
 
-import pytest
 
 from inference.dev_agent import AgentStep, DevAgent
 from inference.trajectory import render_trajectory, reduction_enabled

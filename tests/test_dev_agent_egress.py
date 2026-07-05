@@ -1,7 +1,6 @@
 import pytest
-import asyncio
 import socket
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from core.egress import EgressController, EgressError
 
 @pytest.mark.asyncio

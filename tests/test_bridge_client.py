@@ -184,7 +184,7 @@ async def run_tests() -> int:
                             break
 
                     if not ack_received:
-                        print(f"        < TIMEOUT -- no ack received within 5s")
+                        print("        < TIMEOUT -- no ack received within 5s")
                         failed += 1
 
                     print()

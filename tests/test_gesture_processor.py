@@ -10,15 +10,12 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import time
 from unittest.mock import MagicMock, patch
 
-import numpy as np
-import pytest
 
 from tests.conftest import (
     make_camera_msg, make_lm_mock, make_hands_result,
-    POINT_LM, FIST_LM, PALM_LM, PINCH_LM, TWO_FINGER_LM, FOUR_FINGER_LM, GRAB_LM,
+    POINT_LM, FIST_LM, PINCH_LM, TWO_FINGER_LM, FOUR_FINGER_LM, GRAB_LM,
 )
 
 
