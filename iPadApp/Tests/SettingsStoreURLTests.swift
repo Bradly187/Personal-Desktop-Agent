@@ -110,7 +110,7 @@ final class SettingsStoreURLTests: XCTestCase {
         store.serverHost = ""
         store.serverPort = 0
         let url = store.wsURLOrDefault
-        XCTAssertEqual(url.absoluteString, "ws://192.168.1.100:8765/ws",
+        XCTAssertEqual(url.absoluteString, "ws://192.168.18.2:8765/ws",
                        "wsURLOrDefault should return fallback when wsURL is nil")
     }
 

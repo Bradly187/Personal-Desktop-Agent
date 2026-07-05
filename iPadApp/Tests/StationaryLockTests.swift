@@ -94,9 +94,13 @@ final class StationaryLockTests: XCTestCase {
             XCTAssertEqual(sensor.lockedCoords?.y, lockedY,
                 "Iteration \(iteration): lockedCoords.y should remain \(lockedY)")
 
-            if abs(computedPos.x - lockedX) > 0.01 || abs(computedPos.y - lockedY) > 0.01 {
+            if abs(computedPos.x - lockedX) > 0.01 {
                 XCTAssertNotEqual(computedPos.x, lockedX, accuracy: 0.001,
                     "Iteration \(iteration): computed x should differ from locked x to prove lock is meaningful")
+            }
+            if abs(computedPos.y - lockedY) > 0.01 {
+                XCTAssertNotEqual(computedPos.y, lockedY, accuracy: 0.001,
+                    "Iteration \(iteration): computed y should differ from locked y to prove lock is meaningful")
             }
         }
     }

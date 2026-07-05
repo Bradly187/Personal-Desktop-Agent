@@ -5,7 +5,7 @@ import XCTest
 /// (Settings "Tap Sensitivity" slider → SettingsStore.tapThreshold).
 ///
 /// Property: for ANY value assigned to `tapThreshold` (negative, zero, huge),
-/// the stored value SHALL be clamped to [0.5, 3.0] g and survive a reload.
+/// the stored value SHALL be clamped to [0.4, 3.0] g and survive a reload.
 @MainActor
 final class TapSensitivityClampingTests: XCTestCase {
 
@@ -26,29 +26,29 @@ final class TapSensitivityClampingTests: XCTestCase {
         super.tearDown()
     }
 
-    func testDefaultIsTwelveTenths() {
+    func testDefaultIsPointFourG() {
         let store = SettingsStore(defaults: suite)
-        XCTAssertEqual(store.tapThreshold, 1.2, accuracy: 1e-10,
-                       "Fresh install should default tapThreshold to 1.2 g")
+        XCTAssertEqual(store.tapThreshold, 0.4, accuracy: 1e-10,
+                       "Fresh install should default tapThreshold to 0.4 g")
     }
 
     func testAlwaysClampedToValidInterval() {
         let store = SettingsStore(defaults: suite)
         let inputs: [Double] = [
-            -Double.greatestFiniteMagnitude, -10.0, -0.001, 0.0, 0.49, 0.5,
+            -Double.greatestFiniteMagnitude, -10.0, -0.001, 0.0, 0.39, 0.4,
             1.2, 2.0, 3.0, 3.01, 100.0, Double.greatestFiniteMagnitude,
         ]
         for v in inputs {
             store.tapThreshold = v
-            XCTAssertGreaterThanOrEqual(store.tapThreshold, 0.5, "input \(v)")
+            XCTAssertGreaterThanOrEqual(store.tapThreshold, 0.4, "input \(v)")
             XCTAssertLessThanOrEqual(store.tapThreshold, 3.0, "input \(v)")
         }
     }
 
     func testBoundariesPreservedExactly() {
         let store = SettingsStore(defaults: suite)
-        store.tapThreshold = 0.5
-        XCTAssertEqual(store.tapThreshold, 0.5)
+        store.tapThreshold = 0.4
+        XCTAssertEqual(store.tapThreshold, 0.4)
         store.tapThreshold = 3.0
         XCTAssertEqual(store.tapThreshold, 3.0)
     }
@@ -56,7 +56,7 @@ final class TapSensitivityClampingTests: XCTestCase {
     func testValidValuesPreservedExactly() {
         let store = SettingsStore(defaults: suite)
         for _ in 0..<100 {
-            let v = Double.random(in: 0.5...3.0)
+            let v = Double.random(in: 0.4...3.0)
             store.tapThreshold = v
             XCTAssertEqual(store.tapThreshold, v, accuracy: 1e-10)
         }
