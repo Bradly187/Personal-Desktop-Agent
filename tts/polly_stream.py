@@ -352,7 +352,12 @@ def set_muted(muted: bool) -> None:
 class _MutedWrapper:
     def __init__(self, client):
         self._client = client
-        
+
+    def __getattr__(self, name):
+        # Delegate everything not overridden (voice, speed, …) so callers see
+        # the wrapped client's full surface, not just the speak methods.
+        return getattr(self._client, name)
+
     def speak_sync(self, text: str) -> bool:
         if _tts_muted:
             return False
