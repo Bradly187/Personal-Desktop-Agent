@@ -115,6 +115,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(true, forKey: "tiltPositionMode")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -157,6 +158,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -179,6 +181,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -200,6 +203,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -221,6 +225,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -242,6 +247,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -311,6 +317,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
