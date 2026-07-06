@@ -1,27 +1,29 @@
+import asyncio
 import logging
 import os
 import subprocess
 from typing import Optional, TYPE_CHECKING
 
+from inference.dev_common import _RAG_OPEN_FENCE, _RAG_CLOSE_FENCE, _RAG_MAX_CHARS
+
 if TYPE_CHECKING:
     from inference.codebase_indexer import CodebaseIndexer
+    from inference.dev_agent import DevAgent
     from storage.db import AgentDB
 
 log = logging.getLogger(__name__)
 
 class ContextBuilder:
     def __init__(self, agent: "DevAgent", agent_db: Optional['AgentDB'] = None, memory=None, indexer: Optional['CodebaseIndexer'] = None, repo_root: str = '', session_context: Optional[list[str]] = None):
+        # Shared state (_memory, _indexer, _context, _workspace_built,
+        # _workspace_block) lives on the agent — DevAgent's set_* methods
+        # assign there and reads here delegate via __getattr__, so late wiring
+        # (set_indexer/set_memory after construction) is always visible.
+        # The memory/indexer/session_context ctor params are accepted for
+        # signature compatibility but the agent's copies are authoritative.
         self._agent = agent
         self._agent_db = agent_db
-        self._memory = memory
-        self._indexer = indexer
         self._repo_root = repo_root or os.getcwd()
-        self._context = session_context or []
-        self._workspace_built = False
-        self._workspace_block = None
-
-    def set_indexer(self, indexer: 'CodebaseIndexer') -> None:
-        self._indexer = indexer
 
     def set_repo_root(self, path: str) -> bool:
         rp = os.path.realpath(os.path.expanduser(path or ''))
@@ -48,7 +50,7 @@ class ContextBuilder:
             db = self._db()
             if not db:
                 return ""
-            candidates = await db.get_recent_runs(limit=20)
+            candidates = await db.runs.get_recent_runs(limit=20)
             related = select_related_runs(goal, candidates)
             if not related:
                 return ""
@@ -57,7 +59,7 @@ class ContextBuilder:
                 run_id = run.get("id")
                 if run_id is None:
                     continue
-                steps = await db.get_steps_for_run(int(run_id))
+                steps = await db.runs.get_steps_for_run(int(run_id))
                 if not steps:
                     continue
                 run_goal = run.get("goal", "") or ""
@@ -98,7 +100,7 @@ class ContextBuilder:
     def _push_context(self, entry: str) -> None:
         self._context.append(entry)
         if len(self._context) > 10:
-            self._context = self._context[-10:]
+            self._agent._context = self._context[-10:]
 
     def _format_context(self) -> Optional[str]:
         if not self._context:
@@ -114,18 +116,18 @@ class ContextBuilder:
         if not self._repo_context_enabled:
             return None
         if not self._workspace_built:
-            self._workspace_built = True
+            self._agent._workspace_built = True
             try:
                 from inference.workspace_context import build_workspace_context
                 block, stats = build_workspace_context(self._repo_root)
-                self._workspace_block = block or None
+                self._agent._workspace_block = block or None
                 if self._workspace_block:
                     log.info("DevAgent: workspace context %d chars (git=%s, files=%d)",
                              stats.get("chars_out", 0), stats.get("has_git"),
                              stats.get("files_read", 0))
             except Exception as exc:  # never block the plan path (R4.3)
                 log.warning("DevAgent: workspace context build failed: %s", exc)
-                self._workspace_block = None
+                self._agent._workspace_block = None
         return self._workspace_block
 
     def invalidate_workspace_context(self) -> None:
@@ -133,8 +135,8 @@ class ContextBuilder:
 
         For a long-lived session after a branch switch / CLAUDE.md edit. Never
         called on the 60 Hz path (AGENTS.md #2 — dev-agent-only)."""
-        self._workspace_built = False
-        self._workspace_block = None
+        self._agent._workspace_built = False
+        self._agent._workspace_block = None
 
     async def _rag_context(self, query: str, n: int = 3) -> Optional[str]:
         """Fetch top-n relevant source chunks from CodebaseIndexer for `query`.

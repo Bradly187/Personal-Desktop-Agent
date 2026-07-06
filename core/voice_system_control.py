@@ -26,19 +26,45 @@ from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
 
 log = logging.getLogger(__name__)
 
-_SYSTEM_CONTROL_PHRASES: set[str] = {
-    # Existing static phrases from hybrid_coordinator
-    "pain day on", "pain day off", "lecture mode on", "lecture mode off",
-    "status", "cancel", "stop", "nevermind",
-    "resume", "continue", "pause", "hold on",
-    "mute mic", "mute microphone", "unmute mic", "unmute microphone",
-    "review history", "show my history", "recent commands",
-    "review escalated", "show escalated", "review queue",
+# Voice phrases handled by the system-control block in route() (pain day,
+# lecture mode, condition switching, calibration). The dev-agent pre-gate must
+# NOT intercept these: the DomainClassifier maps some (e.g. "pain day on" →
+# general) to dev domains, which would shadow the keyword handler and send the
+# phrase to an LLM instead. KEEP IN SYNC with the keyword block in route().
+_SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
+    "start lecture mode", "lecture mode on", "begin lecture mode",
+    "stop lecture mode", "lecture mode off", "end lecture mode",
+    "pain day on", "flare day on", "bad day",
+    "pain day off", "flare day off", "feeling better",
+    "this is a good day", "good day mode", "feeling well",
+    "this is a flare day", "flare day", "flare mode",
+    "this is an allergy day", "allergy day", "allergy mode",
+    "run voice calibration", "calibrate my voice", "quick calibration",
+    "calibrate flare day", "calibrate allergy day",
+    # Goal-level agent control
+    "hey agent status", "what are you doing", "agent status",
+    "status", "what's happening",
+    "hey agent stop", "cancel task", "cancel agent", "stop agent",
+    "stop the agent", "cancel the task",
+    # Crash recovery — advertised by the post-crash TTS notice in main.py;
+    # the resume itself is voice-confirm-gated inside resume_pending_plan()
+    "resume task", "resume the task", "hey agent resume",
+    "resume work", "resume interrupted task",
+    "hey agent history", "what did you do", "agent history",
+    "show history", "recent actions",
+    "review queue", "show review queue", "what needs review",
+    "hey agent review queue", "show escalations", "pending reviews",
+    "clear review queue", "dismiss reviews", "clear escalations",
+    # Mic mute — voice can only mute; unmute requires the iPad button
+    # (mic is deaf once muted, so a voice unmute command can never arrive)
+    "mute mic", "mute microphone", "mic off", "silence mic",
+    # Capability discovery + personal KB maintenance
     "help", "what can you do", "what can i say", "list your skills",
     "index my notes", "reindex my notes", "index my documents",
+    # Google PIM auth lifecycle (one-time setup + expired-token recovery)
     "connect google", "reconnect google", "connect gmail", "set up gmail",
     "set up google",
-}
+})
 
 def _is_system_control_voice(cmd) -> bool:
     """True if `cmd` is a voice system-control keyword that route()'s keyword

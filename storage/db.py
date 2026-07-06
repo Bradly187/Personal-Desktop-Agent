@@ -1117,6 +1117,29 @@ class AgentDB:
         """
         if not self._conn:
             return 0
+        delay = 0.2
+        for attempt in range(1, attempts + 1):
+            try:
+                async with self._conn.execute(sql, params) as cur:
+                    deleted = cur.rowcount or 0
+                if checkpoint:
+                    await self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                await self._conn.commit()
+                if deleted:
+                    log.info("AgentDB: pruned %d %s", deleted, label)
+                return deleted
+            except Exception as exc:
+                if "lock" in str(exc).lower() and attempt < attempts:
+                    log.debug(
+                        "AgentDB.prune %s locked (attempt %d/%d) — retrying in %.1fs",
+                        label, attempt, attempts, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                log.warning("AgentDB.prune %s failed: %s", label, exc)
+                return 0
+        return 0
 
 # ---------------------------------------------------------------------------
 # AnalyticsDB — DuckDB analytical store

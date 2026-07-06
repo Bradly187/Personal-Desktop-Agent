@@ -49,7 +49,7 @@ async def test_compensation_throws_escalates(tmp_path):
         run_id, step_id, "DELETE_FILE", "/root/protected.py"
     )
 
-    with patch("inference.dev_agent.Path") as mock_path_cls:
+    with patch("inference.saga_manager.Path") as mock_path_cls:
         mock_path_instance = MagicMock()
         mock_path_instance.exists.return_value = True
         mock_path_instance.unlink.side_effect = PermissionError("access denied")

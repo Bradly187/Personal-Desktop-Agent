@@ -11,10 +11,15 @@ import webbrowser
 from typing import Optional, TYPE_CHECKING
 from pathlib import Path
 
-from inference.plan_parser import AgentStep, AgentResult
+from inference.plan_parser import AgentStep, AgentResult, _extract_json_obj
 from core.approval_keywords import classify_confirmation
-from inference.edit_format import EditApplier, render_hashline, HASHLINE, UDIFF
+from core.events import TOPIC_DAG_APPROVAL
+from inference.edit_format import EditApplier, render_hashline, HASHLINE, UDIFF, SEARCH_REPLACE
 from inference.critic import BLOCK, PASS, REVISE, Critic, CriticVerdict, Finding
+from inference.dev_common import (
+    _RAG_OPEN_FENCE, _RAG_CLOSE_FENCE,
+    _get_trust_classifier, _get_content_filter, _strip_html,
+)
 
 if TYPE_CHECKING:
     from inference.dev_agent import DevAgent
@@ -27,26 +32,17 @@ log = logging.getLogger(__name__)
 
 class StepExecutor:
     def __init__(self, agent: "DevAgent", router: 'ModelRouter', coordinator: Optional['HybridCoordinator'], agent_db: Optional['AgentDB'] = None):
+        # Wiring state (_bridge, _skill_registry, _personal_kb, _critic,
+        # _critic_enabled, ...) lives on the agent — DevAgent's set_* methods
+        # assign there and reads here delegate via __getattr__, so late wiring
+        # after construction is always visible.
         self._agent = agent
         self._router = router
         self._coordinator = coordinator
         self._agent_db = agent_db
-        self._bridge = None
-        self._skill_registry = None
-        self._personal_kb = None
         self._edit_applier = EditApplier()
         self._repo_root = os.getcwd()
         self._confirm_lock = asyncio.Lock()
-
-
-    def set_bridge(self, bridge: 'BridgeClient') -> None:
-        self._bridge = bridge
-
-    def set_skill_registry(self, registry) -> None:
-        self._skill_registry = registry
-
-    def set_personal_kb(self, kb) -> None:
-        self._personal_kb = kb
 
     def set_repo_root(self, path: str) -> None:
         self._repo_root = path
@@ -81,16 +77,16 @@ class StepExecutor:
                 # marks the step failed (both verbs are non-retryable) → replan;
                 # nothing is snapshotted or written.
                 new_text = await asyncio.to_thread(
-                    self._apply_edit, step.args, step.body, fmt_override
+                    self._agent._apply_edit, step.args, step.body, fmt_override
                 )
                 # Snapshot BEFORE writing so a saga rollback restores an
                 # overwritten file instead of deleting it. Captured even though
                 # we're about to write — if the write fails, no compensation is
                 # registered anyway.
                 step.comp_args = json.dumps(await asyncio.to_thread(
-                    self._snapshot_for_write, step.args
+                    self._agent._snapshot_for_write, step.args
                 ))
-                result = await asyncio.to_thread(self._write_file, step.args, new_text)
+                result = await asyncio.to_thread(self._agent._write_file, step.args, new_text)
                 return await self._maybe_run_tester(step, result)
 
             # ── Critic-enabled path (specs/dev-agent-critic) ────────────────
@@ -98,7 +94,7 @@ class StepExecutor:
             # text; an EditError still fails closed → replan (unchanged). The
             # Critic runs BEFORE the approval gate so it can escalate it.
             new_text = await asyncio.to_thread(
-                self._apply_edit, step.args, step.body, fmt_override
+                self._agent._apply_edit, step.args, step.body, fmt_override
             )
             verdict = await self._critic_review(step, new_text)
             if verdict.decision in (REVISE, BLOCK):
@@ -113,13 +109,13 @@ class StepExecutor:
                 f"Approve writing file {target[:60]}?", force=verdict.escalate,
                 card={"file_path": target,
                       "diff": await asyncio.to_thread(
-                          self._diff_for_confirm, step.args, new_text)},
+                          self._agent._diff_for_confirm, step.args, new_text)},
             ):
                 return f"{action} cancelled by user"
             step.comp_args = json.dumps(await asyncio.to_thread(
-                self._snapshot_for_write, step.args
+                self._agent._snapshot_for_write, step.args
             ))
-            result = await asyncio.to_thread(self._write_file, step.args, new_text)
+            result = await asyncio.to_thread(self._agent._write_file, step.args, new_text)
             return await self._maybe_run_tester(step, result)
 
         if action == "RUN_TERMINAL":
@@ -380,7 +376,7 @@ class StepExecutor:
             summary = ""
             if isinstance(result, dict):
                 summary = (result.get("text") or result.get("error") or "")[:300]
-            await self._agent_db.log_skill_invocation(
+            await self._agent_db.skills.log_skill_invocation(
                 skill_id=skill_id, tool_name=tool, send=is_send,
                 status=(result.get("status", "?") if isinstance(result, dict) else "?"),
                 blocked=blocked, result_summary=summary,

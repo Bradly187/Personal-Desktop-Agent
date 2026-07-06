@@ -213,7 +213,7 @@ async def test_run_compensations_compensation_failure_marks_failed(tmp_path):
     )
 
     # Sabotage Path.unlink to raise PermissionError
-    with patch("inference.dev_agent.Path") as mock_path_cls:
+    with patch("inference.saga_manager.Path") as mock_path_cls:
         mock_path_instance = MagicMock()
         mock_path_instance.exists.return_value = True
         mock_path_instance.unlink.side_effect = PermissionError("access denied")

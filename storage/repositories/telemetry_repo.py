@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 import logging
-from storage.repositories.common import _GOAL_LEASE_TTL_S, _pid_alive
+from storage.repositories.common import _GOAL_LEASE_TTL_S, _pid_alive, PruneRetryMixin
 import math
 import os
 import time
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-class TelemetryRepo:
+class TelemetryRepo(PruneRetryMixin):
     def __init__(self, conn):
         self._conn = conn
 

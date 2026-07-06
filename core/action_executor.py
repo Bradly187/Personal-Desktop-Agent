@@ -27,10 +27,13 @@ import asyncio
 import logging
 import os
 from dataclasses import replace as _dc_replace
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 
 from core.command_executor import Command
 from monitoring.trace import get_tracer
+
+if TYPE_CHECKING:
+    from core.coordinator_state import CoordinatorState
 
 log = logging.getLogger(__name__)
 

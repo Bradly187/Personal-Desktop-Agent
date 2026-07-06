@@ -24,9 +24,13 @@ import time
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from core.goal_session import _path_in_scope
+
+if TYPE_CHECKING:
+    from desktop.action_verifier import ActionVerifier
+    from desktop.ui_automation import UIAutomationProvider
 
 log = logging.getLogger(__name__)
 

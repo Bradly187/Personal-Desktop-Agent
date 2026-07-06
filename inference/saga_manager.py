@@ -5,32 +5,40 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
+from core.events import TOPIC_STEP_FAILED, TOPIC_REPLAN_EXHAUSTED, TOPIC_DAG_RUN_FINALIZED
 from inference.plan_parser import AgentResult, AgentStep
 
 if TYPE_CHECKING:
     from storage.db import AgentDB
+    from inference.dev_agent import DevAgent
 
 log = logging.getLogger(__name__)
 
 class SagaManager:
     def __init__(self, agent: "DevAgent", agent_db: Optional['AgentDB'] = None):
+        # Shared run state (_escalated_this_run, _rollback_summary,
+        # _active_trace_id, _saga_announce, _escalation_sidecar_path) lives on
+        # the agent — reads delegate via __getattr__, writes go through
+        # self._agent.X so DevAgent stays the single source of truth.
         self._agent = agent
         self._agent_db = agent_db
-        self._saga_announce = os.environ.get('DA_SAGA_ANNOUNCE', '1').strip().lower() in ('1', 'true', 'on', 'yes')
-        self._rollback_summary = None
-        self._escalation_sidecar_path = Path.home() / '.claude' / 'escalations_pending.jsonl'
 
     async def _start_run(self, goal: str, model_used: Optional[str]) -> int:
         db = self._db()
         if not db or not getattr(db, "available", False):
             return -1
         try:
-            return await db.start_agent_run(goal=goal, domain="plan", model_used=model_used)
+            return await db.runs.start_agent_run(goal=goal, domain="plan", model_used=model_used)
         except Exception as exc:
             log.debug("DevAgent._start_run failed: %s", exc)
             return -1
+
+    # Max file size we snapshot for a WRITE_FILE rollback. Above this, we record
+    # that the file existed (so rollback won't delete it) but keep no backup.
+    _SAGA_SNAPSHOT_MAX_BYTES = 256 * 1024
 
     @staticmethod
     def _saga_dir() -> Path:
@@ -158,7 +166,7 @@ class SagaManager:
             return
         comp_action, comp_args = self._compensation_for(step)
         try:
-            step.db_id = await db.insert_agent_step(
+            step.db_id = await db.runs.insert_agent_step(
                 run_id=step.run_id, step_num=step.step_num, action=step.action,
                 args=step.args or None, body=step.body or None,
                 result=None, success=None, latency_ms=0.0,
@@ -193,12 +201,12 @@ class SagaManager:
         comp_action, comp_args = self._compensation_for(step)
         try:
             if step.db_id is not None:
-                await db.update_agent_step(
+                await db.runs.update_agent_step(
                     step.db_id, result=step.result, success=step.success, latency_ms=step.latency_ms
                 )
                 step_id = step.db_id
             else:
-                step_id = await db.insert_agent_step(
+                step_id = await db.runs.insert_agent_step(
                     run_id=run_id, step_num=step_num, action=step.action,
                     args=step.args or None, body=step.body or None,
                     result=step.result, success=step.success, latency_ms=step.latency_ms,
@@ -220,7 +228,7 @@ class SagaManager:
                 register = True
             if register and comp_action and step_id is not None:
                 if step.comp_id is None:
-                    step.comp_id = await db.insert_saga_compensation(
+                    step.comp_id = await db.sagas.insert_saga_compensation(
                         run_id=run_id, step_id=step_id,
                         compensation_action=comp_action,
                         compensation_args=comp_args,
@@ -279,7 +287,7 @@ class SagaManager:
         db = self._db()
         if db and getattr(db, "available", False):
             try:
-                row_id = await db.insert_escalation(
+                row_id = await db.sagas.insert_escalation(
                     run_id, goal, reason,
                     failed_action=failed_action, replans=replans, detail=detail,
                 )
@@ -297,7 +305,7 @@ class SagaManager:
                 log.warning("DevAgent: DB unavailable — escalation saved to sidecar "
                             "for reconcile on next boot (%s): %.60s", reason, goal)
         if persisted:
-            self._escalated_this_run = True
+            self._agent._escalated_this_run = True
             log.info("DevAgent: escalated halted plan to review queue (%s): %.60s",
                      reason, goal)
         else:
@@ -334,7 +342,7 @@ class SagaManager:
         leftover: list[dict] = []
         for row in rows:
             try:
-                rid = await db.insert_escalation(
+                rid = await db.sagas.insert_escalation(
                     int(row.get("run_id", -1)), row.get("goal", ""), row.get("reason", ""),
                     failed_action=row.get("failed_action"),
                     replans=int(row.get("replans", 0)), detail=row.get("detail"),
@@ -399,7 +407,7 @@ class SagaManager:
         db = self._db()
         if run_id < 0 or not db or not getattr(db, "available", False):
             return 0
-        compensations = await db.get_pending_compensations(run_id)
+        compensations = await db.sagas.get_pending_compensations(run_id)
         if not compensations:
             return 0
         log.info("DevAgent: running %d saga compensation(s) for run %d (%s)",
@@ -411,7 +419,7 @@ class SagaManager:
             cid = comp["id"]
             caction = comp.get("compensation_action", "")
             cargs = comp.get("compensation_args")
-            await db.update_saga_compensation(cid, "running", triggered_by=triggered_by)
+            await db.sagas.update_saga_compensation(cid, "running", triggered_by=triggered_by)
             try:
                 if caction == "RESTORE_FILE" and cargs:
                     restored = await asyncio.to_thread(self._restore_file, cargs)
@@ -419,7 +427,7 @@ class SagaManager:
                         # An overwritten file with no backup was left in place —
                         # record the truth (E5), not a misleading "done".
                         incomplete += 1
-                        await db.update_saga_compensation(
+                        await db.sagas.update_saga_compensation(
                             cid, "skipped",
                             error="no backup — overwritten file left in place",
                             finished=True)
@@ -441,11 +449,11 @@ class SagaManager:
                     log.warning(
                         "DevAgent: saga compensation REVERT_TERMINAL requires manual review: %r", cargs
                     )
-                await db.update_saga_compensation(cid, "done", finished=True)
+                await db.sagas.update_saga_compensation(cid, "done", finished=True)
             except Exception as exc:
                 incomplete += 1
                 log.error("DevAgent: saga compensation %s failed: %s", caction, exc)
-                await db.update_saga_compensation(cid, "failed", error=str(exc), finished=True)
+                await db.sagas.update_saga_compensation(cid, "failed", error=str(exc), finished=True)
                 await self._record_escalation(
                     run_id, "Saga rollback", "compensation_failed",
                     caction, 0, incomplete=1,
@@ -456,7 +464,7 @@ class SagaManager:
         # Record the rollback so completion speech can announce it (R2.2). Set only
         # when compensations actually ran (empty list returns early above), so a
         # successful plan with no rollback leaves the summary None → silent.
-        self._rollback_summary = {
+        self._agent._rollback_summary = {
             "reverted": reverted, "manual": manual,
             "incomplete": incomplete, "triggered_by": triggered_by,
         }
@@ -483,7 +491,7 @@ class SagaManager:
             # works regardless of the current flag state.
             blob, repo = info.get("git_blob"), info.get("git_repo")
             if blob and repo:
-                data = DevAgent._git_cat_blob(repo, blob)
+                data = SagaManager._git_cat_blob(repo, blob)
                 if data is not None:
                     path.write_bytes(data)
                     log.info("DevAgent: saga RESTORE_FILE restored %s from git blob %s",
@@ -514,7 +522,7 @@ class SagaManager:
         if run_id < 0 or not db or not getattr(db, "available", False):
             return
         try:
-            await db.update_agent_run(
+            await db.runs.update_agent_run(
                 run_id=run_id, status=status, step_count=len(result.steps),
                 success=result.success, total_latency_ms=result.total_latency_ms,
                 error=result.error,
@@ -524,7 +532,7 @@ class SagaManager:
             # we promote them to 'checkpoint' so VoiceRewindHandler can restore them.
             # For failed/cancelled runs (already rolled back), any leftovers are skipped.
             new_status = 'checkpoint' if result.success else 'skipped'
-            promoted = await db.skip_pending_compensations(run_id, new_status=new_status)
+            promoted = await db.sagas.skip_pending_compensations(run_id, new_status=new_status)
             # Chat undo affordance (specs/chat-workbench-parity R8.2): a run that
             # persisted checkpoints can be rolled back ("undo this run"), so tell
             # the originating chat turn. No-op for non-chat runs.
@@ -547,7 +555,7 @@ class SagaManager:
         nothing and are byte-identical.
         """
         if trace_id:
-            self._active_trace_id = trace_id
+            self._agent._active_trace_id = trace_id
         db = self._db()
         if not db or not getattr(db, "available", False):
             return False
@@ -568,7 +576,7 @@ class SagaManager:
         # rollback would restore, read-only — nothing is promoted until approval.
         files: list[str] = []
         try:
-            for comp in await db.get_checkpoint_compensations(run_id):
+            for comp in await db.sagas.get_checkpoint_compensations(run_id):
                 try:
                     p = json.loads(comp.get("compensation_args") or "{}").get("path")
                 except Exception:
@@ -585,7 +593,7 @@ class SagaManager:
             return False
             
         log.info("VoiceRewindHandler: reverting run %d (%s)", run_id, goal)
-        await db.promote_checkpoints_to_pending(run_id)
+        await db.misc.promote_checkpoints_to_pending(run_id)
         
         # We need to run compensations in a background task so we don't block voice
         from core.async_utils import fire_and_log
