@@ -276,7 +276,7 @@ class WhisperStream:
         ws.set_fusion_engine(fusion)
         bridge.set_whisper_stream(ws)   # routes audio_stream messages here
 
-        # After ContinuousTrainer.skills.get_hotwords():
+        # After ContinuousTrainer.get_hotwords():
         ws.update_hotwords(["scroll", "click", ...])
 
         # On shutdown:

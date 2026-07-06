@@ -22,7 +22,7 @@ Message types:
   set_dwell_action       →  updates active dwell action type (left_click, right_click, etc.)
   set_feature_toggle     →  updates a FusionEngine feature toggle (currently none defined)
   gesture_assessment     →  sets disabled gesture list in GestureProcessor
-  pain_day_override      →  BehavioralTwinState.profile.set_manual_pain_day(); relaxes VAD threshold
+  pain_day_override      →  BehavioralTwinState.set_manual_pain_day(); relaxes VAD threshold
   calibration_start      →  spawns VoiceCalibrator session task; streams progress to iPad
   calibration_cancel     →  VoiceCalibrator.stop()
   mic_mute               →  WhisperStream.set_muted(bool) — hard mute/unmute mic input
@@ -528,7 +528,7 @@ class IPadBridge:
             log.info("ipad_bridge: pain_day_override active=%s", active)
             if self._coordinator and hasattr(self._coordinator, "_twin") \
                     and self._coordinator._twin:
-                self._coordinator._twin.profile.set_manual_pain_day(active)
+                self._coordinator._twin.set_manual_pain_day(active)
             # Immediate recognizer relaxation (VAD + logprob floor) so the next
             # utterance benefits before route() reconciles on the next command.
             if self._whisper is not None:

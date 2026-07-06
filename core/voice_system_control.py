@@ -207,7 +207,7 @@ class VoiceSystemControl:
         elif _lower in ("pain day on", "flare day on", "bad day"):
             twin = self._twin()
             if twin:
-                twin.profile.set_manual_pain_day(True)
+                twin.set_manual_pain_day(True)
             # Immediately relax the recognizer (VAD + logprob floor) for the
             # next utterance, before route() reconciles on the next command.
             whisper = self._whisper()
@@ -217,7 +217,7 @@ class VoiceSystemControl:
         elif _lower in ("pain day off", "flare day off", "feeling better"):
             twin = self._twin()
             if twin:
-                twin.profile.set_manual_pain_day(False)
+                twin.set_manual_pain_day(False)
             whisper = self._whisper()
             if whisper is not None:
                 whisper.apply_pain_day(False)

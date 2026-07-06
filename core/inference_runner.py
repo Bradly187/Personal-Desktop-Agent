@@ -189,11 +189,11 @@ class InferenceRunner:
         effective = cfg if cfg is not None else self.effective_cfg()
         trainer = self._trainer()
         examples = (
-            await trainer.memory.get_few_shot_examples(cmd)
+            await trainer.get_few_shot_examples(cmd)
             if trainer else None
         )
         counterexamples = (
-            await trainer.memory.get_few_shot_counterexamples(cmd)
+            await trainer.get_few_shot_counterexamples(cmd)
             if trainer else None
         )
         # Clear the task-local capture so a backend that doesn't set it (or a
