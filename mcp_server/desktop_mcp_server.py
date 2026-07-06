@@ -36,8 +36,8 @@ from mcp.types import ImageContent, TextContent, Tool
 # where `mcp_server/` is on sys.path so `tools` resolves) and when imported as
 # `mcp_server.desktop_mcp_server` (e.g. from pytest at the repo root).
 try:
-    from tools import browser, keyboard, lsp, mouse, screen, terminal, vcs, web, windows
-    from tools import search as search_tools
+    from tools import browser, keyboard, lsp, mouse, screen, terminal, vcs, web, windows  # type: ignore[import-not-found]
+    from tools import search as search_tools  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - import-path shim
     from mcp_server.tools import browser, keyboard, lsp, mouse, screen, terminal, vcs, web, windows
     from mcp_server.tools import search as search_tools

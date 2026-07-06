@@ -75,7 +75,7 @@ class ActionVerifier:
             import sys
             from pathlib import Path
             sys.path.insert(0, str(Path(__file__).parent / "mcp_server"))
-            from tools import screen
+            from tools import screen  # type: ignore[import-not-found,import-untyped]
             result = screen.screenshot()
             return result.get("image_base64", "")
         except Exception as exc:

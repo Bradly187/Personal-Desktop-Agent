@@ -27,26 +27,26 @@ def _route(c, text):
 def test_pain_day_on_with_trailing_period():
     c = _coord()
     res = _route(c, "Pain day on.")          # exactly what Whisper produced live
-    c._twin.profile.set_manual_pain_day.assert_called_once_with(True)
+    c._twin.set_manual_pain_day.assert_called_once_with(True)
     assert res.get("action") == "PAIN_DAY"
 
 
 def test_pain_day_on_clean_still_matches():
     c = _coord()
     _route(c, "pain day on")
-    c._twin.profile.set_manual_pain_day.assert_called_once_with(True)
+    c._twin.set_manual_pain_day.assert_called_once_with(True)
 
 
 def test_pain_day_on_with_question_mark_and_caps():
     c = _coord()
     _route(c, "Pain Day On?")
-    c._twin.profile.set_manual_pain_day.assert_called_once_with(True)
+    c._twin.set_manual_pain_day.assert_called_once_with(True)
 
 
 def test_feeling_better_with_bang_turns_off():
     c = _coord()
     res = _route(c, "Feeling better!")
-    c._twin.profile.set_manual_pain_day.assert_called_once_with(False)
+    c._twin.set_manual_pain_day.assert_called_once_with(False)
     assert res.get("action") == "PAIN_DAY"
 
 
@@ -71,5 +71,5 @@ def test_pain_day_not_shadowed_when_dev_agent_present():
     c._dev_agent = MagicMock()
     res = _route(c, "Pain day on.")
     c._dev_agent.handle.assert_not_called()          # not misrouted to DevAgent
-    c._twin.profile.set_manual_pain_day.assert_called_once_with(True)
+    c._twin.set_manual_pain_day.assert_called_once_with(True)
     assert res.get("action") == "PAIN_DAY"

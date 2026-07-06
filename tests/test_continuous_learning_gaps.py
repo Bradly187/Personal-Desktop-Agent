@@ -511,8 +511,8 @@ class TestGap2CoordinatorPassthrough:
 
         local.infer = _fake_infer
         trainer = MagicMock()
-        trainer.memory.get_few_shot_examples = AsyncMock(return_value=[])
-        trainer.memory.get_few_shot_counterexamples = AsyncMock(
+        trainer.get_few_shot_examples = AsyncMock(return_value=[])
+        trainer.get_few_shot_counterexamples = AsyncMock(
             return_value=[{"command_text": "scroll", "wrong_action": "CLICK nothing"}]
         )
         agent_db = MagicMock()

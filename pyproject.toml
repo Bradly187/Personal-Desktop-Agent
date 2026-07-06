@@ -52,11 +52,5 @@ exclude = [
 
 [tool.mypy]
 python_version = "3.10"
-
-[[tool.mypy.overrides]]
-module = [
-    "pywin32",
-    "comtypes",
-    "windows_curses"
-]
 ignore_missing_imports = true
+exclude = ["^scripts/"]
