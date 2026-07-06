@@ -2411,3 +2411,4 @@ class DevAgent:
     _git_cat_blob = SagaManager._git_cat_blob
     _grep = StepExecutor._grep
     _run_terminal = StepExecutor._run_terminal
+    _git_commit = StepExecutor._git_commit

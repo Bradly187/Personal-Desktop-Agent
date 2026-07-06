@@ -721,11 +721,93 @@ class HybridCoordinator:
     async def _route_impl(self, cmd: Command) -> dict:
         return await self._event_dispatcher.route_impl(cmd)
 
+    # --- Legacy state aliases (pre-CoordinatorState API) --------------------
+    # Tests and older callers read/write these directly on the coordinator —
+    # including on __new__-constructed instances — so proxy them to self.state,
+    # creating it lazily when __init__ never ran.
+    def _ensure_state(self) -> CoordinatorState:
+        st = self.__dict__.get("state")
+        if st is None:
+            st = CoordinatorState()
+            self.__dict__["state"] = st
+        return st
+
+    @property
+    def _pending_clarification(self):
+        return self._ensure_state().pending_clarification
+
+    @_pending_clarification.setter
+    def _pending_clarification(self, v):
+        self._ensure_state().pending_clarification = v
+
+    @property
+    def _active_clarify_surface_id(self):
+        return self._ensure_state().active_clarify_surface_id
+
+    @_active_clarify_surface_id.setter
+    def _active_clarify_surface_id(self, v):
+        self._ensure_state().active_clarify_surface_id = v
+
+    @property
+    def _recent_open_targets(self):
+        return self._ensure_state().recent_open_targets
+
+    @_recent_open_targets.setter
+    def _recent_open_targets(self, v):
+        self._ensure_state().recent_open_targets = v
+
+    @property
+    def _recent_dev_commands(self):
+        return self._ensure_state().recent_dev_commands
+
+    @_recent_dev_commands.setter
+    def _recent_dev_commands(self, v):
+        self._ensure_state().recent_dev_commands = v
+
+    @property
+    def _last_executed_action(self):
+        return self._ensure_state().last_executed_action
+
+    @_last_executed_action.setter
+    def _last_executed_action(self, v):
+        self._ensure_state().last_executed_action = v
+
+    @property
+    def _last_command_id(self):
+        return self._ensure_state().last_command_id
+
+    @_last_command_id.setter
+    def _last_command_id(self, v):
+        self._ensure_state().last_command_id = v
+
+    def _get_correction_handler(self) -> CorrectionHandler:
+        """Return the wired CorrectionHandler, building one lazily for
+        partially-constructed coordinators (tests use __new__ + a couple of
+        attributes to exercise the correction path in isolation)."""
+        h = self.__dict__.get("_correction_handler")
+        if h is None:
+            h = CorrectionHandler(
+                state=self._ensure_state(),
+                agent_db=lambda: self.__dict__.get("_agent_db"),
+                trainer=lambda: self.__dict__.get("_trainer"),
+                audit=lambda: self.__dict__.get("_audit"),
+                tts_speak=lambda text: (
+                    self._tts_speak(text)
+                    if self.__dict__.get("_tts_speak") else None
+                ),
+                session_id=self.__dict__.get("_session_id", -1),
+            )
+            self.__dict__["_correction_handler"] = h
+        return h
+
+    def _harvest_correction(self, cmd: Command, prior_action: str) -> None:
+        self._get_correction_handler().harvest_correction(cmd, prior_action)
+
     async def correct(self, cmd: Command, wrong_action: str, correct_action: str) -> dict:
-        return await self._correction_handler.correct(cmd, wrong_action, correct_action)
+        return await self._get_correction_handler().correct(cmd, wrong_action, correct_action)
 
     async def _on_correction(self, cmd: Command, correct_action: str) -> None:
-        await self._correction_handler.on_correction(cmd, correct_action)
+        await self._get_correction_handler().on_correction(cmd, correct_action)
 
     def get_status(self) -> dict:
         return {
