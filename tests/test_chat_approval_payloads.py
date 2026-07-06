@@ -146,15 +146,15 @@ async def test_rewind_deny_rolls_back_nothing():
     cur = MagicMock()
     cur.fetchone = AsyncMock(return_value=_Row(id=7, goal="the goal"))
     db._conn.execute = AsyncMock(return_value=cur)
-    db.get_checkpoint_compensations = AsyncMock(return_value=[
+    db.sagas.get_checkpoint_compensations = AsyncMock(return_value=[
         {"compensation_args": '{"path": "f.py"}'}])
-    db.promote_checkpoints_to_pending = AsyncMock()
+    db.misc.promote_checkpoints_to_pending = AsyncMock()
     agent._db = MagicMock(return_value=db)
     agent._confirm_destructive_op = AsyncMock(return_value=False)
 
     ok = await agent.revert_last_run(trace_id="T9")
     assert ok is False
-    db.promote_checkpoints_to_pending.assert_not_awaited()
+    db.misc.promote_checkpoints_to_pending.assert_not_awaited()
     # The chat trace was adopted so the confirm card lands on the right socket.
     assert agent._active_trace_id == "T9"
     # The confirm saw the file list (card context).

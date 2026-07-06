@@ -216,7 +216,7 @@ class ResourceGovernor:
     # ── Flare fast-path ──────────────────────────────────────────────────────
 
     def notify_pain_day_change(self, score: float) -> None:
-        """Called synchronously by BehavioralTwinState.set_manual_pain_day().
+        """Called synchronously by BehavioralTwinState.profile.set_manual_pain_day().
 
         Fires _on_flare_start / _on_flare_end immediately via create_task so
         VRAM is released in <100ms on a manually declared flare instead of

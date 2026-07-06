@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 
 # Task-local accumulator linking inference rows to their command row (the
 # inference insert happens before insert_command, so command_id is unknown at
-# write time and backfilled by route() — see AgentDB.link_inferences_to_command).
+# write time and backfilled by route() — see AgentDB.commands.link_inferences_to_command).
 _PENDING_INFERENCE_IDS: ContextVar[Optional[list]] = ContextVar(
     "da_pending_inference_ids", default=None
 )
@@ -189,11 +189,11 @@ class InferenceRunner:
         effective = cfg if cfg is not None else self.effective_cfg()
         trainer = self._trainer()
         examples = (
-            await trainer.get_few_shot_examples(cmd)
+            await trainer.memory.get_few_shot_examples(cmd)
             if trainer else None
         )
         counterexamples = (
-            await trainer.get_few_shot_counterexamples(cmd)
+            await trainer.memory.get_few_shot_counterexamples(cmd)
             if trainer else None
         )
         # Clear the task-local capture so a backend that doesn't set it (or a
@@ -226,7 +226,7 @@ class InferenceRunner:
             status = local.get_status()
             error = action_str if action_str.startswith("CLARIFY inference") else None
             _prompt, _tokens_in, _tokens_out = get_inference_capture()
-            _inf_id = await agent_db.insert_inference(
+            _inf_id = await agent_db.inferences.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=status.get("model", "unknown"),
                 domain="command",
@@ -336,7 +336,7 @@ class InferenceRunner:
         agent_db = self._agent_db()
         if agent_db and agent_db.available:
             error = action_str if action_str.startswith("CLARIFY") else None
-            _inf_id = await agent_db.insert_inference(
+            _inf_id = await agent_db.inferences.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=effective.anthropic_model,
                 domain="command",

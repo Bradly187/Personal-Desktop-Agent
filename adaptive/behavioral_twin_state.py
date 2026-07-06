@@ -516,6 +516,10 @@ class BehavioralTwinState:
         """Discard ephemeral dev-agent session history. Called after dev session ends."""
         self._session_history["dev_agent"] = []
 
+    def set_model_router(self, router) -> None:
+        """ModelRouter for LLM-driven memory consolidation."""
+        self._semantic_memory.set_model_router(router)
+
     def set_acoustic_profiler(self, profiler) -> None:
         """Wire AcousticProfiler so voice clarity feeds into pain detection."""
         self._acoustic_profiler = profiler
@@ -563,7 +567,7 @@ class BehavioralTwinState:
             self._current_snapshot = self._build_snapshot()
         log.info("BehavioralTwinState: manual pain day %s", "ON" if active else "OFF")
         if self._agent_db and self._agent_db.available:
-            t = asyncio.create_task(self._agent_db.set_manual_pain_day(active))
+            t = asyncio.create_task(self._agent_db.profile.set_manual_pain_day(active))
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
         self._on_pain_day_transition(active)
@@ -574,7 +578,7 @@ class BehavioralTwinState:
         """Persist the current PreferenceModel to AgentDB settings_versions."""
         try:
             json_data = self._preference_model.to_json()
-            await self._agent_db.log_settings_change(
+            await self._agent_db.profile.log_settings_change(
                 component="preference_model",
                 key="snapshot",
                 old_value=None,
@@ -590,14 +594,14 @@ class BehavioralTwinState:
             accessibility_history = self._session_history.get("accessibility", [])
             if not accessibility_history:
                 return
-            session_id = await self._agent_db.get_most_recent_session_id()
+            session_id = await self._agent_db.sessions.get_most_recent_session_id()
             if session_id is None:
                 return
             history = [
                 {"ts": time.time(), "cmd_text": text, "action": "", "source": ""}
                 for text in accessibility_history
             ]
-            await self._agent_db.write_session_history(session_id, history)
+            await self._agent_db.sessions.write_session_history(session_id, history)
         except Exception as exc:
             log.warning("BehavioralTwinState._write_session_history failed: %s", exc)
 
@@ -691,7 +695,7 @@ class BehavioralTwinState:
     async def _load_working_set(self) -> None:
         """Load 500 most recent successful commands from AgentDB on startup."""
         try:
-            rows = await self._agent_db.get_recent_successful_commands(limit=self.WORKING_SET_SIZE)
+            rows = await self._agent_db.commands.get_recent_successful_commands(limit=self.WORKING_SET_SIZE)
             self._working_set = rows
             log.debug("BehavioralTwinState: loaded %d commands into working set", len(rows))
         except Exception as exc:
@@ -706,7 +710,7 @@ class BehavioralTwinState:
         this by checking whether json.loads() returns a str or dict.
         """
         try:
-            json_data = await self._agent_db.get_preference_model_snapshot()
+            json_data = await self._agent_db.profile.get_preference_model_snapshot()
             if json_data:
                 # Safety: un-nest any legacy double-serialized value
                 parsed = json.loads(json_data) if isinstance(json_data, str) else json_data
@@ -732,12 +736,12 @@ class BehavioralTwinState:
         try:
             # Get the most recent prior session (not the current one)
             # We don't have a current session_id here, so get the most recent
-            prior_session_id = await self._agent_db.get_most_recent_session_id()
+            prior_session_id = await self._agent_db.sessions.get_most_recent_session_id()
             if prior_session_id is None:
                 log.debug("BehavioralTwinState: no prior session found")
                 return
             
-            rows = await self._agent_db.read_session_history(
+            rows = await self._agent_db.sessions.read_session_history(
                 session_id=prior_session_id,
                 limit=self.SESSION_HISTORY_MAX,
             )
@@ -858,9 +862,9 @@ class BehavioralTwinState:
 
                 # Log pain day score to AgentDB
                 try:
-                    session_id = await self._agent_db.get_most_recent_session_id()
+                    session_id = await self._agent_db.sessions.get_most_recent_session_id()
                     if session_id is not None:
-                        await self._agent_db.log_pain_day(
+                        await self._agent_db.profile.log_pain_day(
                             session_id=session_id,
                             score=score,
                             active=self._pain_day_active,
@@ -891,7 +895,7 @@ class BehavioralTwinState:
         pain-day relaxation is unchanged until Brad configures it on the iPad.
         """
         try:
-            profile = await self._agent_db.get_flare_profile()
+            profile = await self._agent_db.profile.get_flare_profile()
             if profile:
                 self._flare_voice_degrades = bool(profile.get("voice_degrades", True))
                 self._flare_gesture_degrades = bool(profile.get("gesture_degrades", True))

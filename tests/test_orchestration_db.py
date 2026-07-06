@@ -30,8 +30,8 @@ async def _open(tmp_path, name="test.db") -> AgentDB:
 
 
 async def _seed_run(db: AgentDB) -> int:
-    sid = await db.insert_session(mode="test")
-    return await db.start_agent_run("test goal", "plan", "test-model",
+    sid = await db.sessions.insert_session(mode="test")
+    return await db.runs.start_agent_run("test goal", "plan", "test-model",
                                     command_id=None)
 
 
@@ -41,13 +41,13 @@ async def _seed_run(db: AgentDB) -> int:
 
 async def test_insert_and_poll_event(tmp_path):
     db = await _open(tmp_path)
-    row_id = await db.insert_event(
+    row_id = await db.events.insert_event(
         "command.executed", '{"action":"CLICK"}', "coordinator",
         session_id=1, command_id=5, trace_id="t1",
     )
     assert row_id is not None and row_id > 0
 
-    events = await db.poll_events("command.executed", last_event_id=0)
+    events = await db.events.poll_events("command.executed", last_event_id=0)
     assert len(events) == 1
     assert events[0]["source"] == "coordinator"
     assert events[0]["trace_id"] == "t1"
@@ -56,10 +56,10 @@ async def test_insert_and_poll_event(tmp_path):
 
 async def test_poll_events_cursor_excludes_seen(tmp_path):
     db = await _open(tmp_path)
-    id1 = await db.insert_event("command.executed", "{}", "c")
-    id2 = await db.insert_event("command.executed", "{}", "c")
+    id1 = await db.events.insert_event("command.executed", "{}", "c")
+    id2 = await db.events.insert_event("command.executed", "{}", "c")
 
-    after = await db.poll_events("command.executed", last_event_id=id1)
+    after = await db.events.poll_events("command.executed", last_event_id=id1)
     assert len(after) == 1
     assert after[0]["id"] == id2
     await db.close()
@@ -67,11 +67,11 @@ async def test_poll_events_cursor_excludes_seen(tmp_path):
 
 async def test_poll_events_topic_filter(tmp_path):
     db = await _open(tmp_path)
-    await db.insert_event("command.executed", "{}", "c")
-    await db.insert_event("gate.decided", "{}", "c")
+    await db.events.insert_event("command.executed", "{}", "c")
+    await db.events.insert_event("gate.decided", "{}", "c")
 
-    cmd = await db.poll_events("command.executed", last_event_id=0)
-    gate = await db.poll_events("gate.decided", last_event_id=0)
+    cmd = await db.events.poll_events("command.executed", last_event_id=0)
+    gate = await db.events.poll_events("gate.decided", last_event_id=0)
 
     assert len(cmd) == 1
     assert len(gate) == 1
@@ -84,11 +84,11 @@ async def test_poll_events_topic_filter(tmp_path):
 
 async def test_consumer_cursor_round_trip(tmp_path):
     db = await _open(tmp_path)
-    await db.upsert_event_consumer("watcher", "command.%")
-    await db.update_consumer_cursor("watcher", 99)
+    await db.events.upsert_event_consumer("watcher", "command.%")
+    await db.events.update_consumer_cursor("watcher", 99)
 
     # Second upsert should not reset cursor
-    await db.upsert_event_consumer("watcher", "command.%")
+    await db.events.upsert_event_consumer("watcher", "command.%")
 
     # Verify via direct query
     async with db._conn.execute(
@@ -108,21 +108,21 @@ async def test_insert_and_get_pending_compensations(tmp_path):
     run_id = await _seed_run(db)
 
     # Insert two steps with compensations
-    step1_id = await db.insert_agent_step(
+    step1_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", "/tmp/a.py", None, "ok", True, 10.0,
         compensation_action="DELETE_FILE", compensation_args="/tmp/a.py",
     )
-    step2_id = await db.insert_agent_step(
+    step2_id = await db.runs.insert_agent_step(
         run_id, 2, "WRITE_FILE", "/tmp/b.py", None, "ok", True, 10.0,
         compensation_action="DELETE_FILE", compensation_args="/tmp/b.py",
     )
     assert step1_id is not None
     assert step2_id is not None
 
-    await db.insert_saga_compensation(run_id, step1_id, "DELETE_FILE", "/tmp/a.py")
-    await db.insert_saga_compensation(run_id, step2_id, "DELETE_FILE", "/tmp/b.py")
+    await db.sagas.insert_saga_compensation(run_id, step1_id, "DELETE_FILE", "/tmp/a.py")
+    await db.sagas.insert_saga_compensation(run_id, step2_id, "DELETE_FILE", "/tmp/b.py")
 
-    pending = await db.get_pending_compensations(run_id)
+    pending = await db.sagas.get_pending_compensations(run_id)
     assert len(pending) == 2
     # Returned in reverse step order (highest step_num first)
     assert pending[0]["compensation_action"] == "DELETE_FILE"
@@ -134,14 +134,14 @@ async def test_insert_and_get_pending_compensations(tmp_path):
 async def test_update_saga_compensation_status(tmp_path):
     db = await _open(tmp_path)
     run_id = await _seed_run(db)
-    step_id = await db.insert_agent_step(
+    step_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", "/f", None, None, None, 0.0,
         compensation_action="DELETE_FILE",
     )
-    comp_id = await db.insert_saga_compensation(run_id, step_id, "DELETE_FILE", "/f")
+    comp_id = await db.sagas.insert_saga_compensation(run_id, step_id, "DELETE_FILE", "/f")
 
-    await db.update_saga_compensation(comp_id, "running", triggered_by="max_replans")
-    await db.update_saga_compensation(comp_id, "done", finished=True)
+    await db.sagas.update_saga_compensation(comp_id, "running", triggered_by="max_replans")
+    await db.sagas.update_saga_compensation(comp_id, "done", finished=True)
 
     async with db._conn.execute(
         "SELECT status, triggered_by, finished_at FROM saga_compensations WHERE id = ?",
@@ -157,12 +157,12 @@ async def test_update_saga_compensation_status(tmp_path):
 async def test_get_pending_compensations_excludes_done(tmp_path):
     db = await _open(tmp_path)
     run_id = await _seed_run(db)
-    step_id = await db.insert_agent_step(run_id, 1, "WRITE_FILE", "/f", None, None, None, 0.0,
+    step_id = await db.runs.insert_agent_step(run_id, 1, "WRITE_FILE", "/f", None, None, None, 0.0,
                                           compensation_action="DELETE_FILE")
-    comp_id = await db.insert_saga_compensation(run_id, step_id, "DELETE_FILE", "/f")
-    await db.update_saga_compensation(comp_id, "done", finished=True)
+    comp_id = await db.sagas.insert_saga_compensation(run_id, step_id, "DELETE_FILE", "/f")
+    await db.sagas.update_saga_compensation(comp_id, "done", finished=True)
 
-    pending = await db.get_pending_compensations(run_id)
+    pending = await db.sagas.get_pending_compensations(run_id)
     assert pending == []
     await db.close()
 
@@ -174,7 +174,7 @@ async def test_get_pending_compensations_excludes_done(tmp_path):
 async def test_insert_agent_step_returns_row_id(tmp_path):
     db = await _open(tmp_path)
     run_id = await _seed_run(db)
-    step_id = await db.insert_agent_step(
+    step_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", "/tmp/x", None, "ok", True, 5.0,
     )
     assert isinstance(step_id, int) and step_id > 0
@@ -184,7 +184,7 @@ async def test_insert_agent_step_returns_row_id(tmp_path):
 async def test_insert_agent_step_persists_compensation_columns(tmp_path):
     db = await _open(tmp_path)
     run_id = await _seed_run(db)
-    step_id = await db.insert_agent_step(
+    step_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", "/f", None, None, True, 0.0,
         compensation_action="DELETE_FILE", compensation_args="/f",
     )
@@ -204,7 +204,7 @@ async def test_insert_agent_step_persists_compensation_columns(tmp_path):
 
 async def test_insert_tool_call_returns_row_id(tmp_path):
     db = await _open(tmp_path)
-    row_id = await db.insert_tool_call(
+    row_id = await db.logs.insert_tool_call(
         "write_file",
         idempotency_key="key1",
         result_json='{"written": "/f"}',
@@ -220,9 +220,9 @@ async def test_insert_tool_call_returns_row_id(tmp_path):
 async def test_insert_tool_call_idempotency_blocks_duplicate(tmp_path):
     db = await _open(tmp_path)
     key = "sha256-of-same-args"
-    row1 = await db.insert_tool_call("write_file", idempotency_key=key,
+    row1 = await db.logs.insert_tool_call("write_file", idempotency_key=key,
                                      result_json='{"n":1}', success=True, status="completed")
-    row2 = await db.insert_tool_call("write_file", idempotency_key=key,
+    row2 = await db.logs.insert_tool_call("write_file", idempotency_key=key,
                                      result_json='{"n":2}', success=True, status="completed")
     assert row1 is not None
     assert row2 is None  # INSERT OR IGNORE → duplicate key blocked
@@ -232,9 +232,9 @@ async def test_insert_tool_call_idempotency_blocks_duplicate(tmp_path):
 async def test_insert_tool_call_non_idempotent_allows_duplicates(tmp_path):
     db = await _open(tmp_path)
     # NULL idempotency_key → no UNIQUE constraint → both inserts succeed
-    row1 = await db.insert_tool_call("run_terminal", result_json='{"out":"a"}',
+    row1 = await db.logs.insert_tool_call("run_terminal", result_json='{"out":"a"}',
                                      success=True, status="completed")
-    row2 = await db.insert_tool_call("run_terminal", result_json='{"out":"b"}',
+    row2 = await db.logs.insert_tool_call("run_terminal", result_json='{"out":"b"}',
                                      success=True, status="completed")
     assert row1 is not None
     assert row2 is not None
@@ -245,9 +245,9 @@ async def test_insert_tool_call_non_idempotent_allows_duplicates(tmp_path):
 async def test_get_tool_call_by_idempotency_returns_cached(tmp_path):
     db = await _open(tmp_path)
     key = "abc"
-    await db.insert_tool_call("write_file", idempotency_key=key,
+    await db.logs.insert_tool_call("write_file", idempotency_key=key,
                                result_json='{"written":"/f"}', success=True, status="completed")
-    cached = await db.get_tool_call_by_idempotency(key)
+    cached = await db.logs.get_tool_call_by_idempotency(key)
     assert cached is not None
     assert cached["tool_name"] == "write_file"
     import json
@@ -257,7 +257,7 @@ async def test_get_tool_call_by_idempotency_returns_cached(tmp_path):
 
 async def test_get_tool_call_by_idempotency_returns_none_for_unknown(tmp_path):
     db = await _open(tmp_path)
-    result = await db.get_tool_call_by_idempotency("no-such-key")
+    result = await db.logs.get_tool_call_by_idempotency("no-such-key")
     assert result is None
     await db.close()
 
@@ -268,7 +268,7 @@ async def test_get_tool_call_by_idempotency_returns_none_for_unknown(tmp_path):
 
 async def test_get_tool_timeout_returns_seeded_value(tmp_path):
     db = await _open(tmp_path)
-    timeout_ms, max_retries = await db.get_tool_timeout("write_file")
+    timeout_ms, max_retries = await db.logs.get_tool_timeout("write_file")
     assert timeout_ms == 15_000
     assert max_retries == 1
     await db.close()
@@ -276,7 +276,7 @@ async def test_get_tool_timeout_returns_seeded_value(tmp_path):
 
 async def test_get_tool_timeout_fallback_for_unknown(tmp_path):
     db = await _open(tmp_path)
-    timeout_ms, max_retries = await db.get_tool_timeout("nonexistent_tool")
+    timeout_ms, max_retries = await db.logs.get_tool_timeout("nonexistent_tool")
     assert timeout_ms == 15_000  # default fallback
     assert max_retries == 0
     await db.close()
@@ -284,7 +284,7 @@ async def test_get_tool_timeout_fallback_for_unknown(tmp_path):
 
 async def test_get_cache_config_returns_seeded_value(tmp_path):
     db = await _open(tmp_path)
-    ttl_s, max_entries = await db.get_cache_config("vision_grounder")
+    ttl_s, max_entries = await db.misc.get_cache_config("vision_grounder")
     assert ttl_s == pytest.approx(2.0)
     assert max_entries == 200
     await db.close()
@@ -292,7 +292,7 @@ async def test_get_cache_config_returns_seeded_value(tmp_path):
 
 async def test_get_cache_config_fallback_for_unknown(tmp_path):
     db = await _open(tmp_path)
-    ttl_s, max_entries = await db.get_cache_config("no_such_tool")
+    ttl_s, max_entries = await db.misc.get_cache_config("no_such_tool")
     assert ttl_s == pytest.approx(2.0)  # fallback
     assert max_entries == 200
     await db.close()
@@ -300,7 +300,7 @@ async def test_get_cache_config_fallback_for_unknown(tmp_path):
 
 async def test_get_rate_limit_config_returns_seeded_value(tmp_path):
     db = await _open(tmp_path)
-    max_rps, burst = await db.get_rate_limit_config("cloud_api")
+    max_rps, burst = await db.logs.get_rate_limit_config("cloud_api")
     assert max_rps == pytest.approx(2.0)
     assert burst == 5
     await db.close()
@@ -308,7 +308,7 @@ async def test_get_rate_limit_config_returns_seeded_value(tmp_path):
 
 async def test_get_rate_limit_config_fallback_for_unknown(tmp_path):
     db = await _open(tmp_path)
-    max_rps, burst = await db.get_rate_limit_config("unknown_resource")
+    max_rps, burst = await db.logs.get_rate_limit_config("unknown_resource")
     assert max_rps > 0
     assert burst >= 1
     await db.close()
@@ -320,7 +320,7 @@ async def test_get_rate_limit_config_fallback_for_unknown(tmp_path):
 
 async def test_insert_rate_limit_event(tmp_path):
     db = await _open(tmp_path)
-    await db.insert_rate_limit_event("cloud_api", command_id=None,
+    await db.events.insert_rate_limit_event("cloud_api", command_id=None,
                                      wait_ms=250.0, was_dropped=False)
     async with db._conn.execute(
         "SELECT wait_ms, was_dropped FROM rate_limit_events WHERE resource = 'cloud_api'"

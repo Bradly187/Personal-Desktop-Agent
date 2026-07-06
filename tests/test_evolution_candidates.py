@@ -19,12 +19,12 @@ async def _open_db():
 async def test_insert_is_idempotent():
     db, d = await _open_db()
     try:
-        id1 = await db.insert_evolution_candidate(
+        id1 = await db.skills.insert_evolution_candidate(
             "counterexample", "open the parser", "OPEN parser.py",
             domain="command", reason="pipeline_failure",
             source_refs='{"escalation_ids":[1]}',
         )
-        id2 = await db.insert_evolution_candidate(
+        id2 = await db.skills.insert_evolution_candidate(
             "counterexample", "open the parser", "OPEN parser.py", domain="command",
         )
         assert id1 and id1 == id2, "duplicate stage must return the same row id"
@@ -40,18 +40,18 @@ async def test_insert_is_idempotent():
 async def test_get_by_status_and_transition():
     db, d = await _open_db()
     try:
-        cid = await db.insert_evolution_candidate(
+        cid = await db.skills.insert_evolution_candidate(
             "example", "scroll down", "SCROLL down", domain="command",
         )
-        proposed = await db.get_evolution_candidates(status="proposed")
+        proposed = await db.skills.get_evolution_candidates(status="proposed")
         assert any(c["id"] == cid for c in proposed)
         assert proposed[0]["status"] == "proposed"
 
-        await db.set_evolution_candidate_status(cid, "promoted", eval_delta=0.012)
+        await db.skills.set_evolution_candidate_status(cid, "promoted", eval_delta=0.012)
 
         # no longer proposed
-        assert all(c["id"] != cid for c in await db.get_evolution_candidates("proposed"))
-        promoted = await db.get_evolution_candidates("promoted")
+        assert all(c["id"] != cid for c in await db.skills.get_evolution_candidates("proposed"))
+        promoted = await db.skills.get_evolution_candidates("promoted")
         row = next(c for c in promoted if c["id"] == cid)
         assert row["status"] == "promoted"
         assert abs(row["eval_delta"] - 0.012) < 1e-9
@@ -64,12 +64,12 @@ async def test_get_by_status_and_transition():
 async def test_reject_status():
     db, d = await _open_db()
     try:
-        cid = await db.insert_evolution_candidate(
+        cid = await db.skills.insert_evolution_candidate(
             "counterexample", "delete everything", "RUN_TERMINAL rm -rf",
             domain="command", reason="pipeline_failure",
         )
-        await db.set_evolution_candidate_status(cid, "rejected")
-        rejected = await db.get_evolution_candidates("rejected")
+        await db.skills.set_evolution_candidate_status(cid, "rejected")
+        rejected = await db.skills.get_evolution_candidates("rejected")
         assert any(c["id"] == cid for c in rejected)
     finally:
         await db.close()

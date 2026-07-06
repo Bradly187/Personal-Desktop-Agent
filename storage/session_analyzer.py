@@ -297,7 +297,7 @@ class SessionAnalyzer:
         """Analyze session, persist summary, return summary dict."""
         import asyncio
         summary = await asyncio.to_thread(self.analyze_session, session_id)
-        await agent_db.insert_session_summary(summary)
+        await agent_db.sessions.insert_session_summary(summary)
         log.info(
             "SessionAnalyzer: session %d — %d commands, success=%.0f%%, cloud=%.0f%%",
             session_id,

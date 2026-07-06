@@ -385,7 +385,7 @@ class FusionEngine:
         so it never clobbers a value already adapted by the trainer.
         """
         try:
-            rom = await db.get_sensor_rom("tilt")
+            rom = await db.telemetry.get_sensor_rom("tilt")
             default_cfg = FusionConfig()
             if "neutral" in rom:
                 comfortable = rom["neutral"].get("comfortable_value")
@@ -855,7 +855,7 @@ class FusionEngine:
                 _trace_id = self._active_trace_id
 
             fire_and_log(
-                self._db.insert_sensor_telemetry(
+                self._db.telemetry.insert_sensor_telemetry(
                     self._session_id,
                     time.time(),
                     tilt_rx=_tilt_rx,
@@ -878,7 +878,7 @@ class FusionEngine:
             # Also push legacy sensor_events for backward-compat DuckDB queries
             if self._last_tilt_sample is not None:
                 fire_and_log(
-                    self._db.insert_sensor_event("tilt", x=_tilt_rx, y=_tilt_ry),
+                    self._db.events.insert_sensor_event("tilt", x=_tilt_rx, y=_tilt_ry),
                     log, "sensor_event write",
                 )
 

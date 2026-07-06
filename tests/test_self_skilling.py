@@ -42,11 +42,11 @@ async def _open_db():
 
 async def _add_run(db, *, goal, success, steps, domain="command"):
     """Insert a run plus its ordered steps; step_count matches len(steps)."""
-    run_id = await db.insert_agent_run(
+    run_id = await db.runs.insert_agent_run(
         None, goal, domain, "llama3.1:8b", len(steps), success, 12.0,
     )
     for i, (action, args) in enumerate(steps):
-        await db.insert_agent_step(
+        await db.runs.insert_agent_step(
             run_id, i, action, args, None, "ok", True, 1.0,
         )
     return run_id
@@ -60,15 +60,15 @@ async def test_macro_insert_is_idempotent_R1_4():
     db, d = await _open_db()
     try:
         sig = "OPEN(app) → CLICK(target) → TYPE(text)"
-        id1 = await db.insert_evolution_candidate(
+        id1 = await db.skills.insert_evolution_candidate(
             "macro", "open scheduler and start a note", sig, domain="command",
             reason="recurring_plan", source_refs='{"run_ids":[1,2,3,4]}',
         )
-        id2 = await db.insert_evolution_candidate(
+        id2 = await db.skills.insert_evolution_candidate(
             "macro", "open scheduler and start a note", sig, domain="command",
         )
         assert id1 and id1 == id2, "re-detecting the same macro must not duplicate"
-        rows = await db.get_evolution_candidates(status="proposed", kind="macro")
+        rows = await db.skills.get_evolution_candidates(status="proposed", kind="macro")
         assert len(rows) == 1
     finally:
         await db.close()
@@ -78,16 +78,16 @@ async def test_macro_insert_is_idempotent_R1_4():
 async def test_get_candidates_kind_filter_isolates_macros():
     db, d = await _open_db()
     try:
-        await db.insert_evolution_candidate(
+        await db.skills.insert_evolution_candidate(
             "macro", "do the thing", "OPEN(app) → CLICK(x)", domain="command",
         )
-        await db.insert_evolution_candidate(
+        await db.skills.insert_evolution_candidate(
             "example", "scroll down", "SCROLL down", domain="command",
         )
-        macros = await db.get_evolution_candidates(status="proposed", kind="macro")
+        macros = await db.skills.get_evolution_candidates(status="proposed", kind="macro")
         assert [c["kind"] for c in macros] == ["macro"]
         # kind=None preserves the legacy "all kinds" behavior
-        every = await db.get_evolution_candidates(status="proposed")
+        every = await db.skills.get_evolution_candidates(status="proposed")
         assert {c["kind"] for c in every} == {"macro", "example"}
     finally:
         await db.close()
@@ -111,7 +111,7 @@ async def test_runs_reader_returns_only_successful_multistep_ordered():
         await _add_run(db, goal="trivial", success=True,
                        steps=[("CLICK", "target=z")])  # 1 step → excluded
 
-        runs = await db.get_successful_runs_with_steps(min_steps=2)
+        runs = await db.runs.get_successful_runs_with_steps(min_steps=2)
         assert [r["id"] for r in runs] == [good], "only the successful 2+ step run"
         steps = runs[0]["steps"]
         assert [s["step_num"] for s in steps] == [0, 1, 2], "ordered by step_num"
@@ -126,8 +126,8 @@ async def test_runs_reader_min_steps_threshold():
     try:
         await _add_run(db, goal="two step", success=True,
                        steps=[("OPEN", "a"), ("CLICK", "b")])
-        assert len(await db.get_successful_runs_with_steps(min_steps=2)) == 1
-        assert len(await db.get_successful_runs_with_steps(min_steps=3)) == 0
+        assert len(await db.runs.get_successful_runs_with_steps(min_steps=2)) == 1
+        assert len(await db.runs.get_successful_runs_with_steps(min_steps=3)) == 0
     finally:
         await db.close()
         d.cleanup()
@@ -139,8 +139,8 @@ async def test_runs_reader_since_filter():
         await _add_run(db, goal="recent", success=True,
                        steps=[("OPEN", "a"), ("CLICK", "b")])
         # a future watermark excludes everything already recorded
-        assert await db.get_successful_runs_with_steps(since=time.time() + 1000) == []
-        assert len(await db.get_successful_runs_with_steps(since=0.0)) == 1
+        assert await db.runs.get_successful_runs_with_steps(since=time.time() + 1000) == []
+        assert len(await db.runs.get_successful_runs_with_steps(since=0.0)) == 1
     finally:
         await db.close()
         d.cleanup()
@@ -189,7 +189,7 @@ async def test_detects_recurring_plan_R1_1_R1_2():
                        steps=[("OPEN", "vscode"), ("CLICK", "panel"), ("TYPE", "ok")])
         staged = await _det(db).run_once()
         assert len(staged) == 1
-        rows = await db.get_evolution_candidates(status="proposed", kind="macro")
+        rows = await db.skills.get_evolution_candidates(status="proposed", kind="macro")
         assert len(rows) == 1
         assert rows[0]["action_or_wrong"] == "OPEN(STR) → CLICK(STR) → TYPE(STR)"
         refs = json.loads(rows[0]["source_refs"])
@@ -215,7 +215,7 @@ async def test_skips_when_referenced_tool_missing_R1_3():
         await _add_n(db, 3, "uses unknown verb",
                      [("OPEN", "a"), ("FROBNICATE", "b")])
         assert await _det(db).run_once() == [], "a missing verb must block staging"
-        assert await db.get_evolution_candidates(status="proposed", kind="macro") == []
+        assert await db.skills.get_evolution_candidates(status="proposed", kind="macro") == []
     finally:
         await db.close()
         d.cleanup()
@@ -229,7 +229,7 @@ async def test_restage_is_idempotent_R1_4():
         first = await det.run_once()
         second = await det.run_once()
         assert first == second, "re-detecting the same macro returns the same row"
-        assert len(await db.get_evolution_candidates(status="proposed", kind="macro")) == 1
+        assert len(await db.skills.get_evolution_candidates(status="proposed", kind="macro")) == 1
     finally:
         await db.close()
         d.cleanup()
@@ -241,7 +241,7 @@ async def test_flare_skips_run_R1_5():
         await _add_n(db, 4, "flare day", [("OPEN", "a"), ("CLICK", "b")])
         det = _det(db, twin_state=_FakeTwin(pain_day_active=True))
         assert await det.run_once() == []
-        assert await db.get_evolution_candidates(status="proposed", kind="macro") == []
+        assert await db.skills.get_evolution_candidates(status="proposed", kind="macro") == []
         # same data, no flare → detected
         ok = _det(db, twin_state=_FakeTwin(pain_day_active=False))
         assert len(await ok.run_once()) == 1
@@ -286,8 +286,8 @@ class _FakeExec:
 async def _stage_and_promote(db, detector):
     staged = await detector.run_once()
     assert len(staged) == 1
-    await db.set_evolution_candidate_status(staged[0], "promoted")
-    rows = await db.get_evolution_candidates(status="promoted", kind="macro")
+    await db.skills.set_evolution_candidate_status(staged[0], "promoted")
+    rows = await db.skills.get_evolution_candidates(status="promoted", kind="macro")
     return rows[0]
 
 
@@ -483,7 +483,7 @@ async def test_handle_macro_save_promotes_and_routes():
         res = await coord._workflow.handle_macro_save("morning setup")
         assert res == {"status": "ok", "action": "MACRO_SAVE", "name": "morning setup"}
         # persisted: promoted, renamed, survives a fresh load
-        row = await db.get_evolution_candidate(cid)
+        row = await db.skills.get_evolution_candidate(cid)
         assert row["status"] == "promoted" and row["text"] == "morning setup"
         fresh = MacroStore(known_verbs=set(_VERBS))
         assert await fresh.load_promoted(db) == 1

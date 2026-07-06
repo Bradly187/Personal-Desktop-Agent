@@ -158,7 +158,7 @@ class MacroDetector:
             log.debug("MacroDetector: flare active — skipping run.")
             return []
         since = max(0.0, time.time() - self._lookback_s)
-        runs = await self._db.get_successful_runs_with_steps(
+        runs = await self._db.runs.get_successful_runs_with_steps(
             since=since, min_steps=self._min_steps, limit=self._run_limit,
         )
         if not runs:
@@ -269,7 +269,7 @@ class MacroDetector:
             "occurrences": len(run_ids),
             "steps": descriptors,
         })
-        return await self._db.insert_evolution_candidate(
+        return await self._db.skills.insert_evolution_candidate(
             "macro", goal or signature, signature,
             domain=domain, reason="recurring_plan", source_refs=source_refs,
         )

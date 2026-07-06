@@ -64,17 +64,17 @@ class TestPipelineFailureUsageGate:
     async def test_single_pipeline_failure_not_injected(self, db):
         """One transient execution failure must never reach a prompt."""
         cmd = _Cmd("open chrome")
-        await db.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
-        results = await db.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
+        await db.memory.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
+        results = await db.memory.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
         assert results == []
 
     @pytest.mark.asyncio
     async def test_repeated_pipeline_failure_injected(self, db):
         """The same pair failing twice is real evidence — inject it."""
         cmd = _Cmd("open chrome")
-        await db.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
-        await db.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
-        results = await db.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
+        await db.memory.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
+        results = await db.memory.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
         assert len(results) == 1
         assert results[0]["wrong_action"] == "OPEN Chrome"
 
@@ -82,8 +82,8 @@ class TestPipelineFailureUsageGate:
     async def test_user_correction_injected_immediately(self, db):
         """A user correction is direct evidence — no usage_count gate."""
         cmd = _Cmd("scroll down")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "user_correction")
-        results = await db.get_few_shot_counterexamples(_Cmd("scroll down"), n=3)
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "user_correction")
+        results = await db.memory.get_few_shot_counterexamples(_Cmd("scroll down"), n=3)
         assert len(results) == 1
         assert results[0]["wrong_action"] == "CLICK footer"
 
@@ -94,19 +94,19 @@ class TestContradictionGuard:
         """A pair that exists as a positive few-shot example must not also
         appear as a counterexample in the same prompt."""
         cmd = _Cmd("open chrome")
-        await db.upsert_few_shot_example(cmd, "OPEN Chrome", "command")
-        await db.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
-        await db.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
-        results = await db.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
+        await db.memory.upsert_few_shot_example(cmd, "OPEN Chrome", "command")
+        await db.memory.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
+        results = await db.memory.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
         assert results == []
 
     @pytest.mark.asyncio
     async def test_different_action_still_injected(self, db):
         """The positive example only suppresses the SAME (text, action) pair."""
         cmd = _Cmd("open chrome")
-        await db.upsert_few_shot_example(cmd, "OPEN Chrome", "command")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK chrome icon", "command", "user_correction")
-        results = await db.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
+        await db.memory.upsert_few_shot_example(cmd, "OPEN Chrome", "command")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK chrome icon", "command", "user_correction")
+        results = await db.memory.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
         assert len(results) == 1
         assert results[0]["wrong_action"] == "CLICK chrome icon"
 
@@ -116,8 +116,8 @@ class TestSimilarityFloor:
     async def test_unrelated_counterexample_not_injected(self, db):
         """Zero word overlap (Jaccard fallback) stays out of the prompt."""
         cmd = _Cmd("open chrome")
-        await db.upsert_few_shot_counterexample(cmd, "OPEN Firefox", "command", "user_correction")
-        results = await db.get_few_shot_counterexamples(_Cmd("scroll down"), n=3)
+        await db.memory.upsert_few_shot_counterexample(cmd, "OPEN Firefox", "command", "user_correction")
+        results = await db.memory.get_few_shot_counterexamples(_Cmd("scroll down"), n=3)
         assert results == []
 
 
@@ -125,8 +125,8 @@ class TestReasonUpgrade:
     @pytest.mark.asyncio
     async def test_reason_upgrades_to_user_correction(self, db):
         cmd = _Cmd("scroll down")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "pipeline_failure")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "user_correction")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "user_correction")
         async with db._conn.execute(
             "SELECT reason FROM few_shot_counterexamples WHERE text=? AND wrong_action=?",
             ("scroll down", "CLICK footer"),
@@ -137,8 +137,8 @@ class TestReasonUpgrade:
     @pytest.mark.asyncio
     async def test_reason_never_downgrades(self, db):
         cmd = _Cmd("scroll down")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "user_correction")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "user_correction")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK footer", "command", "pipeline_failure")
         async with db._conn.execute(
             "SELECT reason FROM few_shot_counterexamples WHERE text=? AND wrong_action=?",
             ("scroll down", "CLICK footer"),
@@ -155,8 +155,8 @@ class TestSupersession:
     @pytest.mark.asyncio
     async def test_delete_counterexample_removes_row(self, db):
         cmd = _Cmd("open chrome")
-        await db.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
-        await db.delete_few_shot_counterexample("open chrome", "OPEN Chrome")
+        await db.memory.upsert_few_shot_counterexample(cmd, "OPEN Chrome", "command", "pipeline_failure")
+        await db.memory.delete_few_shot_counterexample("open chrome", "OPEN Chrome")
         async with db._conn.execute("SELECT COUNT(*) FROM few_shot_counterexamples") as cur:
             row = await cur.fetchone()
         assert row[0] == 0
@@ -164,13 +164,13 @@ class TestSupersession:
     @pytest.mark.asyncio
     async def test_delete_counterexample_noop_when_absent(self, db):
         # Must not raise.
-        await db.delete_few_shot_counterexample("never seen", "CLICK nothing")
+        await db.memory.delete_few_shot_counterexample("never seen", "CLICK nothing")
 
     @pytest.mark.asyncio
     async def test_delete_positive_example_removes_row(self, db):
         cmd = _Cmd("open chrome")
-        await db.upsert_few_shot_example(cmd, "OPEN Chrome", "command")
-        await db.delete_few_shot_example("open chrome", "OPEN Chrome")
+        await db.memory.upsert_few_shot_example(cmd, "OPEN Chrome", "command")
+        await db.memory.delete_few_shot_example("open chrome", "OPEN Chrome")
         async with db._conn.execute("SELECT COUNT(*) FROM few_shot_examples") as cur:
             row = await cur.fetchone()
         assert row[0] == 0
@@ -189,10 +189,10 @@ class TestSupersession:
         cmd = _Cmd("open chrome")
         await trainer.record_failure(cmd, "OPEN Chrome")
         await trainer.record_failure(cmd, "OPEN Chrome")
-        assert await db.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
+        assert await db.memory.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
 
         await trainer.record_success(cmd, "OPEN Chrome")
-        assert await db.get_few_shot_counterexamples(_Cmd("open chrome"), n=3) == []
+        assert await db.memory.get_few_shot_counterexamples(_Cmd("open chrome"), n=3) == []
 
     @pytest.mark.asyncio
     async def test_record_correction_retires_stale_positive(self, db):
@@ -218,7 +218,7 @@ class TestSupersession:
             row = await cur.fetchone()
         assert row[0] == 0
         # …and the correction's counterexample injects (not suppressed by it).
-        results = await db.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
+        results = await db.memory.get_few_shot_counterexamples(_Cmd("open chrome"), n=3)
         assert any(r["wrong_action"] == "OPEN Chromium" for r in results)
 
 
@@ -256,7 +256,7 @@ def _make_runner(infer):
     )
     agent_db = MagicMock()
     agent_db.available = True
-    agent_db.insert_inference = AsyncMock(return_value=1)
+    agent_db.inferences.insert_inference = AsyncMock(return_value=1)
     runner = InferenceRunner(
         CoordinatorConfig(),
         local=lambda: local, cloud=lambda: None,
@@ -279,7 +279,7 @@ class TestRunLocalCapture:
 
         runner = _make_runner(_infer)
         await runner.run_local(_Cmd("click ok"))
-        kwargs = runner._agent_db_mock.insert_inference.call_args.kwargs
+        kwargs = runner._agent_db_mock.inferences.insert_inference.call_args.kwargs
         assert kwargs["prompt"] == "captured-prompt"
         assert kwargs["tokens_in"] == 11
         assert kwargs["tokens_out"] == 3
@@ -296,7 +296,7 @@ class TestRunLocalCapture:
         set_inference_capture("stale-prompt-from-previous-command", 99, 99)
         runner = _make_runner(_infer)
         await runner.run_local(_Cmd("click ok"))
-        kwargs = runner._agent_db_mock.insert_inference.call_args.kwargs
+        kwargs = runner._agent_db_mock.inferences.insert_inference.call_args.kwargs
         assert kwargs["prompt"] is None
         assert kwargs["tokens_in"] is None
 
@@ -321,7 +321,7 @@ class TestRunLocalCapture:
         )
         by_response = {
             c.kwargs["response"]: c.kwargs["prompt"]
-            for c in runner._agent_db_mock.insert_inference.call_args_list
+            for c in runner._agent_db_mock.inferences.insert_inference.call_args_list
         }
         assert by_response["CLICK slow"] == "prompt::slow"
         assert by_response["CLICK fast"] == "prompt::fast"

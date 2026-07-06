@@ -133,7 +133,7 @@ class ContinuousTrainer:
                 namespace=namespace,
             )
         else:
-            await self._db.upsert_few_shot_example(cmd, action_str, domain, command_id)
+            await self._db.memory.upsert_few_shot_example(cmd, action_str, domain, command_id)
 
         # Success supersedes failure evidence: if this exact (text, action) pair
         # was previously recorded as a counterexample (e.g. a transient execution
@@ -141,7 +141,7 @@ class ContinuousTrainer:
         # right, so retire the counterexample instead of letting it contradict
         # the positive store in future prompts.
         if self._db and self._db.available:
-            await self._db.delete_few_shot_counterexample(cmd.text, action_str)
+            await self._db.memory.delete_few_shot_counterexample(cmd.text, action_str)
 
         # Feed observation into twin state (non-blocking)
         if self._twin:
@@ -151,7 +151,7 @@ class ContinuousTrainer:
         if cmd.source == "gesture":
             gesture = cmd.params.get("gesture", "UNKNOWN")
             lidar_depth = cmd.params.get("lidar_depth_m")
-            await self._db.record_gesture_sample(
+            await self._db.gestures.record_gesture_sample(
                 gesture, cmd.gesture_confidence,
                 lidar_depth_m=lidar_depth,
                 command_id=command_id,
@@ -173,13 +173,13 @@ class ContinuousTrainer:
 
         An execution failure is weak evidence (the mapping may be right and the
         app merely slow), so the counterexample only reaches prompts under the
-        guards in AgentDB.get_few_shot_counterexamples (usage_count >= 2 for
+        guards in AgentDB.memory.get_few_shot_counterexamples (usage_count >= 2 for
         pipeline failures, excluded while the same pair exists as a positive
         example) and is deleted outright if the pair later succeeds
         (record_success). command_id is accepted for call-site symmetry.
         """
         if self._db and self._db.available:
-            await self._db.upsert_few_shot_counterexample(
+            await self._db.memory.upsert_few_shot_counterexample(
                 cmd, action_str, "command", "pipeline_failure", command_id
             )
         if self._twin:
@@ -200,7 +200,7 @@ class ContinuousTrainer:
             return
         new_samples = 0
         for g_name, vel in self._gesture_proc.drain_velocity_samples():
-            await self._db.record_gesture_velocity(g_name, vel, pain_day=pain_day)
+            await self._db.gestures.record_gesture_velocity(g_name, vel, pain_day=pain_day)
             new_samples += 1
 
         if new_samples == 0:
@@ -223,7 +223,7 @@ class ContinuousTrainer:
         domain: str = "command",
     ) -> list[dict]:
         """Return the n best few-shot examples for this command."""
-        return await self._db.get_few_shot_examples(cmd, n=n, domain=domain)
+        return await self._db.memory.get_few_shot_examples(cmd, n=n, domain=domain)
 
     async def get_few_shot_counterexamples(
         self,
@@ -232,20 +232,20 @@ class ContinuousTrainer:
         domain: str = "command",
     ) -> list[dict]:
         """Return up to n counterexamples (wrong actions) for this command."""
-        return await self._db.get_few_shot_counterexamples(cmd, n=n, domain=domain)
+        return await self._db.memory.get_few_shot_counterexamples(cmd, n=n, domain=domain)
 
     async def get_hotwords(self) -> list[str]:
-        return await self._db.get_hotwords()
+        return await self._db.skills.get_hotwords()
 
     def record_gesture_sample(self, gesture: str, confidence: float) -> None:
         """Synchronous wrapper for direct calls from GestureProcessor."""
         fire_and_log(
-            self._db.record_gesture_sample(gesture, confidence),
+            self._db.gestures.record_gesture_sample(gesture, confidence),
             log, "gesture_sample write",
         )
 
     async def get_gesture_floor(self, gesture: str) -> float:
-        return await self._db.get_gesture_floor(gesture)
+        return await self._db.gestures.get_gesture_floor(gesture)
 
     async def load_velocity_calibration(self) -> None:
         """Load persisted velocity floors from DB into GestureProcessor at startup (Gap 3).
@@ -266,7 +266,7 @@ class ContinuousTrainer:
         ]
         calibrated: dict[str, float] = {}
         for gesture in motion_gestures:
-            floor = await self._db.get_gesture_velocity_floor(gesture)
+            floor = await self._db.gestures.get_gesture_velocity_floor(gesture)
             if floor is None:               # no calibration row — keep class default
                 continue
             key = "SWIPE" if "SWIPE" in gesture else "PUSH"
@@ -300,15 +300,15 @@ class ContinuousTrainer:
         Also retires any stale POSITIVE example for (text, wrong_action): the
         user just said that mapping is wrong, so it must neither keep
         reinforcing the model nor suppress this counterexample through the
-        contradiction guard in AgentDB.get_few_shot_counterexamples.
+        contradiction guard in AgentDB.memory.get_few_shot_counterexamples.
         """
-        await self._db.delete_few_shot_example(cmd.text, wrong_action)
-        await self._db.upsert_few_shot_counterexample(
+        await self._db.memory.delete_few_shot_example(cmd.text, wrong_action)
+        await self._db.memory.upsert_few_shot_counterexample(
             cmd, wrong_action, "command", "user_correction", command_id
         )
-        await self._db.upsert_few_shot_example(cmd, correct_action, "command", command_id)
+        await self._db.memory.upsert_few_shot_example(cmd, correct_action, "command", command_id)
         if command_id and command_id > 0:
-            await self._db.mark_command_corrected(command_id, correct_action)
+            await self._db.commands.mark_command_corrected(command_id, correct_action)
         log.info("Correction stored: %r → %s (was %s)", cmd.text, correct_action, wrong_action)
 
     # ---------------------------------------------------------------------- #
@@ -332,10 +332,10 @@ class ContinuousTrainer:
                 snapshot = await self._twin.get_snapshot()
             except Exception as exc:
                 log.warning("ContinuousTrainer: twin snapshot failed: %s", exc)
-        entries = await self._db.get_recent_routing_stats(limit=1000)
+        entries = await self._db.routing.get_recent_routing_stats(limit=1000)
         if entries:
             await self._adapt_gate1_threshold(entries, pain_day_active=snapshot.pain_day_active)
-        await self._db.promote_hotwords(self._hotword_threshold)
+        await self._db.skills.promote_hotwords(self._hotword_threshold)
         await self._update_gesture_calibration(pain_day_active=snapshot.pain_day_active)
         await self._update_gesture_velocity_calibration(pain_day_active=snapshot.pain_day_active)
         await self._adapt_per_domain_slo()
@@ -362,7 +362,7 @@ class ContinuousTrainer:
             return
         try:
             from core.slo import evaluate, BREACH_LATENCY, BREACH_SUCCESS, HEADROOM
-            stats = await self._db.get_inference_stats_by_domain(limit=1000)
+            stats = await self._db.inferences.get_inference_stats_by_domain(limit=1000)
         except Exception as exc:
             log.debug("ContinuousTrainer._adapt_per_domain_slo: stats failed: %s", exc)
             return
@@ -378,7 +378,7 @@ class ContinuousTrainer:
                 log.info("SLO breach: domain=%s verdict=%s p50=%.0fms success=%.2f (budget=%.0fms)",
                          domain, verdict, s.get("p50_latency_ms") or 0,
                          s.get("success_rate") or 0, slo.latency_budget_ms)
-                await self._db.log_adaptation(
+                await self._db.routing.log_adaptation(
                     component=f"slo:{domain}",
                     metric_before=slo.latency_budget_ms,
                     metric_after=s.get("p50_latency_ms") or slo.latency_budget_ms,
@@ -411,7 +411,7 @@ class ContinuousTrainer:
     async def _adapt_domain_misroutes(self) -> None:
         """E1 — domain misroute analyzer (logged-first, no behaviour change).
 
-        Reads per-domain routed-vs-corrected counts (AgentDB.get_domain_misroutes)
+        Reads per-domain routed-vs-corrected counts (AgentDB.routing.get_domain_misroutes)
         and LOGS domains whose user-correction rate is high enough to be a routing
         smell — surfaced via `self.misroute_status` for the operator/UI and the
         `adaptation_log` (component=`misroute:<domain>`). It does NOT change the
@@ -421,7 +421,7 @@ class ContinuousTrainer:
         domain), so we observe before we act.
         """
         try:
-            rows = await self._db.get_domain_misroutes(limit=1000)
+            rows = await self._db.routing.get_domain_misroutes(limit=1000)
         except Exception as exc:
             log.debug("ContinuousTrainer._adapt_domain_misroutes failed: %s", exc)
             return
@@ -436,7 +436,7 @@ class ContinuousTrainer:
             if rate >= self._MISROUTE_RATE_FLAG:
                 log.info("Domain misroute smell: domain=%s rate=%.2f (%d/%d corrected)",
                          domain, rate, r.get("corrected") or 0, routed)
-                await self._db.log_adaptation(
+                await self._db.routing.log_adaptation(
                     component=f"misroute:{domain}",
                     metric_before=float(routed),
                     metric_after=float(r.get("corrected") or 0),
@@ -470,7 +470,7 @@ class ContinuousTrainer:
         import re
         from collections import Counter
         try:
-            texts_by_domain = await self._db.get_few_shot_texts_by_domain()
+            texts_by_domain = await self._db.memory.get_few_shot_texts_by_domain()
         except Exception as exc:
             log.debug("ContinuousTrainer._learn_domain_overlay: fetch failed: %s", exc)
             return
@@ -495,10 +495,10 @@ class ContinuousTrainer:
         # last learn pass; mark that pass rolled-back so it can't re-trigger.
         rolled_back = set()
         for d, rate in self.misroute_status.items():
-            prev = await self._db.get_recent_adaptation_log(f"vocab:{d}")
+            prev = await self._db.routing.get_recent_adaptation_log(f"vocab:{d}")
             if prev and rate > (prev[0].get("metric_after") or 0.0) + self._VOCAB_ROLLBACK_DELTA:
-                await self._db.clear_domain_keyword_overlay(d)
-                await self._db.mark_adaptation_rolled_back(prev[0]["id"])
+                await self._db.routing.clear_domain_keyword_overlay(d)
+                await self._db.routing.mark_adaptation_rolled_back(prev[0]["id"])
                 rolled_back.add(d)
                 log.info("Domain overlay rollback: %s misroute rate rose to %.2f", d, rate)
 
@@ -512,10 +512,10 @@ class ContinuousTrainer:
                     break
                 if df < self._VOCAB_MIN_DF or len(owner.get(w, ())) != 1:
                     continue
-                await self._db.upsert_domain_keyword_weight(d, w, min(5.0, df * 0.5))
+                await self._db.routing.upsert_domain_keyword_weight(d, w, min(5.0, df * 0.5))
                 learned += 1
             if learned:
-                await self._db.log_adaptation(
+                await self._db.routing.log_adaptation(
                     component=f"vocab:{d}",
                     metric_before=float(learned),
                     metric_after=float(self.misroute_status.get(d, 0.0)),
@@ -523,7 +523,7 @@ class ContinuousTrainer:
                 )
 
         try:
-            overlay = await self._db.get_domain_keyword_weights()
+            overlay = await self._db.routing.get_domain_keyword_weights()
             DomainClassifier.register_keyword_overlay(overlay)
         except Exception as exc:
             log.debug("ContinuousTrainer._learn_domain_overlay: register failed: %s", exc)
@@ -565,7 +565,7 @@ class ContinuousTrainer:
         # latched off for the life of the DB (audit 2026-06-09).
         try:
             if self._db and self._db.available:
-                history = await self._db.get_recent_adaptation_log("gate1", limit=3)
+                history = await self._db.routing.get_recent_adaptation_log("gate1", limit=3)
                 rates = [h.get("cloud_rate") for h in history]
                 if (len(history) >= 3
                         and all(r is not None for r in rates[:3])
@@ -581,14 +581,14 @@ class ContinuousTrainer:
                         # Persist: without this, startup restores the latest
                         # settings_versions row — the loosened value we just
                         # rejected — and the rollback evaporates on restart.
-                        await self._db.log_settings_change(
+                        await self._db.profile.log_settings_change(
                             component="coordinator",
                             key="whisper_logprob_min",
                             old_value=rolled_from,
                             new_value=self._config.whisper_logprob_min,
                             changed_by="continuous_trainer_rollback",
                         )
-                    await self._db.mark_adaptation_rolled_back(history[0]["id"])
+                    await self._db.routing.mark_adaptation_rolled_back(history[0]["id"])
                     return
         except Exception as exc:
             log.debug("Gate 1 rollback check skipped: %s", exc)
@@ -607,14 +607,14 @@ class ContinuousTrainer:
             )
             try:
                 if self._db and self._db.available:
-                    await self._db.log_adaptation(
+                    await self._db.routing.log_adaptation(
                         component="gate1",
                         metric_before=old,
                         metric_after=self._config.whisper_logprob_min,
                         cloud_rate=cloud_rate,
                         failure_rate=failure_rate,
                     )
-                    await self._db.log_settings_change(
+                    await self._db.profile.log_settings_change(
                         component="coordinator",
                         key="whisper_logprob_min",
                         old_value=old,
@@ -628,7 +628,7 @@ class ContinuousTrainer:
         """Requirement 14.5 — set gesture floor to p10(observed) - 0.05."""
         gestures = ["POINT", "PINCH", "OPEN_PALM", "FIST"]
         for gesture in gestures:
-            samples = await self._db.get_recent_gesture_samples(gesture, limit=500)
+            samples = await self._db.gestures.get_recent_gesture_samples(gesture, limit=500)
             if len(samples) < self._gesture_min:
                 continue
             samples_sorted = sorted(samples)
@@ -637,8 +637,8 @@ class ContinuousTrainer:
             floor = max(0.0, p10 - 0.05)
             if pain_day_active:
                 floor = max(0.0, floor - 0.05)  # additional reduction on pain days
-            old_floor = await self._db.get_gesture_floor(gesture)
-            await self._db.update_gesture_calibration(
+            old_floor = await self._db.gestures.get_gesture_floor(gesture)
+            await self._db.gestures.update_gesture_calibration(
                 gesture, floor, len(samples), p10
             )
             if abs(floor - old_floor) > 0.001:
@@ -673,17 +673,17 @@ class ContinuousTrainer:
 
         calibrated: dict[str, float] = {}
         for gesture in motion_gestures:
-            samples = await self._db.get_recent_gesture_velocities(gesture, limit=500)
+            samples = await self._db.gestures.get_recent_gesture_velocities(gesture, limit=500)
             if len(samples) < self._gesture_min:
                 continue
             samples_sorted = sorted(samples)
             p10_idx = max(0, int(len(samples_sorted) * 0.10) - 1)
             p10 = samples_sorted[p10_idx]
             floor = max(0.1, p10)              # always at least 0.1 coords/s
-            old_floor = await self._db.get_gesture_velocity_floor(gesture)
+            old_floor = await self._db.gestures.get_gesture_velocity_floor(gesture)
             if old_floor is None:              # first calibration for this gesture
                 old_floor = floor
-            await self._db.update_gesture_velocity_calibration(
+            await self._db.gestures.update_gesture_velocity_calibration(
                 gesture, floor, len(samples), p10
             )
             # Group swipes and push/pull under canonical keys for GestureProcessor

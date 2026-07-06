@@ -117,13 +117,13 @@ async def test_r4_1_journals_mode_delegate():
     agent = _agent()
     db = MagicMock()
     db.available = True
-    db.insert_workflow = AsyncMock(return_value=1)
+    db.workflows.insert_workflow = AsyncMock(return_value=1)
     agent._agent_db = db
     agent._router.infer = AsyncMock(side_effect=[_Result("[READ_FILE a]"), _Result("ans")])
     agent._execute_step = AsyncMock(return_value="data")
     await agent._delegate_investigate("q", depth=1)
-    db.insert_workflow.assert_awaited()
-    assert db.insert_workflow.await_args.kwargs["mode"] == "delegate"
+    db.workflows.insert_workflow.assert_awaited()
+    assert db.workflows.insert_workflow.await_args.kwargs["mode"] == "delegate"
 
 
 @pytest.mark.asyncio

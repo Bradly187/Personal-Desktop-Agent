@@ -23,13 +23,13 @@ async def _open_db():
 async def test_insert_and_query_episodic():
     db, d = await _open_db()
     try:
-        rid = await db.insert_episodic_memory(
+        rid = await db.memory.insert_episodic_memory(
             "recovery", "fix the failing parser test",
             "Ran pytest, the parser test failed on a None guard; added the guard and it passed.",
             domain="code",
         )
         assert rid and rid > 0
-        hits = await db.query_episodic_memory("parser test failing", n=5)
+        hits = await db.memory.query_episodic_memory("parser test failing", n=5)
         assert hits, "expected to recall the note via word overlap"
         assert hits[0]["goal"] == "fix the failing parser test"
         assert hits[0]["kind"] == "recovery"
@@ -42,23 +42,22 @@ async def test_insert_and_query_episodic():
 async def test_query_filters_kind_domain_painday():
     db, d = await _open_db()
     try:
-        await db.insert_episodic_memory(
+        await db.memory.insert_episodic_memory(
             "recovery", "deploy goal", "deployed the service after a retry",
             domain="code", pain_day_active=True, pain_day_score=0.7,
         )
-        await db.insert_episodic_memory(
+        await db.memory.insert_episodic_memory(
             "note", "deploy goal note", "a plain note about deploying",
             domain="general", pain_day_active=False,
         )
-        # kind filter
-        only_recovery = await db.query_episodic_memory("deploy", n=10, kind="recovery")
+        only_recovery = await db.memory.query_episodic_memory("deploy", n=10, kind="recovery")
         assert all(h["kind"] == "recovery" for h in only_recovery)
         assert only_recovery
         # domain filter
-        only_code = await db.query_episodic_memory("deploy", n=10, domain="code")
+        only_code = await db.memory.query_episodic_memory("deploy", n=10, domain="code")
         assert all(h["domain"] == "code" for h in only_code)
         # pain-day filter
-        flare = await db.query_episodic_memory("deploy", n=10, pain_day=True)
+        flare = await db.memory.query_episodic_memory("deploy", n=10, pain_day=True)
         assert flare and all(h["pain_day_active"] for h in flare)
     finally:
         await db.close()
@@ -68,9 +67,9 @@ async def test_query_filters_kind_domain_painday():
 async def test_touch_bumps_usage():
     db, d = await _open_db()
     try:
-        rid = await db.insert_episodic_memory("note", "g", "alpha beta gamma delta")
-        await db.touch_episodic_memory(rid)
-        await db.touch_episodic_memory(rid)
+        rid = await db.memory.insert_episodic_memory("note", "g", "alpha beta gamma delta")
+        await db.memory.touch_episodic_memory(rid)
+        await db.memory.touch_episodic_memory(rid)
         async with db._conn.execute(
             "SELECT usage_count, last_recalled_ts FROM episodic_memory WHERE id=?", (rid,)
         ) as cur:
@@ -86,8 +85,8 @@ async def test_prune_keeps_cap():
     db, d = await _open_db()
     try:
         for i in range(10):
-            await db.insert_episodic_memory("note", f"goal {i}", f"summary token{i} shared")
-        deleted = await db.prune_episodic_memory(cap=4)
+            await db.memory.insert_episodic_memory("note", f"goal {i}", f"summary token{i} shared")
+        deleted = await db.runs.prune_episodic_memory(cap=4)
         assert deleted == 6
         async with db._conn.execute("SELECT COUNT(*) FROM episodic_memory") as cur:
             assert (await cur.fetchone())[0] == 4

@@ -82,16 +82,21 @@ class MemoryManager:
         agent_db: "AgentDB",
         semantic_memory: Optional["SemanticMemory"] = None,
         twin_state: Optional["BehavioralTwinState"] = None,
+        graph_memory: Optional[Any] = None,
     ) -> None:
         self._db = agent_db
         self._semantic = semantic_memory
         self._twin = twin_state
+        self._graph = graph_memory
 
     def set_twin_state(self, twin: "BehavioralTwinState") -> None:
         self._twin = twin
 
     def set_semantic_memory(self, semantic: "SemanticMemory") -> None:
         self._semantic = semantic
+
+    def set_graph_memory(self, graph_memory: Any) -> None:
+        self._graph = graph_memory
 
     # ── Hot-path pain-day accessors (zero-copy, no await) ─────────────────────
 
@@ -135,7 +140,7 @@ class MemoryManager:
                 return await self._semantic.query_similar(query, n)
             if self._db is not None and self._db.available:
                 # Minimal Command-like stub for the DB query. NB: the scorer in
-                # AgentDB.get_few_shot_examples reads only `.text`; the remaining
+                # AgentDB.memory.get_few_shot_examples reads only `.text`; the remaining
                 # fields are inert padding to satisfy attribute access and do not
                 # influence ranking.
                 class _FakeCmd:
@@ -145,7 +150,7 @@ class MemoryManager:
                     gesture_confidence = 1.0
                     session_context = []
                     params = {}
-                return await self._db.get_few_shot_examples(
+                return await self._db.memory.get_few_shot_examples(
                     _FakeCmd(), n=n, domain=namespace
                 )
         except Exception as exc:
@@ -176,12 +181,12 @@ class MemoryManager:
         if self._db is None or not self._db.available:
             return []
         try:
-            hits = await self._db.query_episodic_memory(
+            hits = await self._db.memory.query_episodic_memory(
                 query, n=n, kind=kind, domain=domain, pain_day=pain_day
             )
             for h in hits:
                 try:
-                    await self._db.touch_episodic_memory(h["id"])
+                    await self._db.memory.touch_episodic_memory(h["id"])
                 except Exception:
                     pass
             return hits
@@ -207,7 +212,7 @@ class MemoryManager:
         if self._db is None:
             return None
         try:
-            return await self._db.insert_episodic_memory(
+            return await self._db.memory.insert_episodic_memory(
                 kind, goal, summary,
                 domain=domain,
                 source_run_id=source_run_id,
@@ -218,6 +223,26 @@ class MemoryManager:
         except Exception as exc:
             log.warning("MemoryManager.write_memory_note(%r) failed: %s", goal, exc)
             return None
+
+    async def write_graph_fact(
+        self,
+        source_name: str,
+        source_type: str,
+        relation: str,
+        target_name: str,
+        target_type: str,
+        weight: float = 1.0,
+    ) -> None:
+        """Persist a factual relationship in the Knowledge Graph."""
+        if self._graph is None:
+            return
+        await self._graph.add_fact(source_name, source_type, relation, target_name, target_type, weight)
+
+    def query_graph(self, node_name: str, depth: int = 1) -> list[dict]:
+        """Find immediate neighbors of a node by name in the Knowledge Graph."""
+        if self._graph is None:
+            return []
+        return self._graph.get_neighbors(node_name, depth)
 
     # ── Async writes ──────────────────────────────────────────────────────────
 
@@ -255,11 +280,11 @@ class MemoryManager:
         """Route a validated write to the appropriate AgentDB method."""
         if key == "few_shot_example":
             cmd, action_str, domain, command_id = value
-            await self._db.upsert_few_shot_example(cmd, action_str, domain, command_id)
+            await self._db.memory.upsert_few_shot_example(cmd, action_str, domain, command_id)
 
         elif key == "gesture_sample":
             gesture, conf, lidar_depth, command_id = value
-            await self._db.record_gesture_sample(
+            await self._db.gestures.record_gesture_sample(
                 gesture, conf,
                 lidar_depth_m=lidar_depth,
                 command_id=command_id,
@@ -267,34 +292,34 @@ class MemoryManager:
 
         elif key == "gesture_velocity":
             name, vel, pain_day = value
-            await self._db.record_gesture_velocity(name, vel, pain_day=pain_day)
+            await self._db.gestures.record_gesture_velocity(name, vel, pain_day=pain_day)
 
         elif key == "inference_record":
             # value is a dict matching insert_inference kwargs
-            await self._db.insert_inference(**value)
+            await self._db.inferences.insert_inference(**value)
 
         elif key == "agent_run":
             # value is a dict matching insert_agent_run kwargs
-            await self._db.insert_agent_run(**value)
+            await self._db.runs.insert_agent_run(**value)
 
         elif key == "agent_step":
             # value is a dict matching insert_agent_step kwargs
-            await self._db.insert_agent_step(**value)
+            await self._db.runs.insert_agent_step(**value)
 
         elif key == "sensor_telemetry":
             # value is a dict matching insert_sensor_telemetry kwargs
             # (session_id, ts, + optional per-sensor columns)
-            await self._db.insert_sensor_telemetry(**value)
+            await self._db.telemetry.insert_sensor_telemetry(**value)
 
         elif key == "voice_profile":
-            # value is a single dict (NOT **kwargs) — see AgentDB.upsert_voice_profile
-            await self._db.upsert_voice_profile(value)
+            # value is a single dict (NOT **kwargs) — see AgentDB.voice.upsert_voice_profile
+            await self._db.voice.upsert_voice_profile(value)
 
         elif key == "pain_day_score":
             # value is a dict: {session_id, score, active, fail_ratio,
             # clarify_ratio, [gesture_conf_delta], [cmd_rate_delta]}
             v = value
-            await self._db.log_pain_day(
+            await self._db.profile.log_pain_day(
                 session_id=v["session_id"],
                 score=v["score"],
                 active=v["active"],
@@ -310,7 +335,7 @@ class MemoryManager:
 
         elif key == "command_outcome":
             # Intentional no-op: commands are inserted by HybridCoordinator via
-            # AgentDB.insert_command (which needs the returned command_id).
+            # AgentDB.commands.insert_command (which needs the returned command_id).
             # Listed in _VALID_KEYS so a stray write validates rather than
             # erroring; it must not double-insert here.
             pass

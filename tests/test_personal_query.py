@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from inference.dev_agent import DevAgent, AgentStep
-from core.hybrid_coordinator import _is_system_control_voice
+from core.hybrid_coordinator import HybridCoordinator
+from core.voice_system_control import _is_system_control_voice
 from core.voice_system_control import VoiceSystemControl
 
 

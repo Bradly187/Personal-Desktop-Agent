@@ -54,6 +54,7 @@ _DASHBOARD_TOPICS = {
     # Alerting + autonomous-action topics surfaced in the Activity feed.
     "metric.threshold_crossed", "slo.breached",
     "voice.drift", "step.failed", "replan.exhausted", "email.arrived",
+    "file.written",
 }
 
 # Topics surfaced in the Alerts panel (durable read from event_log).
@@ -592,7 +593,14 @@ class ChatServer:
     async def _api_metrics(self, request: web.Request) -> web.Response:
         try:
             from monitoring.metrics import get_metrics
-            return web.json_response(get_metrics().get_snapshot())
+            data = get_metrics().get_snapshot()
+            if request.query.get("series") == "1":
+                from monitoring.trends import session_trends
+                path = self._db_path()
+                if path:
+                    trends = await asyncio.to_thread(session_trends, path, 30)
+                    data["series"] = trends.get("sessions", [])
+            return web.json_response(data)
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"error": str(exc)}, status=500)
 
@@ -1122,4 +1130,7 @@ class ChatServer:
         if topic == "email.arrived":
             return {"type": "dash_event", "kind": "email", "ts": ts, "severity": "info",
                     "text": f"email: {str(p.get('subject', ''))[:80]}"}
+        if topic == "file.written":
+            return {"type": "dash_event", "kind": "file_written", "ts": ts, "severity": "info",
+                    "path": p.get("path"), "content": p.get("content")}
         return None

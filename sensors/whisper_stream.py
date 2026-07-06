@@ -276,7 +276,7 @@ class WhisperStream:
         ws.set_fusion_engine(fusion)
         bridge.set_whisper_stream(ws)   # routes audio_stream messages here
 
-        # After ContinuousTrainer.get_hotwords():
+        # After ContinuousTrainer.skills.get_hotwords():
         ws.update_hotwords(["scroll", "click", ...])
 
         # On shutdown:
@@ -1086,7 +1086,7 @@ class WhisperStream:
                     log.debug("WhisperStream: lecture mode — storing: %r", text)
                     import asyncio as _asyncio
                     _fut = _asyncio.run_coroutine_threadsafe(
-                        self._agent_db.insert_ambient_transcript(
+                        self._agent_db.voice.insert_ambient_transcript(
                             session_id=self._session_id,
                             text=text,
                             logprob=avg_logprob,

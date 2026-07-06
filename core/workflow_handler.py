@@ -286,7 +286,7 @@ class WorkflowHandler:
         from core.macro_store import parse_macro_save
         # Deferred import: avoids a circular import with core.hybrid_coordinator,
         # which defines this predicate and imports WorkflowHandler at module level.
-        from core.hybrid_coordinator import _is_system_control_voice
+        from core.voice_system_control import _is_system_control_voice
 
         name = parse_macro_save(cmd.text)
         if name is not None:
@@ -310,7 +310,7 @@ class WorkflowHandler:
         row = None
         agent_db = self._agent_db()
         if agent_db and getattr(agent_db, "available", False):
-            row = await agent_db.get_evolution_candidate(pending["id"])
+            row = await agent_db.skills.get_evolution_candidate(pending["id"])
         if not row:
             self._pending_macro = None
             await self._tts_speak("Sorry, I couldn't find that suggestion anymore.")
@@ -326,7 +326,7 @@ class WorkflowHandler:
             refs = {}
         refs["name"] = name
         refs["keywords"] = [name.lower()]
-        await agent_db.promote_macro_candidate(row["id"], name, _json.dumps(refs))
+        await agent_db.skills.promote_macro_candidate(row["id"], name, _json.dumps(refs))
         self._pending_macro = None
         await self._tts_speak(f"Saved. Say {name} to run it.")
         return {"status": "ok", "action": "MACRO_SAVE", "name": name}

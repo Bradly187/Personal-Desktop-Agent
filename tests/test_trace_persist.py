@@ -42,7 +42,7 @@ async def test_persist_and_read_back(tmp_path):
     n = await t.persist_trace(tid, db, session_id=7)
     assert n == 3
 
-    spans = await db.get_trace_spans(tid)
+    spans = await db.logs.get_trace_spans(tid)
     assert [s["stage"] for s in spans] == ["enqueue", "route_decision", "execute"]
     assert spans[0]["seq"] == 0 and spans[2]["seq"] == 2
     # attrs round-trip as JSON
@@ -58,7 +58,7 @@ async def test_disabled_tracer_persists_nothing(tmp_path):
     tid = "deadbeef"
     # record_span is a no-op when disabled, so there are no spans to write.
     assert await t.persist_trace(tid, db, session_id=1) == 0
-    assert await db.get_trace_spans(tid) == []
+    assert await db.logs.get_trace_spans(tid) == []
 
 
 async def test_unknown_trace_and_no_db_are_safe(tmp_path):

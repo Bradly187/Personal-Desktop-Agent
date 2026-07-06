@@ -58,7 +58,7 @@ async def test_publish_writes_to_event_log(tmp_path):
     )
     assert row_id is not None and row_id > 0
     # Read back via poll_events
-    events = await db.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=0)
+    events = await db.events.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=0)
     assert len(events) == 1
     assert events[0]["topic"] == TOPIC_COMMAND_EXECUTED
     assert events[0]["source"] == "coordinator"
@@ -75,10 +75,10 @@ async def test_publish_multiple_topics_filtered_by_poll(tmp_path):
     await bus.publish(TOPIC_GATE_DECIDED, {"b": 2}, source="c")
     await bus.publish(TOPIC_COMMAND_EXECUTED, {"a": 3}, source="c")
 
-    cmd_events = await db.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=0)
+    cmd_events = await db.events.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=0)
     assert len(cmd_events) == 2
 
-    gate_events = await db.poll_events(TOPIC_GATE_DECIDED, last_event_id=0)
+    gate_events = await db.events.poll_events(TOPIC_GATE_DECIDED, last_event_id=0)
     assert len(gate_events) == 1
 
     await db.close()
@@ -90,11 +90,11 @@ async def test_poll_events_respects_cursor(tmp_path):
     id2 = await bus.publish(TOPIC_COMMAND_EXECUTED, {"n": 2}, source="c")
     id3 = await bus.publish(TOPIC_COMMAND_EXECUTED, {"n": 3}, source="c")
 
-    all_events = await db.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=0)
+    all_events = await db.events.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=0)
     assert len(all_events) == 3
 
     # Cursor at id1 → only see id2 and id3
-    after_first = await db.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=id1)
+    after_first = await db.events.poll_events(TOPIC_COMMAND_EXECUTED, last_event_id=id1)
     assert len(after_first) == 2
     assert after_first[0]["id"] == id2
 
@@ -186,7 +186,7 @@ async def test_publish_delivers_in_process_even_on_db_failure(tmp_path):
     received = []
 
     # Sabotage the DB method
-    db.insert_event = AsyncMock(side_effect=RuntimeError("db down"))
+    db.events.insert_event = AsyncMock(side_effect=RuntimeError("db down"))
 
     async def consume():
         async for event in bus.subscribe("resilient", "command.%"):
@@ -211,11 +211,11 @@ async def test_publish_delivers_in_process_even_on_db_failure(tmp_path):
 
 async def test_upsert_and_update_consumer_cursor(tmp_path):
     _, db = await _make_bus(tmp_path)
-    await db.upsert_event_consumer("test_consumer", "command.%")
-    await db.update_consumer_cursor("test_consumer", last_event_id=42)
+    await db.events.upsert_event_consumer("test_consumer", "command.%")
+    await db.events.update_consumer_cursor("test_consumer", last_event_id=42)
 
     # Upsert again — should update updated_at but not reset cursor
-    await db.upsert_event_consumer("test_consumer", "command.%")
+    await db.events.upsert_event_consumer("test_consumer", "command.%")
 
     await db.close()  # no assertion needed — confirms no DB errors
 

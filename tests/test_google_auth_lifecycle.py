@@ -20,7 +20,7 @@ import pytest
 from skills import google_setup as gs
 from skills.servers.google_pim_server import _auth_guard, _NotAuthorized, RECONNECT_MSG
 from core.email_watcher import EmailWatcher
-from core.hybrid_coordinator import _is_system_control_voice
+from core.voice_system_control import _is_system_control_voice
 from core.voice_system_control import VoiceSystemControl
 
 _MANIFEST_DIR = Path(__file__).parent.parent / "skills" / "manifests"

@@ -21,9 +21,41 @@
   }
 
   // ── Now: KPI cards (poll /api/metrics) ──────────────────────────────────────
-  function kpi(label, value, sub) {
+  function sparkline(data, color) {
+    if (!data || data.length < 2) return null;
+    const max = Math.max(...data) || 1;
+    const min = Math.min(...data);
+    const range = max - min || 1;
+    const pts = data.map((d, i) => `${(i / (data.length - 1) * 100).toFixed(1)},${(100 - (d - min) / range * 100).toFixed(1)}`).join(" ");
+    
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 -5 100 110");
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.width = "40px";
+    svg.style.height = "16px";
+    svg.style.marginLeft = "8px";
+    
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.setAttribute("points", pts);
+    polyline.setAttribute("fill", "none");
+    polyline.setAttribute("stroke", color);
+    polyline.setAttribute("stroke-width", "8");
+    polyline.setAttribute("stroke-linecap", "round");
+    polyline.setAttribute("stroke-linejoin", "round");
+    
+    svg.appendChild(polyline);
+    return svg;
+  }
+
+  function kpi(label, value, sub, spark = null) {
     const c = el("div", "kpi");
-    c.appendChild(el("div", "kpi-val", value));
+    const v = el("div", "kpi-val", value);
+    if (spark) {
+      v.style.display = "flex";
+      v.style.alignItems = "center";
+      v.appendChild(spark);
+    }
+    c.appendChild(v);
     c.appendChild(el("div", "kpi-label", label));
     if (sub != null) c.appendChild(el("div", "kpi-sub", sub));
     return c;
@@ -32,20 +64,23 @@
     // Command-scoped KPIs prefer the live-session rollup (/api/session-live) so the
     // panel isn't empty after a restart; process-lifetime counters (/api/metrics,
     // reset every start) are the fallback. VRAM/pain-day/EMA stay process-wide.
-    const [m, sess] = await Promise.all([getJSON("/api/metrics"), getJSON("/api/session-live")]);
+    const [m, sess] = await Promise.all([getJSON("/api/metrics?series=1"), getJSON("/api/session-live")]);
     const box = $("kpis");
     if (!m) { box.innerHTML = ""; box.appendChild(el("div", "empty", "metrics endpoint unavailable")); return; }
     const g = m.gauges || {}, c = m.counters || {}, h = (m.histograms || {}).latency_ms || {};
     const live = (sess && sess.total_commands != null) ? sess : null;
     const win = live ? "this session" : "lifetime";
+    const series = m.series || [];
+    const color = "var(--text-dim)";
     box.innerHTML = "";
-    box.appendChild(kpi("commands", String(live ? live.total_commands : (c.commands_total ?? 0)), win));
-    box.appendChild(kpi("success", live ? pct(live.success_rate) : pct(g.success_rate_1m), live ? "session" : "1m"));
-    box.appendChild(kpi("cloud", live ? pct(live.cloud_escalation_rate) : pct(g.cloud_rate_1m), live ? "session" : "1m"));
-    box.appendChild(kpi("latency p50", live ? ms(live.latency_p50_ms) : ms(h.p50), win));
-    box.appendChild(kpi("latency p95", live ? ms(live.latency_p95_ms) : ms(h.p95), win));
+    box.appendChild(kpi("commands", String(live ? live.total_commands : (c.commands_total ?? 0)), win, sparkline(series.map(s => s.total_commands || 0), color)));
+    box.appendChild(kpi("success", live ? pct(live.success_rate) : pct(g.success_rate_1m), live ? "session" : "1m", sparkline(series.map(s => s.success_rate || 0), color)));
+    box.appendChild(kpi("cloud", live ? pct(live.cloud_escalation_rate) : pct(g.cloud_rate_1m), live ? "session" : "1m", sparkline(series.map(s => s.cloud_escalation_rate || 0), color)));
+    box.appendChild(kpi("latency p50", live ? ms(live.latency_p50_ms) : ms(h.p50), win, sparkline(series.map(s => s.latency_p50_ms || 0), color)));
+    box.appendChild(kpi("latency p95", live ? ms(live.latency_p95_ms) : ms(h.p95), win, sparkline(series.map(s => s.latency_p95_ms || 0), color)));
     const pd = g.pain_day_score;
-    const pdc = kpi("pain-day", fixed(pd)); if (pd != null && pd >= 0.6) pdc.classList.add("warn");
+    document.body.classList.toggle("flare-mode", pd != null && pd >= 0.6);
+    const pdc = kpi("pain-day", fixed(pd), undefined, sparkline(series.map(s => s.pain_day_pct || 0), color)); if (pd != null && pd >= 0.6) pdc.classList.add("warn");
     box.appendChild(pdc);
     box.appendChild(kpi("VRAM free", g.vram_free_gb == null ? "—" : fixed(g.vram_free_gb, 1) + " GB"));
     // Accessibility + backpressure KPIs (R5). Absent gauge → "—", never 0.
@@ -167,13 +202,89 @@
       `trace ${tid.slice(0,8)} · ${s.route || "?"} · ${s.gate || "?"} · ${ms(s.latency_ms)} · ` +
       `tokens ${s.tokens_in}/${s.tokens_out}`);
     out.appendChild(head);
-    const tl = el("div", "timeline");
-    const t0 = res.timeline.length ? res.timeline[0].t : 0;
+    
+    if (!res.timeline.length) return;
+    const tl = el("div", "waterfall");
+    tl.style.padding = "6px 0";
+    
+    const t0 = res.timeline[0].t;
+    let tEnd = t0;
     for (const e of res.timeline) {
-      const r = el("div", "tl-row tl-" + e.kind);
-      r.appendChild(el("span", "tl-rel", "+" + Math.round((e.t - t0) * 1000) + "ms"));
-      r.appendChild(el("span", "tl-kind", e.kind));
-      r.appendChild(el("span", "tl-label", e.label || ""));
+      const dur = e.detail?.dur_ms || e.detail?.latency_ms || 0;
+      tEnd = Math.max(tEnd, e.t + dur / 1000);
+    }
+    const totalMs = Math.max(1, (tEnd - t0) * 1000);
+    
+    for (const e of res.timeline) {
+      const dur = e.detail?.dur_ms || e.detail?.latency_ms || 0;
+      const relMs = (e.t - t0) * 1000;
+      
+      const r = el("div", "wf-row tl-" + e.kind);
+      r.style.cursor = "pointer";
+      r.style.padding = "4px 14px";
+      r.style.borderBottom = "1px solid rgba(255,255,255,0.03)";
+      r.style.font = "12px/1.4 var(--mono)";
+      r.style.display = "flex";
+      r.style.flexDirection = "column";
+      
+      const header = el("div", "wf-header");
+      header.style.display = "flex";
+      header.style.gap = "10px";
+      header.style.alignItems = "center";
+      
+      const leftW = Math.max(0, relMs / totalMs * 100);
+      const barW = Math.max(0.5, dur / totalMs * 100);
+      
+      const barContainer = el("div", "wf-bar-wrap");
+      barContainer.style.flex = "1";
+      barContainer.style.height = "14px";
+      barContainer.style.position = "relative";
+      barContainer.style.background = "rgba(255,255,255,0.05)";
+      barContainer.style.borderRadius = "4px";
+      
+      const bar = el("div", "wf-bar");
+      bar.style.position = "absolute";
+      bar.style.left = leftW + "%";
+      bar.style.width = barW + "%";
+      bar.style.height = "100%";
+      bar.style.borderRadius = "4px";
+      bar.style.background = e.kind === "span" ? "var(--accent)" : 
+                             e.kind === "inference" ? "var(--run)" : 
+                             e.kind === "audit" ? "var(--fail)" : "var(--text-dim)";
+                             
+      barContainer.appendChild(bar);
+      
+      const lbl = el("div", "wf-lbl");
+      lbl.style.minWidth = "140px";
+      let lblText = e.kind + " " + e.label;
+      if (e.kind === "inference" && e.detail?.cost != null) lblText += ` ($${e.detail.cost.toFixed(4)})`;
+      lbl.textContent = lblText;
+      
+      const timeLbl = el("div", "wf-time");
+      timeLbl.style.minWidth = "60px";
+      timeLbl.style.textAlign = "right";
+      timeLbl.style.color = "var(--text-dim)";
+      timeLbl.textContent = dur > 0 ? ms(dur) : `+${Math.round(relMs)}ms`;
+      
+      header.appendChild(lbl);
+      header.appendChild(barContainer);
+      header.appendChild(timeLbl);
+      r.appendChild(header);
+      
+      const det = el("pre", "wf-detail");
+      det.style.display = "none";
+      det.style.margin = "6px 0 0";
+      det.style.padding = "8px";
+      det.style.background = "var(--bg)";
+      det.style.borderRadius = "4px";
+      det.style.color = "var(--text-dim)";
+      det.style.fontSize = "11px";
+      det.style.whiteSpace = "pre-wrap";
+      det.style.wordBreak = "break-all";
+      det.textContent = JSON.stringify(e.detail, null, 2);
+      r.appendChild(det);
+      
+      r.onclick = () => { det.style.display = det.style.display === "none" ? "block" : "none"; };
       tl.appendChild(r);
     }
     out.appendChild(tl);
@@ -376,6 +487,12 @@
     ws.onmessage = (e) => {
       let f; try { f = JSON.parse(e.data); } catch { return; }
       if (f.type === "dash_event") {
+        if (f.kind === "file_written") {
+          $("text-editor-panel").style.display = "block";
+          $("editor-file-path").textContent = f.path || "new file";
+          $("editor-textarea").value = f.content || "";
+          f.text = `file created: ${f.path}`;
+        }
         pushFeed(f);
         if (f.kind === "command") refreshMetricsSoon();
         if (f.kind === "alert") refreshAlerts();

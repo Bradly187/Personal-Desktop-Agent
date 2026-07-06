@@ -36,7 +36,7 @@ async def _load_corrections(db_path: str, limit: int) -> list[dict]:
               file=sys.stderr)
         return []
     try:
-        return await db.get_corrections(limit=limit)
+        return await db.logs.get_corrections(limit=limit)
     finally:
         await db.close()
 

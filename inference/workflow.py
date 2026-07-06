@@ -355,7 +355,7 @@ class WorkflowRunner:
         if db is None or not getattr(db, "available", True):
             return
         try:
-            await db.insert_workflow(
+            await db.workflows.insert_workflow(
                 name=name, goal=goal, mode=mode, subtask_count=subtask_count,
                 success_count=success_count, verified_count=verified_count,
                 status=status, latency_ms=(time.monotonic() - t0) * 1000,

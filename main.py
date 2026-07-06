@@ -373,7 +373,7 @@ class _ShutdownController:
 
         # Close session record in DB
         if agent_db is not None and session_id >= 0:
-            await agent_db.close_session(session_id)
+            await agent_db.sessions.close_session(session_id)
 
         # Stop registered components (FusionEngine, GestureProcessor, etc.)
         for comp in reversed(self._components):
@@ -528,20 +528,20 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # gesture_velocity_samples: ~7,200 rows/day → retain 90 days
     # ipad_logs: ~50 rows/day → retain 60 days
     # Non-fatal: prune failures are logged and skipped, never block startup.
-    await agent_db.prune_sensor_telemetry(days=7)
-    await agent_db.prune_gesture_velocity_samples(days=90)
-    await agent_db.prune_ipad_logs(days=60)
+    await agent_db.telemetry.prune_sensor_telemetry(days=7)
+    await agent_db.runs.prune_gesture_velocity_samples(days=90)
+    await agent_db.runs.prune_ipad_logs(days=60)
     # Orchestration tables (added in schema v3)
-    await agent_db.prune_event_log(days=7)
-    await agent_db.prune_tool_calls(days=30)
-    await agent_db.prune_rate_limit_events(days=7)
+    await agent_db.events.prune_event_log(days=7)
+    await agent_db.runs.prune_tool_calls(days=30)
+    await agent_db.runs.prune_rate_limit_events(days=7)
     # command_traces: tracing is on by default → grows per command; retain 30 days
-    await agent_db.prune_command_traces(days=30)
+    await agent_db.commands.prune_command_traces(days=30)
 
     # --- Crash recovery: reconcile plans left mid-run by a previous process ---
     # Any agent_run still 'running' means the process died during a plan. Mark
     # them 'interrupted'; DevAgent.resume_pending_plan() can offer a gated resume.
-    _interrupted = await agent_db.mark_interrupted_runs()
+    _interrupted = await agent_db.runs.mark_interrupted_runs()
     if _interrupted:
         log.warning(
             "Recovered %d interrupted plan run(s) from a previous session — "
@@ -552,7 +552,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     # mid-goal. Requeue it (idempotency_key prevents duplicates; poison goals that
     # exhausted max_attempts are marked failed). The drainer is kicked after the
     # pipeline is wired (see below) so queued goals from a previous session run.
-    _requeued = await agent_db.requeue_stale_running()
+    _requeued = await agent_db.runs.requeue_stale_running()
     if _requeued:
         log.warning("Re-queued %d goal(s) from the durable backlog after a crash.", _requeued)
 
@@ -575,7 +575,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         pass
 
     mode = "safe" if args.safe_mode else "normal"
-    session_id = await agent_db.insert_session(mode=mode, git_hash=git_hash)
+    session_id = await agent_db.sessions.insert_session(mode=mode, git_hash=git_hash)
     log.info("Session %d started (mode=%s git=%s)", session_id, mode, git_hash or "unknown")
     await audit.log_session_start(session_id)
 
@@ -1008,13 +1008,13 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
 
     # Read cache configs from DB and push to the cache-using components.
     try:
-        vg_ttl, vg_max = await agent_db.get_cache_config("vision_grounder")
+        vg_ttl, vg_max = await agent_db.misc.get_cache_config("vision_grounder")
         if hasattr(coordinator, "_vision_grounder") and coordinator._vision_grounder:
             coordinator._vision_grounder.set_cache_config(vg_ttl, vg_max)
     except Exception as _cfg_exc:
         log.debug("Could not read vision_grounder cache config: %s", _cfg_exc)
     try:
-        ua_ttl, ua_max = await agent_db.get_cache_config("ui_automation")
+        ua_ttl, ua_max = await agent_db.misc.get_cache_config("ui_automation")
         from desktop.ui_automation import UIAutomationProvider as _UAP
         # UIAutomationProvider is a lazy singleton; update it when first accessed.
         from core import command_executor as _cex
@@ -1184,6 +1184,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     governor.set_flare_change_callback(lambda active: bridge.push_status_dashboard())
     await governor.start()
     twin_state.set_resource_governor(governor)   # flare fast-path: <100ms flare response
+    twin_state.set_model_router(router)
     shutdown.register(governor)
     if target_cache is not None:
         shutdown.register(target_cache)
@@ -1295,7 +1296,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     shutdown.register(supervisor)
 
     # --- Sync hotwords into WhisperStream once trainer is ready ---
-    hotwords = await trainer.get_hotwords()
+    hotwords = await trainer.skills.get_hotwords()
     if hotwords:
         whisper.update_hotwords(hotwords)
 

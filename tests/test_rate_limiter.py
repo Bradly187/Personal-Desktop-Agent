@@ -107,7 +107,7 @@ async def test_check_waits_when_not_drop_on_limit(tmp_path):
 
 async def test_check_fails_open_when_db_unavailable(tmp_path):
     limiter, db = await _make_limiter(tmp_path)
-    limiter._db.get_rate_limit_config = AsyncMock(side_effect=RuntimeError("db gone"))
+    limiter._db.logs.get_rate_limit_config = AsyncMock(side_effect=RuntimeError("db gone"))
     limiter._buckets.clear()  # force config re-read
 
     result = await limiter.check("cloud_api")

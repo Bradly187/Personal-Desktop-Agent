@@ -26,6 +26,37 @@ from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
 
 log = logging.getLogger(__name__)
 
+_SYSTEM_CONTROL_PHRASES: set[str] = {
+    # Existing static phrases from hybrid_coordinator
+    "pain day on", "pain day off", "lecture mode on", "lecture mode off",
+    "status", "cancel", "stop", "nevermind",
+    "resume", "continue", "pause", "hold on",
+    "mute mic", "mute microphone", "unmute mic", "unmute microphone",
+    "review history", "show my history", "recent commands",
+    "review escalated", "show escalated", "review queue",
+    "help", "what can you do", "what can i say", "list your skills",
+    "index my notes", "reindex my notes", "index my documents",
+    "connect google", "reconnect google", "connect gmail", "set up gmail",
+    "set up google",
+}
+
+def _is_system_control_voice(cmd) -> bool:
+    """True if `cmd` is a voice system-control keyword that route()'s keyword
+    block handles — so the dev-agent pre-gate leaves it alone."""
+    if cmd.source not in ("voice", "voice_local"):
+        return False
+    norm = cmd.text.lower().strip(" \t\n.,!?;:\"'")
+    if norm in _SYSTEM_CONTROL_PHRASES:
+        return True
+    if "lecture notes" in norm and "search" in norm:
+        return True
+    if norm.startswith("hey agent authorize ") or norm.startswith("authorize "):
+        return True
+    if is_schedule_phrase(norm):
+        return True
+    return False
+
+
 # Hoisted to module level to avoid rebuilding on every voice command (#5).
 _CONDITION_TRIGGERS: dict[str, str] = {
     "this is a good day":      "good_day",
@@ -134,7 +165,7 @@ class VoiceSystemControl:
                 search_q = cmd.text  # fallback: search whole phrase
             agent_db = self._agent_db()
             if agent_db and agent_db.available and search_q:
-                rows = await agent_db.search_lecture_notes(search_q, limit=10)
+                rows = await agent_db.memory.search_lecture_notes(search_q, limit=10)
                 if rows:
                     summary = "\n".join(f"- {r['text']}" for r in rows[:5])
                     log.info("Lecture notes search %r: %d results", search_q, len(rows))
@@ -150,7 +181,7 @@ class VoiceSystemControl:
         elif _lower in ("pain day on", "flare day on", "bad day"):
             twin = self._twin()
             if twin:
-                twin.set_manual_pain_day(True)
+                twin.profile.set_manual_pain_day(True)
             # Immediately relax the recognizer (VAD + logprob floor) for the
             # next utterance, before route() reconciles on the next command.
             whisper = self._whisper()
@@ -160,7 +191,7 @@ class VoiceSystemControl:
         elif _lower in ("pain day off", "flare day off", "feeling better"):
             twin = self._twin()
             if twin:
-                twin.set_manual_pain_day(False)
+                twin.profile.set_manual_pain_day(False)
             whisper = self._whisper()
             if whisper is not None:
                 whisper.apply_pain_day(False)
@@ -221,7 +252,7 @@ class VoiceSystemControl:
             pending: list = []
             agent_db = self._agent_db()
             if agent_db and agent_db.available:
-                pending = await agent_db.get_interrupted_runs(limit=1)
+                pending = await agent_db.runs.get_interrupted_runs(limit=1)
             dev_agent = self._dev_agent()
             if dev_agent is None or not pending:
                 from core.async_utils import fire_and_log
@@ -261,7 +292,7 @@ class VoiceSystemControl:
                 agent_db = self._agent_db()
                 if agent_db and agent_db.available:
                     key = f"authorize:{goal_text[:80]}:{_time.time():.3f}"  # fix #7
-                    await agent_db.enqueue_goal(
+                    await agent_db.goals.enqueue_goal(
                         goal_text, domain="plan", idempotency_key=key,
                     )
                     dev_agent = self._dev_agent()
@@ -298,8 +329,8 @@ class VoiceSystemControl:
             total = 0
             agent_db = self._agent_db()
             if agent_db and agent_db.available:
-                total = await agent_db.count_pending_escalations()
-                items = await agent_db.get_pending_escalations(limit=5)
+                total = await agent_db.sagas.count_pending_escalations()
+                items = await agent_db.sagas.get_pending_escalations(limit=5)
             if total:
                 newest = items[0]
                 msg = (f"{total} plan{'s' if total != 1 else ''} need review. "
@@ -318,7 +349,7 @@ class VoiceSystemControl:
             cleared = 0
             agent_db = self._agent_db()
             if agent_db and agent_db.available:
-                cleared = await agent_db.resolve_escalations(
+                cleared = await agent_db.sagas.resolve_escalations(
                     status="acknowledged")
             from core.async_utils import fire_and_log
             fire_and_log(  # fix #15
@@ -462,7 +493,7 @@ class VoiceSystemControl:
 
         if kind == "schedule":
             key = f"sched:{spec['goal'][:60]}:{spec['execute_at']:.0f}"
-            await db.enqueue_scheduled_goal(
+            await db.goals.enqueue_scheduled_goal(
                 spec["goal"], execute_at=spec["execute_at"],
                 recurrence=spec.get("recurrence"), source_trigger="schedule",
                 idempotency_key=key)
@@ -470,7 +501,7 @@ class VoiceSystemControl:
             return {"status": "ok", "action": "SCHEDULE_SET", "goal": spec["goal"]}
 
         if kind == "event_rule":
-            await db.insert_event_rule(
+            await db.events.insert_event_rule(
                 topic_pattern=spec["topic_pattern"], goal_template=spec["goal_template"],
                 name=spec.get("name"), predicate=spec.get("predicate"),
                 action_kind=spec.get("action_kind", "notify"))
@@ -478,8 +509,8 @@ class VoiceSystemControl:
             return {"status": "ok", "action": "EVENT_RULE_SET"}
 
         if kind == "list":
-            scheds = await db.list_schedules()
-            rules = await db.list_event_rules()
+            scheds = await db.goals.list_schedules()
+            rules = await db.events.list_event_rules()
             total = len(scheds) + len(rules)
             if not total:
                 msg = "You have no reminders set."
@@ -493,9 +524,9 @@ class VoiceSystemControl:
         if kind == "cancel":
             q = (spec.get("query") or "").strip().lower()
             cancelled = 0
-            for s in await db.list_schedules():
+            for s in await db.goals.list_schedules():
                 if not q or q in s["goal"].lower():
-                    if await db.cancel_schedule(s["id"]):
+                    if await db.goals.cancel_schedule(s["id"]):
                         cancelled += 1
             asyncio.create_task(self._tts_speak(
                 f"Cancelled {cancelled} reminder{'s' if cancelled != 1 else ''}."))

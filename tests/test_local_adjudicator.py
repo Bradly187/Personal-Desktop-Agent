@@ -7,10 +7,10 @@ from inference.adjudicator import LocalAdjudicator
 @pytest.fixture
 def mock_db():
     db = MagicMock()
-    db.get_pending_escalations = AsyncMock(return_value=[
+    db.sagas.get_pending_escalations = AsyncMock(return_value=[
         {"id": 1, "goal": "do impossible", "reason": "max_replans", "failed_action": "cmd", "detail": "..."}
     ])
-    db.resolve_escalations = AsyncMock()
+    db.sagas.resolve_escalations = AsyncMock()
     return db
 
 @pytest.fixture
@@ -31,7 +31,7 @@ async def test_adjudicator_off(mock_db, mock_router, monkeypatch):
     dismissed = await adj.adjudicate_pending()
     assert dismissed == 0
     mock_router.infer.assert_not_called()
-    mock_db.resolve_escalations.assert_not_called()
+    mock_db.sagas.resolve_escalations.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_adjudicator_dismiss(mock_db, mock_router, monkeypatch):
@@ -42,7 +42,7 @@ async def test_adjudicator_dismiss(mock_db, mock_router, monkeypatch):
     dismissed = await adj.adjudicate_pending()
     assert dismissed == 1
     mock_router.infer.assert_called_once()
-    mock_db.resolve_escalations.assert_called_once_with(status="auto_dismissed", escalation_id=1)
+    mock_db.sagas.resolve_escalations.assert_called_once_with(status="auto_dismissed", escalation_id=1)
     
     # Second run should skip due to evaluated_ids
     dismissed2 = await adj.adjudicate_pending()
@@ -58,7 +58,7 @@ async def test_adjudicator_escalate(mock_db, mock_router, monkeypatch):
     dismissed = await adj.adjudicate_pending()
     assert dismissed == 0
     mock_router.infer.assert_called_once()
-    mock_db.resolve_escalations.assert_not_called()
+    mock_db.sagas.resolve_escalations.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_adjudicator_failsafe_error(mock_db, mock_router, monkeypatch):
@@ -68,7 +68,7 @@ async def test_adjudicator_failsafe_error(mock_db, mock_router, monkeypatch):
     
     dismissed = await adj.adjudicate_pending()
     assert dismissed == 0
-    mock_db.resolve_escalations.assert_not_called()
+    mock_db.sagas.resolve_escalations.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_adjudicator_failsafe_parse(mock_db, mock_router, monkeypatch):
@@ -78,4 +78,4 @@ async def test_adjudicator_failsafe_parse(mock_db, mock_router, monkeypatch):
     
     dismissed = await adj.adjudicate_pending()
     assert dismissed == 0
-    mock_db.resolve_escalations.assert_not_called()
+    mock_db.sagas.resolve_escalations.assert_not_called()

@@ -48,8 +48,8 @@ async def _make_agent(db=None) -> DevAgent:
 
 
 async def _seed_run(db) -> int:
-    await db.insert_session(mode="test")
-    return await db.start_agent_run("saga test", "plan", "model")
+    await db.sessions.insert_session(mode="test")
+    return await db.runs.start_agent_run("saga test", "plan", "model")
 
 
 def _git_repo(path: Path) -> Path:
@@ -72,11 +72,11 @@ async def test_rollback_summary_counts_reverted(tmp_path):
     target.write_text("ORIGINAL", encoding="utf-8")
     snap = json.dumps(DevAgent._snapshot_for_write(str(target)))
     target.write_text("OVERWRITTEN", encoding="utf-8")
-    step_id = await db.insert_agent_step(
+    step_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", str(target), None, "ok", True, 1.0,
         compensation_action="RESTORE_FILE", compensation_args=snap,
     )
-    await db.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
+    await db.sagas.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
 
     await agent._run_compensations(run_id, triggered_by="user_cancel")
 
@@ -92,20 +92,20 @@ async def test_rollback_summary_counts_manual_and_incomplete(tmp_path):
     run_id = await _seed_run(db)
 
     # A REVERT_TERMINAL (manual) and an existed-but-no-backup RESTORE (incomplete).
-    sid1 = await db.insert_agent_step(
+    sid1 = await db.runs.insert_agent_step(
         run_id, 1, "RUN_TERMINAL", "rm x", None, "ok", True, 1.0,
         compensation_action="REVERT_TERMINAL", compensation_args="rm x",
     )
-    await db.insert_saga_compensation(run_id, sid1, "REVERT_TERMINAL", "rm x")
+    await db.sagas.insert_saga_compensation(run_id, sid1, "REVERT_TERMINAL", "rm x")
 
     target = tmp_path / "huge.py"
     target.write_text("OVERWRITTEN", encoding="utf-8")
     snap = json.dumps({"path": str(target), "existed": True, "backup": None})
-    sid2 = await db.insert_agent_step(
+    sid2 = await db.runs.insert_agent_step(
         run_id, 2, "WRITE_FILE", str(target), None, "ok", True, 1.0,
         compensation_action="RESTORE_FILE", compensation_args=snap,
     )
-    await db.insert_saga_compensation(run_id, sid2, "RESTORE_FILE", snap)
+    await db.sagas.insert_saga_compensation(run_id, sid2, "RESTORE_FILE", snap)
 
     await agent._run_compensations(run_id, triggered_by="max_replans")
 
@@ -231,11 +231,11 @@ async def test_git_backend_round_trip_restore(tmp_path, monkeypatch):
     snap = json.dumps(DevAgent._snapshot_for_write(str(target)))
     target.write_text("OVERWRITTEN BY PLAN", encoding="utf-8")
 
-    step_id = await db.insert_agent_step(
+    step_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", str(target), None, "ok", True, 1.0,
         compensation_action="RESTORE_FILE", compensation_args=snap,
     )
-    await db.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
+    await db.sagas.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
 
     incomplete = await agent._run_compensations(run_id, triggered_by="user_cancel")
 

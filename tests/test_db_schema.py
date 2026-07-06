@@ -25,7 +25,7 @@ from storage.db import AGENT_DB_SCHEMA, _AGENT_DB_SCHEMA_VERSION
 
 # Authoritative as of 2026-07-01: 49 tables at user_version 9
 # (v9 = sensor_telemetry.trace_id, sensor→command trace correlation).
-_EXPECTED_TABLE_COUNT = 49
+_EXPECTED_TABLE_COUNT = 51
 _EXPECTED_USER_VERSION = 9
 
 # Paren-anchored so a stray "CREATE TABLE IF NOT EXISTS is a …" in a comment is
@@ -125,7 +125,7 @@ async def test_reopen_is_idempotent(tmp_path):
 async def test_insert_session_roundtrips(tmp_path):
     db = await _open_temp(tmp_path)
     try:
-        sid = await db.insert_session(mode="test", git_hash="deadbeef")
+        sid = await db.sessions.insert_session(mode="test", git_hash="deadbeef")
         assert sid > 0
         cur = await db._conn.execute(
             "SELECT mode, git_hash FROM sessions WHERE id = ?", (sid,)
@@ -142,4 +142,4 @@ async def test_methods_degrade_safely_when_not_opened():
     # A never-opened AgentDB must not crash — writes no-op with a sentinel.
     db = AgentDB()
     assert db.available is False
-    assert await db.insert_session(mode="x") == -1
+    assert await db.sessions.insert_session(mode="x") == -1

@@ -130,7 +130,7 @@ async def test_malformed_verb_sets_pending_clarification():
     coord._executor.execute = AsyncMock(return_value={"status": "ok", "clarify": True})
 
     await coord._action_executor.execute_action("blah blah nonsense", _cmd(), route_label="local")
-    assert coord._pending_clarification is not None
+    assert coord.state.pending_clarification is not None
 
 
 async def test_real_clarify_still_works():

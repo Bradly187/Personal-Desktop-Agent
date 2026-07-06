@@ -110,7 +110,7 @@ class TestWriteStateValidation:
         with caplog.at_level(logging.ERROR):
             await mm.write_state("nonexistent_key", ("a", "b"), "accessibility")
         assert "invalid write" in caplog.text.lower() or "dropped" in caplog.text.lower()
-        db.upsert_few_shot_example.assert_not_called()
+        db.memory.upsert_few_shot_example.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_wrong_namespace_logs_error(self, caplog):
@@ -119,12 +119,12 @@ class TestWriteStateValidation:
         with caplog.at_level(logging.ERROR):
             await mm.write_state("agent_run", {}, "accessibility")
         assert "invalid write" in caplog.text.lower() or "dropped" in caplog.text.lower()
-        db.insert_agent_run.assert_not_called()
+        db.runs.insert_agent_run.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_valid_few_shot_dispatches_upsert(self):
         db = AsyncMock()
-        db.upsert_few_shot_example = AsyncMock()
+        db.memory.upsert_few_shot_example = AsyncMock()
         mm = _make_memory(db=db)
 
         fake_cmd = MagicMock()
@@ -133,29 +133,29 @@ class TestWriteStateValidation:
             (fake_cmd, "CLICK screen", "accessibility", 1),
             "accessibility",
         )
-        db.upsert_few_shot_example.assert_called_once_with(
+        db.memory.upsert_few_shot_example.assert_called_once_with(
             fake_cmd, "CLICK screen", "accessibility", 1
         )
 
     @pytest.mark.asyncio
     async def test_valid_agent_step_dispatches_insert(self):
         db = AsyncMock()
-        db.insert_agent_step = AsyncMock()
+        db.runs.insert_agent_step = AsyncMock()
         mm = _make_memory(db=db)
 
         payload = {"run_id": 1, "step": "plan", "result": "ok"}
         await mm.write_state("agent_step", payload, "dev_agent")
-        db.insert_agent_step.assert_called_once_with(**payload)
+        db.runs.insert_agent_step.assert_called_once_with(**payload)
 
     @pytest.mark.asyncio
     async def test_valid_agent_run_dispatches_insert(self):
         db = AsyncMock()
-        db.insert_agent_run = AsyncMock()
+        db.runs.insert_agent_run = AsyncMock()
         mm = _make_memory(db=db)
 
         payload = {"session_id": 5, "goal": "fix bug", "status": "running"}
         await mm.write_state("agent_run", payload, "dev_agent")
-        db.insert_agent_run.assert_called_once_with(**payload)
+        db.runs.insert_agent_run.assert_called_once_with(**payload)
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ class TestReadContext:
         semantic.available = False
         db = MagicMock()
         db.available = True
-        db.get_few_shot_examples = AsyncMock(return_value=[{"cmd": "scroll down"}])
+        db.memory.get_few_shot_examples = AsyncMock(return_value=[{"cmd": "scroll down"}])
         mm = MemoryManager(agent_db=db, semantic_memory=semantic)
         result = await mm.read_context("scroll", namespace="accessibility")
         assert result == [{"cmd": "scroll down"}]
@@ -275,21 +275,21 @@ class TestNewDispatchers:
     @pytest.mark.asyncio
     async def test_sensor_telemetry_dispatches_insert(self):
         db = AsyncMock()
-        db.insert_sensor_telemetry = AsyncMock()
+        db.telemetry.insert_sensor_telemetry = AsyncMock()
         mm = _make_memory(db=db)
         payload = {"session_id": 3, "ts": 1.0, "tilt_rx": 0.2, "pain_day_active": True}
         await mm.write_state("sensor_telemetry", payload, "system")
-        db.insert_sensor_telemetry.assert_called_once_with(**payload)
+        db.telemetry.insert_sensor_telemetry.assert_called_once_with(**payload)
 
     @pytest.mark.asyncio
     async def test_voice_profile_dispatches_upsert_with_single_dict(self):
         db = AsyncMock()
-        db.upsert_voice_profile = AsyncMock()
+        db.voice.upsert_voice_profile = AsyncMock()
         mm = _make_memory(db=db)
         payload = {"baseline_rms": 0.4, "vad_threshold": 0.015}
         await mm.write_state("voice_profile", payload, "system")
         # Passed positionally as a single dict, NOT **kwargs
-        db.upsert_voice_profile.assert_called_once_with(payload)
+        db.voice.upsert_voice_profile.assert_called_once_with(payload)
 
     @pytest.mark.asyncio
     async def test_command_outcome_is_noop(self):
@@ -303,7 +303,7 @@ class TestNewDispatchers:
     @pytest.mark.asyncio
     async def test_pain_day_score_passes_through_deltas(self):
         db = AsyncMock()
-        db.log_pain_day = AsyncMock()
+        db.profile.log_pain_day = AsyncMock()
         mm = _make_memory(db=db)
         payload = {
             "session_id": 1, "score": 0.7, "active": True,
@@ -311,7 +311,7 @@ class TestNewDispatchers:
             "gesture_conf_delta": 0.25, "cmd_rate_delta": 0.4,
         }
         await mm.write_state("pain_day_score", payload, "system")
-        kwargs = db.log_pain_day.call_args.kwargs
+        kwargs = db.profile.log_pain_day.call_args.kwargs
         assert kwargs["gesture_conf_delta"] == 0.25
         assert kwargs["cmd_rate_delta"] == 0.4
 
@@ -343,14 +343,14 @@ class TestReadContextNamespace:
         semantic.query_similar = AsyncMock(return_value=[{"text": "should not be used"}])
         db = MagicMock()
         db.available = True
-        db.get_few_shot_examples = AsyncMock(return_value=[{"text": "dev hit"}])
+        db.memory.get_few_shot_examples = AsyncMock(return_value=[{"text": "dev hit"}])
         mm = MemoryManager(agent_db=db, semantic_memory=semantic)
 
         result = await mm.read_context("build the plan", namespace="dev_agent")
 
         semantic.query_similar.assert_not_called()
-        db.get_few_shot_examples.assert_called_once()
-        assert db.get_few_shot_examples.call_args.kwargs["domain"] == "dev_agent"
+        db.memory.get_few_shot_examples.assert_called_once()
+        assert db.memory.get_few_shot_examples.call_args.kwargs["domain"] == "dev_agent"
         assert result == [{"text": "dev hit"}]
 
     @pytest.mark.asyncio
@@ -360,13 +360,13 @@ class TestReadContextNamespace:
         semantic.query_similar = AsyncMock(return_value=[{"text": "acc hit"}])
         db = MagicMock()
         db.available = True
-        db.get_few_shot_examples = AsyncMock(return_value=[{"text": "db"}])
+        db.memory.get_few_shot_examples = AsyncMock(return_value=[{"text": "db"}])
         mm = MemoryManager(agent_db=db, semantic_memory=semantic)
 
         result = await mm.read_context("click", namespace="accessibility")
 
         semantic.query_similar.assert_called_once()
-        db.get_few_shot_examples.assert_not_called()
+        db.memory.get_few_shot_examples.assert_not_called()
         assert result == [{"text": "acc hit"}]
 
 

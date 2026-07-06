@@ -7,7 +7,7 @@ Covers:
 - E8  ResourceGovernor._evict_heavy_models stops the batch on the first failed
       keep_alive POST (no 5 s × N stall when Ollama is down during a flare).
 - E9  GateEvaluator.gate3 bounds the NVML probe and fails open on timeout.
-- E15 AgentDB.reap_expired_leases requeues a 'running' goal whose claim lease
+- E15 AgentDB.misc.reap_expired_leases requeues a 'running' goal whose claim lease
       outlived the TTL, but never an actively-claimed (fresh) goal.
 - E21 Supervisor logs once when a supervised subsystem flips to disabled.
 
@@ -137,36 +137,36 @@ async def _set_claimed_at(db, gid, ts):
 
 
 async def test_reap_requeues_expired_lease(db):
-    gid = await db.enqueue_goal("wedged", idempotency_key="k")
-    claimed = await db.claim_next_goal()       # → running, claimed_at=now
+    gid = await db.goals.enqueue_goal("wedged", idempotency_key="k")
+    claimed = await db.goals.claim_next_goal()       # → running, claimed_at=now
     assert claimed is not None
     # Age the lease well past the TTL (default 1800 s).
     await _set_claimed_at(db, gid, time.time() - 5000.0)
 
-    n = await db.reap_expired_leases()
+    n = await db.misc.reap_expired_leases()
     assert n == 1
     # Recovered → claimable again.
-    again = await db.claim_next_goal()
+    again = await db.goals.claim_next_goal()
     assert again is not None and again["goal"] == "wedged"
 
 
 async def test_reap_leaves_fresh_claim_untouched(db):
-    await db.enqueue_goal("running-now", idempotency_key="k")
-    claimed = await db.claim_next_goal()       # fresh claimed_at
+    await db.goals.enqueue_goal("running-now", idempotency_key="k")
+    claimed = await db.goals.claim_next_goal()       # fresh claimed_at
     assert claimed is not None
 
-    n = await db.reap_expired_leases()
+    n = await db.misc.reap_expired_leases()
     assert n == 0                               # actively-executing goal untouched
-    assert await db.claim_next_goal() is None   # still 'running', not requeued
+    assert await db.goals.claim_next_goal() is None   # still 'running', not requeued
 
 
 async def test_reap_respects_explicit_ttl(db):
-    gid = await db.enqueue_goal("g", idempotency_key="k")
-    await db.claim_next_goal()
+    gid = await db.goals.enqueue_goal("g", idempotency_key="k")
+    await db.goals.claim_next_goal()
     await _set_claimed_at(db, gid, time.time() - 10.0)   # 10 s old
 
-    assert await db.reap_expired_leases(lease_ttl_s=3600.0) == 0   # within TTL
-    assert await db.reap_expired_leases(lease_ttl_s=5.0) == 1      # past TTL
+    assert await db.misc.reap_expired_leases(lease_ttl_s=3600.0) == 0   # within TTL
+    assert await db.misc.reap_expired_leases(lease_ttl_s=5.0) == 1      # past TTL
 
 
 # ===========================================================================

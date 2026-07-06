@@ -266,7 +266,8 @@ async def test_low_confidence_gesture_discard_is_logged():
         available = True
 
         def __init__(self):
-            self.insert_command = AsyncMock(return_value=1)
+            self.commands = self
+            self.commands.insert_command = AsyncMock(return_value=1)
 
     db = _DB()
     coord._agent_db = db
@@ -276,7 +277,7 @@ async def test_low_confidence_gesture_discard_is_logged():
 
     assert result["status"] == "discarded"
     assert result["reason"] == "gate1_gesture_conf"
-    db.insert_command.assert_awaited_once()
-    kwargs = db.insert_command.await_args.kwargs
+    db.commands.insert_command.assert_awaited_once()
+    kwargs = db.commands.insert_command.await_args.kwargs
     assert kwargs["gate_that_decided"] == "gate1_gesture_conf"
     assert kwargs["success"] is False

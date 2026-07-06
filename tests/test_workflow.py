@@ -160,7 +160,7 @@ async def test_agent_workflows_table_is_additive(tmp_path):
     await db.open(tmp_path / "wf.db")
     try:
         # The new table exists and a row round-trips.
-        wid = await db.insert_workflow(
+        wid = await db.workflows.insert_workflow(
             name="research", goal="find X", mode="fan_out",
             subtask_count=4, success_count=3, status="completed",
             verified_count=2, latency_ms=123.4,

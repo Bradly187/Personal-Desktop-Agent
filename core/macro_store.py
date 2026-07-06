@@ -93,7 +93,7 @@ class MacroStore:
     async def load_promoted(self, db) -> int:
         """Load every promoted macro candidate. Returns how many registered."""
         try:
-            rows = await db.get_evolution_candidates(status="promoted", kind="macro")
+            rows = await db.skills.get_evolution_candidates(status="promoted", kind="macro")
         except Exception as exc:
             log.warning("MacroStore.load_promoted failed: %s", exc)
             return 0

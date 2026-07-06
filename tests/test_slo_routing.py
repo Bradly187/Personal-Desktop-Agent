@@ -110,7 +110,7 @@ async def test_inference_stats_by_domain(db):
     await _ins("vision", 5000)
     await db._conn.commit()
 
-    stats = await db.get_inference_stats_by_domain()
+    stats = await db.inferences.get_inference_stats_by_domain()
     assert stats["code"]["count"] == 4
     assert stats["code"]["p50_latency_ms"] in (200, 300)   # median of 4
     assert stats["code"]["success_rate"] == 0.75            # 3/4 ok

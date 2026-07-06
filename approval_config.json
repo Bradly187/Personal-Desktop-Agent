@@ -2,43 +2,40 @@
   "_comment": "Per-tool voice approval policy for approval_hook.py.",
   "_policy": "Only gate destructive/irreversible tools — everything read-only or low-risk passes silently.",
   "_values": "'approve' = Polly speaks + wait for yes/no | 'silent' = pass through immediately",
-
   "tools": {
-    "Bash":        "approve",
-    "PowerShell":  "approve",
-    "Agent":       "approve",
-    "computer":    "approve",
-
-    "Edit":        "silent",
-    "Write":       "silent",
-    "Read":        "silent",
-    "Glob":        "silent",
-    "Grep":        "silent",
-    "WebSearch":   "silent",
-    "WebFetch":    "silent",
-    "TodoWrite":   "silent",
-    "ToolSearch":  "silent"
+    "Bash": "approve",
+    "PowerShell": "approve",
+    "Agent": "approve",
+    "computer": "approve",
+    "Edit": "silent",
+    "Write": "silent",
+    "Read": "silent",
+    "Glob": "silent",
+    "Grep": "silent",
+    "WebSearch": "silent",
+    "WebFetch": "silent",
+    "TodoWrite": "silent",
+    "ToolSearch": "silent"
   },
-
-  "tts_backend":              "kokoro",
-  "kokoro_voice":             "af_bella",
-  "kokoro_speed":             1.0,
-
-  "voice_id":      "Danielle",
-  "record_s":      4.0,
-  "timeout_action":"reject",
-  "device":        "Microphone (Realtek USB Audio)",
-
+  "tts_backend": "kokoro",
+  "kokoro_voice": "af_bella",
+  "kokoro_speed": 1.2,
+  "voice_id": "Danielle",
+  "record_s": 4,
+  "timeout_action": "reject",
+  "device": "Microphone (Realtek USB Audio)",
   "_note_vibe_diff": "GAP-2 Vibe Diff: for these tools, a fast local LLM (vibe_diff_model) summarizes in one plain-English sentence what the action DOES before the spoken consent prompt. Best-effort — falls back to the static description if Ollama is down or slow (>3s). Remove vibe_diff_tools (or empty it) to disable.",
-  "vibe_diff_tools": ["Bash", "PowerShell", "Write", "Edit"],
+  "vibe_diff_tools": [
+    "Bash",
+    "PowerShell",
+    "Write",
+    "Edit"
+  ],
   "vibe_diff_model": "llama3.1:8b",
-
-  "_note_policy":  "Bash/PowerShell/Agent gate because they can run arbitrary commands. Edit/Write pass silently because they can be reviewed in git diff before commit.",
+  "_note_policy": "Bash/PowerShell/Agent gate because they can run arbitrary commands. Edit/Write pass silently because they can be reviewed in git diff before commit.",
   "_note_timeout": "Fail safe: if no clear yes/no confirmation is heard within the window, timeout_action applies. Keep 'reject' so ambient audio / TTS echo / silence can never auto-approve a destructive tool call. 'approve' = proceed on ambiguity (NOT recommended).",
-
-  "goal_session_duration_s":  900,
+  "goal_session_duration_s": 900,
   "goal_session_max_actions": 50,
-
   "_note_cloud_budget": "GAP-10 denial-of-wallet tripwire: once a session exceeds this many Anthropic cloud calls, the coordinator speaks a one-time cost warning (advisory — it does not block the cloud path).",
   "cloud_call_budget": 20
 }

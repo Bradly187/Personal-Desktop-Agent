@@ -69,20 +69,23 @@ def test_default_backend_is_kokoro():
 
 def test_get_client_dispatches_to_kokoro():
     client = get_client(backend="kokoro")
-    assert client.__class__.__name__ == "KokoroClient"
+    actual = getattr(client, "_client", client)
+    assert actual.__class__.__name__ == "KokoroClient"
 
 
 def test_kokoro_client_uses_configured_voice():
     cfg = _read_tts_config()
     client = get_client(backend="kokoro")
-    assert client.voice == cfg.get("kokoro_voice", "af_bella")
+    actual = getattr(client, "_client", client)
+    assert actual.voice == cfg.get("kokoro_voice", "af_bella")
 
 
 def test_get_client_honors_config_default():
     """With backend=None, get_client() resolves via approval_config.json."""
     client = get_client()
     # config default is kokoro; assert we did NOT silently fall back to Polly.
-    assert client.__class__.__name__ == "KokoroClient"
+    actual = getattr(client, "_client", client)
+    assert actual.__class__.__name__ == "KokoroClient"
 
 
 # ---------------------------------------------------------------------------

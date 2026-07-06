@@ -84,15 +84,15 @@ def test_overlay_nudge_is_bounded(monkeypatch):
 async def test_db_overlay_roundtrip_and_clamp():
     db = await _open_db()
     try:
-        await db.upsert_domain_keyword_weight("code", "Frobnicate", 3.0)
-        await db.upsert_domain_keyword_weight("code", "widget", 99.0)   # clamps to MAX
-        await db.upsert_domain_keyword_weight("math", "lemma", 2.0)
-        ov = await db.get_domain_keyword_weights()
+        await db.routing.upsert_domain_keyword_weight("code", "Frobnicate", 3.0)
+        await db.routing.upsert_domain_keyword_weight("code", "widget", 99.0)   # clamps to MAX
+        await db.routing.upsert_domain_keyword_weight("math", "lemma", 2.0)
+        ov = await db.routing.get_domain_keyword_weights()
         assert ov["code"]["frobnicate"] == 3.0          # lower-cased key
-        assert ov["code"]["widget"] == db._DOMAIN_OVERLAY_MAX
+        assert ov["code"]["widget"] == db.routing._DOMAIN_OVERLAY_MAX
         assert ov["math"]["lemma"] == 2.0
-        await db.clear_domain_keyword_overlay("code")
-        ov2 = await db.get_domain_keyword_weights()
+        await db.routing.clear_domain_keyword_overlay("code")
+        ov2 = await db.routing.get_domain_keyword_weights()
         assert "code" not in ov2 and "math" in ov2
     finally:
         await db.close()
@@ -104,7 +104,7 @@ async def test_db_overlay_roundtrip_and_clamp():
 
 async def _seed_examples(db, domain, distinctive_token, n=3):
     for k in range(n):
-        await db.upsert_few_shot_example(
+        await db.memory.upsert_few_shot_example(
             Command(text=f"{distinctive_token} sample {k} extra words here",
                     action="", source="voice"),
             "DO it", domain)
@@ -120,7 +120,7 @@ async def test_learner_writes_distinctive_overlay(monkeypatch):
         await _seed_examples(db, "math", "eigenvalue")
         trainer = ContinuousTrainer(agent_db=db)
         await trainer._learn_domain_overlay()
-        ov = await db.get_domain_keyword_weights()
+        ov = await db.routing.get_domain_keyword_weights()
         assert "frobnicate" in ov.get("code", {})
         assert "eigenvalue" in ov.get("math", {})
         # distinctive: frobnicate must NOT have leaked into math
@@ -140,7 +140,7 @@ async def test_learner_noop_when_flag_off(monkeypatch):
         await _seed_examples(db, "code", "frobnicate")
         trainer = ContinuousTrainer(agent_db=db)
         await trainer._learn_domain_overlay()
-        assert await db.get_domain_keyword_weights() == {}
+        assert await db.routing.get_domain_keyword_weights() == {}
     finally:
         await db.close()
 
@@ -151,13 +151,13 @@ async def test_learner_rolls_back_on_rate_rise(monkeypatch):
     db = await _open_db()
     try:
         # an existing learned overlay for code + a prior vocab log at low rate
-        await db.upsert_domain_keyword_weight("code", "frobnicate", 2.0)
-        await db.log_adaptation(component="vocab:code", metric_before=1.0,
+        await db.routing.upsert_domain_keyword_weight("code", "frobnicate", 2.0)
+        await db.routing.log_adaptation(component="vocab:code", metric_before=1.0,
                                 metric_after=0.10, domain="code")   # learned at 10%
         trainer = ContinuousTrainer(agent_db=db)
         trainer.misroute_status = {"code": 0.40}   # rate rose well past +0.05
         await trainer._learn_domain_overlay()
-        ov = await db.get_domain_keyword_weights()
+        ov = await db.routing.get_domain_keyword_weights()
         assert "code" not in ov                     # overlay rolled back/cleared
     finally:
         DomainClassifier.register_keyword_overlay({})

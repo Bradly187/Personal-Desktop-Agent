@@ -45,8 +45,8 @@ def _agent(db):
 
 
 async def _seed_run(db) -> int:
-    await db.insert_session(mode="test")
-    return await db.start_agent_run("eh2 test", "plan", "model")
+    await db.sessions.insert_session(mode="test")
+    return await db.runs.start_agent_run("eh2 test", "plan", "model")
 
 
 def _step(action, args="", body="", success=True, comp_args=None) -> AgentStep:
@@ -72,7 +72,7 @@ async def test_failed_write_with_snapshot_registers_restore(tmp_path):
     step = _step("WRITE_FILE", args=str(tmp_path / "f.py"), success=False, comp_args=snap)
     await agent._persist_step(run_id, 1, step)
 
-    comps = await db.get_pending_compensations(run_id)
+    comps = await db.sagas.get_pending_compensations(run_id)
     assert len(comps) == 1
     assert comps[0]["compensation_action"] == "RESTORE_FILE"
     await db.close()
@@ -86,7 +86,7 @@ async def test_failed_write_without_snapshot_registers_nothing(tmp_path):
     step = _step("WRITE_FILE", args=str(tmp_path / "f.py"), success=False, comp_args=None)
     await agent._persist_step(run_id, 1, step)
 
-    assert await db.get_pending_compensations(run_id) == []   # nothing to roll back
+    assert await db.sagas.get_pending_compensations(run_id) == []   # nothing to roll back
     await db.close()
 
 
@@ -118,7 +118,7 @@ async def test_escalation_detail_carries_incomplete_count(tmp_path):
 
     await agent._record_escalation(run_id, "goal", "max_replans", "WRITE_FILE", 2,
                                    incomplete=1)
-    items = await db.get_pending_escalations()
+    items = await db.sagas.get_pending_escalations()
     assert len(items) == 1
     detail = json.loads(items[0]["detail"])
     assert detail["incomplete_compensations"] == 1
@@ -145,7 +145,7 @@ async def test_reconcile_drains_sidecar_into_db(tmp_path):
 
     n = await agent.reconcile_pending_escalations()
     assert n == 2
-    items = await db.get_pending_escalations()
+    items = await db.sagas.get_pending_escalations()
     assert {i["goal"] for i in items} == {"g1", "g2"}
     assert not sidecar.exists()                            # fully drained → removed
     await db.close()
@@ -154,7 +154,7 @@ async def test_reconcile_drains_sidecar_into_db(tmp_path):
 async def test_reconcile_keeps_rows_that_still_fail(tmp_path):
     db = MagicMock()
     db.available = True
-    db.insert_escalation = AsyncMock(return_value=None)    # DB still refusing
+    db.sagas.insert_escalation = AsyncMock(return_value=None)    # DB still refusing
     agent = _agent(db)
     sidecar = tmp_path / "esc.jsonl"
     agent._escalation_sidecar_path = sidecar
@@ -212,7 +212,7 @@ def _plan_agent(db, plan_text):
 
 async def test_skipped_rollback_on_user_cancel_escalates(tmp_path):
     db = await _open_db(tmp_path)
-    await db.insert_session(mode="test")
+    await db.sessions.insert_session(mode="test")
     # Two steps so the top-of-loop cancel check fires AFTER step 1 runs.
     agent = _plan_agent(db, "Step 1: [WRITE_FILE out.py]\nStep 2: [EXPLAIN done]")
 
@@ -233,7 +233,7 @@ async def test_skipped_rollback_on_user_cancel_escalates(tmp_path):
 
     assert result.success is False                         # cancelled
     assert target.exists()                                 # overwritten file left in place, not deleted
-    escs = await db.get_pending_escalations()
+    escs = await db.sagas.get_pending_escalations()
     matched = [e for e in escs if e["reason"] == "compensation_failed"]
     assert len(matched) == 1                               # the skipped rollback reached the queue
     assert json.loads(matched[0]["detail"])["incomplete_compensations"] == 1
@@ -242,7 +242,7 @@ async def test_skipped_rollback_on_user_cancel_escalates(tmp_path):
 
 async def test_clean_rollback_on_user_cancel_does_not_escalate(tmp_path):
     db = await _open_db(tmp_path)
-    await db.insert_session(mode="test")
+    await db.sessions.insert_session(mode="test")
     agent = _plan_agent(db, "Step 1: [WRITE_FILE new.py]\nStep 2: [EXPLAIN done]")
 
     target = tmp_path / "new.py"                           # does NOT exist pre-write
@@ -260,6 +260,6 @@ async def test_clean_rollback_on_user_cancel_does_not_escalate(tmp_path):
 
     assert result.success is False                         # cancelled
     assert not target.exists()                             # plan-created file cleanly rolled back
-    escs = await db.get_pending_escalations()
+    escs = await db.sagas.get_pending_escalations()
     assert not any(e["reason"] == "compensation_failed" for e in escs)   # clean unwind → no escalation
     await db.close()

@@ -32,8 +32,8 @@ async def _make_agent(db) -> DevAgent:
 
 
 async def _seed_run(db) -> int:
-    await db.insert_session(mode="test")
-    return await db.start_agent_run("saga integrity test", "plan", "model")
+    await db.sessions.insert_session(mode="test")
+    return await db.runs.start_agent_run("saga integrity test", "plan", "model")
 
 
 async def test_compensation_throws_escalates(tmp_path):
@@ -41,11 +41,11 @@ async def test_compensation_throws_escalates(tmp_path):
     agent = await _make_agent(db)
     run_id = await _seed_run(db)
 
-    step_id = await db.insert_agent_step(
+    step_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", "/root/protected.py", None, "ok", True, 1.0,
         compensation_action="DELETE_FILE", compensation_args="/root/protected.py",
     )
-    comp_id = await db.insert_saga_compensation(
+    comp_id = await db.sagas.insert_saga_compensation(
         run_id, step_id, "DELETE_FILE", "/root/protected.py"
     )
 
@@ -84,11 +84,11 @@ async def test_un_snapshottable_skipped_and_escalates(tmp_path):
     
     import json as _json
     snap = _json.dumps({"path": str(target), "existed": True, "backup": None})
-    step_id = await db.insert_agent_step(
+    step_id = await db.runs.insert_agent_step(
         run_id, 1, "WRITE_FILE", str(target), None, "ok", True, 1.0,
         compensation_action="RESTORE_FILE", compensation_args=snap,
     )
-    cid = await db.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
+    cid = await db.sagas.insert_saga_compensation(run_id, step_id, "RESTORE_FILE", snap)
 
     await agent._run_compensations(run_id, triggered_by="user_cancel")
 

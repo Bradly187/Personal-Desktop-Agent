@@ -46,9 +46,9 @@ class TestGap1ThresholdPersistence:
         cfg.whisper_logprob_min = -1.0
         _db = db or MagicMock()
         _db.available = True
-        _db.log_adaptation = AsyncMock()
-        _db.log_settings_change = AsyncMock()
-        _db.get_recent_adaptation_log = AsyncMock(return_value=[])
+        _db.routing.log_adaptation = AsyncMock()
+        _db.profile.log_settings_change = AsyncMock()
+        _db.routing.get_recent_adaptation_log = AsyncMock(return_value=[])
         trainer = ContinuousTrainer.__new__(ContinuousTrainer)
         trainer._config = cfg
         trainer._db = _db
@@ -66,8 +66,8 @@ class TestGap1ThresholdPersistence:
         await trainer._adapt_gate1_with_log(
             cloud_rate=0.5, failure_rate=0.1, pain_day_active=False
         )
-        trainer._db.log_settings_change.assert_awaited_once()
-        call_kwargs = trainer._db.log_settings_change.call_args
+        trainer._db.profile.log_settings_change.assert_awaited_once()
+        call_kwargs = trainer._db.profile.log_settings_change.call_args
         assert call_kwargs.kwargs.get("key") == "whisper_logprob_min" or (
             len(call_kwargs.args) > 1 and call_kwargs.args[1] == "whisper_logprob_min"
         )
@@ -79,7 +79,7 @@ class TestGap1ThresholdPersistence:
         await trainer._adapt_gate1_with_log(
             cloud_rate=0.5, failure_rate=0.1, pain_day_active=False
         )
-        call_kwargs = trainer._db.log_settings_change.call_args.kwargs
+        call_kwargs = trainer._db.profile.log_settings_change.call_args.kwargs
         assert call_kwargs["old_value"] == pytest.approx(old)
         assert call_kwargs["new_value"] == pytest.approx(old - 0.05)
 
@@ -90,7 +90,7 @@ class TestGap1ThresholdPersistence:
         await trainer._adapt_gate1_with_log(
             cloud_rate=0.1, failure_rate=0.1, pain_day_active=False
         )
-        trainer._db.log_settings_change.assert_not_awaited()
+        trainer._db.profile.log_settings_change.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_persist_on_pain_day(self):
@@ -98,13 +98,13 @@ class TestGap1ThresholdPersistence:
         await trainer._adapt_gate1_with_log(
             cloud_rate=0.5, failure_rate=0.1, pain_day_active=True
         )
-        trainer._db.log_settings_change.assert_not_awaited()
+        trainer._db.profile.log_settings_change.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_db_exception_does_not_propagate(self):
         trainer = self._make_trainer()
-        trainer._db.log_settings_change.side_effect = RuntimeError("db down")
-        trainer._db.log_adaptation.side_effect = RuntimeError("db down")
+        trainer._db.profile.log_settings_change.side_effect = RuntimeError("db down")
+        trainer._db.routing.log_adaptation.side_effect = RuntimeError("db down")
         # Should silently swallow
         await trainer._adapt_gate1_with_log(
             cloud_rate=0.5, failure_rate=0.1, pain_day_active=False
@@ -134,22 +134,22 @@ class TestGate1Rollback(TestGap1ThresholdPersistence):
         true and rolled back on any single noisy increase. Two rows are not
         enough evidence: loosening must proceed."""
         trainer = self._make_trainer()
-        trainer._db.mark_adaptation_rolled_back = AsyncMock()
-        trainer._db.get_recent_adaptation_log = AsyncMock(
+        trainer._db.routing.mark_adaptation_rolled_back = AsyncMock()
+        trainer._db.routing.get_recent_adaptation_log = AsyncMock(
             return_value=self._history(0.45, 0.40)   # newest > older (noise)
         )
         await trainer._adapt_gate1_with_log(
             cloud_rate=0.5, failure_rate=0.1, pain_day_active=False
         )
-        trainer._db.mark_adaptation_rolled_back.assert_not_awaited()
-        trainer._db.log_adaptation.assert_awaited_once()   # loosening happened
+        trainer._db.routing.mark_adaptation_rolled_back.assert_not_awaited()
+        trainer._db.routing.log_adaptation.assert_awaited_once()   # loosening happened
 
     @pytest.mark.asyncio
     async def test_three_rising_rows_roll_back_and_persist(self):
         trainer = self._make_trainer()
         trainer._config.whisper_logprob_min = -1.15
-        trainer._db.mark_adaptation_rolled_back = AsyncMock()
-        trainer._db.get_recent_adaptation_log = AsyncMock(
+        trainer._db.routing.mark_adaptation_rolled_back = AsyncMock()
+        trainer._db.routing.get_recent_adaptation_log = AsyncMock(
             return_value=self._history(0.50, 0.42, 0.35, metric_before=-1.10)
         )
         await trainer._adapt_gate1_with_log(
@@ -158,28 +158,28 @@ class TestGate1Rollback(TestGap1ThresholdPersistence):
         # Threshold restored to the pre-loosening value of the newest row
         assert trainer._config.whisper_logprob_min == pytest.approx(-1.10)
         # The undone adaptation row is marked so it is never re-read
-        trainer._db.mark_adaptation_rolled_back.assert_awaited_once_with(100)
+        trainer._db.routing.mark_adaptation_rolled_back.assert_awaited_once_with(100)
         # Rollback is PERSISTED — without this, restart restores the rejected
         # loosened value from settings_versions
-        kwargs = trainer._db.log_settings_change.call_args.kwargs
+        kwargs = trainer._db.profile.log_settings_change.call_args.kwargs
         assert kwargs["key"] == "whisper_logprob_min"
         assert kwargs["new_value"] == pytest.approx(-1.10)
         assert kwargs["changed_by"] == "continuous_trainer_rollback"
         # And no new loosening in the same pass
-        trainer._db.log_adaptation.assert_not_awaited()
+        trainer._db.routing.log_adaptation.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_non_monotonic_rates_do_not_roll_back(self):
         trainer = self._make_trainer()
-        trainer._db.mark_adaptation_rolled_back = AsyncMock()
-        trainer._db.get_recent_adaptation_log = AsyncMock(
+        trainer._db.routing.mark_adaptation_rolled_back = AsyncMock()
+        trainer._db.routing.get_recent_adaptation_log = AsyncMock(
             return_value=self._history(0.50, 0.30, 0.40)   # dipped in the middle
         )
         await trainer._adapt_gate1_with_log(
             cloud_rate=0.5, failure_rate=0.1, pain_day_active=False
         )
-        trainer._db.mark_adaptation_rolled_back.assert_not_awaited()
-        trainer._db.log_adaptation.assert_awaited_once()
+        trainer._db.routing.mark_adaptation_rolled_back.assert_not_awaited()
+        trainer._db.routing.log_adaptation.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_rolled_back_rows_excluded_from_history_read(self, tmp_path):
@@ -192,15 +192,15 @@ class TestGate1Rollback(TestGap1ThresholdPersistence):
             pytest.skip("aiosqlite unavailable")
         try:
             for rate in (0.35, 0.42, 0.50):
-                await db.log_adaptation(
+                await db.routing.log_adaptation(
                     component="gate1", metric_before=-1.0, metric_after=-1.05,
                     cloud_rate=rate, failure_rate=0.1,
                 )
-            rows = await db.get_recent_adaptation_log("gate1", limit=3)
+            rows = await db.routing.get_recent_adaptation_log("gate1", limit=3)
             assert len(rows) == 3
             newest_id = rows[0]["id"]
-            await db.mark_adaptation_rolled_back(newest_id)
-            rows_after = await db.get_recent_adaptation_log("gate1", limit=3)
+            await db.routing.mark_adaptation_rolled_back(newest_id)
+            rows_after = await db.routing.get_recent_adaptation_log("gate1", limit=3)
             assert all(r["id"] != newest_id for r in rows_after)
             assert len(rows_after) == 2
         finally:
@@ -281,7 +281,7 @@ class TestGap2CounterexampleDB:
     @pytest.mark.asyncio
     async def test_upsert_creates_row(self, db):
         cmd = _Cmd("scroll down please")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK down button", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK down button", "command", "pipeline_failure")
         cur = await db._conn.execute(
             "SELECT text, wrong_action, source, reason FROM few_shot_counterexamples"
         )
@@ -293,8 +293,8 @@ class TestGap2CounterexampleDB:
     @pytest.mark.asyncio
     async def test_upsert_increments_usage_count(self, db):
         cmd = _Cmd("scroll down please")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK down button", "command", "pipeline_failure")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK down button", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK down button", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK down button", "command", "pipeline_failure")
         cur = await db._conn.execute(
             "SELECT usage_count FROM few_shot_counterexamples WHERE text=? AND wrong_action=?",
             ("scroll down please", "CLICK down button"),
@@ -305,8 +305,8 @@ class TestGap2CounterexampleDB:
     @pytest.mark.asyncio
     async def test_upsert_unique_on_text_wrong_action(self, db):
         cmd = _Cmd("scroll down")
-        await db.upsert_few_shot_counterexample(cmd, "TYPE down", "command", "pipeline_failure")
-        await db.upsert_few_shot_counterexample(cmd, "TYPE down", "command", "user_correction")
+        await db.memory.upsert_few_shot_counterexample(cmd, "TYPE down", "command", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "TYPE down", "command", "user_correction")
         cur = await db._conn.execute("SELECT COUNT(*) FROM few_shot_counterexamples")
         rows = await cur.fetchall()
         assert rows[0][0] == 1
@@ -314,33 +314,33 @@ class TestGap2CounterexampleDB:
     @pytest.mark.asyncio
     async def test_get_returns_relevant_counterexample(self, db):
         cmd_store = _Cmd("scroll down please")
-        await db.upsert_few_shot_counterexample(cmd_store, "CLICK footer", "command", "user_correction")
+        await db.memory.upsert_few_shot_counterexample(cmd_store, "CLICK footer", "command", "user_correction")
         query_cmd = _Cmd("scroll down")
-        results = await db.get_few_shot_counterexamples(query_cmd, n=3, domain="command")
+        results = await db.memory.get_few_shot_counterexamples(query_cmd, n=3, domain="command")
         assert len(results) >= 1
         assert results[0]["wrong_action"] == "CLICK footer"
 
     @pytest.mark.asyncio
     async def test_get_returns_empty_when_no_counterexamples(self, db):
         cmd = _Cmd("open chrome")
-        results = await db.get_few_shot_counterexamples(cmd, n=3)
+        results = await db.memory.get_few_shot_counterexamples(cmd, n=3)
         assert results == []
 
     @pytest.mark.asyncio
     async def test_get_limits_results(self, db):
         for i in range(5):
             cmd = _Cmd(f"click button {i}")
-            await db.upsert_few_shot_counterexample(cmd, f"SCROLL {i}", "command", "pipeline_failure")
+            await db.memory.upsert_few_shot_counterexample(cmd, f"SCROLL {i}", "command", "pipeline_failure")
         query = _Cmd("click button")
-        results = await db.get_few_shot_counterexamples(query, n=2)
+        results = await db.memory.get_few_shot_counterexamples(query, n=2)
         assert len(results) <= 2
 
     @pytest.mark.asyncio
     async def test_get_respects_domain_filter(self, db):
         cmd = _Cmd("write some code")
-        await db.upsert_few_shot_counterexample(cmd, "CLICK editor", "code", "pipeline_failure")
+        await db.memory.upsert_few_shot_counterexample(cmd, "CLICK editor", "code", "pipeline_failure")
         query = _Cmd("write some code")
-        results = await db.get_few_shot_counterexamples(query, n=5, domain="command")
+        results = await db.memory.get_few_shot_counterexamples(query, n=5, domain="command")
         assert all(r["wrong_action"] != "CLICK editor" for r in results)
 
 
@@ -353,12 +353,12 @@ class TestGap2TrainerWiring:
         from adaptive.continuous_trainer import ContinuousTrainer
         _db = MagicMock()
         _db.available = True
-        _db.upsert_few_shot_counterexample = AsyncMock()
-        _db.upsert_few_shot_example = AsyncMock()
-        _db.delete_few_shot_example = AsyncMock()
-        _db.delete_few_shot_counterexample = AsyncMock()
-        _db.mark_command_corrected = AsyncMock()
-        _db.get_few_shot_counterexamples = AsyncMock(return_value=[])
+        _db.memory.upsert_few_shot_counterexample = AsyncMock()
+        _db.memory.upsert_few_shot_example = AsyncMock()
+        _db.memory.delete_few_shot_example = AsyncMock()
+        _db.memory.delete_few_shot_counterexample = AsyncMock()
+        _db.commands.mark_command_corrected = AsyncMock()
+        _db.memory.get_few_shot_counterexamples = AsyncMock(return_value=[])
         _twin = MagicMock()
         _twin.record_failure = AsyncMock()
         trainer = ContinuousTrainer.__new__(ContinuousTrainer)
@@ -374,8 +374,8 @@ class TestGap2TrainerWiring:
         trainer = self._make_trainer()
         cmd = _Cmd("open chrome")
         await trainer.record_failure(cmd, "CLICK nowhere", command_id=1)
-        trainer._db.upsert_few_shot_counterexample.assert_awaited_once()
-        call_args = trainer._db.upsert_few_shot_counterexample.call_args
+        trainer._db.memory.upsert_few_shot_counterexample.assert_awaited_once()
+        call_args = trainer._db.memory.upsert_few_shot_counterexample.call_args
         assert call_args.args[1] == "CLICK nowhere"
         assert call_args.args[3] == "pipeline_failure"
 
@@ -390,10 +390,10 @@ class TestGap2TrainerWiring:
     async def test_record_correction_stores_counterexample_before_positive(self):
         call_order: list[str] = []
         trainer = self._make_trainer()
-        trainer._db.upsert_few_shot_counterexample = AsyncMock(
+        trainer._db.memory.upsert_few_shot_counterexample = AsyncMock(
             side_effect=lambda *a, **kw: call_order.append("counter") or None
         )
-        trainer._db.upsert_few_shot_example = AsyncMock(
+        trainer._db.memory.upsert_few_shot_example = AsyncMock(
             side_effect=lambda *a, **kw: call_order.append("positive") or None
         )
         cmd = _Cmd("click save button")
@@ -405,19 +405,19 @@ class TestGap2TrainerWiring:
         trainer = self._make_trainer()
         cmd = _Cmd("click save button")
         await trainer.record_correction(cmd, "TYPE save", "CLICK save button", command_id=5)
-        call_args = trainer._db.upsert_few_shot_counterexample.call_args
+        call_args = trainer._db.memory.upsert_few_shot_counterexample.call_args
         assert call_args.args[3] == "user_correction"
         assert call_args.args[1] == "TYPE save"
 
     @pytest.mark.asyncio
     async def test_get_few_shot_counterexamples_delegates_to_db(self):
         trainer = self._make_trainer()
-        trainer._db.get_few_shot_counterexamples = AsyncMock(
+        trainer._db.memory.get_few_shot_counterexamples = AsyncMock(
             return_value=[{"command_text": "click", "wrong_action": "SCROLL"}]
         )
         cmd = _Cmd("click the button")
-        result = await trainer.get_few_shot_counterexamples(cmd, n=2, domain="command")
-        trainer._db.get_few_shot_counterexamples.assert_awaited_once_with(
+        result = await trainer._db.memory.get_few_shot_counterexamples(cmd, n=2, domain="command")
+        trainer._db.memory.get_few_shot_counterexamples.assert_awaited_once_with(
             cmd, n=2, domain="command"
         )
         assert len(result) == 1
@@ -511,8 +511,8 @@ class TestGap2CoordinatorPassthrough:
 
         local.infer = _fake_infer
         trainer = MagicMock()
-        trainer.get_few_shot_examples = AsyncMock(return_value=[])
-        trainer.get_few_shot_counterexamples = AsyncMock(
+        trainer.memory.get_few_shot_examples = AsyncMock(return_value=[])
+        trainer.memory.get_few_shot_counterexamples = AsyncMock(
             return_value=[{"command_text": "scroll", "wrong_action": "CLICK nothing"}]
         )
         agent_db = MagicMock()
@@ -574,7 +574,7 @@ class TestGap3VelocityCalibrationLoad:
         async def _fake_floor(gesture, default=None):
             return (db_floors or {}).get(gesture, default)
 
-        _db.get_gesture_velocity_floor = _fake_floor
+        _db.gestures.get_gesture_velocity_floor = _fake_floor
         gesture_proc = MagicMock()
         gesture_proc.set_velocity_thresholds = MagicMock()
         trainer = ContinuousTrainer.__new__(ContinuousTrainer)

@@ -196,11 +196,11 @@ async def test_rate_limiter_waits_instead_of_admitting_free(monkeypatch):
 
     async def _cfg(resource):
         return (1000.0, 1)          # 1000 rps, burst 1 → refills in 1 ms
-    db.get_rate_limit_config = _cfg
+    db.logs.get_rate_limit_config = _cfg
 
     async def _evt(*a, **k):
         return None
-    db.insert_rate_limit_event = _evt
+    db.events.insert_rate_limit_event = _evt
 
     rl = RateLimiter(db)
     rl._MAX_WAIT_S = 2.0

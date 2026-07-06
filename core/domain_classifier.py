@@ -126,6 +126,7 @@ _PLAN_KEYWORDS = {
     "set up", "setup", "create a project", "new project", "scaffold",
     "build a", "make a", "implement a", "design a", "architect",
     "from scratch", "end to end", "full pipeline",
+    "create a file", "create a new file", "write a file",
     # Multi-step markers
     "step by step", "walkthrough", "how do i", "how to",
     "first", "then", "after that", "followed by", "finally",
@@ -245,7 +246,7 @@ class DomainClassifier:
     @classmethod
     def register_keyword_overlay(cls, overlay) -> None:
         """Install the learned per-domain keyword overlay (ContinuousTrainer loads
-        it from AgentDB.get_domain_keyword_weights). Replaces any prior overlay."""
+        it from AgentDB.routing.get_domain_keyword_weights). Replaces any prior overlay."""
         cls._KEYWORD_OVERLAY = {
             d: {k.lower(): float(w) for k, w in (kw or {}).items()}
             for d, kw in (overlay or {}).items()
