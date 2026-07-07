@@ -163,5 +163,5 @@ hypothesis==6.119.3  # property-based tests (test_prop_*, twin/semantic-memory);
 # idna.encode(). Pinned here as an explicit floor because idna is a transitive
 # dep of aiohttp/requests and not otherwise constrained. Exposure in this
 # project: mDNS-discovered hostnames passed to aiohttp — low risk, closed anyway.
-idna>=3.15
+idna>=3.18
 comtypes>=1.4  # Win32 UIAutomation COM (magnetic click / element resolution)
