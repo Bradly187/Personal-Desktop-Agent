@@ -105,10 +105,10 @@ async def _run_case(case: SelfSkillingCase) -> CaseResult:
     try:
         for run in case.runs:
             steps = run["steps"]
-            rid = await db.insert_agent_run(
+            rid = await db.runs.insert_agent_run(
                 None, run.get("goal", ""), "command", "test", len(steps), True, 1.0)
             for i, (action, args) in enumerate(steps):
-                await db.insert_agent_step(rid, i, action, args, None, "ok", True, 1.0)
+                await db.runs.insert_agent_step(rid, i, action, args, None, "ok", True, 1.0)
 
         verbs = set(case.known_verbs)
         det = MacroDetector(db, known_verbs=verbs,
@@ -121,15 +121,15 @@ async def _run_case(case: SelfSkillingCase) -> CaseResult:
                               f"staged {len(staged)} != {case.expect_staged}")
 
         if case.expect_signature:
-            rows = await db.get_evolution_candidates(status="proposed", kind="macro")
+            rows = await db.skills.get_evolution_candidates(status="proposed", kind="macro")
             sigs = [r["action_or_wrong"] for r in rows]
             if case.expect_signature not in sigs:
                 return CaseResult(case.id, False,
                                   f"signature {case.expect_signature!r} not in {sigs}")
 
         if case.replay and staged:
-            await db.set_evolution_candidate_status(staged[0], "promoted")
-            rows = await db.get_evolution_candidates(status="promoted", kind="macro")
+            await db.skills.set_evolution_candidate_status(staged[0], "promoted")
+            rows = await db.skills.get_evolution_candidates(status="promoted", kind="macro")
             store = MacroStore(known_verbs=set(case.replay.get("known_verbs", case.known_verbs)))
             macro = store.register(rows[0])
             want = case.replay.get("expect_status")

@@ -172,6 +172,17 @@ function register() {
     const r = await dialog.showOpenDialog({ properties: ["openDirectory"] });
     return r.canceled ? null : r.filePaths[0];
   });
+  ipcMain.on("fs:showContextMenu", (event, filePath) => {
+    const { Menu, shell, BrowserWindow } = require("electron");
+    const template = [
+      { label: "Open", click: () => shell.openPath(norm(filePath)) },
+      { label: "Show in File Explorer", click: () => shell.showItemInFolder(norm(filePath)) },
+      { type: "separator" },
+      { label: "Delete", click: () => shell.trashItem(norm(filePath)) }
+    ];
+    const window = BrowserWindow.fromWebContents(event.sender);
+    Menu.buildFromTemplate(template).popup({ window });
+  });
 }
 
 module.exports = { register };

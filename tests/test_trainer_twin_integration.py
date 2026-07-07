@@ -54,19 +54,19 @@ def _make_db(gesture_samples: Optional[dict[str, list[float]]] = None, gesture_f
     """Return a mock AgentDB that has gesture samples."""
     db = MagicMock()
     db.available = True
-    db.upsert_few_shot_example = AsyncMock()
-    db.upsert_few_shot_counterexample = AsyncMock()
-    db.get_recent_routing_stats = AsyncMock(return_value=[])
-    db.promote_hotwords = AsyncMock()
-    db.get_gesture_floor = AsyncMock(side_effect=lambda g: (gesture_floors or {}).get(g, 0.0))
-    db.update_gesture_calibration = AsyncMock()
+    db.memory.upsert_few_shot_example = AsyncMock()
+    db.memory.upsert_few_shot_counterexample = AsyncMock()
+    db.routing.get_recent_routing_stats = AsyncMock(return_value=[])
+    db.skills.promote_hotwords = AsyncMock()
+    db.gestures.get_gesture_floor = AsyncMock(side_effect=lambda g: (gesture_floors or {}).get(g, 0.0))
+    db.gestures.update_gesture_calibration = AsyncMock()
 
     samples = gesture_samples or {}
 
     async def _get_samples(gesture, limit=500):
         return samples.get(gesture, [])
 
-    db.get_recent_gesture_samples = _get_samples
+    db.gestures.get_recent_gesture_samples = _get_samples
     return db
 
 
@@ -175,7 +175,7 @@ def test_gesture_floor_extra_reduction_on_pain_day():
             gesture_floors={gesture: 0.0},
         )
         await normal_trainer._update_gesture_calibration(pain_day_active=False)
-        call_args_normal = normal_trainer._db.update_gesture_calibration.call_args_list
+        call_args_normal = normal_trainer._db.gestures.update_gesture_calibration.call_args_list
         assert call_args_normal, "update_gesture_calibration was not called for normal day"
         normal_floor = call_args_normal[0][0][1]  # positional arg index 1 = floor
 
@@ -185,7 +185,7 @@ def test_gesture_floor_extra_reduction_on_pain_day():
             gesture_floors={gesture: 0.0},
         )
         await pain_trainer._update_gesture_calibration(pain_day_active=True)
-        call_args_pain = pain_trainer._db.update_gesture_calibration.call_args_list
+        call_args_pain = pain_trainer._db.gestures.update_gesture_calibration.call_args_list
         assert call_args_pain, "update_gesture_calibration was not called for pain day"
         pain_floor = call_args_pain[0][0][1]
 
@@ -218,7 +218,7 @@ def test_gesture_floor_extra_reduction_on_pain_day_pbt(raw_samples):
             gesture_floors={gesture: 0.0},
         )
         await normal_trainer._update_gesture_calibration(pain_day_active=False)
-        calls_normal = normal_trainer._db.update_gesture_calibration.call_args_list
+        calls_normal = normal_trainer._db.gestures.update_gesture_calibration.call_args_list
 
         # Pain day
         pain_trainer = _make_trainer(
@@ -226,7 +226,7 @@ def test_gesture_floor_extra_reduction_on_pain_day_pbt(raw_samples):
             gesture_floors={gesture: 0.0},
         )
         await pain_trainer._update_gesture_calibration(pain_day_active=True)
-        calls_pain = pain_trainer._db.update_gesture_calibration.call_args_list
+        calls_pain = pain_trainer._db.gestures.update_gesture_calibration.call_args_list
 
         # Both should update (enough samples) or neither should (< gesture_min)
         assert len(calls_normal) == len(calls_pain), (
@@ -263,7 +263,7 @@ def test_gesture_floor_clamped_to_zero_on_pain_day():
             gesture_floors={gesture: 0.0},
         )
         await trainer._update_gesture_calibration(pain_day_active=True)
-        calls = trainer._db.update_gesture_calibration.call_args_list
+        calls = trainer._db.gestures.update_gesture_calibration.call_args_list
         assert calls, "update_gesture_calibration was not called"
         floor = calls[0][0][1]
         assert floor >= 0.0, f"Gesture floor went negative on pain day: {floor}"
@@ -295,10 +295,10 @@ def test_trainer_record_failure_forwards_to_twin_only():
 
     twin.record_failure.assert_called_once()
     # Must write NOTHING to the success-biased few-shot store
-    db.upsert_few_shot_example.assert_not_called()
+    db.memory.upsert_few_shot_example.assert_not_called()
 
 
 def test_trainer_record_failure_no_twin_is_safe():
     trainer = _make_trainer()  # twin_state=None
     asyncio.run(trainer.record_failure(_FailCmd(), "CLICK"))
-    trainer._db.upsert_few_shot_example.assert_not_called()
+    trainer._db.memory.upsert_few_shot_example.assert_not_called()

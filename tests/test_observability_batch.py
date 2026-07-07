@@ -83,18 +83,18 @@ async def test_replay_trace_assembles_all_layers(tmp_path):
     db = await _open_db(tmp_path)
     if not db.available:
         pytest.skip("aiosqlite unavailable")
-    sid = await db.insert_session(mode="test")
+    sid = await db.sessions.insert_session(mode="test")
     tid = "trace123"
     cmd_id = await _insert_command(db, session_id=sid, trace_id=tid, ts=1000.0)
 
-    await db.insert_trace_spans(tid, sid, [
+    await db.logs.insert_trace_spans(tid, sid, [
         {"stage": "enqueue", "ts": 1000.1, "dur_ms": 1.0},
         {"stage": "route_decision", "ts": 1000.2, "dur_ms": 12.0, "attrs": {"route": "local"}},
         {"stage": "execute", "ts": 1000.3, "dur_ms": 5.0, "attrs": {"verb": "CLICK"}},
     ])
-    await db.insert_event("command.executed", json.dumps({"action": "CLICK"}),
+    await db.events.insert_event("command.executed", json.dumps({"action": "CLICK"}),
                           "coordinator", session_id=sid, command_id=cmd_id, trace_id=tid)
-    await db.insert_inference(command_id=cmd_id, model="claude-haiku-4-5",
+    await db.inferences.insert_inference(command_id=cmd_id, model="claude-haiku-4-5",
                              domain="command", prompt=None, response=None,
                              tokens_in=100, tokens_out=40, latency_ms=200.0,
                              backend="bedrock")
@@ -144,7 +144,7 @@ async def test_recent_traces_lists_newest_first(tmp_path):
     db = await _open_db(tmp_path)
     if not db.available:
         pytest.skip("aiosqlite unavailable")
-    sid = await db.insert_session(mode="test")
+    sid = await db.sessions.insert_session(mode="test")
     await _insert_command(db, session_id=sid, trace_id="old", ts=1000.0)
     await _insert_command(db, session_id=sid, trace_id="new", ts=2000.0)
     await db.close()
@@ -176,7 +176,7 @@ async def test_session_trends_detects_direction(tmp_path):
              pain_day_pct=0.0, corrections_count=0),
     ]
     for r in rows:
-        await db.insert_session_summary(r)
+        await db.sessions.insert_session_summary(r)
     await db.close()
 
     result = trends.session_trends(str(tmp_path / "agent.db"), limit=30)
@@ -197,15 +197,15 @@ async def test_cost_rollup_counts_cloud_only(tmp_path):
     db = await _open_db(tmp_path)
     if not db.available:
         pytest.skip("aiosqlite unavailable")
-    sid = await db.insert_session(mode="test")
+    sid = await db.sessions.insert_session(mode="test")
     cmd_id = await _insert_command(db, session_id=sid, trace_id="t", ts=1000.0)
     # Opus: 1M in + 1M out → 1*5 + 1*25 = $30 at list price.
-    await db.insert_inference(command_id=cmd_id, model="claude-opus-4-8",
+    await db.inferences.insert_inference(command_id=cmd_id, model="claude-opus-4-8",
                              domain="code", prompt=None, response=None,
                              tokens_in=1_000_000, tokens_out=1_000_000,
                              latency_ms=0.0, backend="bedrock")
     # Local llama — has tokens but is unpriced → excluded from the cloud ledger.
-    await db.insert_inference(command_id=cmd_id, model="llama3.1:8b",
+    await db.inferences.insert_inference(command_id=cmd_id, model="llama3.1:8b",
                              domain="command", prompt=None, response=None,
                              tokens_in=500, tokens_out=200, latency_ms=30.0,
                              backend="ollama")
@@ -225,9 +225,9 @@ async def test_cost_rollup_price_override(tmp_path, monkeypatch):
     db = await _open_db(tmp_path)
     if not db.available:
         pytest.skip("aiosqlite unavailable")
-    sid = await db.insert_session(mode="test")
+    sid = await db.sessions.insert_session(mode="test")
     cmd_id = await _insert_command(db, session_id=sid, trace_id="t", ts=1000.0)
-    await db.insert_inference(command_id=cmd_id, model="claude-opus-4-8",
+    await db.inferences.insert_inference(command_id=cmd_id, model="claude-opus-4-8",
                              domain="code", prompt=None, response=None,
                              tokens_in=1_000_000, tokens_out=0,
                              latency_ms=0.0, backend="bedrock")

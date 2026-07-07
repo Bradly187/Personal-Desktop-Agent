@@ -256,7 +256,7 @@ class CloudPlanRouter:
         if not (self._agent_db and getattr(self._agent_db, "available", False)):
             return
         try:
-            await self._agent_db.insert_inference(
+            await self._agent_db.inferences.insert_inference(
                 command_id=None,
                 model=self.model,
                 domain="plan",

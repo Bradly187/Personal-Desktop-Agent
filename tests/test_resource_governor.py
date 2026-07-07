@@ -549,7 +549,7 @@ class TestFlareFastPath:
 
     @pytest.mark.asyncio
     async def test_flare_fast_path_wired_from_twin_state(self):
-        """BehavioralTwinState.set_manual_pain_day(True) fires governor immediately."""
+        """BehavioralTwinState.profile.set_manual_pain_day(True) fires governor immediately."""
         from adaptive.behavioral_twin_state import BehavioralTwinState
 
         db = AsyncMock()

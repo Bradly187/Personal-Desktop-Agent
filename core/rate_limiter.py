@@ -75,7 +75,7 @@ class RateLimiter:
                 # Double-check: another coroutine may have populated the bucket
                 # while we were waiting for the lock.
                 if resource not in self._buckets:
-                    max_rps, burst = await self._db.get_rate_limit_config(resource)
+                    max_rps, burst = await self._db.logs.get_rate_limit_config(resource)
                     self._buckets[resource] = _TokenBucket(max_rps, burst)
         return self._buckets[resource]
 
@@ -99,12 +99,12 @@ class RateLimiter:
                 return True
             if drop_on_limit:
                 log.info("RateLimiter: dropping %s request (over rate)", resource)
-                await self._db.insert_rate_limit_event(
+                await self._db.events.insert_rate_limit_event(
                     resource, command_id=command_id, wait_ms=0.0, was_dropped=True
                 )
                 return False
             log.debug("RateLimiter: throttling %s for %.0f ms", resource, wait_s * 1000)
-            await self._db.insert_rate_limit_event(
+            await self._db.events.insert_rate_limit_event(
                 resource, command_id=command_id, wait_ms=wait_s * 1000, was_dropped=False
             )
             # Wait, then ACTUALLY consume the token. The first consume() above

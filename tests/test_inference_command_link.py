@@ -37,25 +37,25 @@ async def _one(db, sql, params=()):
 
 
 # ---------------------------------------------------------------------------
-# AgentDB.link_inferences_to_command
+# AgentDB.commands.link_inferences_to_command
 # ---------------------------------------------------------------------------
 
 async def test_backfill_links_inference_to_command(db):
-    inf_id = await db.insert_inference(
+    inf_id = await db.inferences.insert_inference(
         command_id=None, model="llama3.1:8b", domain="command",
         prompt="p", response="CLICK save", tokens_in=10, tokens_out=3,
         latency_ms=42.0,
     )
     assert inf_id > 0
-    sid = await db.insert_session()
-    cmd_id = await db.insert_command(
+    sid = await db.sessions.insert_session()
+    cmd_id = await db.commands.insert_command(
         session_id=sid, cmd=Command(text="click save", action="CLICK", source="voice"),
         action="CLICK save", route="local", gate_that_decided="all_pass",
         latency_ms=50.0, success=True,
     )
     assert cmd_id > 0
 
-    await db.link_inferences_to_command([inf_id], cmd_id)
+    await db.commands.link_inferences_to_command([inf_id], cmd_id)
 
     row = await _one(
         db,
@@ -68,31 +68,31 @@ async def test_backfill_links_inference_to_command(db):
 
 
 async def test_backfill_never_relinks_an_already_linked_row(db):
-    sid = await db.insert_session()
-    cmd_a = await db.insert_command(
+    sid = await db.sessions.insert_session()
+    cmd_a = await db.commands.insert_command(
         session_id=sid, cmd=Command(text="a", action="CLICK", source="voice"),
         action="CLICK a", route="local", gate_that_decided="all_pass",
         latency_ms=1.0, success=True,
     )
-    cmd_b = await db.insert_command(
+    cmd_b = await db.commands.insert_command(
         session_id=sid, cmd=Command(text="b", action="CLICK", source="voice"),
         action="CLICK b", route="local", gate_that_decided="all_pass",
         latency_ms=1.0, success=True,
     )
-    inf_id = await db.insert_inference(
+    inf_id = await db.inferences.insert_inference(
         command_id=cmd_a, model="m", domain="command", prompt="p",
         response="r", tokens_in=None, tokens_out=None, latency_ms=1.0,
     )
-    await db.link_inferences_to_command([inf_id], cmd_b)
+    await db.commands.link_inferences_to_command([inf_id], cmd_b)
     row = await _one(db, "SELECT command_id FROM inferences WHERE id = ?", (inf_id,))
     assert row["command_id"] == cmd_a      # unchanged
 
 
 async def test_backfill_ignores_invalid_ids(db):
     # Must not raise on empty/invalid input.
-    await db.link_inferences_to_command([], 1)
-    await db.link_inferences_to_command([-1, 0], 1)
-    await db.link_inferences_to_command([1], -1)
+    await db.commands.link_inferences_to_command([], 1)
+    await db.commands.link_inferences_to_command([-1, 0], 1)
+    await db.commands.link_inferences_to_command([1], -1)
 
 
 # ---------------------------------------------------------------------------

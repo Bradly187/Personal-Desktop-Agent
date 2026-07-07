@@ -45,14 +45,22 @@ class SemanticMemory:
         self._chroma_dir = chroma_dir
         self._agent_db = agent_db
         self._encoder = encoder
-        self._client = None
-        self._collection = None
+        import typing
+        self._client: typing.Any = None
+        self._collection: typing.Any = None
         self._available: bool = False
         self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
         # Lazy re-probe (C4): retry start() after a failure, but only once the
         # store has been started at least once, and at most once per interval.
         self._started_once: bool = False
         self._last_probe_ts: float = 0.0
+        self._model_router = None
+
+    def set_model_router(self, router) -> None:
+        self._model_router = router
+
+    def set_agent_db(self, db) -> None:
+        self._agent_db = db
 
     async def start(self) -> bool:
         """Initialize ChromaDB client. Returns True if available."""
@@ -200,7 +208,7 @@ class SemanticMemory:
             if self._agent_db is None:
                 return []
 
-            candidates = await self._agent_db.get_recent_successful_commands(limit=200)
+            candidates = await self._agent_db.commands.get_recent_successful_commands(limit=200)
 
             def jaccard(a: str, b: str) -> float:
                 sa = set(a.lower().split())
@@ -255,28 +263,61 @@ class SemanticMemory:
             return 0
 
     async def _evict_oldest(self) -> None:
-        """Remove the EVICT_COUNT oldest documents by ts metadata."""
+        """Remove the EVICT_COUNT oldest documents by ts metadata.
+        Synthesizes an insight via ModelRouter before deletion if available."""
         if not self._available or self._collection is None:
             return
 
         try:
             result = await asyncio.to_thread(
-                self._collection.get, include=["metadatas"]
+                self._collection.get, include=["metadatas", "documents"]
             )
 
             ids: list[str] = result.get("ids", [])
             metadatas: list[dict] = result.get("metadatas", [])
+            documents: list[str] = result.get("documents", [])
 
-            # Pair each id with its ts, then sort ascending (oldest first)
+            if not ids:
+                return
+
+            # Pair each id with its ts and document, then sort ascending (oldest first)
             paired = sorted(
-                zip(ids, metadatas),
+                zip(ids, metadatas, documents),
                 key=lambda x: x[1].get("ts", 0.0),
             )
 
-            ids_to_delete = [doc_id for doc_id, _ in paired[: self.EVICT_COUNT]]
+            to_evict = paired[: self.EVICT_COUNT]
+            ids_to_delete = [doc_id for doc_id, _, _ in to_evict]
 
             if not ids_to_delete:
                 return
+
+            # Memory Consolidation Reflection Loop
+            if self._model_router is not None and self._agent_db is not None:
+                try:
+                    records_text = "\n".join(
+                        f"[{meta.get('ts', 0.0)}] {meta.get('action', 'UNKNOWN')}: {doc}" 
+                        for _, meta, doc in to_evict
+                    )
+                    prompt = (
+                        "Summarize the following chronological memory records into a concise insight. "
+                        "Focus on identifying patterns, preferences, and long-term behaviors.\n\n"
+                        f"{records_text}"
+                    )
+                    inference_result = await self._model_router.infer(
+                        domain="general", 
+                        user_text=prompt
+                    )
+                    if inference_result and inference_result.text:
+                        await self._agent_db.memory.insert_episodic_memory(
+                            kind="insight",
+                            goal="Memory Consolidation",
+                            summary=inference_result.text.strip(),
+                            domain="general"
+                        )
+                        log.info("SemanticMemory: synthesized insight from %d old records", len(to_evict))
+                except Exception as insight_exc:
+                    log.warning("SemanticMemory: failed to generate insight during eviction: %s", insight_exc)
 
             await asyncio.to_thread(self._collection.delete, ids=ids_to_delete)
             log.info("SemanticMemory: evicted %d oldest documents", len(ids_to_delete))

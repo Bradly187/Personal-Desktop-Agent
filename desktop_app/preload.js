@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld("agent", {
     readFileBase64: (path) => ipcRenderer.invoke("fs:readFileBase64", path),
     writeFile: (args) => ipcRenderer.invoke("fs:writeFile", args),
     stat: (path) => ipcRenderer.invoke("fs:stat", path),
+    showContextMenu: (path) => ipcRenderer.send("fs:showContextMenu", path),
   },
   pty: {
     spawn: (opts) => ipcRenderer.invoke("pty:spawn", opts),

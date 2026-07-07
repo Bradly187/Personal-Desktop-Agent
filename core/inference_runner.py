@@ -21,7 +21,7 @@ import json
 import logging
 import time
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from dataclasses import replace as _dc_replace
 
@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 
 # Task-local accumulator linking inference rows to their command row (the
 # inference insert happens before insert_command, so command_id is unknown at
-# write time and backfilled by route() — see AgentDB.link_inferences_to_command).
+# write time and backfilled by route() — see AgentDB.commands.link_inferences_to_command).
 _PENDING_INFERENCE_IDS: ContextVar[Optional[list]] = ContextVar(
     "da_pending_inference_ids", default=None
 )
@@ -159,12 +159,12 @@ class InferenceRunner:
         self,
         cfg: "CoordinatorConfig",
         *,
-        local: Callable[[], object],
-        cloud: Callable[[], _CloudInference],
-        trainer: Callable[[], object],
-        agent_db: Callable[[], object],
-        content_filter: Callable[[], object],
-        rate_limiter: Callable[[], object],
+        local: Callable[[], Any],
+        cloud: Callable[[], Optional[_CloudInference]],
+        trainer: Callable[[], Any],
+        agent_db: Callable[[], Any],
+        content_filter: Callable[[], Any],
+        rate_limiter: Callable[[], Any],
         note_cloud_call: Callable[[], None],
     ) -> None:
         self._cfg = cfg
@@ -206,7 +206,7 @@ class InferenceRunner:
         # On timeout, degrade to CLARIFY rather than blocking the accessibility
         # path indefinitely. Mirrors the cloud-path guard in run_cloud().
         try:
-            async with asyncio.timeout(effective.local_timeout_s):
+            async with asyncio.timeout(effective.local_timeout_s):  # type: ignore[attr-defined]
                 action_str = await local.infer(
                     cmd, few_shot_examples=examples, counterexamples=counterexamples
                 )
@@ -226,7 +226,7 @@ class InferenceRunner:
             status = local.get_status()
             error = action_str if action_str.startswith("CLARIFY inference") else None
             _prompt, _tokens_in, _tokens_out = get_inference_capture()
-            _inf_id = await agent_db.insert_inference(
+            _inf_id = await agent_db.inferences.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=status.get("model", "unknown"),
                 domain="command",
@@ -248,7 +248,7 @@ class InferenceRunner:
                 "inference", route="local", backend=_st.get("backend"),
                 model=_st.get("model"), dur_ms=round(latency_ms, 1),
                 tokens_in=_ti, tokens_out=_to,
-                cost_usd=estimate_cost(_st.get("model", ""), _ti, _to) or None,
+                cost_usd=estimate_cost(_st.get("model", ""), _ti or 0, _to or 0) or None,
             )
         except Exception:
             pass
@@ -294,8 +294,10 @@ class InferenceRunner:
         set_inference_capture(None)
         t0 = time.monotonic()
         cloud = self._cloud()
+        if cloud is None:
+            return "CLARIFY cloud not configured"
         try:
-            async with asyncio.timeout(self._CLOUD_TIMEOUT_S):
+            async with asyncio.timeout(self._CLOUD_TIMEOUT_S):  # type: ignore[attr-defined]
                 # Throttle cloud egress INSIDE the timeout (#18): a saturated
                 # 'anthropic' bucket otherwise stalled the command path past the
                 # advertised budget. Fail-open if no limiter/bucket is configured;
@@ -329,14 +331,14 @@ class InferenceRunner:
                 "inference", route="cloud", model=effective.anthropic_model,
                 dur_ms=round(latency_ms, 1),
                 tokens_in=_tokens_in, tokens_out=_tokens_out,
-                cost_usd=estimate_cost(effective.anthropic_model, _tokens_in, _tokens_out) or None,
+                cost_usd=estimate_cost(effective.anthropic_model, _tokens_in or 0, _tokens_out or 0) or None,
             )
         except Exception:
             pass
         agent_db = self._agent_db()
         if agent_db and agent_db.available:
             error = action_str if action_str.startswith("CLARIFY") else None
-            _inf_id = await agent_db.insert_inference(
+            _inf_id = await agent_db.inferences.insert_inference(
                 command_id=None,   # backfilled by route() via link_inferences_to_command
                 model=effective.anthropic_model,
                 domain="command",

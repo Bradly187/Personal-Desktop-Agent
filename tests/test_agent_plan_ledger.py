@@ -50,19 +50,19 @@ async def _open_db(tmp_path) -> AgentDB:
 async def test_run_lifecycle_and_crash_recovery(tmp_path):
     db = await _open_db(tmp_path)
     try:
-        rid = await db.start_agent_run("goal x", "plan", "model-y")
+        rid = await db.runs.start_agent_run("goal x", "plan", "model-y")
         assert rid > 0
 
         # A run left 'running' is reconciled to 'interrupted' on recovery.
-        assert await db.mark_interrupted_runs() == 1
-        runs = await db.get_interrupted_runs()
+        assert await db.runs.mark_interrupted_runs() == 1
+        runs = await db.runs.get_interrupted_runs()
         assert runs and runs[0]["goal"] == "goal x"
 
         # A finalized run is NOT picked up by recovery.
-        rid2 = await db.start_agent_run("goal z", "plan", "m")
-        await db.update_agent_run(rid2, "completed", step_count=3,
+        rid2 = await db.runs.start_agent_run("goal z", "plan", "m")
+        await db.runs.update_agent_run(rid2, "completed", step_count=3,
                                   success=True, total_latency_ms=12.0)
-        assert await db.mark_interrupted_runs() == 0
+        assert await db.runs.mark_interrupted_runs() == 0
     finally:
         await db.close()
 
@@ -93,7 +93,7 @@ async def test_plan_and_run_finalizes_status(tmp_path):
         assert result.success is True
 
         # Recovery finds nothing → the run was finalized, not left 'running'.
-        assert await db.mark_interrupted_runs() == 0
+        assert await db.runs.mark_interrupted_runs() == 0
         cur = await db._conn.execute("SELECT status, step_count FROM agent_runs")
         rows = await cur.fetchall()
         assert len(rows) == 1
@@ -111,8 +111,8 @@ async def test_plan_and_run_finalizes_status(tmp_path):
 async def test_resume_declined_does_not_run(tmp_path):
     db = await _open_db(tmp_path)
     try:
-        await db.start_agent_run("old goal", "plan", "m")
-        await db.mark_interrupted_runs()
+        await db.runs.start_agent_run("old goal", "plan", "m")
+        await db.runs.mark_interrupted_runs()
 
         agent = DevAgent(router=MagicMock(), agent_db=db)
         agent._confirm_destructive_op = AsyncMock(return_value=False)
@@ -129,8 +129,8 @@ async def test_resume_declined_does_not_run(tmp_path):
 async def test_resume_approved_runs_plan(tmp_path):
     db = await _open_db(tmp_path)
     try:
-        await db.start_agent_run("old goal", "plan", "m")
-        await db.mark_interrupted_runs()
+        await db.runs.start_agent_run("old goal", "plan", "m")
+        await db.runs.mark_interrupted_runs()
 
         agent = DevAgent(router=MagicMock(), agent_db=db)
         agent._confirm_destructive_op = AsyncMock(return_value=True)

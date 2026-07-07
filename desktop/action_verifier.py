@@ -73,7 +73,7 @@ class ActionVerifier:
             import sys
             from pathlib import Path
             sys.path.insert(0, str(Path(__file__).parent / "mcp_server"))
-            from tools import screen
+            from tools import screen  # type: ignore[import-not-found,import-untyped]
             result = screen.screenshot()
             return result.get("image_base64", "")
         except Exception as exc:
@@ -161,7 +161,7 @@ class ActionVerifier:
 
         # Resize post to pre dimensions if they differ (window resize edge case)
         if pre_img.size != post_img.size:
-            post_img = post_img.resize(pre_img.size, Image.LANCZOS)
+            pre_img = pre_img.resize(post_img.size, Image.LANCZOS)  # type: ignore[attr-defined]
 
         diff = ImageChops.difference(pre_img, post_img)
 
@@ -172,7 +172,7 @@ class ActionVerifier:
 
         # Threshold diff at 10/255 to ignore JPEG compression noise
         changed = sum(
-            1 for r, g, b in diff.getdata()
+            1 for r, g, b in diff.getdata()  # type: ignore[attr-defined,misc]
             if r > 10 or g > 10 or b > 10
         )
         return (changed / total) * 100.0

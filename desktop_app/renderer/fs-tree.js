@@ -44,6 +44,12 @@ const FsTree = (() => {
     childBox.hidden = true;
     container.appendChild(childBox);
 
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      select(row);
+      window.agent.fs.showContextMenu(path);
+    });
+
     let loaded = false;
     row.addEventListener("click", async () => {
       select(row);
@@ -66,6 +72,11 @@ const FsTree = (() => {
             fileRow.addEventListener("click", () => {
               select(fileRow);
               onOpenFile(item.path);
+            });
+            fileRow.addEventListener("contextmenu", (e) => {
+              e.preventDefault();
+              select(fileRow);
+              window.agent.fs.showContextMenu(item.path);
             });
           }
         }

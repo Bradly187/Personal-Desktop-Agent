@@ -53,7 +53,7 @@ def test_feeling_better_with_bang_turns_off():
 # --- bug #3: dev-agent pre-gate must not shadow system-control keywords -------
 
 def test_is_system_control_voice_classifier():
-    from core.hybrid_coordinator import _is_system_control_voice
+    from core.voice_system_control import _is_system_control_voice
     assert _is_system_control_voice(Command(text="Pain day on.", action="X", source="voice"))
     assert _is_system_control_voice(Command(text="calibrate allergy day", action="X", source="voice"))
     # a genuine dev query is NOT system-control

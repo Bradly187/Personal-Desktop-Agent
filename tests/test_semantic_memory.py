@@ -336,7 +336,7 @@ def _make_fallback_memory(candidates: list[dict]) -> SemanticMemory:
     """Return a SemanticMemory in fallback mode (ChromaDB unavailable) backed
     by a mock AgentDB that returns the given candidates list."""
     mock_db = MagicMock()
-    mock_db.get_recent_successful_commands = AsyncMock(return_value=candidates)
+    mock_db.commands.get_recent_successful_commands = AsyncMock(return_value=candidates)
 
     mem = SemanticMemory(agent_db=mock_db)
     # _available defaults to False — no ChromaDB
@@ -493,7 +493,7 @@ def test_14_1_chroma_unavailable_at_startup():
         {"text": "click the button", "action": "CLICK", "source": "voice", "ts": 1.0}
     ]
     mock_db = MagicMock()
-    mock_db.get_recent_successful_commands = AsyncMock(return_value=candidates)
+    mock_db.commands.get_recent_successful_commands = AsyncMock(return_value=candidates)
 
     async def _run_test():
         mem = SemanticMemory(chroma_dir="/nonexistent_chroma_dir_123", agent_db=mock_db)
@@ -541,7 +541,7 @@ def test_14_2_chroma_fails_mid_session_fallback_activated():
         {"text": "open the app", "action": "OPEN", "source": "voice", "ts": 2.0}
     ]
     mock_db = MagicMock()
-    mock_db.get_recent_successful_commands = AsyncMock(return_value=candidates)
+    mock_db.commands.get_recent_successful_commands = AsyncMock(return_value=candidates)
 
     async def _run_test():
         mem = SemanticMemory(agent_db=mock_db)

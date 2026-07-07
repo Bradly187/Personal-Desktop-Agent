@@ -194,7 +194,7 @@ class VoiceCalibrator:
         await asyncio.sleep(2.0)
 
         # Create DB session
-        session_id = await self._db.start_calibration_session(condition)
+        session_id = await self._db.sessions.start_calibration_session(condition)
 
         try:
             for i, phrase_def in enumerate(phrases):
@@ -225,7 +225,7 @@ class VoiceCalibrator:
                 results.append(result)
 
                 # Store in DB
-                await self._db.insert_pronunciation(
+                await self._db.voice.insert_pronunciation(
                     session_id=session_id,
                     expected=expected,
                     heard=heard,
@@ -255,7 +255,7 @@ class VoiceCalibrator:
         corrections_added = len(corrections)
 
         # Save voice profile for this condition
-        await self._db.save_voice_profile(
+        await self._db.voice.save_voice_profile(
             condition=condition,
             corrections=corrections,
             vad_threshold=self._profiler.get_vad_threshold(),

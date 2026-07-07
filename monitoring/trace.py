@@ -188,7 +188,7 @@ class TraceRecorder:
         if agent_db is None or not getattr(agent_db, "available", False):
             return 0
         try:
-            return await agent_db.insert_trace_spans(trace_id, session_id, spans)
+            return await agent_db.logs.insert_trace_spans(trace_id, session_id, spans)
         except Exception:
             return 0
 

@@ -112,9 +112,9 @@ async def test_queue_is_bounded(monkeypatch, tmp_path):
 def _proactive(count, notifier):
     from core.proactive_scheduler import ProactiveScheduler
     db = MagicMock()
-    db.count_pending_escalations = AsyncMock(return_value=count)
-    db.promote_due_goals = AsyncMock(return_value=[])
-    db.reap_expired_leases = AsyncMock(return_value=0)
+    db.sagas.count_pending_escalations = AsyncMock(return_value=count)
+    db.goals.promote_due_goals = AsyncMock(return_value=[])
+    db.misc.reap_expired_leases = AsyncMock(return_value=0)
     return ProactiveScheduler(db, notifier=notifier)
 
 

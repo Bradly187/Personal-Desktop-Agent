@@ -34,60 +34,60 @@ async def db(tmp_path):
 # ---------------------------------------------------------------------------
 
 async def test_enqueue_and_claim_order(db):
-    a = await db.enqueue_goal("first", idempotency_key="k1")
-    b = await db.enqueue_goal("second", idempotency_key="k2")
+    a = await db.goals.enqueue_goal("first", idempotency_key="k1")
+    b = await db.goals.enqueue_goal("second", idempotency_key="k2")
     assert a > 0 and b > 0 and a != b
 
-    g1 = await db.claim_next_goal()
+    g1 = await db.goals.claim_next_goal()
     assert g1["goal"] == "first"            # oldest first
     assert g1["status"] == "running"
     assert g1["attempts"] == 1
-    g2 = await db.claim_next_goal()
+    g2 = await db.goals.claim_next_goal()
     assert g2["goal"] == "second"
-    assert await db.claim_next_goal() is None   # queue drained
+    assert await db.goals.claim_next_goal() is None   # queue drained
 
 
 async def test_enqueue_dedupes_on_idempotency_key(db):
-    a = await db.enqueue_goal("same", idempotency_key="dup")
-    b = await db.enqueue_goal("same", idempotency_key="dup")
+    a = await db.goals.enqueue_goal("same", idempotency_key="dup")
+    b = await db.goals.enqueue_goal("same", idempotency_key="dup")
     assert a == b                            # second is a no-op, same row id
     # Only one claimable goal exists.
-    assert await db.claim_next_goal() is not None
-    assert await db.claim_next_goal() is None
+    assert await db.goals.claim_next_goal() is not None
+    assert await db.goals.claim_next_goal() is None
 
 
 async def test_complete_goal_terminal(db):
-    gid = await db.enqueue_goal("g", idempotency_key="k")
-    await db.claim_next_goal()
-    await db.complete_goal(gid, "done")
+    gid = await db.goals.enqueue_goal("g", idempotency_key="k")
+    await db.goals.claim_next_goal()
+    await db.goals.complete_goal(gid, "done")
     # Done goals are not re-claimed.
-    assert await db.claim_next_goal() is None
-    assert await db.get_queued_goals() == []
+    assert await db.goals.claim_next_goal() is None
+    assert await db.goals.get_queued_goals() == []
 
 
 async def test_requeue_stale_running_recovers_crash(db):
-    gid = await db.enqueue_goal("crashy", idempotency_key="k")
-    claimed = await db.claim_next_goal()     # → running, attempts=1
+    gid = await db.goals.enqueue_goal("crashy", idempotency_key="k")
+    claimed = await db.goals.claim_next_goal()     # → running, attempts=1
     assert claimed is not None
     # Simulate a crash: the row is left 'running'. Startup requeues it.
-    n = await db.requeue_stale_running()
+    n = await db.runs.requeue_stale_running()
     assert n == 1
-    again = await db.claim_next_goal()       # claimable again
+    again = await db.goals.claim_next_goal()       # claimable again
     assert again["goal"] == "crashy"
     assert again["attempts"] == 2            # attempt counter advanced
 
 
 async def test_poison_goal_capped_at_max_attempts(db):
-    gid = await db.enqueue_goal("poison", idempotency_key="k", max_attempts=2)
+    gid = await db.goals.enqueue_goal("poison", idempotency_key="k", max_attempts=2)
     # attempt 1
-    await db.claim_next_goal()
-    await db.requeue_stale_running()
+    await db.goals.claim_next_goal()
+    await db.runs.requeue_stale_running()
     # attempt 2
-    await db.claim_next_goal()
-    n = await db.requeue_stale_running()     # attempts(2) >= max(2) → failed, not requeued
+    await db.goals.claim_next_goal()
+    n = await db.runs.requeue_stale_running()     # attempts(2) >= max(2) → failed, not requeued
     assert n == 0
-    assert await db.claim_next_goal() is None
-    assert await db.get_queued_goals() == []
+    assert await db.goals.claim_next_goal() is None
+    assert await db.goals.get_queued_goals() == []
 
 
 # ---------------------------------------------------------------------------
@@ -100,8 +100,8 @@ def _agent(db):
 
 
 async def test_drain_runs_all_queued_goals(db, monkeypatch):
-    await db.enqueue_goal("g1", idempotency_key="k1")
-    await db.enqueue_goal("g2", idempotency_key="k2")
+    await db.goals.enqueue_goal("g1", idempotency_key="k1")
+    await db.goals.enqueue_goal("g2", idempotency_key="k2")
     agent = _agent(db)
     ran = []
 
@@ -113,11 +113,11 @@ async def test_drain_runs_all_queued_goals(db, monkeypatch):
     n = await agent.drain_goal_queue()
     assert n == 2
     assert ran == ["g1", "g2"]
-    assert await db.get_queued_goals() == []   # all consumed
+    assert await db.goals.get_queued_goals() == []   # all consumed
 
 
 async def test_drain_marks_failed_on_exception(db, monkeypatch):
-    await db.enqueue_goal("boom", idempotency_key="k")
+    await db.goals.enqueue_goal("boom", idempotency_key="k")
     agent = _agent(db)
 
     async def _raise(goal):
@@ -127,29 +127,29 @@ async def test_drain_marks_failed_on_exception(db, monkeypatch):
     n = await agent.drain_goal_queue()
     assert n == 1
     # Goal is terminal (failed), not stuck queued/running.
-    assert await db.claim_next_goal() is None
+    assert await db.goals.claim_next_goal() is None
 
 
 async def test_drain_respects_max_goals(db, monkeypatch):
     for i in range(3):
-        await db.enqueue_goal(f"g{i}", idempotency_key=f"k{i}")
+        await db.goals.enqueue_goal(f"g{i}", idempotency_key=f"k{i}")
     agent = _agent(db)
     monkeypatch.setattr(agent, "plan_and_run",
                         AsyncMock(return_value=AgentResult(goal="x", domain="plan",
                                                            model_used="m", success=True)))
     n = await agent.drain_goal_queue(max_goals=2)
     assert n == 2
-    assert len(await db.get_queued_goals()) == 1   # one left
+    assert len(await db.goals.get_queued_goals()) == 1   # one left
 
 
 async def test_drain_stops_on_cancel(db, monkeypatch):
-    await db.enqueue_goal("g", idempotency_key="k")
+    await db.goals.enqueue_goal("g", idempotency_key="k")
     agent = _agent(db)
     agent._cancel_event.set()
     monkeypatch.setattr(agent, "plan_and_run", AsyncMock())
     n = await agent.drain_goal_queue()
     assert n == 0
-    assert len(await db.get_queued_goals()) == 1   # untouched
+    assert len(await db.goals.get_queued_goals()) == 1   # untouched
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ async def test_concurrent_drain_is_single_flight_and_no_goal_abandoned(db, monke
     active drainer picks up a goal enqueued mid-run (re-check signal)."""
     import asyncio
 
-    await db.enqueue_goal("g1", idempotency_key="k1")
+    await db.goals.enqueue_goal("g1", idempotency_key="k1")
     agent = _agent(db)
     ran: list[str] = []
     release = asyncio.Event()
@@ -177,7 +177,7 @@ async def test_concurrent_drain_is_single_flight_and_no_goal_abandoned(db, monke
     await asyncio.sleep(0.05)               # let drainer claim g1 and block
 
     # New goal arrives + second drain call (the coordinator "authorize" path)
-    await db.enqueue_goal("g2", idempotency_key="k2")
+    await db.goals.enqueue_goal("g2", idempotency_key="k2")
     n2 = await agent.drain_goal_queue()
     assert n2 == 0                          # single-flight: did not run anything
 
@@ -185,14 +185,14 @@ async def test_concurrent_drain_is_single_flight_and_no_goal_abandoned(db, monke
     n1 = await drain1
     assert n1 == 2                          # active drainer processed BOTH
     assert ran == ["g1", "g2"]              # g2 was not abandoned
-    assert await db.get_queued_goals() == []
+    assert await db.goals.get_queued_goals() == []
 
 
 async def test_drain_waits_for_flare_gate(db, monkeypatch):
     """With dev admission paused, the drainer must not claim until resume."""
     import asyncio
 
-    await db.enqueue_goal("g", idempotency_key="k")
+    await db.goals.enqueue_goal("g", idempotency_key="k")
     agent = _agent(db)
     resume = asyncio.Event()
 
@@ -216,7 +216,7 @@ async def test_drain_waits_for_flare_gate(db, monkeypatch):
     drain = asyncio.create_task(agent.drain_goal_queue())
     await asyncio.sleep(0.05)
     assert ran == []                                    # parked at the gate
-    assert (await db.get_queued_goals())[0]["goal"] == "g"  # not yet claimed
+    assert (await db.goals.get_queued_goals())[0]["goal"] == "g"  # not yet claimed
 
     resume.set()                                        # flare ends
     n = await drain

@@ -32,7 +32,7 @@ class LocalAdjudicator:
             return 0
             
         try:
-            pending = await self._db.get_pending_escalations(limit=20)
+            pending = await self._db.sagas.get_pending_escalations(limit=20)
         except Exception as exc:
             log.warning("LocalAdjudicator failed to fetch: %s", exc)
             return 0
@@ -58,7 +58,7 @@ class LocalAdjudicator:
                 if res and res.ok and res.text:
                     decision = res.text.strip().upper()
                     if "DISMISS" in decision and "ESCALATE" not in decision:
-                        await self._db.resolve_escalations(status="auto_dismissed", escalation_id=eid)
+                        await self._db.sagas.resolve_escalations(status="auto_dismissed", escalation_id=eid)
                         dismissed += 1
                         log.info("LocalAdjudicator auto-dismissed escalation %d", eid)
                     else:

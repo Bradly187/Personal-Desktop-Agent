@@ -278,7 +278,7 @@ async def run(args: argparse.Namespace) -> int:
                     log.info("connected to bridge at %s", uri)
                     while True:
                         frames = await asyncio.to_thread(pipeline.wait_for_frames)
-                        if want_depth:
+                        if align is not None:
                             frames = align.process(frames)
                         color = frames.get_color_frame()
                         if not color:

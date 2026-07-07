@@ -153,13 +153,16 @@ async def test_governor_spawn_bg_without_start_uses_running_loop():
 
 def test_git_commit_staging_failure_raises_runtimeerror(monkeypatch):
     from inference import dev_agent
+    from inference import step_executor
 
     class _Res:
         returncode = 1
         stderr = "fatal: not a git repository"
         stdout = ""
 
-    monkeypatch.setattr(dev_agent.subprocess, "run", lambda *a, **k: _Res())
+    # _git_commit moved to StepExecutor in the god-object split; patch subprocess
+    # where it is actually called.
+    monkeypatch.setattr(step_executor.subprocess, "run", lambda *a, **k: _Res())
     with pytest.raises(RuntimeError, match="git add failed"):
         dev_agent.DevAgent._git_commit("msg")
 
@@ -196,11 +199,11 @@ async def test_rate_limiter_waits_instead_of_admitting_free(monkeypatch):
 
     async def _cfg(resource):
         return (1000.0, 1)          # 1000 rps, burst 1 → refills in 1 ms
-    db.get_rate_limit_config = _cfg
+    db.logs.get_rate_limit_config = _cfg
 
     async def _evt(*a, **k):
         return None
-    db.insert_rate_limit_event = _evt
+    db.events.insert_rate_limit_event = _evt
 
     rl = RateLimiter(db)
     rl._MAX_WAIT_S = 2.0

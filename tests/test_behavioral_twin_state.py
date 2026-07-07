@@ -54,6 +54,10 @@ class MockAgentDB:
         self._preference_json = preference_json
         self._written_history = []
         self._logged_settings = []
+        self.commands = self
+        self.sessions = self
+        self.profile = self
+        self.telemetry = self
 
     async def get_recent_successful_commands(self, limit=500):
         return self._commands[:limit]
@@ -123,7 +127,7 @@ def make_command_rows(n: int) -> list[dict]:
 
 
 def make_session_history_rows(texts: list[str]) -> list[dict]:
-    """Build session history rows as returned by AgentDB.read_session_history."""
+    """Build session history rows as returned by AgentDB.sessions.read_session_history."""
     return [
         {"cmd_text": t, "action": "CLICK", "source": "voice", "ts": float(i)}
         for i, t in enumerate(texts)

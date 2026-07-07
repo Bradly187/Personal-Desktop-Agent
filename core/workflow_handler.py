@@ -20,7 +20,7 @@ this module (never read outside these methods on the original class).
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 from core.workflow_voice import (
     parse_workflow_request,
@@ -34,20 +34,25 @@ from core.workflow_voice import (
 log = logging.getLogger(__name__)
 
 
+from typing import Any, Coroutine, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass
+
 class WorkflowHandler:
     def __init__(
         self,
         *,
-        workflow_runner: Callable[[], object],
-        dev_agent: Callable[[], object],
+        workflow_runner: Callable[[], Any],
+        dev_agent: Callable[[], Any],
         wf_cfg: Callable[[], dict],
-        twin: Callable[[], object],
-        conv_mode: Callable[[], object],
-        macro_store: Callable[[], object],
-        agent_db: Callable[[], object],
-        executor: Callable[[], object],
-        tts_speak: Callable[[str], Awaitable[None]],
-        speak_and_suppress: Callable[[str], Awaitable[None]],
+        twin: Callable[[], Any],
+        conv_mode: Callable[[], Any],
+        macro_store: Callable[[], Any],
+        agent_db: Callable[[], Any],
+        executor: Callable[[], Any],
+        tts_speak: Callable[[str], Coroutine[Any, Any, None]],
+        speak_and_suppress: Callable[[str], Coroutine[Any, Any, None]],
     ) -> None:
         self._workflow_runner = workflow_runner
         self._dev_agent = dev_agent
@@ -286,7 +291,7 @@ class WorkflowHandler:
         from core.macro_store import parse_macro_save
         # Deferred import: avoids a circular import with core.hybrid_coordinator,
         # which defines this predicate and imports WorkflowHandler at module level.
-        from core.hybrid_coordinator import _is_system_control_voice
+        from core.voice_system_control import _is_system_control_voice
 
         name = parse_macro_save(cmd.text)
         if name is not None:
@@ -310,7 +315,7 @@ class WorkflowHandler:
         row = None
         agent_db = self._agent_db()
         if agent_db and getattr(agent_db, "available", False):
-            row = await agent_db.get_evolution_candidate(pending["id"])
+            row = await agent_db.skills.get_evolution_candidate(pending["id"])
         if not row:
             self._pending_macro = None
             await self._tts_speak("Sorry, I couldn't find that suggestion anymore.")
@@ -326,7 +331,7 @@ class WorkflowHandler:
             refs = {}
         refs["name"] = name
         refs["keywords"] = [name.lower()]
-        await agent_db.promote_macro_candidate(row["id"], name, _json.dumps(refs))
+        await agent_db.skills.promote_macro_candidate(row["id"], name, _json.dumps(refs))
         self._pending_macro = None
         await self._tts_speak(f"Saved. Say {name} to run it.")
         return {"status": "ok", "action": "MACRO_SAVE", "name": name}

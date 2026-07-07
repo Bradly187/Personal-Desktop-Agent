@@ -26,7 +26,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from storage.db import AgentDB, _pid_alive
+from storage.db import AgentDB
+from storage.repositories.common import _pid_alive
 from core.proactive_scheduler import ProactiveScheduler, next_occurrence
 from core.event_rule_engine import EventRuleEngine, _eval_predicate, _get_path, _MISSING
 from core.email_watcher import EmailWatcher
@@ -47,34 +48,34 @@ async def db(tmp_path):
 # ---------------------------------------------------------------------------
 
 async def test_enqueue_revives_terminal_row(db):
-    gid = await db.enqueue_goal("recurring", idempotency_key="r1")
-    await db.claim_next_goal()
-    await db.complete_goal(gid, "done")
-    assert await db.claim_next_goal() is None          # terminal, not claimable
+    gid = await db.goals.enqueue_goal("recurring", idempotency_key="r1")
+    await db.goals.claim_next_goal()
+    await db.goals.complete_goal(gid, "done")
+    assert await db.goals.claim_next_goal() is None          # terminal, not claimable
 
     # Same key re-enqueued (e.g. the goal is due again) → revived, same row id.
-    gid2 = await db.enqueue_goal("recurring", idempotency_key="r1")
+    gid2 = await db.goals.enqueue_goal("recurring", idempotency_key="r1")
     assert gid2 == gid
-    again = await db.claim_next_goal()
+    again = await db.goals.claim_next_goal()
     assert again is not None and again["goal"] == "recurring"
     assert again["attempts"] == 1                      # attempts reset on revival
 
 
 async def test_enqueue_active_row_still_dedupes(db):
     """A still-queued row must NOT be revived/duplicated — that's genuine dedup."""
-    a = await db.enqueue_goal("dup", idempotency_key="d1")
-    b = await db.enqueue_goal("dup", idempotency_key="d1")
+    a = await db.goals.enqueue_goal("dup", idempotency_key="d1")
+    b = await db.goals.enqueue_goal("dup", idempotency_key="d1")
     assert a == b
-    assert await db.claim_next_goal() is not None
-    assert await db.claim_next_goal() is None           # only one row ever existed
+    assert await db.goals.claim_next_goal() is not None
+    assert await db.goals.claim_next_goal() is None           # only one row ever existed
 
 
 async def test_enqueue_revives_cancelled(db):
-    gid = await db.enqueue_goal("g", idempotency_key="c1")
-    await db.complete_goal(gid, "cancelled")
-    gid2 = await db.enqueue_goal("g", idempotency_key="c1")
+    gid = await db.goals.enqueue_goal("g", idempotency_key="c1")
+    await db.goals.complete_goal(gid, "cancelled")
+    gid2 = await db.goals.enqueue_goal("g", idempotency_key="c1")
     assert gid2 == gid
-    assert (await db.claim_next_goal())["goal"] == "g"
+    assert (await db.goals.claim_next_goal())["goal"] == "g"
 
 
 # ---------------------------------------------------------------------------
@@ -109,10 +110,10 @@ async def test_relay_carries_idempotency_key():
         return 1
 
     dbm = MagicMock()
-    dbm.promote_due_goals = AsyncMock(return_value=[{
+    dbm.goals.promote_due_goals = AsyncMock(return_value=[{
         "goal": "brief", "recurrence": '{"kind":"interval","every_s":60}',
         "domain": "plan", "source_trigger": "schedule", "execute_at": 1000.0}])
-    dbm.enqueue_scheduled_goal = AsyncMock(side_effect=_enqueue)
+    dbm.goals.enqueue_scheduled_goal = AsyncMock(side_effect=_enqueue)
     ps = ProactiveScheduler(dbm, dev_agent=MagicMock(drain_goal_queue=AsyncMock()))
     await ps._tick(1000.0)
     assert captured["idempotency_key"] == "schedule:brief:1060"
@@ -161,8 +162,8 @@ def test_pid_alive_self_and_dead():
 async def test_requeue_skips_live_concurrent_owner(db):
     """A 'running' goal owned by a different, live pid is a concurrent instance —
     requeue must leave it alone."""
-    gid = await db.enqueue_goal("g", idempotency_key="k")
-    await db.claim_next_goal()                           # owner_pid = our pid
+    gid = await db.goals.enqueue_goal("g", idempotency_key="k")
+    await db.goals.claim_next_goal()                           # owner_pid = our pid
     # Re-stamp owner to another LIVE pid (simulate a second instance's claim).
     other = os.getppid() or os.getpid()
     await db._conn.execute(
@@ -170,20 +171,20 @@ async def test_requeue_skips_live_concurrent_owner(db):
     await db._conn.commit()
     if other == os.getpid():
         pytest.skip("no distinct live pid available")
-    n = await db.requeue_stale_running()
+    n = await db.runs.requeue_stale_running()
     assert n == 0                                        # left for the live owner
-    assert await db.claim_next_goal() is None            # still 'running'
+    assert await db.goals.claim_next_goal() is None            # still 'running'
 
 
 async def test_requeue_recovers_dead_owner(db):
-    gid = await db.enqueue_goal("g", idempotency_key="k")
-    await db.claim_next_goal()
+    gid = await db.goals.enqueue_goal("g", idempotency_key="k")
+    await db.goals.claim_next_goal()
     await db._conn.execute(
         "UPDATE goal_queue SET owner_pid=? WHERE id=?", (2_000_000_000, gid))
     await db._conn.commit()
-    n = await db.requeue_stale_running()
+    n = await db.runs.requeue_stale_running()
     assert n == 1                                        # dead owner → recovered
-    assert (await db.claim_next_goal())["goal"] == "g"
+    assert (await db.goals.claim_next_goal())["goal"] == "g"
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +217,8 @@ async def test_cooldown_suppresses_same_tick_burst():
     rule = {"id": 1, "topic_pattern": "email.arrived", "predicate": None,
             "goal_template": "x", "action_kind": "notify",
             "cooldown_s": 3600, "last_fired_at": None, "name": "n"}
-    dbm.list_event_rules = AsyncMock(return_value=[rule])
-    dbm.touch_rule_fired = AsyncMock()
+    dbm.events.list_event_rules = AsyncMock(return_value=[rule])
+    dbm.events.touch_rule_fired = AsyncMock()
     eng = EventRuleEngine(dbm, MagicMock(), notifier=notifier)
     ev = {"topic": "email.arrived", "payload": {}}
     # Two events in the same tick, before last_fired_at is persisted.

@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import time
+import typing
 from pathlib import Path
 from typing import Optional
 
@@ -326,10 +327,10 @@ class AuditLog:
         try:
             if severity:
                 query = "SELECT * FROM audit_events WHERE event_type = 'security_event' AND severity = ? ORDER BY ts DESC LIMIT ?"
-                params = (severity, limit)
+                params: typing.Any = (severity, limit)
             else:
                 query = "SELECT * FROM audit_events WHERE event_type = 'security_event' ORDER BY ts DESC LIMIT ?"
-                params = (limit,)
+                params: typing.Any = (limit,)
             async with self._conn.execute(query, params) as cur:
                 return [dict(r) for r in await cur.fetchall()]
         except Exception as exc:
@@ -358,7 +359,7 @@ class AuditLog:
         detectable against an external checkpoint of chain_head() — a self-
         contained walk can't know rows are missing from the end.
         """
-        result = {"ok": True, "rows_checked": 0, "unchained": 0, "break_at": None}
+        result: dict[str, typing.Any] = {"ok": True, "rows_checked": 0, "unchained": 0, "break_at": None}
         if not self._conn:
             result["ok"] = False
             return result

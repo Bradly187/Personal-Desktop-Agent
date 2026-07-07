@@ -49,17 +49,18 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
-from core.gate_evaluator import GateEvaluator, _EFFECTIVE_CFG
-from core.inference_runner import InferenceRunner, _CloudInference, _PENDING_INFERENCE_IDS
+from core.gate_evaluator import GateEvaluator
+from core.inference_runner import InferenceRunner, _CloudInference
 from core.action_executor import ActionExecutor
 from core.workflow_handler import WorkflowHandler
+from core.coordinator_state import CoordinatorState
+from core.correction_handler import CorrectionHandler
+from core.event_dispatcher import EventDispatcher
 from core.voice_system_control import VoiceSystemControl
 from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
     OllamaInference,
-    get_inference_capture,
-    set_inference_capture,
 )
 from desktop.vision_grounder import VisionGrounder
 from core.conversation_state import ConversationState
@@ -270,75 +271,12 @@ def _apply_pain_day_adjustments(cfg, snapshot) -> "CoordinatorConfig":
 # NOT intercept these: the DomainClassifier maps some (e.g. "pain day on" →
 # general) to dev domains, which would shadow the keyword handler and send the
 # phrase to an LLM instead. KEEP IN SYNC with the keyword block in route().
-_SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
-    "start lecture mode", "lecture mode on", "begin lecture mode",
-    "stop lecture mode", "lecture mode off", "end lecture mode",
-    "pain day on", "flare day on", "bad day",
-    "pain day off", "flare day off", "feeling better",
-    "this is a good day", "good day mode", "feeling well",
-    "this is a flare day", "flare day", "flare mode",
-    "this is an allergy day", "allergy day", "allergy mode",
-    "run voice calibration", "calibrate my voice", "quick calibration",
-    "calibrate flare day", "calibrate allergy day",
-    # Goal-level agent control
-    "hey agent status", "what are you doing", "agent status",
-    "status", "what's happening",
-    "hey agent stop", "cancel task", "cancel agent", "stop agent",
-    "stop the agent", "cancel the task",
-    # Crash recovery — advertised by the post-crash TTS notice in main.py;
-    # the resume itself is voice-confirm-gated inside resume_pending_plan()
-    "resume task", "resume the task", "hey agent resume",
-    "resume work", "resume interrupted task",
-    "hey agent history", "what did you do", "agent history",
-    "show history", "recent actions",
-    "review queue", "show review queue", "what needs review",
-    "hey agent review queue", "show escalations", "pending reviews",
-    "clear review queue", "dismiss reviews", "clear escalations",
-    # Mic mute — voice can only mute; unmute requires the iPad button
-    # (mic is deaf once muted, so a voice unmute command can never arrive)
-    "mute mic", "mute microphone", "mic off", "silence mic",
-    # Capability discovery + personal KB maintenance
-    "help", "what can you do", "what can i say", "list your skills",
-    "index my notes", "reindex my notes", "index my documents",
-    # Google PIM auth lifecycle (one-time setup + expired-token recovery)
-    "connect google", "reconnect google", "connect gmail", "set up gmail",
-    "set up google",
-})
-
-from core.schedule_parser import is_schedule_phrase
-from storage.personal_kb import is_personal_query as _is_personal_query
-
-
-def _is_system_control_voice(cmd) -> bool:
-    """True if `cmd` is a voice system-control keyword that route()'s keyword
-    block handles — so the dev-agent pre-gate leaves it alone."""
-    if cmd.source not in ("voice", "voice_local"):
-        return False
-    norm = cmd.text.lower().strip(" \t\n.,!?;:\"'")
-    if norm in _SYSTEM_CONTROL_PHRASES:
-        return True
-    # lecture-notes search is a startswith/contains pattern, not exact-match
-    if "lecture notes" in norm and "search" in norm:
-        return True
-    # "hey agent authorize <goal>" — prefix match
-    if norm.startswith("hey agent authorize ") or norm.startswith("authorize "):
-        return True
-    if is_schedule_phrase(norm):       # N+2: reminders / schedules / event rules
-        return True
-    return False
-
-
 class HybridCoordinator:
     # Class-level DomainClassifier — stateless keyword scorer, no need to
     # re-instantiate per route() call.
     _domain_classifier = None
 
-    @classmethod
-    def _get_domain_classifier(cls):
-        if cls._domain_classifier is None:
-            from core.domain_classifier import DomainClassifier
-            cls._domain_classifier = DomainClassifier()
-        return cls._domain_classifier
+
 
     def __init__(
         self,
@@ -394,16 +332,7 @@ class HybridCoordinator:
         self._grounder = VisionGrounder()
         self._whisper = whisper_stream
         self._fusion = None   # set via set_fusion_engine() after FusionEngine is created
-        self._pending_clarification: Optional[str] = None
-        # A2UI: surface_id of a live CLARIFY touch-card, cleared when the
-        # clarification resolves (by tap or voice) so a stale card doesn't linger.
-        self._active_clarify_surface_id: Optional[str] = None
-        # Rolling list of recently-opened app/file targets (most-recent first),
-        # used to populate the "what would you like to open?" CLARIFY card.
-        self._recent_open_targets: list[str] = []
-        # Live clickable-element snapshot source for the click-target palette
-        # (Phase 3 prototype, flag-gated by DA_A2UI_CLICK_TARGETS).
-        self._target_cache = None
+        self.state = CoordinatorState()
         self._conversation = ConversationState()  # voice anaphora + last-action hint
         self._action_executor = ActionExecutor(
             # Late-bound for the same reason as InferenceRunner/GateEvaluator
@@ -417,12 +346,7 @@ class HybridCoordinator:
             whisper=lambda: self._whisper,
             bridge=lambda: self._bridge,
             target_cache=lambda: self._target_cache,
-            get_pending_clarification=lambda: self._pending_clarification,
-            set_pending_clarification=lambda v: setattr(self, "_pending_clarification", v),
-            get_active_clarify_surface_id=lambda: self._active_clarify_surface_id,
-            set_active_clarify_surface_id=lambda v: setattr(self, "_active_clarify_surface_id", v),
-            get_recent_open_targets=lambda: self._recent_open_targets,
-            set_recent_open_targets=lambda v: setattr(self, "_recent_open_targets", v),
+            state=self.state,
         )
         # Multi-agent workflow voice trigger ("think hard about …"). Default OFF;
         # the runner is injected by main.py and gates itself on
@@ -474,18 +398,15 @@ class HybridCoordinator:
             switch_condition=lambda condition: self._switch_condition(condition),
             run_calibration=lambda condition, quick: self._run_calibration(condition, quick),
         )
-        # D8: correction tracking
-        self._last_executed_action: str = ""
-        self._last_command_id: int = -1
-
-        # GAP-6: intent drift / trust-decay tripwire. The first substantive
-        # dev-domain command of a session anchors the intent; subsequent dev
-        # commands are compared against it, and a sustained divergence logs a
-        # one-time advisory DRIFT_WARNING (the command still runs).
-        self._session_intent: Optional[str] = None
-        self._drift_streak: int = 0
-        self._drift_warned: bool = False
-
+        self._correction_handler = CorrectionHandler(
+            state=self.state,
+            agent_db=lambda: self._agent_db,
+            trainer=lambda: self._trainer,
+            audit=lambda: self._audit,
+            tts_speak=lambda text: self._tts_speak(text),
+            session_id=self._session_id,
+        )
+        self._event_dispatcher = EventDispatcher(self)
         self._metrics = None   # set via set_metrics()
 
         self._memory = None   # MemoryManager — wired via set_memory()
@@ -498,9 +419,6 @@ class HybridCoordinator:
         self._cloud_dev_agent = None          # CloudDevAgent or None
         self._cloud_always = False            # True with --no-local-specialists
         self._local_specialist_available = None  # () -> bool (specialist awake?)
-        # Small rolling buffer of recent dev queries — passed to the cloud agent
-        # as context without a DB round-trip in the hot path.
-        self._recent_dev_commands: list[str] = []
 
 
     # ---------------------------------------------------------------------- #
@@ -640,9 +558,9 @@ class HybridCoordinator:
             return False
 
     def _record_dev_command(self, text: str) -> None:
-        self._recent_dev_commands.append(text)
-        if len(self._recent_dev_commands) > 10:
-            self._recent_dev_commands = self._recent_dev_commands[-10:]
+        self.state.recent_dev_commands.append(text)
+        if len(self.state.recent_dev_commands) > 10:
+            self.state.recent_dev_commands = self.state.recent_dev_commands[-10:]
 
     def set_whisper_stream(self, whisper_stream) -> None:
         self._whisper = whisper_stream
@@ -794,689 +712,95 @@ class HybridCoordinator:
                 pass
 
     async def _route_impl(self, cmd: Command) -> dict:
-        """Route a Command through the gate decision tree and execute it.
+        return await self._event_dispatcher.route_impl(cmd)
 
-        Dev-domain queries (code, math, vision, plan, general) are intercepted
-        here and forwarded to DevAgent before the accessibility pipeline runs.
-        """
-        # Cross-layer trace: set the current-trace ContextVar so every awaited
-        # descendant (router, executor) attaches spans without new params. Runs
-        # as its own scheduler task, so no reset is needed. No-op unless DA_TRACE.
-        _tracer = get_tracer()
-        if _tracer.enabled:
-            _tid = cmd.trace_id or _tracer.new_trace(source=cmd.source)
-            if not cmd.trace_id:
-                # Use _dc_replace so the original Command object is never mutated
-                # (concurrent route() tasks share the same reference until here).
-                cmd = _dc_replace(cmd, trace_id=_tid)  # fix #1
-            _tracer.set_current(_tid)
+    # --- Legacy state aliases (pre-CoordinatorState API) --------------------
+    # Tests and older callers read/write these directly on the coordinator —
+    # including on __new__-constructed instances — so proxy them to self.state,
+    # creating it lazily when __init__ never ran.
+    def _ensure_state(self) -> CoordinatorState:
+        st = self.__dict__.get("state")
+        if st is None:
+            st = CoordinatorState()
+            self.__dict__["state"] = st
+        return st
 
-        # De-glue an ASR-concatenated leading command verb ("OpenVSCode" ->
-        # "open VSCode") so a mish-spaced launch command still classifies as the
-        # command domain and reaches the OPEN/CLOSE action path instead of the
-        # free-form dev agent. No-op unless the text starts with a launch verb
-        # glued on a camelCase boundary. Skip bypass sources (touch/multimodal),
-        # whose text is a pre-resolved token, not a transcript.
-        if cmd.source not in _BYPASS_SOURCES:
-            from core.domain_classifier import deglue_command_verb
-            deglued = deglue_command_verb(cmd.text)
-            if deglued != cmd.text:
-                log.info("HybridCoordinator: de-glued command verb %r -> %r",
-                         cmd.text, deglued)
-                cmd = _dc_replace(cmd, text=deglued)  # fix #1 — never mutate in place
+    @property
+    def _pending_clarification(self):
+        return self._ensure_state().pending_clarification
 
-        # --- Self-skilling rung 2: macro replay + "save that as ..." approval ---
-        # Runs before the dev pre-gate so a saved macro routes by its own name
-        # rather than being classified to an LLM. Voice-only; built-in
-        # system-control phrases still take priority (see _maybe_handle_macro).
-        if self._macro_store is not None and cmd.source in ("voice", "voice_local"):
-            macro_result = await self._workflow.maybe_handle_macro(cmd)
-            if macro_result is not None:
-                return macro_result
+    @_pending_clarification.setter
+    def _pending_clarification(self, v):
+        self._ensure_state().pending_clarification = v
 
-        # --- Voice multi-agent workflow trigger ("think hard about …") ---
-        # Decompose the goal → fan out to fresh-context sub-agents → synthesize +
-        # speak one answer. Pure talk, no desktop actions; the entire command/dev
-        # pipeline below is bypassed for a handled request. Default OFF (the
-        # runner gates on workflow_orchestration.enabled). Fail-safe: a miss, a
-        # flare, or any error returns None → ordinary routing below.
-        if (self._workflow_runner is not None and self._workflow_runner.enabled
-                and cmd.source in ("voice", "voice_local")):
-            wf_result = await self._workflow.maybe_handle_workflow(cmd)
-            if wf_result is not None:
-                return wf_result
+    @property
+    def _active_clarify_surface_id(self):
+        return self._ensure_state().active_clarify_surface_id
 
-        # --- Voice conversation mode: wake/sleep-gated talk-only dialogue ---
-        # When active, every voice utterance (other than the sleep phrase) is a
-        # conversational turn answered by the resident general model — the entire
-        # command/dev pipeline below is bypassed. Default OFF (experimental).
-        if self._conv_mode.enabled and cmd.source in ("voice", "voice_local"):
-            conv_result = await self._workflow.maybe_handle_conversation(cmd)
-            if conv_result is not None:
-                return conv_result
+    @_active_clarify_surface_id.setter
+    def _active_clarify_surface_id(self, v):
+        self._ensure_state().active_clarify_surface_id = v
 
-        # --- Dev-agent pre-gate: intercept non-command domains ---
-        # Skip for voice system-control keywords so they reach the keyword block
-        # below instead of being misrouted to an LLM (e.g. "pain day on").
-        # Skip for bypass sources (touch / multimodal): these arrive
-        # with a concrete accessibility action already resolved (e.g. a tilt-tap is
-        # source="touch" action="CLICK" text="tilt_tap"). Classifying their text
-        # would send "tilt_tap" to the DevAgent as a general-domain query and the
-        # click would never fire — they must fall through to the gate-bypass path.
-        if (
-            self._dev_agent
-            and not _is_system_control_voice(cmd)
-            and cmd.source not in _BYPASS_SOURCES
-        ):
-            domain = self._get_domain_classifier().classify(cmd.text)
-            if domain != "command":
-                # GAP-6: anchor/track session intent for dev-domain commands.
-                self._note_intent_drift(cmd)
-                # Privacy: the dev pre-gate runs BEFORE the command-path Gate 0,
-                # so enforce Gate 0 here too — sensitive text (credentials/PII)
-                # must never reach the cloud. A Gate-0 failure forces the LOCAL
-                # DevAgent regardless of the cloud-routing preference.
-                route_cloud = self._should_route_cloud_dev()
-                if domain == "skill":
-                    # Skills execute LOCALLY via the SkillRegistry (the cloud dev
-                    # agent has no registry) — never route a skill to the cloud.
-                    route_cloud = False
-                if _is_personal_query(cmd.text):
-                    # Questions about the user's OWN documents answer from the
-                    # local PersonalKB — the query itself must never go to cloud.
-                    route_cloud = False
-                if route_cloud and not self._gates.gate0(cmd):
-                    log.info("HybridCoordinator: dev-domain=%s contains sensitive "
-                             "data — forcing LOCAL DevAgent (Gate 0)", domain)
-                    route_cloud = False
+    @property
+    def _recent_open_targets(self):
+        return self._ensure_state().recent_open_targets
 
-                # Cloud DevAgent branch — route to Claude when configured to,
-                # avoiding a 30B specialist wake (and the GPU teardown it forces).
-                if route_cloud:
-                    # Scrub secrets/PII from the query AND the recent-command
-                    # context before any cloud egress (the command-path cloud
-                    # route scrubs in _run_cloud; this path bypasses it).
-                    clean_text = cmd.text
-                    recent = list(self._recent_dev_commands)
-                    if self._content_filter:
-                        clean_text, findings = await self._content_filter.scrub(cmd.text)
-                        if findings:
-                            log.info("ContentFilter: redacted %d secret(s) before "
-                                     "cloud dev call", len(findings))
-                        recent = [
-                            (await self._content_filter.scrub(rc))[0] for rc in recent
-                        ]
-                    log.info("HybridCoordinator: dev-domain=%s → CloudDevAgent (%s)",
-                             domain, getattr(self._cloud_dev_agent, "model", "?"))
-                    ctx = {
-                        "session_id": self._session_id,
-                        "recent_commands": recent,
-                        "source": cmd.source,
-                        "trace_id": cmd.trace_id,
-                    }
-                    self._gates.note_cloud_call()  # GAP-10: denial-of-wallet tripwire
-                    # Clear the task-local capture so a stale prompt/token count
-                    # from a prior inference in this task can't be attributed to
-                    # this cloud-dev call (mirrors _run_cloud).
-                    set_inference_capture(None)
-                    response_text = await self._cloud_dev_agent.run(clean_text, domain, ctx)
-                    # Persist the Opus-tier token usage for the cost ledger. This
-                    # is the most expensive cloud path; CloudDevAgent.run() set the
-                    # capture from the Bedrock response usage.
-                    if self._agent_db and self._agent_db.available:
-                        _p, _ti, _to = get_inference_capture()
-                        _cda_model = getattr(self._cloud_dev_agent, "model", "unknown")
-                        await self._agent_db.insert_inference(
-                            command_id=None,
-                            model=_cda_model,
-                            domain=domain,
-                            prompt=None,
-                            response=None,
-                            tokens_in=_ti,
-                            tokens_out=_to,
-                            latency_ms=0.0,
-                            backend="bedrock",
-                            error=None,
-                        )
-                    # Record the ORIGINAL locally (kept on-device; re-scrubbed at
-                    # the next cloud egress).
-                    self._record_dev_command(cmd.text)
-                    if self._twin:
-                        self._twin.clear_dev_namespace()
-                    return {
-                        "status": "ok",
-                        "action": "dev_agent",
-                        "domain": domain,
-                        "model": self._cloud_dev_agent.model,
-                        "response": response_text,
-                        "steps": 0,
-                        "backend": "bedrock",
-                    }
+    @_recent_open_targets.setter
+    def _recent_open_targets(self, v):
+        self._ensure_state().recent_open_targets = v
 
-                log.info("HybridCoordinator: dev-domain=%s → DevAgent", domain)
-                # Chat file attachments (specs/chat-context-attachments R2.4): the
-                # chat server stuffs extracted context + an optional image into
-                # cmd.params. Forward both; absent → byte-identical to today.
-                _att_ctx = cmd.params.get("attachment_context", "") if cmd.params else ""
-                _att_img = cmd.params.get("attachment_image_b64") if cmd.params else None
-                agent_result = await self._dev_agent.handle(
-                    cmd.text, screenshot_b64=_att_img, trace_id=cmd.trace_id,
-                    attachment_context=_att_ctx)
-                # Personal-document queries are NOT recorded in the rolling dev
-                # context: _recent_dev_commands is sent verbatim to the cloud
-                # dev agent on later queries, which would leak the very text the
-                # force-local guard kept on-device.
-                if not _is_personal_query(cmd.text):
-                    self._record_dev_command(cmd.text)
-                if self._twin:
-                    self._twin.clear_dev_namespace()
-                return {
-                    "status": "ok",
-                    "action": "dev_agent",
-                    "domain": agent_result.domain,
-                    "model": agent_result.model_used,
-                    "response": agent_result.response_text,
-                    "steps": len(agent_result.steps),
-                    "backend": "local",
-                }
+    @property
+    def _recent_dev_commands(self):
+        return self._ensure_state().recent_dev_commands
 
-        # System control commands — intercept before gate evaluation
-        vsc_result = await self._voice_control.maybe_handle(cmd)
-        if vsc_result is not None:
-            return vsc_result
+    @_recent_dev_commands.setter
+    def _recent_dev_commands(self, v):
+        self._ensure_state().recent_dev_commands = v
 
-        t0 = time.monotonic()
-        route_label = "local"
-        gate_that_decided = "all_pass"
-        action_str: Optional[str] = None
-        success: bool = False  # default False so a pre-action exception never sends None to metrics (#11)
-        error_msg: Optional[str] = None
-        command_id: int = -1
-        # Per-command accumulator for inference row ids written by
-        # _run_local/_run_cloud BEFORE the command row exists. Task-local
-        # (ContextVar) so concurrent route() tasks never share a list. The ids
-        # are backfilled onto inferences.command_id right after insert_command.
-        _inf_ids_token = _PENDING_INFERENCE_IDS.set([])
+    @property
+    def _last_executed_action(self):
+        return self._ensure_state().last_executed_action
 
-        try:
-            source = cmd.source
+    @_last_executed_action.setter
+    def _last_executed_action(self, v):
+        self._ensure_state().last_executed_action = v
 
-            # --- Twin state snapshot and adjustments -----------------------
-            from adaptive.behavioral_twin_state import _DEFAULT_SNAPSHOT
-            snapshot = _DEFAULT_SNAPSHOT
-            if self._twin:
-                try:
-                    snapshot = await self._twin.get_snapshot()
-                except Exception as exc:
-                    log.warning("BehavioralTwinState.get_snapshot failed: %s", exc)
+    @property
+    def _last_command_id(self):
+        return self._ensure_state().last_command_id
 
-            # Apply pain-day threshold adjustments
-            if snapshot.pain_day_active:
-                effective_cfg = _apply_pain_day_adjustments(self._cfg, snapshot)
-            else:
-                effective_cfg = self._cfg
+    @_last_command_id.setter
+    def _last_command_id(self, v):
+        self._ensure_state().last_command_id = v
 
-            # Propagate pain-day state to sensor + voice thresholds. Each
-            # consumer relaxes only if its flare_profile degrade flag is set,
-            # and apply_pain_day is idempotent so calling every command is cheap.
-            if self._fusion is not None:
-                self._fusion.apply_pain_day(
-                    tilt=snapshot.pain_day_active and snapshot.flare_tilt_degrades,
-                )
-            if self._whisper is not None:
-                self._whisper.apply_pain_day(
-                    snapshot.pain_day_active and snapshot.flare_voice_degrades
-                )
-
-            # Always apply vocabulary corrections before any gate evaluation
-            # so app-name phonetics ("key-row" → "vscode") reach the LLM fixed
-            # regardless of Whisper confidence level.
-            vocab_corrected = False
-            if cmd.source in ("voice", "voice_local"):
-                corrected_text, changed = _apply_vocabulary_corrections(cmd.text)
-                if changed:
-                    log.debug(
-                        "Pre-gate vocab correction: %r → %r", cmd.text, corrected_text
-                    )
-                    cmd = _dc_replace(cmd, text=corrected_text)
-                    vocab_corrected = True
-
-            # Populate session_context from twin state (always accessibility namespace)
-            if self._twin and self._twin.is_ready:
-                cmd = _dc_replace(cmd, session_context=self._twin.get_session_context("accessibility"))
-
-            # Conversational continuity (voice only): deterministically resolve
-            # anaphora ("do that again", "click it") against the previous resolved
-            # turn BEFORE inference — the local 8B model is poor at this — and
-            # append one structured last-action line so both the local and cloud
-            # prompts see what actually happened, not just what was said.
-            if cmd.source in ("voice", "voice_local", "voice_correction"):
-                resolved_text, changed = self._conversation.resolve_anaphora(cmd.text)
-                if changed:
-                    log.debug("Anaphora resolved: %r → %r", cmd.text, resolved_text)
-                    cmd = _dc_replace(cmd, text=resolved_text)
-            hint = self._conversation.prompt_hint()
-            if hint:
-                cmd = _dc_replace(
-                    cmd, session_context=list(cmd.session_context or []) + [hint]
-                )
-
-            # Inject pending clarification so the LLM knows what "up" or "yes"
-            # is answering.  Prepended so it appears closest to the user turn.
-            if self._pending_clarification and cmd.source in ("voice", "voice_local"):
-                clarify_ctx = f"[PENDING CLARIFICATION: {self._pending_clarification}]"
-                ctx = [clarify_ctx] + list(cmd.session_context or [])
-                cmd = _dc_replace(cmd, session_context=ctx)
-
-            # Gate evaluation — set effective_cfg in a task-local ContextVar so
-            # concurrent route() tasks each see their own pain-day-adjusted config
-            # without mutating the shared self._cfg (#4). Gate/inference helpers
-            # read it via effective_cfg(), which falls back to their own self._cfg
-            # when unset.
-            _cfg_token = _EFFECTIVE_CFG.set(effective_cfg)
-            try:
-                # --- Bypass path (touch / multimodal) --------------------------
-                # These sources always run local and never reach the cloud, so
-                # Gate 0 — whose sole purpose is to keep sensitive text off an
-                # external API — does not apply and is checked AFTER this branch.
-                # Touch commands (iPad CommandPad taps, tilt-tap) arrive with a
-                # concrete action already resolved — the text is just a label
-                # ("tilt_tap"). Honor that action directly instead of asking the
-                # LLM to infer it from the label, which yields CLARIFY ("What is
-                # the target of the click?") because the model can't read
-                # "tilt_tap" as a verb. Multimodal still infers via the LLM
-                # (its action depends on which phrase fired).
-                if source in _BYPASS_SOURCES:
-                    if cmd.source == "touch" and cmd.action in _VALID_COMMAND_VERBS:
-                        action_str = cmd.action
-                    else:
-                        action_str = await self._inference.run_local(cmd)
-                    route_label = "local"
-                    gate_that_decided = "bypass"
-
-                # --- Gate 0 — Privacy (force local for cloud-eligible sources) --
-                elif not self._gates.gate0(cmd):
-                    log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
-                    action_str = await self._inference.run_local(cmd)
-                    route_label = "local"
-                    gate_that_decided = "gate0_privacy"
-
-                # --- Skip Gate 1 path ------------------------------------------
-                elif source in _SKIP_GATE1_SOURCES:
-                    action_str, gate_that_decided, route_label = await self._gates.gates_2_to_4(cmd)
-
-                # --- Full 4-gate path -------------------------------------------
-                else:
-                    # Gate 1 — Confidence
-                    passed, cmd = await self._gates.gate1(cmd)
-                    if passed is None:
-                        # Gesture low confidence — discard. Record it (E10) so the
-                        # drop is visible to retraining and analytics instead of
-                        # vanishing with only a debug line.
-                        log.debug("Gate 1 discard (low gesture conf): %r", cmd.text)
-                        if self._agent_db and self._agent_db.available:
-                            try:
-                                await self._agent_db.insert_command(
-                                    session_id=self._session_id,
-                                    cmd=cmd,
-                                    action="DISCARDED",
-                                    route="local",
-                                    gate_that_decided="gate1_gesture_conf",
-                                    latency_ms=(time.monotonic() - t0) * 1000,
-                                    success=False,
-                                    error_msg="low gesture confidence",
-                                    trace_id=cmd.trace_id or None,
-                                )
-                            except Exception as _disc_exc:
-                                log.debug("discard log failed: %s", _disc_exc)
-                        return {"status": "discarded", "reason": "gate1_gesture_conf"}
-                    if not passed:
-                        # Voice low confidence. If the pre-gate vocabulary pass
-                        # already fixed a KNOWN misrecognition the transcript is now
-                        # high-confidence — continue local (fast, no round-trip).
-                        # Otherwise it's an UNKNOWN low-confidence utterance:
-                        # escalate to the cloud, whose system prompt is tuned to
-                        # repair voice misrecognitions the local dictionary can't.
-                        # Gate 0 has already passed here, so no sensitive data is
-                        # transmitted.
-                        if vocab_corrected:
-                            cmd = await _retranscribe(cmd)
-                            action_str, gate_that_decided, route_label = \
-                                await self._gates.gates_2_to_4(cmd)
-                        else:
-                            log.info(
-                                "Gate 1 voice low-confidence (logprob=%.3f) — "
-                                "escalating to cloud for misrecognition repair",
-                                cmd.whisper_logprob,
-                            )
-                            action_str = await self._inference.run_cloud(cmd)
-                            gate_that_decided = "gate1_voice_conf"
-                            route_label = "cloud"
-                    else:
-                        action_str, gate_that_decided, route_label = \
-                            await self._gates.gates_2_to_4(cmd)
-            finally:
-                _EFFECTIVE_CFG.reset(_cfg_token)
-
-            # --- Execute the action ----------------------------------------
-            result = await self._action_executor.execute_action(action_str, cmd, route_label=route_label)
-            success = result.get("status") == "ok"
-
-            # E17: record a concrete failure reason so root-cause analysis does
-            # not have to reverse-engineer it from the action column. CLARIFY
-            # outcomes carry their reason text; verify_failed/resolve_miss/error
-            # carry the status (or executor error).
-            if not success and error_msg is None:
-                if isinstance(action_str, str) and action_str.upper().startswith("CLARIFY"):
-                    error_msg = action_str[len("CLARIFY"):].strip()[:200] or "clarify"
-                else:
-                    error_msg = result.get("error") or result.get("status")
-
-            # Persist to DB now so command_id is valid before trainer uses it
-            latency_ms = (time.monotonic() - t0) * 1000
-            if self._agent_db and self._agent_db.available:
-                try:
-                    resolved_by_val = result.get("result", {}).get("resolved_by") if isinstance(result.get("result"), dict) else None
-                    command_id = await self._agent_db.insert_command(
-                        session_id=self._session_id,
-                        cmd=cmd,
-                        action=action_str,
-                        route=route_label,
-                        gate_that_decided=gate_that_decided,
-                        latency_ms=latency_ms,
-                        success=success,
-                        error_msg=error_msg,
-                        trace_id=cmd.trace_id or None,
-                        resolved_by=resolved_by_val,
-                    )
-                except Exception as db_exc:
-                    log.warning("AgentDB.insert_command failed: %s", db_exc)
-                else:
-                    # Backfill inferences.command_id now that the command row
-                    # exists — without this the fine-tuning extraction JOIN
-                    # (inferences ⨝ commands) matches nothing.
-                    _inf_ids = _PENDING_INFERENCE_IDS.get()
-                    if _inf_ids and command_id and command_id > 0:
-                        try:
-                            await self._agent_db.link_inferences_to_command(
-                                _inf_ids, command_id
-                            )
-                        except Exception as link_exc:
-                            log.debug("link_inferences_to_command failed: %s", link_exc)
-
-            # Publish gate decision and command outcome events (fail-safe).
-            if self._event_bus is not None:
-                try:
-                    from core.events import TOPIC_COMMAND_EXECUTED, TOPIC_GATE_DECIDED
-                    _ev_payload_gate = {
-                        "gate": gate_that_decided, "route": route_label,
-                        "domain": getattr(cmd, "domain", None),
-                        "latency_ms": round(latency_ms, 1),
-                    }
-                    _ev_payload_cmd = {
-                        "action": action_str, "route": route_label,
-                        "gate": gate_that_decided,
-                        "latency_ms": round(latency_ms, 1),
-                        "success": success,
-                    }
-                    from core.async_utils import fire_and_log
-                    fire_and_log(self._event_bus.publish(
-                        TOPIC_GATE_DECIDED, _ev_payload_gate, source="coordinator",
-                        session_id=self._session_id, command_id=command_id,
-                        trace_id=cmd.trace_id or None,
-                    ))
-                    fire_and_log(self._event_bus.publish(
-                        TOPIC_COMMAND_EXECUTED, _ev_payload_cmd, source="coordinator",
-                        session_id=self._session_id, command_id=command_id,
-                        trace_id=cmd.trace_id or None,
-                    ))
-                    # Update bridge's active trace_id so ipad_log entries
-                    # arriving within the 2 s window are correlated to this command.
-                    if self._bridge is not None and cmd.trace_id:
-                        self._bridge.set_active_trace_id(cmd.trace_id)
-                except Exception as _ev_exc:
-                    log.debug("HybridCoordinator: event publish failed: %s", _ev_exc)
-
-            # Record successful local executions for few-shot learning
-            if (self._trainer and route_label == "local" and success):
-                await self._trainer.record_success(
-                    cmd, action_str, command_id=command_id
-                )
-            # Feed failed local executions into the twin's pain-day fail signal
-            # and the counterexample store (guarded — see trainer.record_failure;
-            # never the positive few-shot store). CLARIFY executes with status
-            # "ok" so it is a success here, not a failure. Cloud outcomes stay
-            # out of the twin, matching the local-only success gate above.
-            elif (self._trainer and route_label == "local" and not success):
-                await self._trainer.record_failure(
-                    cmd, action_str, command_id=command_id
-                )
-
-            # D3: drain gesture velocity samples after every gesture command
-            # that cleared Gate 1, regardless of execution outcome.
-            if self._trainer and cmd.source == "gesture":
-                await self._trainer.drain_and_persist_velocity(
-                    pain_day=snapshot.pain_day_active
-                )
-
-            # D8: handle voice corrections — record the right action for
-            # commands where the user said "no/wait/actually <new command>"
-            if cmd.source == "voice_correction":
-                await self._on_correction(cmd, action_str)
-
-            # D8: record action/status so WhisperStream can detect next correction
-            self._last_executed_action = action_str or ""
-            self._last_command_id = command_id
-            if self._whisper:
-                status_str = "ok" if success else ("CLARIFY" if action_str == "CLARIFY" else "failed")
-                self._whisper.set_last_command_status(status_str, cmd.text)
-
-            # Advance acoustic profiler command counter (seasonal drift check)
-            if self._whisper and hasattr(self._whisper, "_profiler") \
-                    and self._whisper._profiler:
-                self._whisper._profiler.on_any_command()
-
-        except Exception as exc:
-            log.error("HybridCoordinator.route error: %s", exc)
-            error_msg = str(exc)
-            return {"status": "error", "error": str(exc)}
-
-        finally:
-            _PENDING_INFERENCE_IDS.reset(_inf_ids_token)
-            latency_ms = (time.monotonic() - t0) * 1000
-            # Gate 4's EMA exists to detect when LOCAL inference is getting slow
-            # (e.g. GPU contention during a flare) and shed load to the cloud.
-            # Feeding cloud round-trip latency — inherently several times the
-            # local budget — back into it would inflate the EMA, trip Gate 4, and
-            # push even more commands to the cloud: a positive feedback loop that
-            # never recovers. So only local routes update the Gate 4 EMA; when a
-            # burst goes to cloud the EMA stays low and local is retried promptly.
-            if route_label == "local":
-                self._gates.update_ema(latency_ms)
-            # Record outcome in metrics singleton (non-fatal)
-            if self._metrics is not None:
-                try:
-                    self._metrics.record_command_outcome(
-                        success=success,
-                        action=action_str or "",
-                        latency_ms=latency_ms,
-                        route=route_label,
-                        domain=getattr(cmd, "domain", None),
-                        gate=gate_that_decided,
-                        whisper_logprob=getattr(cmd, "whisper_logprob", None),
-                        gesture_conf=getattr(cmd, "gesture_confidence", None),
-                    )
-                except Exception:
-                    pass
-            # Cross-layer trace: the decisive routing span (no-op unless DA_TRACE)
-            try:
-                _tracer.record_span(
-                    "route_decision", route=route_label, gate=gate_that_decided,
-                    action=action_str or None, success=success,
-                    dur_ms=round(latency_ms, 1),
-                )
-            except Exception:
-                pass
-
-        return result
-
-    # ---------------------------------------------------------------------- #
-    # Gate implementations
-    # ---------------------------------------------------------------------- #
-
-    async def _on_correction(self, cmd: Command, correct_action: str) -> None:
-        """D8: Record a voice correction as a few-shot example.
-
-        Called when the user says "no/wait/actually <new command>" after a
-        failed or CLARIFY outcome.  The corrected text becomes the canonical
-        example for future routing of similar commands.
-        """
-        # GAP-9: harvest the correction regardless of whether a trainer is wired —
-        # the user_corrections backlog must capture every confirmed correction,
-        # not only those on deploys that also run a ContinuousTrainer.
-        self._harvest_correction(cmd, self._last_executed_action)
-        # S3.1: Write the gold label to the commands table so it can be harvested
-        if self._agent_db and self._agent_db.available and self._last_command_id is not None:
-            from core.async_utils import fire_and_log
-            fire_and_log(
-                self._agent_db.mark_command_corrected(self._last_command_id, correct_action),
-                log, label="mark command corrected"
+    def _get_correction_handler(self) -> CorrectionHandler:
+        """Return the wired CorrectionHandler, building one lazily for
+        partially-constructed coordinators (tests use __new__ + a couple of
+        attributes to exercise the correction path in isolation)."""
+        h = self.__dict__.get("_correction_handler")
+        if h is None:
+            h = CorrectionHandler(
+                state=self._ensure_state(),
+                agent_db=lambda: self.__dict__.get("_agent_db"),
+                trainer=lambda: self.__dict__.get("_trainer"),
+                audit=lambda: self.__dict__.get("_audit"),
+                tts_speak=lambda text: (
+                    self._tts_speak(text)
+                    if self.__dict__.get("_tts_speak") else None
+                ),
+                session_id=self.__dict__.get("_session_id", -1),
             )
-
-        if not self._trainer:
-            return
-        try:
-            await self._trainer.record_correction(
-                cmd=cmd,
-                wrong_action=self._last_executed_action,
-                correct_action=correct_action,
-                command_id=self._last_command_id,
-            )
-            log.info(
-                "HybridCoordinator: correction recorded %r → %r",
-                self._last_executed_action, correct_action,
-            )
-        except Exception as exc:
-            log.warning("HybridCoordinator._on_correction failed: %s", exc)
-
-    # GAP-6 thresholds: 3 consecutive dev turns below this token-overlap to the
-    # opening intent trip a single advisory warning.
-    _DRIFT_SIM_THRESHOLD = 0.3
-    _DRIFT_STREAK_TRIGGER = 3
-
-    def _note_intent_drift(self, cmd: Command) -> None:
-        """GAP-6: watch a dev session for divergence from its opening intent.
-
-        The first dev-domain command anchors `_session_intent`; each later dev
-        command is scored by cheap token-overlap (Jaccard) against it. Three
-        consecutive below-threshold turns log a one-time DRIFT_WARNING, persist a
-        row, and speak a gentle nudge — all fire-and-forget, off the hot path.
-        The command itself is NOT blocked: the signal is advisory (noisy), so it
-        informs rather than hijacks. Dev-domain only.
-
-        Scope note: the coordinator is one long-lived instance, so "session" here
-        means the process lifetime — the anchor is the first dev command after
-        boot and the warning latches once per process. That suits the typical
-        single-goal session; re-anchoring on an idle boundary is a future option.
-        """
-        text = (cmd.text or "").strip()
-        if not text:
-            return
-        if self._session_intent is None:
-            self._session_intent = text
-            return
-        from storage.db import _tokens, _jaccard
-        sim = _jaccard(_tokens(self._session_intent), _tokens(text))
-        if sim >= self._DRIFT_SIM_THRESHOLD:
-            self._drift_streak = 0
-            return
-        self._drift_streak += 1
-        if self._drift_streak < self._DRIFT_STREAK_TRIGGER or self._drift_warned:
-            return
-        self._drift_warned = True
-        log.warning(
-            "HybridCoordinator: intent drift — %r diverges from opening %r (sim=%.2f)",
-            text[:60], self._session_intent[:60], sim,
-        )
-        from core.async_utils import fire_and_log
-        if self._agent_db and self._agent_db.available:
-            fire_and_log(
-                self._agent_db.insert_drift(
-                    self._session_id, getattr(cmd, "trace_id", None), sim,
-                    self._session_intent, text),
-                log, label="insert drift")
-        if self._audit and getattr(self._audit, "available", False):
-            fire_and_log(
-                self._audit.log_security_event(
-                    detail=f"intent drift: command diverges from session intent (sim={sim:.2f})",
-                    severity="warning",
-                    params={"original_intent": self._session_intent[:120],
-                            "current_command": text[:120],
-                            "drift_score": round(sim, 3)}),
-                log, label="audit drift")
-        nudge = f"You started by asking about {self._session_intent[:48]}. Are we still on track?"
-        fire_and_log(self._tts_speak(nudge), log, label="drift nudge")
+            self.__dict__["_correction_handler"] = h
+        return h
 
     def _harvest_correction(self, cmd: Command, prior_action: str) -> None:
-        """GAP-9: persist a confirmed user correction as labeled failure data.
-
-        Fire-and-forget; reuses the explicit-correction signal (reliable) rather
-        than a heuristic. scripts/cluster_corrections.py clusters these offline.
-        """
-        if not (self._agent_db and self._agent_db.available):
-            return
-        from core.async_utils import fire_and_log
-        try:
-            domain = self._get_domain_classifier().classify(cmd.text)
-        except Exception:
-            domain = None
-        fire_and_log(
-            self._agent_db.insert_correction(
-                self._session_id, getattr(cmd, "trace_id", None),
-                cmd.text or "", prior_action or "", domain),
-            log, label="harvest correction")
-
-    # ---------------------------------------------------------------------- #
-    # Correction API — user feedback loop
-    # ---------------------------------------------------------------------- #
+        self._get_correction_handler().harvest_correction(cmd, prior_action)
 
     async def correct(self, cmd: Command, wrong_action: str, correct_action: str) -> dict:
-        """Record a user correction for a misresolved command.
+        return await self._get_correction_handler().correct(cmd, wrong_action, correct_action)
 
-        Called when the user indicates the last action was wrong and provides
-        the correct one (e.g. via iPad "undo + correct" flow or voice "no, I
-        meant close").
-
-        Args:
-            cmd: The original Command that was misresolved.
-            wrong_action: The action that was incorrectly executed.
-            correct_action: The action the user actually wanted.
-
-        Returns:
-            Status dict with confirmation.
-        """
-        log.info(
-            "Correction received: %r → was %s, should be %s",
-            cmd.text, wrong_action, correct_action,
-        )
-
-        if self._trainer:
-            await self._trainer.record_correction(cmd, wrong_action, correct_action)
-
-        self._harvest_correction(cmd, wrong_action)
-
-        return {
-            "status": "ok",
-            "correction": {
-                "text": cmd.text,
-                "wrong": wrong_action,
-                "correct": correct_action,
-            },
-        }
-
-    # ---------------------------------------------------------------------- #
-    # Status
-    # ---------------------------------------------------------------------- #
+    async def _on_correction(self, cmd: Command, correct_action: str) -> None:
+        await self._get_correction_handler().on_correction(cmd, correct_action)
 
     def get_status(self) -> dict:
         return {

@@ -27,10 +27,19 @@ import asyncio
 import logging
 import os
 from dataclasses import replace as _dc_replace
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING, Any
 
 from core.command_executor import Command
 from monitoring.trace import get_tracer
+
+if TYPE_CHECKING:
+    from core.coordinator_state import CoordinatorState
+    from core.command_executor import CommandExecutor
+    from desktop.vision_grounder import VisionGrounder
+    from core.conversation_state import ConversationState
+    from sensors.whisper_stream import WhisperStream
+    from core.ipad_bridge import IPadBridge
+    from adaptive.target_cache import TargetCache
 
 log = logging.getLogger(__name__)
 
@@ -39,19 +48,14 @@ class ActionExecutor:
     def __init__(
         self,
         *,
-        executor: Callable[[], object],
-        grounder: Callable[[], object],
-        conversation: Callable[[], object],
-        metrics: Callable[[], object],
-        whisper: Callable[[], object],
-        bridge: Callable[[], object],
-        target_cache: Callable[[], object],
-        get_pending_clarification: Callable[[], Optional[str]],
-        set_pending_clarification: Callable[[Optional[str]], None],
-        get_active_clarify_surface_id: Callable[[], Optional[str]],
-        set_active_clarify_surface_id: Callable[[Optional[str]], None],
-        get_recent_open_targets: Callable[[], list],
-        set_recent_open_targets: Callable[[list], None],
+        executor: Callable[[], Optional['CommandExecutor']],
+        grounder: Callable[[], Optional['VisionGrounder']],
+        conversation: Callable[[], Optional['ConversationState']],
+        metrics: Callable[[], Any],
+        whisper: Callable[[], Optional['WhisperStream']],
+        bridge: Callable[[], Optional['IPadBridge']],
+        target_cache: Callable[[], Optional['TargetCache']],
+        state: "CoordinatorState",
     ) -> None:
         self._executor = executor
         self._grounder = grounder
@@ -60,12 +64,7 @@ class ActionExecutor:
         self._whisper = whisper
         self._bridge = bridge
         self._target_cache = target_cache
-        self._get_pending_clarification = get_pending_clarification
-        self._set_pending_clarification = set_pending_clarification
-        self._get_active_clarify_surface_id = get_active_clarify_surface_id
-        self._set_active_clarify_surface_id = set_active_clarify_surface_id
-        self._get_recent_open_targets = get_recent_open_targets
-        self._set_recent_open_targets = set_recent_open_targets
+        self._state = state
 
     # ---------------------------------------------------------------------- #
     # Action execution
@@ -149,6 +148,7 @@ class ActionExecutor:
             log.debug("Pre-CLARIFY mic suppressed for %.1fs", pre_suppress_s)
 
         executor = self._executor()
+        assert executor is not None
         with get_tracer().timed("execute", verb=verb):
             result = await executor.execute(exec_cmd)
 
@@ -195,7 +195,7 @@ class ActionExecutor:
         #   All else — short cooldown prevents app-startup sounds / utterance
         #              tail from being transcribed as a second command.
         if verb == "CLARIFY":
-            self._set_pending_clarification(target or "unclear command")
+            self._state.set_pending_clarification(target or "unclear command")
             # A2UI (token-free): if this clarification is an enumerable shape,
             # push a tappable choice card. Free-form CLARIFYs return no template
             # and stay voice-only. Best-effort — never blocks the voice path.
@@ -205,7 +205,7 @@ class ActionExecutor:
                 whisper.set_awaiting_clarification(True)
                 log.debug("Post-CLARIFY mic suppressed 1.5s; wake-phrase bypassed")
         else:
-            self._set_pending_clarification(None)
+            self._state.set_pending_clarification(None)
             self.clear_clarify_surface()   # answer arrived (tap or voice) → dismiss card
             # Remember successful OPEN targets for the "what would you like to
             # open?" choice card (most-recent first, deduped, capped).
@@ -220,16 +220,18 @@ class ActionExecutor:
         # Record the resolved turn so the NEXT utterance can resolve anaphora
         # ("do that again", "click it") and the prompt can carry a last-action
         # hint. Best-effort — never let bookkeeping fail a command.
-        try:
-            self._conversation().record(
-                command_text=cmd.text,
+        conv = self._conversation()
+        if conv is not None:
+            try:
+                conv.record(
+                    command_text=cmd.text,
                 verb=verb,
                 target=target or "",
                 coords=grounded_coords,
                 success=result.get("status") == "ok",
             )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("ConversationState.record failed: %s", exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("ConversationState.record failed: %s", exc)
 
         return result
 
@@ -242,8 +244,11 @@ class ActionExecutor:
             screenshot_b64: str = screenshot_result.get("image_base64", "")
             if not screenshot_b64:
                 return None
+            grounder = self._grounder()
+            if grounder is None:
+                return None
             result = await asyncio.to_thread(
-                self._grounder().ground, target, screenshot_b64
+                grounder.ground, target, screenshot_b64
             )
             if result is None:
                 return None
@@ -340,12 +345,12 @@ class ActionExecutor:
         try:
             from core import a2ui
             surface = a2ui.template_for_clarify(
-                message, recent_apps=self._get_recent_open_targets())
+                message, recent_apps=self._state.get_recent_open_targets())
             if surface is None and a2ui.is_click_target_clarify(message):
                 surface = self.build_click_target_surface()
             if surface is None:
                 return
-            self._set_active_clarify_surface_id(surface["surface_id"])
+            self._state.set_active_clarify_surface_id(surface["surface_id"])
             asyncio.create_task(bridge.send_a2ui_surface(surface))
         except Exception as exc:
             log.debug("a2ui: clarify surface emit failed: %s", exc)
@@ -433,20 +438,20 @@ class ActionExecutor:
         if not t:
             return
         lower = t.lower()
-        current = self._get_recent_open_targets()
+        current = self._state.get_recent_open_targets()
         updated = [t] + [x for x in current if x.lower() != lower]
         if len(updated) > 8:
             updated = updated[:8]
-        self._set_recent_open_targets(updated)
+        self._state.set_recent_open_targets(updated)
 
     def clear_clarify_surface(self) -> None:
         """Dismiss a live CLARIFY card once the clarification has resolved."""
-        sid = self._get_active_clarify_surface_id()
+        sid = self._state.get_active_clarify_surface_id()
         bridge = self._bridge()
         if not sid or bridge is None:
-            self._set_active_clarify_surface_id(None)
+            self._state.set_active_clarify_surface_id(None)
             return
-        self._set_active_clarify_surface_id(None)
+        self._state.set_active_clarify_surface_id(None)
         try:
             asyncio.create_task(bridge.clear_a2ui_surface(sid))
         except Exception as exc:

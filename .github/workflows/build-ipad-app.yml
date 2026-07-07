@@ -147,7 +147,7 @@ jobs:
           ls -la $RUNNER_TEMP/export/*.ipa
 
       - name: Upload to TestFlight
-        if: ${{ github.event_name == 'push' || github.event.inputs.deploy_testflight == 'true' }}
+        if: ${{ github.ref == 'refs/heads/master' || github.event.inputs.deploy_testflight == 'true' }}
         continue-on-error: true  # Non-fatal: App Store may reject older SDK builds
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}

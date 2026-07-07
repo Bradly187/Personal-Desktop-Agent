@@ -20,10 +20,10 @@ def _make_db():
     """Return a minimal mock AgentDB that satisfies the profiler."""
     db = MagicMock()
     db.available = True
-    db.get_voice_profile = AsyncMock(return_value=None)
-    db.get_flare_profile = AsyncMock(return_value=None)
-    db.upsert_voice_profile = AsyncMock()
-    db.insert_voice_calibration = AsyncMock()
+    db.voice.get_voice_profile = AsyncMock(return_value=None)
+    db.profile.get_flare_profile = AsyncMock(return_value=None)
+    db.voice.upsert_voice_profile = AsyncMock()
+    db.voice.insert_voice_calibration = AsyncMock()
     return db
 
 
@@ -54,7 +54,7 @@ class TestAcousticProfilerLoad:
     def test_load_with_stored_profile_applies_thresholds(self):
         from calibration.acoustic_profiler import AcousticProfiler
         db = _make_db()
-        db.get_voice_profile = AsyncMock(return_value={
+        db.voice.get_voice_profile = AsyncMock(return_value={
             "baseline_rms": 0.08,
             "baseline_logprob": -0.30,
             "baseline_freq": 300.0,

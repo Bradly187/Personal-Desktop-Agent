@@ -33,9 +33,9 @@ def test_render():
 
 def _engine(rules, *, notifier=None, dev=None):
     db = MagicMock()
-    db.list_event_rules = AsyncMock(return_value=rules)
-    db.touch_rule_fired = AsyncMock()
-    db.enqueue_goal = AsyncMock(return_value=1)
+    db.events.list_event_rules = AsyncMock(return_value=rules)
+    db.events.touch_rule_fired = AsyncMock()
+    db.goals.enqueue_goal = AsyncMock(return_value=1)
     return EventRuleEngine(db, MagicMock(), notifier=notifier, dev_agent=dev), db
 
 
@@ -48,7 +48,7 @@ async def test_notify_rule_fires_on_match():
         "cooldown_s": 0, "last_fired_at": None, "name": "boss mail"}], notifier=notifier)
     assert await eng.on_event({"topic": "email.arrived", "payload": {"from": "boss@x.com"}}) == 1
     notifier.notify.assert_awaited()
-    db.touch_rule_fired.assert_awaited()
+    db.events.touch_rule_fired.assert_awaited()
 
 
 async def test_predicate_filters_non_match():
@@ -87,4 +87,4 @@ async def test_enqueue_goal_action():
         "goal_template": "fix the build", "action_kind": "enqueue_goal",
         "cooldown_s": 0, "last_fired_at": None, "name": "b"}], dev=dev)
     assert await eng.on_event({"topic": "build.failed", "payload": {"id": 99}}) == 1
-    db.enqueue_goal.assert_awaited()
+    db.goals.enqueue_goal.assert_awaited()

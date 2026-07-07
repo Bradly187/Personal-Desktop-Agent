@@ -3,7 +3,7 @@
 ``PRAGMA busy_timeout`` only auto-retries ``SQLITE_BUSY``. A "database table is
 locked" (``SQLITE_LOCKED``) — seen at startup when a just-killed previous
 process still holds the WAL lock, observed live as
-``AgentDB.prune_sensor_telemetry failed: database table is locked`` — is NOT
+``AgentDB.telemetry.prune_sensor_telemetry failed: database table is locked`` — is NOT
 retried by SQLite, so the prune skipped and ``sensor_telemetry`` grew unbounded
 (the exact thing the prune exists to prevent). ``_prune_with_retry`` now backs
 off and retries, staying non-fatal.

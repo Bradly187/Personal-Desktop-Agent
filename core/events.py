@@ -3,7 +3,7 @@
 Architecture:
 - `EventBus.publish()` writes to AgentDB.event_log (durable, replayable) AND
   notifies all in-process subscribers via asyncio.Queue (zero-latency real-time delivery).
-- Consumers that need replay call `AgentDB.poll_events()` directly with their cursor.
+- Consumers that need replay call `AgentDB.events.poll_events()` directly with their cursor.
 - Consumers that need real-time delivery call `EventBus.subscribe()` to get an async iterator.
 
 Topic namespace (dotted paths):
@@ -129,7 +129,7 @@ class EventBus:
         # Durable write first — if it fails, log it but still deliver in-process.
         row_id: Optional[int] = None
         try:
-            row_id = await self._db.insert_event(
+            row_id = await self._db.events.insert_event(
                 topic, payload_str, source,
                 session_id=session_id,
                 command_id=command_id,
@@ -160,7 +160,7 @@ class EventBus:
                         # consumer (it drained its buffer, then blocked on
                         # q.get() forever with no signal). The durable log
                         # still has the event; a consumer that must not miss
-                        # any can replay via AgentDB.poll_events + its cursor.
+                        # any can replay via AgentDB.events.poll_events + its cursor.
                         self._dropped_events += 1
                         log.warning(
                             "EventBus: dropped event %s for slow consumer "
@@ -189,7 +189,7 @@ class EventBus:
         # even if the DB call suspends and publish() runs concurrently.
         self._queues.setdefault(topic_pattern, []).append(q)
         try:
-            await self._db.upsert_event_consumer(consumer_name, topic_pattern)
+            await self._db.events.upsert_event_consumer(consumer_name, topic_pattern)
             while True:
                 event = await q.get()
                 yield event
@@ -216,7 +216,7 @@ def _pattern_regex(pattern: str) -> "re.Pattern[str]":
 def _topic_matches(topic: str, pattern: str) -> bool:
     """Match a topic against a SQL-LIKE pattern where % matches zero or more chars.
 
-    Semantics are identical to the SQL LIKE used by AgentDB.poll_events, so
+    Semantics are identical to the SQL LIKE used by AgentDB.events.poll_events, so
     real-time subscribers and replay consumers of the same pattern see the
     same event set ('%' anywhere in the pattern works, not just at the tail;
     SQL's '_' single-char wildcard is NOT supported — treated literally).

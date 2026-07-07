@@ -20,9 +20,18 @@ import asyncio
 import logging
 import time
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, Any, Coroutine
 
+from dataclasses import dataclass
 from storage.personal_kb import is_personal_query as _is_personal_query
+
+@dataclass
+class GateResult:
+    action: str
+    gate: str
+    route: str
+    discard_reason: Optional[str] = None
+    new_cmd: Optional["Command"] = None
 
 if TYPE_CHECKING:
     from core.command_executor import Command
@@ -60,11 +69,11 @@ class GateEvaluator:
         self,
         cfg: "CoordinatorConfig",
         *,
-        run_local: Callable[["Command"], Awaitable[str]],
-        run_cloud: Callable[["Command"], Awaitable[str]],
+        run_local: Callable[["Command"], Coroutine[Any, Any, str]],
+        run_cloud: Callable[["Command"], Coroutine[Any, Any, str]],
         approval_config: Callable[[], dict],
-        audit=None,
-        tts_speak: Optional[Callable[[str], Awaitable[None]]] = None,
+        audit: Any = None,
+        tts_speak: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
     ) -> None:
         self._cfg = cfg
         self._run_local = run_local
@@ -86,10 +95,50 @@ class GateEvaluator:
         # and speak a one-time warning once they exceed cloud_call_budget.
         self._session_cloud_calls: int = 0
         self._cloud_budget_warned: bool = False
+        self.cloud_calls = 0
 
     # ---------------------------------------------------------------------- #
     # Gates
     # ---------------------------------------------------------------------- #
+
+    async def evaluate(self, cmd: "Command", vocab_corrected: bool = False) -> GateResult:
+        """Run the full routing logic across all gates."""
+        from core.hybrid_coordinator import _BYPASS_SOURCES, _VALID_COMMAND_VERBS, _SKIP_GATE1_SOURCES, _retranscribe
+        
+        source = cmd.source
+        
+        if source in _BYPASS_SOURCES:
+            if cmd.source == "touch" and cmd.action in _VALID_COMMAND_VERBS:
+                action_str = cmd.action
+            else:
+                action_str = await self._run_local(cmd)
+            return GateResult(action=action_str, gate="bypass", route="local", new_cmd=cmd)
+            
+        if not self.gate0(cmd):
+            log.debug("Gate 0 force-local (sensitive data): %r", cmd.text)
+            action_str = await self._run_local(cmd)
+            return GateResult(action=action_str, gate="gate0_privacy", route="local", new_cmd=cmd)
+            
+        if source in _SKIP_GATE1_SOURCES:
+            action_str, gate_that_decided, route_label = await self.gates_2_to_4(cmd)
+            return GateResult(action=action_str, gate=gate_that_decided, route=route_label, new_cmd=cmd)
+            
+        passed, new_cmd = await self.gate1(cmd)
+        if passed is None:
+            return GateResult(action="DISCARDED", gate="gate1_gesture_conf", route="local", discard_reason="low gesture confidence", new_cmd=new_cmd)
+            
+        if not passed:
+            if vocab_corrected:
+                new_cmd = await _retranscribe(new_cmd)
+                action_str, gate_that_decided, route_label = await self.gates_2_to_4(new_cmd)
+                return GateResult(action=action_str, gate=gate_that_decided, route=route_label, new_cmd=new_cmd)
+            else:
+                log.info("Gate 1 voice low-confidence (logprob=%.3f) — escalating to cloud for misrecognition repair", new_cmd.whisper_logprob)
+                action_str = await self._run_cloud(new_cmd)
+                return GateResult(action=action_str, gate="gate1_voice_conf", route="cloud", new_cmd=new_cmd)
+                
+        action_str, gate_that_decided, route_label = await self.gates_2_to_4(new_cmd)
+        return GateResult(action=action_str, gate=gate_that_decided, route=route_label, new_cmd=new_cmd)
 
     def effective_cfg(self) -> "CoordinatorConfig":
         """Return the task-local effective config set by _route_impl, or self._cfg.

@@ -50,6 +50,11 @@ exclude = [
 # precedence over pyproject). The root entry points (main.py, approval_hook.py,
 # windows_action_proxy.py) remain run-directly scripts, not installed modules.
 
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+exclude = ["^scripts/"]
+
 # ── Ruff (IG-2a, 2026-07-05 industry-patterns audit) ─────────────────────────
 # First gate: pyflakes + pycodestyle errors only (ruff defaults). The ignores
 # below are a deliberate ratchet — style-only rules with existing violations

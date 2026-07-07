@@ -66,7 +66,7 @@ MIN_SCORE = 0.2
 
 
 def _load_recent_runs(conn: sqlite3.Connection, limit: int) -> list[dict]:
-    """Replicate AgentDB.get_recent_runs (storage/db.py) read-only."""
+    """Replicate AgentDB.runs.get_recent_runs (storage/db.py) read-only."""
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """SELECT id, goal, ts, success, status
@@ -79,7 +79,7 @@ def _load_recent_runs(conn: sqlite3.Connection, limit: int) -> list[dict]:
 
 
 def _load_steps(conn: sqlite3.Connection, run_id: int) -> list[dict]:
-    """Replicate AgentDB.get_steps_for_run (storage/db.py) read-only."""
+    """Replicate AgentDB.runs.get_steps_for_run (storage/db.py) read-only."""
     rows = conn.execute(
         """SELECT step_num, action, args, body, result, success
            FROM agent_steps WHERE run_id = ? ORDER BY step_num ASC""",

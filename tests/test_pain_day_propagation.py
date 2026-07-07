@@ -50,6 +50,15 @@ class RecordingGovernor:
 
 class MockAgentDB:
     available = False  # skip the async DB persist path (no event loop in test)
+    def __init__(self):
+        self.commands = self
+        self.sessions = self
+        self.profile = self
+        self.telemetry = self
+        self.routing = self
+        self.misc = self
+        self.memory = self
+        self.events = self
 
 
 def _make_whisper(profiler=None) -> WhisperStream:
@@ -288,15 +297,15 @@ def test_flare_profile_db_roundtrip(tmp_path):
     async def run():
         db = AgentDB()
         await db.open(str(tmp_path / "flare.db"))
-        await db.upsert_flare_profile({
+        await db.profile.upsert_flare_profile({
             "voice_degrades": True, "gesture_degrades": True,
             "tilt_degrades": False, "sound_degrades": False,
             "flare_vad_scale": 0.4,
         })
-        prof = await db.get_flare_profile()
+        prof = await db.profile.get_flare_profile()
         # Partial update must preserve untouched columns.
-        await db.upsert_flare_profile({"sound_degrades": True})
-        prof2 = await db.get_flare_profile()
+        await db.profile.upsert_flare_profile({"sound_degrades": True})
+        prof2 = await db.profile.get_flare_profile()
         await db.close()
         return prof, prof2
 

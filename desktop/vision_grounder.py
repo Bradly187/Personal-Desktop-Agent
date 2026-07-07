@@ -78,8 +78,8 @@ class VisionGrounder:
         self._client = None  # cloud client (Bedrock/Anthropic), lazy-init
         self._cloud_model: Optional[str] = None  # backend-mapped model id
         self._cache: dict[str, tuple[int, int, float]] = {}
-        self._cache_ttl_s: float = _CACHE_TTL_S
-        self._cache_max: int = 200
+        self._cache_ttl_s: float = _CACHE_TTL_S  # type: ignore[no-redef]
+        self._cache_max: int = 200  # type: ignore[no-redef]
 
     def _get_client(self):
         """Build the cloud client through the shared backend seam so the vision

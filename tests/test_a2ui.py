@@ -253,34 +253,32 @@ def test_record_open_target_dedup_recency_and_cap():
     """ActionExecutor's recent-OPEN buffer: most-recent-first, deduped, capped."""
     from core.action_executor import ActionExecutor
 
-    state = {"recent": []}
+    from core.coordinator_state import CoordinatorState
+    state = CoordinatorState()
     ae = ActionExecutor(
         executor=lambda: None, grounder=lambda: None, conversation=lambda: None,
         metrics=lambda: None, whisper=lambda: None, bridge=lambda: None,
         target_cache=lambda: None,
-        get_pending_clarification=lambda: None, set_pending_clarification=lambda v: None,
-        get_active_clarify_surface_id=lambda: None, set_active_clarify_surface_id=lambda v: None,
-        get_recent_open_targets=lambda: state["recent"],
-        set_recent_open_targets=lambda v: state.__setitem__("recent", v),
+        state=state,
     )
 
     for app in ["Chrome", "vscode", "Slack"]:
         ae.record_open_target(app)
-    assert state["recent"] == ["Slack", "vscode", "Chrome"]
+    assert state.recent_open_targets == ["Slack", "vscode", "Chrome"]
 
     # Re-open vscode → moves to front, no duplicate (case-insensitive).
     ae.record_open_target("vscode")
-    assert state["recent"] == ["vscode", "Slack", "Chrome"]
+    assert state.recent_open_targets == ["vscode", "Slack", "Chrome"]
 
     # Blank target is ignored.
     ae.record_open_target("   ")
-    assert state["recent"] == ["vscode", "Slack", "Chrome"]
+    assert state.recent_open_targets == ["vscode", "Slack", "Chrome"]
 
     # Cap at 8.
     for i in range(10):
         ae.record_open_target(f"App{i}")
-    assert len(state["recent"]) == 8
-    assert state["recent"][0] == "App9"
+    assert len(state.recent_open_targets) == 8
+    assert state.recent_open_targets[0] == "App9"
 
 
 # --------------------------------------------------------------------------- #

@@ -22,7 +22,8 @@ from unittest.mock import AsyncMock, MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.command_executor import Command
-from core.hybrid_coordinator import _SYSTEM_CONTROL_PHRASES, HybridCoordinator
+from core.hybrid_coordinator import HybridCoordinator
+from core.voice_system_control import _SYSTEM_CONTROL_PHRASES
 
 _RESUME_PHRASES = (
     "resume task", "resume the task", "hey agent resume",
@@ -55,7 +56,7 @@ def test_resume_phrases_are_system_control():
 def test_resume_with_interrupted_run_fires_resume():
     db = MagicMock()
     db.available = True
-    db.get_interrupted_runs = AsyncMock(
+    db.runs.get_interrupted_runs = AsyncMock(
         return_value=[{"id": 3, "goal": "refactor the indexer"}]
     )
     agent = MagicMock()
@@ -73,7 +74,7 @@ def test_resume_with_interrupted_run_fires_resume():
 def test_resume_with_nothing_interrupted_speaks_no_task():
     db = MagicMock()
     db.available = True
-    db.get_interrupted_runs = AsyncMock(return_value=[])
+    db.runs.get_interrupted_runs = AsyncMock(return_value=[])
     agent = MagicMock()
     agent.resume_pending_plan = AsyncMock()
     c = _coord(db, agent)
@@ -90,7 +91,7 @@ def test_resume_with_nothing_interrupted_speaks_no_task():
 def test_resume_without_dev_agent_is_graceful():
     db = MagicMock()
     db.available = True
-    db.get_interrupted_runs = AsyncMock(
+    db.runs.get_interrupted_runs = AsyncMock(
         return_value=[{"id": 1, "goal": "anything"}]
     )
     c = _coord(db, dev_agent=None)

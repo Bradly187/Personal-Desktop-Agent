@@ -101,6 +101,8 @@ class _FakeDB:
 
     def __init__(self) -> None:
         self.inserts: list[dict] = []
+        self.telemetry = self
+        self.inferences = self
 
     async def insert_inference(self, **kwargs):
         self.inserts.append(kwargs)

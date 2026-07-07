@@ -33,10 +33,10 @@ async def test_insert_and_get_roundtrip(tmp_path):
     db = await _open(tmp_path, "corr.db")
     if not db.available:
         pytest.skip("aiosqlite unavailable")
-    rid = await db.insert_correction(1, "tid7", "no I meant close the window",
+    rid = await db.logs.insert_correction(1, "tid7", "no I meant close the window",
                                      "OPEN window", "command")
     assert rid
-    rows = await db.get_corrections()
+    rows = await db.logs.get_corrections()
     assert len(rows) == 1
     r = rows[0]
     assert r["correction_text"] == "no I meant close the window"
@@ -49,8 +49,8 @@ async def test_empty_text_not_inserted(tmp_path):
     db = await _open(tmp_path, "corr2.db")
     if not db.available:
         pytest.skip("aiosqlite unavailable")
-    assert await db.insert_correction(1, None, "", "OPEN x", "command") is None
-    assert await db.get_corrections() == []
+    assert await db.logs.insert_correction(1, None, "", "OPEN x", "command") is None
+    assert await db.logs.get_corrections() == []
 
 
 async def test_harvest_correction_schedules_write(tmp_path):
@@ -66,7 +66,7 @@ async def test_harvest_correction_schedules_write(tmp_path):
     # fire_and_log scheduled the insert on the running loop — let it run.
     await asyncio.sleep(0.05)
 
-    rows = await db.get_corrections()
+    rows = await db.logs.get_corrections()
     assert any("close it" in r["correction_text"] for r in rows)
     assert rows[0]["prior_action"] == "OPEN editor"
 
@@ -88,5 +88,5 @@ async def test_on_correction_harvests_without_trainer(tmp_path):
     await c._on_correction(cmd, "CLOSE editor")
     await asyncio.sleep(0.05)
 
-    rows = await db.get_corrections()
+    rows = await db.logs.get_corrections()
     assert any("close it" in r["correction_text"] for r in rows)

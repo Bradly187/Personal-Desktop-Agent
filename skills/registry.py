@@ -115,6 +115,7 @@ class SkillRegistry:
             env=dict(os.environ),
             cwd=server.get("cwd") or str(_REPO_ROOT),
         )
+        assert self._stack is not None
         read, write = await self._stack.enter_async_context(stdio_client(params))
         session = await self._stack.enter_async_context(ClientSession(read, write))
         await session.initialize()

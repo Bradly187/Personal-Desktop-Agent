@@ -74,8 +74,8 @@ async def test_v8_db_migrates_forward_losslessly(tmp_path):
 async def test_insert_round_trips_trace_id(tmp_path):
     db = AgentDB()
     await db.open(tmp_path / "fresh.db")
-    await db.insert_sensor_telemetry(1, 2000.0, tilt_rx=0.1, trace_id="tr-abc")
-    await db.insert_sensor_telemetry(1, 2001.0, tilt_rx=0.2)    # no trace in window
+    await db.telemetry.insert_sensor_telemetry(1, 2000.0, tilt_rx=0.1, trace_id="tr-abc")
+    await db.telemetry.insert_sensor_telemetry(1, 2001.0, tilt_rx=0.2)    # no trace in window
     await db.close()
 
     c = sqlite3.connect(str(tmp_path / "fresh.db"))

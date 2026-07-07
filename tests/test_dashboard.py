@@ -80,6 +80,7 @@ def test_dashboard_topics_are_covered_by_mapping():
         "step.failed": {"step_num": 3, "action": "WRITE_FILE", "error": "boom"},
         "replan.exhausted": {"replans": 3, "goal": "refactor module"},
         "email.arrived": {"subject": "Build failed"},
+        "file.written": {"path": "/tmp/test.txt"},
     }
     assert set(samples) == _DASHBOARD_TOPICS
     for topic, payload in samples.items():
@@ -136,7 +137,7 @@ async def test_api_routes_read_agent_db(tmp_path):
     await db.open(tmp_path / "agent.db")
     if not db.available:
         pytest.skip("aiosqlite unavailable")
-    sid = await db.insert_session(mode="test")
+    sid = await db.sessions.insert_session(mode="test")
     # one traced command
     async with db._conn.execute(
         "INSERT INTO commands (session_id, ts, source, text, action, route, "
@@ -145,10 +146,10 @@ async def test_api_routes_read_agent_db(tmp_path):
     ) as cur:
         cmd_id = cur.lastrowid
     await db._conn.commit()
-    await db.insert_inference(command_id=cmd_id, model="claude-opus-4-8", domain="code",
+    await db.inferences.insert_inference(command_id=cmd_id, model="claude-opus-4-8", domain="code",
                              prompt=None, response=None, tokens_in=1_000_000,
                              tokens_out=0, latency_ms=0.0, backend="bedrock")
-    await db.insert_session_summary(dict(session_id=sid, ts=1000.0, total_commands=1,
+    await db.sessions.insert_session_summary(dict(session_id=sid, ts=1000.0, total_commands=1,
                                          success_rate=1.0, cloud_escalation_rate=0.0,
                                          latency_p50_ms=50, latency_p95_ms=50, pain_day_pct=0.0,
                                          corrections_count=0))

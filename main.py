@@ -373,7 +373,7 @@ class _ShutdownController:
 
         # Close session record in DB
         if agent_db is not None and session_id >= 0:
-            await agent_db.close_session(session_id)
+            await agent_db.sessions.close_session(session_id)
 
         # Stop registered components (FusionEngine, GestureProcessor, etc.)
         for comp in reversed(self._components):
@@ -519,919 +519,952 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         sw, sh = 1920, 1080
 
     # --- Open agent.db and start session ---
-    agent_db = AgentDB()
-    await agent_db.open(Path("agent.db"))
-
-    # --- Startup DB prune: keep high-write tables from growing unboundedly ---
-    # sensor_telemetry: ~86,400 rows/day → retain 7 days
-    # gesture_velocity_samples: ~7,200 rows/day → retain 90 days
-    # ipad_logs: ~50 rows/day → retain 60 days
-    # Non-fatal: prune failures are logged and skipped, never block startup.
-    await agent_db.prune_sensor_telemetry(days=7)
-    await agent_db.prune_gesture_velocity_samples(days=90)
-    await agent_db.prune_ipad_logs(days=60)
-    # Orchestration tables (added in schema v3)
-    await agent_db.prune_event_log(days=7)
-    await agent_db.prune_tool_calls(days=30)
-    await agent_db.prune_rate_limit_events(days=7)
-    # command_traces: tracing is on by default → grows per command; retain 30 days
-    await agent_db.prune_command_traces(days=30)
-
-    # --- Crash recovery: reconcile plans left mid-run by a previous process ---
-    # Any agent_run still 'running' means the process died during a plan. Mark
-    # them 'interrupted'; DevAgent.resume_pending_plan() can offer a gated resume.
-    _interrupted = await agent_db.mark_interrupted_runs()
-    if _interrupted:
-        log.warning(
-            "Recovered %d interrupted plan run(s) from a previous session — "
-            "say 'resume task' to continue the most recent one.", _interrupted,
-        )
-
-    # Durable goal backlog (gap D): a goal left 'running' means the process died
-    # mid-goal. Requeue it (idempotency_key prevents duplicates; poison goals that
-    # exhausted max_attempts are marked failed). The drainer is kicked after the
-    # pipeline is wired (see below) so queued goals from a previous session run.
-    _requeued = await agent_db.requeue_stale_running()
-    if _requeued:
-        log.warning("Re-queued %d goal(s) from the durable backlog after a crash.", _requeued)
-
-    # --- Open audit log (separate append-only DB) ---
-    audit = AuditLog()
-    await audit.open(Path("audit.db"))
-
-    # --- Initialize content filter and trust classifier ---
-    content_filter = ContentFilter(audit_log=audit)
-    trust_classifier = MCPTrustClassifier(audit_log=audit)
-
-    git_hash: Optional[str] = None
+    bridge_task = fusion_task = watchdog_task = metric_watcher_task = None
+    macro_detector = skill_registry = personal_kb = _kb_index_task = chat_server = None
+    _vllm_pool = dashboard_obj = indexer = agent_db = trainer = twin_state = audit = None
+    session_id = -1
+    shutdown = None
+    import typing
+    m: typing.Any = None
     try:
-        git_hash = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        pass
+        agent_db = AgentDB()
+        await agent_db.open(Path("agent.db"))
 
-    mode = "safe" if args.safe_mode else "normal"
-    session_id = await agent_db.insert_session(mode=mode, git_hash=git_hash)
-    log.info("Session %d started (mode=%s git=%s)", session_id, mode, git_hash or "unknown")
-    await audit.log_session_start(session_id)
+        # --- Startup DB prune: keep high-write tables from growing unboundedly ---
+        # sensor_telemetry: ~86,400 rows/day → retain 7 days
+        # gesture_velocity_samples: ~7,200 rows/day → retain 90 days
+        # ipad_logs: ~50 rows/day → retain 60 days
+        # Non-fatal: prune failures are logged and skipped, never block startup.
+        await agent_db.telemetry.prune_sensor_telemetry(days=7)
+        await agent_db.runs.prune_gesture_velocity_samples(days=90)
+        await agent_db.runs.prune_ipad_logs(days=60)
+        # Orchestration tables (added in schema v3)
+        await agent_db.events.prune_event_log(days=7)
+        await agent_db.runs.prune_tool_calls(days=30)
+        await agent_db.runs.prune_rate_limit_events(days=7)
+        # command_traces: tracing is on by default → grows per command; retain 30 days
+        await agent_db.commands.prune_command_traces(days=30)
 
-    # --- Instantiate BehavioralTwinState ---
-    twin_state = BehavioralTwinState(agent_db=agent_db)
-    await twin_state.start()
-
-    # --- MemoryManager — schema-validated façade over AgentDB + SemanticMemory ---
-    from storage.memory_manager import MemoryManager
-    memory = MemoryManager(agent_db=agent_db, twin_state=twin_state)
-
-    # --- Build components ---
-    cfg = CoordinatorConfig()
-    # Gap 1: restore learned Gate 1 threshold that was adapted in a prior session
-    if agent_db.available:
-        try:
-            async with agent_db._conn.execute(
-                "SELECT new_value FROM settings_versions "
-                "WHERE component='coordinator' AND key='whisper_logprob_min' "
-                "ORDER BY ts DESC LIMIT 1"
-            ) as _cur:
-                _row = await _cur.fetchone()
-                if _row and _row[0]:
-                    cfg.whisper_logprob_min = float(_row[0])
-                    log.info("Gate 1: restored learned threshold %.2f from DB", cfg.whisper_logprob_min)
-        except Exception as _exc:
-            log.debug("Gate 1: could not restore threshold (using default): %s", _exc)
-
-    # Backend selection (--backend flag)
-    _backend = args.backend.lower() if hasattr(args, "backend") else "ollama"
-
-    # Ensure a local Ollama server is up before building any Ollama-backed engine.
-    # The command model (default backend) and the ModelRouter specialists both run
-    # on Ollama, so start the server here if it isn't already listening — covers
-    # every launch path (start_agent.bat, watchdog, scheduled task, direct). No-op
-    # when Ollama is already up; degrades to cloud fallback if it can't be started.
-    _uses_ollama = (_backend == "ollama") or (not getattr(args, "no_local_specialists", False))
-    if _uses_ollama:
-        from inference.local_inference import ensure_ollama_running
-        await asyncio.to_thread(ensure_ollama_running)
-
-    if _backend == "llamacpp":
-        local = LlamaCppInference(
-            model=getattr(args, "llamacpp_model", "local-model"),
-            host=getattr(args, "llamacpp_host", "http://localhost:8080"),
-        )
-        log.info("Using llama.cpp backend (llama-server on %s)", local.host)
-    elif _backend == "vllm":
-        _vllm_speculative = getattr(args, "speculative", False)
-        local = VLLMInference(
-            model=getattr(args, "vllm_model", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
-            speculative_model="llama3.1:8b" if _vllm_speculative else None,
-        )
-        log.info(
-            "Using vLLM backend (LLM class) — model loads on first inference request%s",
-            " [speculative decoding enabled]" if _vllm_speculative else "",
-        )
-    elif _backend == "vllm-server":
-        local = VLLMServerInference(
-            base_url=getattr(args, "vllm_server_url", "http://127.0.0.1:8000"),
-            model=getattr(args, "vllm_server_model",
-                          "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"),
-        )
-        log.info(
-            "Using vLLM-server backend (OpenAI-compatible HTTP at %s) — "
-            "server managed externally in WSL2 (scripts/start_vllm_server.sh)",
-            local.base_url,
-        )
-    else:
-        local = OllamaInference()
-
-    # ── vLLM specialist pool (--vllm-pool) ────────────────────────────────
-    # Architecture 2: INT4 AWQ specialists in vLLM, TTL-slept between requests.
-    # Requires --backend vllm (command model) + WSL2 with vllm installed.
-    # Ollama remains the automatic fallback if the pool raises.
-    _vllm_pool: Optional[VLLMSpecialistPool] = None
-    _no_local_specialists = getattr(args, "no_local_specialists", False)
-    if _no_local_specialists and getattr(args, "vllm_pool", False):
-        log.warning("--no-local-specialists overrides --vllm-pool; specialist pool disabled "
-                    "(dev queries route to the cloud)")
-    if getattr(args, "vllm_pool", False) and not _no_local_specialists:
-        if _backend != "vllm":
-            log.warning("--vllm-pool requires --backend vllm; specialist pool disabled")
-        else:
-            # Pass the command engine so the pool can sleep it before waking a
-            # 30B-class specialist (they can't co-reside with Whisper on 32 GB).
-            _vllm_pool = VLLMSpecialistPool(command_engine=local)
-            # Mutual exclusion the other way: when the command engine wakes, sleep
-            # any awake specialist first.
-            if hasattr(local, "set_pre_wake_hook"):
-                local.set_pre_wake_hook(_vllm_pool.sleep_all_specialists)
-            await _vllm_pool.start()
-            log.info("VLLMSpecialistPool: started (INT4 AWQ specialists) — "
-                     "command<->specialist mutual-exclusion wired")
-
-    # ── vLLM embedder (--vllm-embed) ──────────────────────────────────────
-    # Replaces sentence-transformers in SemanticMemory / CodebaseIndexer.
-    _vllm_embedder: Optional[VLLMEmbedder] = None
-    if getattr(args, "vllm_embed", False):
-        if _backend != "vllm":
-            log.warning("--vllm-embed requires --backend vllm; using sentence-transformers")
-        else:
-            _vllm_embedder = VLLMEmbedder(
-                model=getattr(args, "embed_model", "nomic-ai/nomic-embed-text-v1.5")
+        # --- Crash recovery: reconcile plans left mid-run by a previous process ---
+        # Any agent_run still 'running' means the process died during a plan. Mark
+        # them 'interrupted'; DevAgent.resume_pending_plan() can offer a gated resume.
+        _interrupted = await agent_db.runs.mark_interrupted_runs()
+        if _interrupted:
+            log.warning(
+                "Recovered %d interrupted plan run(s) from a previous session — "
+                "say 'resume task' to continue the most recent one.", _interrupted,
             )
-            log.info("VLLMEmbedder: will activate on first encode() call")
 
-    # GestureProcessor created first so trainer can hold a reference for
-    # calibrated threshold push-back.
-    lidar = LiDARReceiver()
-    gesture = GestureProcessor()
-    gesture.set_lidar(lidar)
+        # Durable goal backlog (gap D): a goal left 'running' means the process died
+        # mid-goal. Requeue it (idempotency_key prevents duplicates; poison goals that
+        # exhausted max_attempts are marked failed). The drainer is kicked after the
+        # pipeline is wired (see below) so queued goals from a previous session run.
+        _requeued = await agent_db.runs.requeue_stale_running()
+        if _requeued:
+            log.warning("Re-queued %d goal(s) from the durable backlog after a crash.", _requeued)
 
-    # D7: FlickEngine — wired if not in safe mode
-    if not args.safe_mode:
+        # --- Open audit log (separate append-only DB) ---
+        audit = AuditLog()
+        await audit.open(Path("audit.db"))
+
+        # --- Initialize content filter and trust classifier ---
+        content_filter = ContentFilter(audit_log=audit)
+        trust_classifier = MCPTrustClassifier(audit_log=audit)
+
+        git_hash: Optional[str] = None
         try:
-            from desktop.flick_engine import FlickEngine
-            from desktop.snap_zones import get_snap_zones, move_window_drag
-            _flick_engine = FlickEngine(
-                screen_w=sw, screen_h=sh,
-                snap_zones_fn=get_snap_zones,
-                move_window_fn=move_window_drag,
-            )
-            gesture.set_flick_engine(_flick_engine)
-            log.info("FlickEngine: initialised  screen=%dx%d", sw, sh)
-        except Exception as _fe_exc:
-            log.warning("FlickEngine: could not initialise (%s) — flick-to-snap disabled", _fe_exc)
+            git_hash = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+        except Exception:
+            pass
 
-    trainer = ContinuousTrainer(
-        agent_db=agent_db, config=cfg, twin_state=twin_state,
-        gesture_processor=gesture,          # receives calibrated velocity thresholds
-    )
+        mode = "safe" if args.safe_mode else "normal"
+        session_id = await agent_db.sessions.insert_session(mode=mode, git_hash=git_hash)
+        log.info("Session %d started (mode=%s git=%s)", session_id, mode, git_hash or "unknown")
+        await audit.log_session_start(session_id)
 
-    router = ModelRouter()
-    if _vllm_pool is not None:
-        router.set_vllm_pool(_vllm_pool)
+        # --- Instantiate BehavioralTwinState ---
+        twin_state = BehavioralTwinState(agent_db=agent_db)
+        await twin_state.start()
 
-    # Cloud plan routing (specs/cloud-plan-routing, DA_CLOUD_PLAN, default OFF):
-    # wrap the router so DevAgent's domain="plan" inference is served by Sonnet 4.6
-    # on Bedrock — frees the ~18 GB local plan model and ends the VRAM swap thrash.
-    # Transparent proxy: every other domain/method delegates to the raw router, and
-    # any cloud failure / missing credential falls back to the local plan model, so
-    # OFF (or no credential) is byte-identical to legacy.
-    dev_router = router
-    try:
-        from inference.cloud_plan_router import CloudPlanRouter, cloud_plan_enabled
-        if cloud_plan_enabled():
-            dev_router = CloudPlanRouter(
-                router, content_filter=content_filter, agent_db=agent_db,
-            )
-            log.info("Cloud plan routing ENABLED → %s (Bedrock); local plan model is fallback",
-                     dev_router.model)
-    except Exception as _cpr_exc:
-        log.warning("CloudPlanRouter wiring failed (%s) — planning stays local", _cpr_exc)
-        dev_router = router
+        # --- MemoryManager — schema-validated façade over AgentDB + SemanticMemory ---
+        from storage.memory_manager import MemoryManager
+        memory = MemoryManager(agent_db=agent_db, twin_state=twin_state)
 
-    coordinator = HybridCoordinator(
-        local=local, config=cfg, trainer=trainer,
-        agent_db=agent_db, session_id=session_id,
-        content_filter=content_filter, audit_log=audit,
-        twin_state=twin_state,
-    )
-    dev_agent = DevAgent(
-        router=dev_router, coordinator=coordinator, trainer=trainer,
-        agent_db=agent_db,
-    )
-    coordinator.set_dev_agent(dev_agent)
-    # E4: drain any escalations the DB couldn't accept on a prior run (DB-down at
-    # halt time) back into the review queue now that the DB is healthy.
-    try:
-        await dev_agent.reconcile_pending_escalations()
-    except Exception as _esc_exc:
-        log.debug("escalation reconcile failed: %s", _esc_exc)
-
-    # ── Skill model (N+1): MCP-client SkillRegistry ────────────────────────
-    # Connecting an MCP server via a manifest (skills/manifests/*.json) adds
-    # capability without editing core verbs; skills run as DevAgent
-    # SKILL_QUERY/SKILL_CALL tool-calls. A skill that fails to start is skipped.
-    skill_registry = None
-    try:
-        from skills.registry import SkillRegistry
-        skill_registry = SkillRegistry(
-            content_filter=content_filter, trust_classifier=trust_classifier,
-            audit_log=audit, agent_db=agent_db,
-        )
-        await skill_registry.start()
-        dev_agent.set_skill_registry(skill_registry)
-        coordinator.set_skill_registry(skill_registry)   # voice 'help' listing
-        if skill_registry.has_skills():
-            log.info("SkillRegistry: skills active")
-    except Exception as _skill_exc:
-        log.warning("SkillRegistry: failed to start (%s) — skills disabled", _skill_exc)
-        skill_registry = None
-
-    # ── Personal knowledge base: semantic search over the user's own files ──
-    # Pure-local (no auth, no cloud); indexes ~/Documents + ~/Notes (or the
-    # roots in ~/.claude/personal_kb/config.json) in a background task so
-    # startup is never blocked. Queried via "what did I write in my notes
-    # about …" or the SEARCH_PERSONAL plan verb; re-index via "index my notes".
-    personal_kb = None
-    _kb_index_task = None
-    try:
-        from storage.personal_kb import PersonalKB
-        personal_kb = PersonalKB()
-        if await personal_kb.start():
-            dev_agent.set_personal_kb(personal_kb)
-            coordinator.set_personal_kb(personal_kb)
-            _kb_index_task = asyncio.create_task(personal_kb.index(),
-                                                 name="personal_kb_index")
-        else:
-            personal_kb = None
-    except Exception as _kb_exc:
-        log.warning("PersonalKB: failed to start (%s) — personal search disabled", _kb_exc)
-        personal_kb = None
-
-    # ── Self-skilling rung 2: macro detection + replay ─────────────────────
-    # Mines recurring successful plans offline and stages them as macro
-    # candidates; a voice "save that as a command called X" promotes one. The
-    # detector runs in a supervised background task (never the 60 Hz loop) and
-    # skips during a flare. Default OFF — set self_skilling.enabled in
-    # ~/.claude/ipad_bridge/config.json. Spec: specs/self-skilling/.
-    macro_detector = None
-    try:
-        from core.macro_store import MacroStore, self_skilling_config
-        _ss_cfg = self_skilling_config()
-        if _ss_cfg.get("enabled", False):
-            from adaptive.macro_detector import MacroDetector
-            macro_store = MacroStore(skill_registry=skill_registry)
-            await macro_store.load_promoted(agent_db)
-            coordinator.set_macro_store(macro_store)
-            _mcfg = _ss_cfg.get("macro", {}) or {}
-            macro_detector = MacroDetector(
-                agent_db, twin_state=twin_state, skill_registry=skill_registry,
-                min_occurrences=int(_mcfg.get("min_occurrences", 4)),
-                similarity=float(_mcfg.get("similarity", 0.9)),
-                on_staged=coordinator.note_pending_macro,
-            )
-            await macro_detector.start()
-            log.info("Self-skilling (macros) enabled")
-    except Exception as _ss_exc:
-        log.warning("Self-skilling: failed to start (%s) — macros disabled", _ss_exc)
-        macro_detector = None
-
-    # Wire MemoryManager into all storage-writing components
-    coordinator.set_memory(memory)
-    dev_agent.set_memory(memory)
-    trainer.set_memory(memory)
-
-    # ── Cloud DevAgent (--cloud-dev-agent) ─────────────────────────────────
-    _cloud_dev_agent = None
-    if getattr(args, "cloud_dev_agent", False):
-        try:
-            from inference.cloud_dev_agent import CloudDevAgent
-            _cloud_dev_agent = CloudDevAgent()
-
-            def _local_specialist_awake() -> bool:
-                return _vllm_pool is not None and bool(_vllm_pool.get_status().get("awake"))
-
-            coordinator.set_cloud_dev_agent(
-                _cloud_dev_agent,
-                always_cloud=_no_local_specialists,
-                local_available_fn=_local_specialist_awake,
-            )
-            _cda_status = _cloud_dev_agent.get_status()
-            log.info("CloudDevAgent: wired (available=%s model=%s always_cloud=%s)",
-                     _cda_status["available"], _cda_status["model"], _no_local_specialists)
-            if not _cda_status["available"]:
-                log.warning("CloudDevAgent: AWS_BEARER_TOKEN_BEDROCK not set or anthropic SDK missing "
-                            "— dev queries will return CLARIFY until configured")
-        except Exception as _cda_exc:
-            log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
-            _cloud_dev_agent = None
-
-    # ── VS Code bridge client (--vscode flag) ─────────────────────────────
-    if getattr(args, "vscode", False):
-        try:
-            from inference import bridge_protocol
-            from inference.bridge_client import BridgeClient
-            # Establish the shared auth token now so the extension can
-            # authenticate on its next connect (generate-if-missing, 0600).
-            bridge_protocol.ensure_token()
-            bridge = BridgeClient()
-            dev_agent.set_bridge(bridge)
-            log.info("BridgeClient: wired to DevAgent (authenticated ws://127.0.0.1:8767)")
-        except Exception as _bridge_exc:
-            log.warning("BridgeClient: failed to initialise: %s", _bridge_exc)
-
-    # ── Metrics singleton — wire to all pipeline components ────────────────
-    m = get_metrics()
-    fusion_pre = None   # FusionEngine created below; wire metrics after
-    coordinator.set_metrics(m)
-    if hasattr(local, "set_metrics"):
-        local.set_metrics(m)     # ollama_hang_detected counter (FINDING 4)
-
-    fusion = FusionEngine(screen_width=sw, screen_height=sh)
-    fusion.set_coordinator(coordinator)
-    fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
-    fusion.set_session_id(session_id)
-
-    # Magnetic cursor:
-    #   * Phase 1 (tilt-tap snap) / Phase 2b (dwell snap) — per-click UIA lookup
-    #     in command_executor; also reads the cache's cheap snapshot when running.
-    #   * Phase 3 (cursor gravity) — biases the tilt cursor toward a nearby
-    #     clickable at 60 Hz so the user can settle on buttons without precision.
-    #
-    # The background ClickableTargetCache was reworked (2026-06-05) to be
-    # change-gated (walk only on foreground change / heartbeat) with a failure
-    # backoff and a foreground-scoped UIA walk — fixing the E_POINTER thrash. The
-    # fullscreen overlay that caused the DWM soft-hang was removed entirely;
-    # gravity now runs headless. Kill-switch: DA_CURSOR_GRAVITY=0.
-    target_cache = None
-    if os.environ.get("DA_CURSOR_GRAVITY", "1") != "0":
-        from desktop.target_cache import get_target_cache
-        target_cache = get_target_cache()
-        target_cache.start()
-        fusion.set_target_cache(target_cache)
-        log.info("Cursor gravity enabled (DA_CURSOR_GRAVITY)")
-    else:
-        log.info("Cursor gravity disabled via DA_CURSOR_GRAVITY=0")
-
-    # Priority-aware scheduler — gates DEV_AGENT/BACKGROUND tasks so they
-    # cannot starve accessibility commands during a flare.
-    from core.scheduler import AccessibilityScheduler
-    scheduler = AccessibilityScheduler()
-    await scheduler.start()
-    scheduler.set_metrics(m)        # queue-depth / dev-inflight visibility in /metrics
-    fusion.set_scheduler(scheduler)
-    dev_agent.set_scheduler(scheduler)
-
-    # ── Multi-agent workflow orchestration (voice "think hard about …") ────
-    # Fans a spoken goal out to N fresh-context sub-agents over the resident
-    # model (no new model load — AGENTS.md #6) via the scheduler's bounded pool,
-    # then synthesizes + speaks one answer. Pure inference, no desktop actions.
-    # Constructed always (cheap); the runner gates itself + the coordinator
-    # trigger on workflow_orchestration.enabled (default OFF). Coordinator does
-    # its own async skip-on-flare. Spec: specs/workflow-orchestration/.
-    try:
-        from inference.workflow import WorkflowRunner
-        workflow_runner = WorkflowRunner(
-            router=router, scheduler=scheduler, agent_db=agent_db,
-        )
-        coordinator.set_workflow_runner(workflow_runner)
-        if workflow_runner.enabled:
-            log.info("WorkflowRunner: voice trigger active")
-    except Exception as _wf_exc:
-        log.warning("WorkflowRunner: failed to init (%s) — voice workflows disabled",
-                    _wf_exc)
-
-    from calibration.acoustic_profiler import AcousticProfiler
-    profiler = AcousticProfiler(agent_db=agent_db, session_id=session_id)
-    await profiler.load()
-
-    whisper = WhisperStream()
-    whisper.set_fusion_engine(fusion)
-    whisper.set_agent_db(agent_db, session_id=session_id)
-    whisper.set_acoustic_profiler(profiler)
-    whisper.set_metrics(m)          # wire metrics to WhisperStream (latency + hallucinations)
-    coordinator.set_whisper_stream(whisper)
-    coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
-    coordinator.set_profiler(profiler)
-
-    # Wire VoiceCalibrator
-    from calibration.voice_calibrator import VoiceCalibrator
-    try:
-        from tts.polly_stream import get_client as _get_tts
-        _speak_fn = _get_tts().speak_sync
-    except Exception:
-        _speak_fn = None
-    calibrator = VoiceCalibrator(agent_db=agent_db, whisper_stream=whisper, profiler=profiler)
-    if _speak_fn:
-        calibrator.set_tts(_speak_fn)
-    coordinator.set_calibrator(calibrator)
-
-    # Wire VoicePromptComposer — "hey agent claude compose" → dictate to Claude Code
-    from inference.voice_prompt_composer import VoicePromptComposer
-    composer = VoicePromptComposer()
-    if _speak_fn:
-        composer.set_speak_fn(_speak_fn)
-    composer.set_suppress_fn(whisper.suppress)
-    whisper.set_composer(composer)
-
-    # Wire profiler into fusion engine for rms_ambient telemetry
-    fusion.set_acoustic_profiler(profiler)
-
-    # Wire profiler into twin state for voice clarity pain signal
-    if twin_state:
-        twin_state.set_acoustic_profiler(profiler)
-        # Immediate pain-day velocity-floor flips (no 60s ContinuousTrainer lag)
-        twin_state.set_gesture_processor(gesture)
-
-    # ── EventBus + RateLimiter (orchestration gap remediation — schema v3) ────
-    from core.events import EventBus
-    from core.rate_limiter import RateLimiter
-    event_bus = EventBus(agent_db)
-    rate_limiter = RateLimiter(agent_db)
-    coordinator.set_event_bus(event_bus)
-    coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
-    # Share the same 'anthropic' bucket with the cloud plan router (specs/cloud-plan-routing
-    # R4.2) so Sonnet 4.6 plan calls count against the same throttle. No-op for the raw
-    # ModelRouter (flag off) — only CloudPlanRouter defines set_rate_limiter.
-    if dev_router is not router and hasattr(dev_router, "set_rate_limiter"):
-        dev_router.set_rate_limiter(rate_limiter)
-    dev_agent.set_event_bus(event_bus)
-    trainer.set_event_bus(event_bus)   # per-domain SLO breaches → slo.breached alerts
-    router.set_event_bus(event_bus)    # VRAM fallback picks → model.downgraded
-    # Surface silent backend events: Ollama hang (inference.stalled) + breaker open
-    # (breaker.opened). No-op on backends without a set_event_bus method.
-    if hasattr(local, "set_event_bus"):
-        local.set_event_bus(event_bus)
-
-    # ── PC desktop chat UI (opt-in via --chat): chat window + live DAG preview ──
-    # Standalone localhost aiohttp server sharing the live pipeline. Kept separate
-    # from the iPad bridge so the iPad WebSocket protocol stays an iPad concern.
-    chat_server = None
-    if getattr(args, "chat", False):
-        from core.chat_server import ChatServer
-        chat_server = ChatServer(
-            host=args.chat_host, port=args.chat_port,
-            allow_destructive=not args.chat_readonly,
-        )
-        chat_server.set_coordinator(coordinator)
-        chat_server.set_scheduler(scheduler)
-        chat_server.set_event_bus(event_bus)
-        chat_server.set_agent_db(agent_db, session_id)
-
-    # Wire CommandExecutor DB access for per-call timeout + idempotency.
-    coordinator._executor.set_agent_db(agent_db)
-    # Wire audit log so command execution failures appear in the tamper-evident trail.
-    coordinator._executor.set_audit_log(audit)
-
-    # Read cache configs from DB and push to the cache-using components.
-    try:
-        vg_ttl, vg_max = await agent_db.get_cache_config("vision_grounder")
-        if hasattr(coordinator, "_vision_grounder") and coordinator._vision_grounder:
-            coordinator._vision_grounder.set_cache_config(vg_ttl, vg_max)
-    except Exception as _cfg_exc:
-        log.debug("Could not read vision_grounder cache config: %s", _cfg_exc)
-    try:
-        ua_ttl, ua_max = await agent_db.get_cache_config("ui_automation")
-        # UIAutomationProvider is a lazy singleton; update it when first accessed.
-        from core import command_executor as _cex
-        if _cex._ui_provider is not None:
-            _cex._ui_provider.set_cache_config(ua_ttl, ua_max)
-    except Exception as _cfg_exc:
-        log.debug("Could not read ui_automation cache config: %s", _cfg_exc)
-
-    bridge = IPadBridge(port=args.port, host=args.host)
-    bridge.set_fusion_engine(fusion)
-    bridge.set_lidar(lidar)
-    bridge.set_gesture_processor(gesture)
-    bridge.set_whisper_stream(whisper)
-    bridge.set_coordinator(coordinator)  # needed for pain_day_override message
-    bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
-    coordinator.set_bridge(bridge)  # trace_id correlation: coordinator → bridge on command executed
-    coordinator.set_target_cache(target_cache)  # A2UI click-target palette (DA_A2UI_CLICK_TARGETS)
-    fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
-    await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
-    await profiler.load_rom_bounds(agent_db)       # D4: ROM → initial VAD bounds
-
-    # D6: wire profiler → WhisperStream so VAD changes push immediately
-    profiler.set_whisper_ref(whisper)
-
-    # Wire acoustic drift → provisional VAD relaxation + bridge recalibration request
-    _loop = asyncio.get_event_loop()
-    def _on_drift(drift):
-        # D6: apply provisional relaxation immediately (before recal completes)
-        profiler.apply_provisional_vad_relaxation(factor=0.7)
-        asyncio.run_coroutine_threadsafe(
-            bridge.send_recalibration_request(
-                reason=drift.reason,
-                degradation_pct=drift.degradation_pct,
-            ),
-            _loop,
-        )
-        # R-1 foundation: publish voice.drift so observer agents (Fatigue Monitor)
-        # and event rules can react. Best-effort; never blocks the audio thread.
-        asyncio.run_coroutine_threadsafe(
-            event_bus.publish(
-                "voice.drift",
-                {"drift_pct": drift.degradation_pct, "reason": drift.reason,
-                 "voice_samples": getattr(drift, "voice_samples", 0)},
-                source="acoustic_profiler",
-            ),
-            _loop,
-        )
-    profiler.add_drift_callback(_on_drift)
-
-    # A2UI: push an Approve/Deny surface to the iPad when the approval gate opens
-    # (parallel input to the voice gate; a tap writes the same response file).
-    # The callback fires from the WhisperStream audio thread → hop to the bridge
-    # loop with run_coroutine_threadsafe, mirroring _on_drift above.
-    def _on_approval_gate_open(description: str) -> None:
-        from core import a2ui
-        surface = a2ui.approval_surface(description)
-        asyncio.run_coroutine_threadsafe(bridge.send_a2ui_surface(surface), _loop)
-    whisper.on_approval_gate_open = _on_approval_gate_open
-
-    # ── Optional codebase RAG index ────────────────────────────────────────
-    indexer = None
-    if args.index_codebase:
-        try:
-            from inference.codebase_indexer import CodebaseIndexer
-            _project_root = str(Path(__file__).parent)
-            indexer = CodebaseIndexer(
-                project_root=_project_root,
-                embedder=_vllm_embedder,   # None → falls back to sentence-transformers
-            )
-            if await indexer.start():
-                _idx_stats = await indexer.index()
-                log.info("CodebaseIndexer: %s", _idx_stats)
-                dev_agent.set_indexer(indexer)
-                # Start file watcher for continuous incremental indexing
-                if getattr(args, "watch", False):
-                    if indexer.start_watching():
-                        log.info("CodebaseIndexer: file watcher active")
-                    else:
-                        log.info("CodebaseIndexer: file watcher unavailable (pip install watchdog)")
-            else:
-                log.warning("CodebaseIndexer: ChromaDB unavailable — RAG disabled")
-                indexer = None
-        except Exception as _idx_exc:
-            log.warning("CodebaseIndexer: failed to start: %s", _idx_exc)
-            indexer = None
-
-    # ── Start VRAM poller + optional /metrics HTTP endpoint ────────────────
-    await m.start_vram_poller(interval_s=60.0)
-
-    if args.metrics_port:
-        try:
-            from aiohttp import web as _aio_web
-            from monitoring.trace import get_tracer as _get_tracer
-            # H1: bind loopback only. /trace returns recent command text and
-            # /metrics is for local operator inspection — nothing remote needs them.
-            _metrics_host = "127.0.0.1"
-            _metrics_app = _aio_web.Application()
-            _metrics_app.router.add_get("/metrics", m.aiohttp_handler)
-
-            async def _trace_recent(_req):
-                return _aio_web.json_response({"traces": _get_tracer().get_recent(50)})
-
-            async def _trace_one(req):
-                tr = _get_tracer().get_trace(req.match_info["tid"])
-                if tr is None:
-                    return _aio_web.json_response({"error": "not found"}, status=404)
-                return _aio_web.json_response(tr)
-
-            _metrics_app.router.add_get("/trace", _trace_recent)
-            _metrics_app.router.add_get("/trace/{tid}", _trace_one)
-            _metrics_runner = _aio_web.AppRunner(_metrics_app)
-            await _metrics_runner.setup()
-            _metrics_site = _aio_web.TCPSite(_metrics_runner, _metrics_host, args.metrics_port)
-            await _metrics_site.start()
-            log.info("Metrics endpoint: http://%s:%d/metrics", _metrics_host, args.metrics_port)
-        except Exception as _me_exc:
-            log.warning("Metrics HTTP endpoint failed: %s", _me_exc)
-
-    # ── Optional sensor viewer window ──────────────────────────────────────
-    viewer = None
-    if args.viewer:
-        from sensors.sensor_viewer import SensorViewer
-        viewer = SensorViewer()
-        bridge.set_viewer(viewer)
-        if hasattr(gesture, "set_viewer"):
-            gesture.set_viewer(viewer)
-        if args.viewer and not args.safe_mode and hasattr(gesture, "_flick_engine"):
-            fe = getattr(gesture, "_flick_engine", None)
-            if fe is not None:
-                viewer.set_flick_engine(fe)
-        viewer.start()
-
-    # ── Optional live dashboard ────────────────────────────────────────────
-    dashboard_obj = None
-    if args.dashboard:
-        try:
-            from monitoring.dashboard import Dashboard
-            dashboard_obj = Dashboard(metrics=m, interval=1.0)
-            await dashboard_obj.start()
-        except Exception as _dash_exc:
-            log.warning("Dashboard failed to start: %s", _dash_exc)
-
-    shutdown = _ShutdownController()
-    shutdown.register(fusion, gesture, whisper)
-    shutdown.register(scheduler)
-    if viewer:
-        shutdown.register(viewer)
-    shutdown.arm()
-
-    # --- Start trainer and WhisperStream ---
-    await trainer.start()
-    await trainer.load_velocity_calibration()  # Gap 3: reload persisted gesture floors
-    await whisper.start()
-
-    # --- ResourceGovernor — pain-aware hardware resource control ---
-    from core.resource_governor import ResourceGovernor
-    governor = ResourceGovernor(memory=memory)
-    governor.set_fusion_engine(fusion)
-    governor.set_whisper_stream(whisper)
-    governor.set_model_router(router)   # eviction targets the live model lineup
-    governor.set_scheduler(scheduler)   # gap #3: flare pauses new dev/background admission
-    governor.set_event_bus(event_bus)   # vram.evicted / vram.restored on flare transitions
-    if indexer is not None:
-        governor.set_indexer(indexer)
-    # Live-refresh the iPad Agent dashboard on each pain-day (flare) transition so
-    # its "Pain day" row reflects current state without waiting for a reconnect.
-    governor.set_flare_change_callback(lambda active: bridge.push_status_dashboard())
-    await governor.start()
-    twin_state.set_resource_governor(governor)   # flare fast-path: <100ms flare response
-    shutdown.register(governor)
-    if target_cache is not None:
-        shutdown.register(target_cache)
-
-    # --- Proactivity (N+2): time- + event-triggered automation ---
-    # ProactiveScheduler promotes due scheduled goals; EventRuleEngine fires rules
-    # off the EventBus. Both feed the existing goal_queue/drainer; notifications go
-    # out via Notifier (TTS + iPad push).
-    from core.notifier import Notifier
-    from core.proactive_scheduler import ProactiveScheduler
-    from core.event_rule_engine import EventRuleEngine
-    notifier = Notifier(bridge=bridge)
-    # Flush store-and-forward notifications when an iPad (re)connects (E12).
-    if bridge is not None:
-        bridge.register_connect_handler(notifier.flush_pending)
-    proactive = ProactiveScheduler(agent_db, dev_agent=dev_agent, scheduler=scheduler,
-                                   notifier=notifier)
-    event_rules = EventRuleEngine(agent_db, event_bus, notifier=notifier, dev_agent=dev_agent)
-    await proactive.start()
-    await event_rules.start()
-    shutdown.register(proactive)
-    shutdown.register(event_rules)
-
-    # Email watcher (N+2): polls the Gmail skill and publishes email.arrived onto
-    # the bus so event rules can fire. The loop always runs (skill presence is
-    # re-checked per tick) so a google_pim hot-started by voice "connect Google"
-    # is picked up without a restart; the notifier carries the one-time
-    # token-expired alert.
-    from core.email_watcher import EmailWatcher
-    email_watcher = EmailWatcher(
-        skill_registry, event_bus, notifier=notifier,
-        state_path=Path.home() / ".claude" / "email_watcher_seen.json")
-    await email_watcher.start()
-    shutdown.register(email_watcher)
-
-    # --- Supervisor — liveness watchdog for the critical background loops ---
-    # (gap #2) Restarts the scheduler worker / governor poll loop if either dies
-    # unexpectedly. Registered LAST so reversed-order shutdown stops it FIRST —
-    # it must not try to restart a subsystem that shutdown is tearing down.
-    from core.supervisor import Supervisor, SupervisedSpec
-    supervisor = Supervisor()
-    supervisor.supervise(SupervisedSpec(
-        name="scheduler",
-        is_alive=scheduler.is_healthy,
-        restart=scheduler.restart,
-        enabled=lambda: scheduler._running,
-    ))
-    # Periodic loops also expose a heartbeat + stale_after_s so the Supervisor
-    # catches an ALIVE-BUT-WEDGED loop (stuck on a hung await), not just a crashed
-    # one. stale_after_s is sized well above each loop's period + slowest legit
-    # iteration so a healthy-but-slow tick is never killed. Event-driven loops
-    # (scheduler worker, event_rule_engine) block idle by design — no heartbeat.
-    supervisor.supervise(SupervisedSpec(
-        name="resource_governor",
-        is_alive=governor.is_healthy,
-        restart=governor.restart,
-        enabled=lambda: governor._running,
-        last_heartbeat=governor.last_heartbeat,
-        stale_after_s=60.0,    # poll=5s
-    ))
-    supervisor.supervise(SupervisedSpec(
-        name="proactive_scheduler",
-        is_alive=proactive.is_healthy,
-        restart=proactive.restart,
-        enabled=lambda: proactive._running,
-        last_heartbeat=proactive.last_heartbeat,
-        stale_after_s=180.0,   # poll=30s
-    ))
-    supervisor.supervise(SupervisedSpec(
-        name="event_rule_engine",
-        is_alive=event_rules.is_healthy,
-        restart=event_rules.restart,
-        enabled=lambda: event_rules._running,
-    ))
-    supervisor.supervise(SupervisedSpec(
-        name="email_watcher",
-        is_alive=email_watcher.is_healthy,
-        restart=email_watcher.restart,
-        enabled=lambda: email_watcher._running,
-        last_heartbeat=email_watcher.last_heartbeat,
-        stale_after_s=360.0,   # poll=120s; a wedged skill stdio call stalls here
-    ))
-
-    # Escalation (gap E): when a subsystem can't be restarted, TELL the user
-    # (spoken warning — they may be unattended) and degrade rather than silently
-    # die. A FAILED scheduler → bypass it: FusionEngine._emit falls back to direct
-    # create_task dispatch when set_scheduler(None), so accessibility keeps working.
-    async def _on_subsystem_failed(name: str) -> None:
-        log.critical("Supervisor escalation: subsystem %r is FAILED (unrecoverable)", name)
-        if name == "scheduler":
+        # --- Build components ---
+        cfg = CoordinatorConfig()
+        # Gap 1: restore learned Gate 1 threshold that was adapted in a prior session
+        if agent_db.available:
             try:
-                fusion.set_scheduler(None)   # degrade to direct dispatch
-                log.warning("Degraded mode: FusionEngine now dispatches directly "
-                            "(scheduler bypassed); accessibility unaffected, "
-                            "dev/background gating lost until restart")
-            except Exception as exc:
-                log.error("Degraded-mode handoff failed: %s", exc)
-        try:
-            from tts.polly_stream import get_client as _get_tts
-            msg = (f"Warning. The {name.replace('_', ' ')} stopped responding and "
-                   "could not be restarted. The system is running in a reduced mode.")
-            await asyncio.to_thread(_get_tts().speak_sync, msg)
-        except Exception as exc:
-            log.debug("Supervisor escalation TTS unavailable: %s", exc)
+                async with agent_db._conn.execute(
+                    "SELECT new_value FROM settings_versions "
+                    "WHERE component='coordinator' AND key='whisper_logprob_min' "
+                    "ORDER BY ts DESC LIMIT 1"
+                ) as _cur:
+                    _row = await _cur.fetchone()
+                    if _row and _row[0]:
+                        cfg.whisper_logprob_min = float(_row[0])
+                        log.info("Gate 1: restored learned threshold %.2f from DB", cfg.whisper_logprob_min)
+            except Exception as _exc:
+                log.debug("Gate 1: could not restore threshold (using default): %s", _exc)
 
-    supervisor.set_on_failed(_on_subsystem_failed)
-    supervisor.set_metrics(m)
-    await supervisor.start()
-    shutdown.register(supervisor)
+        # Backend selection (--backend flag)
+        _backend = args.backend.lower() if hasattr(args, "backend") else "ollama"
 
-    # --- Sync hotwords into WhisperStream once trainer is ready ---
-    hotwords = await trainer.get_hotwords()
-    if hotwords:
-        whisper.update_hotwords(hotwords)
+        # Ensure a local Ollama server is up before building any Ollama-backed engine.
+        # The command model (default backend) and the ModelRouter specialists both run
+        # on Ollama, so start the server here if it isn't already listening — covers
+        # every launch path (start_agent.bat, watchdog, scheduled task, direct). No-op
+        # when Ollama is already up; degrades to cloud fallback if it can't be started.
+        _uses_ollama = (_backend == "ollama") or (not getattr(args, "no_local_specialists", False))
+        if _uses_ollama:
+            from inference.local_inference import ensure_ollama_running
+            await asyncio.to_thread(ensure_ollama_running)
 
-    # --- Print startup table (task 4.4) ---
-    if not args.quiet:
-        _print_startup_table(
-            args.port, args.safe_mode, host=args.host,
-            backend=_backend,
-            vllm_server_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
-            cloud_dev_agent=getattr(args, "cloud_dev_agent", False),
-            cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-opus-4-8"),
+        import typing
+        local: typing.Any
+        if _backend == "llamacpp":
+            local = LlamaCppInference(
+                model=getattr(args, "llamacpp_model", "local-model"),
+                host=getattr(args, "llamacpp_host", "http://localhost:8080"),
+            )
+            log.info("Using llama.cpp backend (llama-server on %s)", local.host)
+        elif _backend == "vllm":
+            _vllm_speculative = getattr(args, "speculative", False)
+            local = VLLMInference(
+                model=getattr(args, "vllm_model", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
+                speculative_model="llama3.1:8b" if _vllm_speculative else None,
+            )
+            log.info(
+                "Using vLLM backend (LLM class) — model loads on first inference request%s",
+                " [speculative decoding enabled]" if _vllm_speculative else "",
+            )
+        elif _backend == "vllm-server":
+            local = VLLMServerInference(
+                base_url=getattr(args, "vllm_server_url", "http://127.0.0.1:8000"),
+                model=getattr(args, "vllm_server_model",
+                              "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"),
+            )
+            log.info(
+                "Using vLLM-server backend (OpenAI-compatible HTTP at %s) — "
+                "server managed externally in WSL2 (scripts/start_vllm_server.sh)",
+                local.base_url,
+            )
+        else:
+            local = OllamaInference()
+
+        # ── vLLM specialist pool (--vllm-pool) ────────────────────────────────
+        # Architecture 2: INT4 AWQ specialists in vLLM, TTL-slept between requests.
+        # Requires --backend vllm (command model) + WSL2 with vllm installed.
+        # Ollama remains the automatic fallback if the pool raises.
+        _vllm_pool = None
+        _no_local_specialists = getattr(args, "no_local_specialists", False)
+        if _no_local_specialists and getattr(args, "vllm_pool", False):
+            log.warning("--no-local-specialists overrides --vllm-pool; specialist pool disabled "
+                        "(dev queries route to the cloud)")
+        if getattr(args, "vllm_pool", False) and not _no_local_specialists:
+            if _backend != "vllm":
+                log.warning("--vllm-pool requires --backend vllm; specialist pool disabled")
+            else:
+                # Pass the command engine so the pool can sleep it before waking a
+                # 30B-class specialist (they can't co-reside with Whisper on 32 GB).
+                _vllm_pool = VLLMSpecialistPool(command_engine=local)
+                # Mutual exclusion the other way: when the command engine wakes, sleep
+                # any awake specialist first.
+                if hasattr(local, "set_pre_wake_hook"):
+                    local.set_pre_wake_hook(_vllm_pool.sleep_all_specialists)
+                await _vllm_pool.start()
+                log.info("VLLMSpecialistPool: started (INT4 AWQ specialists) — "
+                         "command<->specialist mutual-exclusion wired")
+
+        # ── vLLM embedder (--vllm-embed) ──────────────────────────────────────
+        # Replaces sentence-transformers in SemanticMemory / CodebaseIndexer.
+        _vllm_embedder: Optional[VLLMEmbedder] = None
+        if getattr(args, "vllm_embed", False):
+            if _backend != "vllm":
+                log.warning("--vllm-embed requires --backend vllm; using sentence-transformers")
+            else:
+                _vllm_embedder = VLLMEmbedder(
+                    model=getattr(args, "embed_model", "nomic-ai/nomic-embed-text-v1.5")
+                )
+                log.info("VLLMEmbedder: will activate on first encode() call")
+
+        # GestureProcessor created first so trainer can hold a reference for
+        # calibrated threshold push-back.
+        lidar = LiDARReceiver()
+        gesture = GestureProcessor()
+        gesture.set_lidar(lidar)
+
+        # D7: FlickEngine — wired if not in safe mode
+        if not args.safe_mode:
+            try:
+                from desktop.flick_engine import FlickEngine
+                from desktop.snap_zones import get_snap_zones, move_window_drag
+                _flick_engine = FlickEngine(
+                    screen_w=sw, screen_h=sh,
+                    snap_zones_fn=get_snap_zones,
+                    move_window_fn=move_window_drag,
+                )
+                gesture.set_flick_engine(_flick_engine)
+                log.info("FlickEngine: initialised  screen=%dx%d", sw, sh)
+            except Exception as _fe_exc:
+                log.warning("FlickEngine: could not initialise (%s) — flick-to-snap disabled", _fe_exc)
+
+        trainer = ContinuousTrainer(
+            agent_db=agent_db, config=cfg, twin_state=twin_state,
+            gesture_processor=gesture,          # receives calibrated velocity thresholds
         )
 
-    # Durable goal backlog (gap D): drain any goals queued/requeued from a previous
-    # session now that the full pipeline is wired. Fire-and-forget — each goal runs
-    # through plan_and_run with its own approval gate + crash-recoverable ledger.
-    from core.async_utils import fire_and_log
-    fire_and_log(dev_agent.drain_goal_queue(), log, label="startup_goal_drain")
+        router = ModelRouter()
+        if _vllm_pool is not None:
+            router.set_vllm_pool(_vllm_pool)
 
-    # Warm the command model so the FIRST real command doesn't pay the cold-load
-    # penalty (~7.5 s observed for llama3.1:8b loading into VRAM vs ~190 ms warm).
-    # Fire-and-forget: never blocks startup or the 60 Hz loop. No-op on non-Ollama
-    # backends (warmup() defaults to a no-op; only OllamaInference pre-loads).
-    # Opt out with DA_COMMAND_WARMUP=0.
-    if os.environ.get("DA_COMMAND_WARMUP", "1") != "0":
-        fire_and_log(local.warmup(), log, label="command_model_warmup")
+        # Cloud plan routing (specs/cloud-plan-routing, DA_CLOUD_PLAN, default OFF):
+        # wrap the router so DevAgent's domain="plan" inference is served by Sonnet 4.6
+        # on Bedrock — frees the ~18 GB local plan model and ends the VRAM swap thrash.
+        # Transparent proxy: every other domain/method delegates to the raw router, and
+        # any cloud failure / missing credential falls back to the local plan model, so
+        # OFF (or no credential) is byte-identical to legacy.
+        dev_router: typing.Any = router
+        try:
+            from inference.cloud_plan_router import CloudPlanRouter, cloud_plan_enabled
+            if cloud_plan_enabled():
+                dev_router = CloudPlanRouter(
+                    router, content_filter=content_filter, agent_db=agent_db,
+                )
+                log.info("Cloud plan routing ENABLED → %s (Bedrock); local plan model is fallback",
+                         dev_router.model)
+        except Exception as _cpr_exc:
+            log.warning("CloudPlanRouter wiring failed (%s) — planning stays local", _cpr_exc)
+            dev_router = router
 
-    # Crash notice: the previous process exited uncleanly (marker survived).
-    # Tell the user briefly — they may have been away when it happened and
-    # should know that recovered state (requeued goals, interrupted plans)
-    # may apply. Fire-and-forget: TTS being down must not block startup.
-    if _unclean_exit:
-        async def _speak_crash_notice() -> None:
-            from tts.polly_stream import get_client as _get_tts
-            await asyncio.to_thread(
-                _get_tts().speak_sync,
-                "I restarted after a crash. Any in-progress work was recovered "
-                "where possible — say 'resume task' if something was interrupted.",
+        coordinator = HybridCoordinator(
+            local=local, config=cfg, trainer=trainer,
+            agent_db=agent_db, session_id=session_id,
+            content_filter=content_filter, audit_log=audit,
+            twin_state=twin_state,
+        )
+        dev_agent = DevAgent(
+            router=dev_router, coordinator=coordinator, trainer=trainer,
+            agent_db=agent_db,
+        )
+        coordinator.set_dev_agent(dev_agent)
+        # E4: drain any escalations the DB couldn't accept on a prior run (DB-down at
+        # halt time) back into the review queue now that the DB is healthy.
+        try:
+            await dev_agent.reconcile_pending_escalations()
+        except Exception as _esc_exc:
+            log.debug("escalation reconcile failed: %s", _esc_exc)
+
+        # ── Skill model (N+1): MCP-client SkillRegistry ────────────────────────
+        # Connecting an MCP server via a manifest (skills/manifests/*.json) adds
+        # capability without editing core verbs; skills run as DevAgent
+        # SKILL_QUERY/SKILL_CALL tool-calls. A skill that fails to start is skipped.
+        skill_registry = None
+        try:
+            from skills.registry import SkillRegistry
+            skill_registry = SkillRegistry(
+                content_filter=content_filter, trust_classifier=trust_classifier,
+                audit_log=audit, agent_db=agent_db,
             )
-        fire_and_log(_speak_crash_notice(), log, label="crash_notice_tts")
+            await skill_registry.start()
+            dev_agent.set_skill_registry(skill_registry)
+            coordinator.set_skill_registry(skill_registry)   # voice 'help' listing
+            if skill_registry.has_skills():
+                log.info("SkillRegistry: skills active")
+        except Exception as _skill_exc:
+            log.warning("SkillRegistry: failed to start (%s) — skills disabled", _skill_exc)
+            skill_registry = None
 
-    # --- Run bridge + fusion + watchdog + metric watcher concurrently ---
-    bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
-    fusion_task = asyncio.create_task(fusion.run())
-    watchdog_task = asyncio.create_task(_watchdog(fusion, whisper, session_id))
-    from monitoring.metric_watcher import MetricWatcher
-    metric_watcher = MetricWatcher(event_bus=event_bus)
-    metric_watcher_task = asyncio.create_task(metric_watcher.run())
-
-    # Start the chat UI server (if enabled) and open the desktop window/browser
-    # once it is actually listening.
-    if chat_server is not None:
-        await chat_server.start()
-        if not getattr(args, "chat_no_browser", False):
-            _open_chat_shell(chat_server.url(with_token=True),
-                             getattr(args, "chat_window", False))
-
-    # Wait for Ctrl-C
-    await shutdown.wait_for_shutdown()
-
-    # Cancel running tasks
-    for t in (bridge_task, fusion_task, watchdog_task, metric_watcher_task):
-        t.cancel()
+        # ── Personal knowledge base: semantic search over the user's own files ──
+        # Pure-local (no auth, no cloud); indexes ~/Documents + ~/Notes (or the
+        # roots in ~/.claude/personal_kb/config.json) in a background task so
+        # startup is never blocked. Queried via "what did I write in my notes
+        # about …" or the SEARCH_PERSONAL plan verb; re-index via "index my notes".
+        personal_kb = None
+        _kb_index_task = None
         try:
-            await t
-        except (asyncio.CancelledError, Exception):
-            pass
+            from storage.personal_kb import PersonalKB
+            personal_kb = PersonalKB()
+            if await personal_kb.start():
+                dev_agent.set_personal_kb(personal_kb)
+                coordinator.set_personal_kb(personal_kb)
+                _kb_index_task = asyncio.create_task(personal_kb.index(),
+                                                     name="personal_kb_index")
+            else:
+                personal_kb = None
+        except Exception as _kb_exc:
+            log.warning("PersonalKB: failed to start (%s) — personal search disabled", _kb_exc)
+            personal_kb = None
 
-    # Stop the self-skilling macro detector (supervised background task)
-    if macro_detector is not None:
-        await macro_detector.stop()
-
-    # Stop skill MCP-client sessions (tear down their stdio subprocesses)
-    if skill_registry is not None:
-        await skill_registry.stop()
-
-    # Stop the personal KB. Order matters: stop() FIRST — it sets the worker's
-    # cooperative stop event, so a still-running background index exits at the
-    # next file instead of pinning the executor join for the whole Documents
-    # walk. Then bounded-wait the task (cancel alone can't interrupt to_thread).
-    if personal_kb is not None:
-        await personal_kb.stop()
-    if _kb_index_task is not None and not _kb_index_task.done():
+        # ── Self-skilling rung 2: macro detection + replay ─────────────────────
+        # Mines recurring successful plans offline and stages them as macro
+        # candidates; a voice "save that as a command called X" promotes one. The
+        # detector runs in a supervised background task (never the 60 Hz loop) and
+        # skips during a flare. Default OFF — set self_skilling.enabled in
+        # ~/.claude/ipad_bridge/config.json. Spec: specs/self-skilling/.
+        macro_detector = None
         try:
-            await asyncio.wait_for(_kb_index_task, timeout=10)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            pass
+            from core.macro_store import MacroStore, self_skilling_config
+            _ss_cfg = self_skilling_config()
+            if _ss_cfg.get("enabled", False):
+                from adaptive.macro_detector import MacroDetector
+                macro_store = MacroStore(skill_registry=skill_registry)
+                await macro_store.load_promoted(agent_db)
+                coordinator.set_macro_store(macro_store)
+                _mcfg = _ss_cfg.get("macro", {}) or {}
+                macro_detector = MacroDetector(
+                    agent_db, twin_state=twin_state, skill_registry=skill_registry,
+                    min_occurrences=int(_mcfg.get("min_occurrences", 4)),
+                    similarity=float(_mcfg.get("similarity", 0.9)),
+                    on_staged=coordinator.note_pending_macro,
+                )
+                await macro_detector.start()
+                log.info("Self-skilling (macros) enabled")
+        except Exception as _ss_exc:
+            log.warning("Self-skilling: failed to start (%s) — macros disabled", _ss_exc)
+            macro_detector = None
 
-    # Stop the chat UI server
-    if chat_server is not None:
-        await chat_server.stop()
+        # Wire MemoryManager into all storage-writing components
+        coordinator.set_memory(memory)
+        dev_agent.set_memory(memory)
+        trainer.set_memory(memory)
 
-    # Stop vLLM specialist pool watchdog
-    if _vllm_pool is not None:
-        await _vllm_pool.stop()
+        # ── Cloud DevAgent (--cloud-dev-agent) ─────────────────────────────────
+        _cloud_dev_agent = None
+        if getattr(args, "cloud_dev_agent", False):
+            try:
+                from inference.cloud_dev_agent import CloudDevAgent
+                _cloud_dev_agent = CloudDevAgent()
 
-    # Stop dashboard + indexer before shutdown flushes DB
-    if dashboard_obj is not None:
-        dashboard_obj.stop()
-    m.stop_vram_poller()
+                def _local_specialist_awake() -> bool:
+                    return _vllm_pool is not None and bool(_vllm_pool.get_status().get("awake"))
 
-    # Run session analytics and persist summary to DB
-    if session_id >= 0:
+                coordinator.set_cloud_dev_agent(
+                    _cloud_dev_agent,
+                    always_cloud=_no_local_specialists,
+                    local_available_fn=_local_specialist_awake,
+                )
+                _cda_status = _cloud_dev_agent.get_status()
+                log.info("CloudDevAgent: wired (available=%s model=%s always_cloud=%s)",
+                         _cda_status["available"], _cda_status["model"], _no_local_specialists)
+                if not _cda_status["available"]:
+                    log.warning("CloudDevAgent: AWS_BEARER_TOKEN_BEDROCK not set or anthropic SDK missing "
+                                "— dev queries will return CLARIFY until configured")
+            except Exception as _cda_exc:
+                log.warning("CloudDevAgent: failed to initialise: %s", _cda_exc)
+                _cloud_dev_agent = None
+
+        # ── VS Code bridge client (--vscode flag) ─────────────────────────────
+        if getattr(args, "vscode", False):
+            try:
+                from inference import bridge_protocol
+                from inference.bridge_client import BridgeClient
+                # Establish the shared auth token now so the extension can
+                # authenticate on its next connect (generate-if-missing, 0600).
+                bridge_protocol.ensure_token()
+                vs_bridge = BridgeClient()
+                dev_agent.set_bridge(vs_bridge)
+                log.info("BridgeClient: wired to DevAgent (authenticated ws://127.0.0.1:8767)")
+            except Exception as _bridge_exc:
+                log.warning("BridgeClient: failed to initialise: %s", _bridge_exc)
+
+        # ── Metrics singleton — wire to all pipeline components ────────────────
+        m = get_metrics()
+        fusion_pre = None   # FusionEngine created below; wire metrics after
+        coordinator.set_metrics(m)
+        if hasattr(local, "set_metrics"):
+            local.set_metrics(m)     # ollama_hang_detected counter (FINDING 4)
+
+        fusion = FusionEngine(screen_width=sw, screen_height=sh)
+        fusion.set_coordinator(coordinator)
+        fusion.set_metrics(m)           # wire metrics to FusionEngine (record_command_routed)
+        fusion.set_session_id(session_id)
+
+        # Magnetic cursor:
+        #   * Phase 1 (tilt-tap snap) / Phase 2b (dwell snap) — per-click UIA lookup
+        #     in command_executor; also reads the cache's cheap snapshot when running.
+        #   * Phase 3 (cursor gravity) — biases the tilt cursor toward a nearby
+        #     clickable at 60 Hz so the user can settle on buttons without precision.
+        #
+        # The background ClickableTargetCache was reworked (2026-06-05) to be
+        # change-gated (walk only on foreground change / heartbeat) with a failure
+        # backoff and a foreground-scoped UIA walk — fixing the E_POINTER thrash. The
+        # fullscreen overlay that caused the DWM soft-hang was removed entirely;
+        # gravity now runs headless. Kill-switch: DA_CURSOR_GRAVITY=0.
+        target_cache = None
+        if os.environ.get("DA_CURSOR_GRAVITY", "1") != "0":
+            from desktop.target_cache import get_target_cache
+            target_cache = get_target_cache()
+            target_cache.start()
+            fusion.set_target_cache(target_cache)
+            log.info("Cursor gravity enabled (DA_CURSOR_GRAVITY)")
+        else:
+            log.info("Cursor gravity disabled via DA_CURSOR_GRAVITY=0")
+
+        # Priority-aware scheduler — gates DEV_AGENT/BACKGROUND tasks so they
+        # cannot starve accessibility commands during a flare.
+        from core.scheduler import AccessibilityScheduler
+        scheduler = AccessibilityScheduler()
+        await scheduler.start()
+        scheduler.set_metrics(m)        # queue-depth / dev-inflight visibility in /metrics
+        fusion.set_scheduler(scheduler)
+        dev_agent.set_scheduler(scheduler)
+
+        # ── Multi-agent workflow orchestration (voice "think hard about …") ────
+        # Fans a spoken goal out to N fresh-context sub-agents over the resident
+        # model (no new model load — AGENTS.md #6) via the scheduler's bounded pool,
+        # then synthesizes + speaks one answer. Pure inference, no desktop actions.
+        # Constructed always (cheap); the runner gates itself + the coordinator
+        # trigger on workflow_orchestration.enabled (default OFF). Coordinator does
+        # its own async skip-on-flare. Spec: specs/workflow-orchestration/.
         try:
-            analyzer = SessionAnalyzer(agent_db_path=str(Path("agent.db")))
-            summary = await analyzer.run_and_persist(session_id, agent_db)
-            analyzer.close()
-            report = analyzer.format_report(summary)
-            log.info("Session summary:\n%s", report)
-        except Exception as _sa_exc:
-            log.warning("SessionAnalyzer failed: %s", _sa_exc)
+            from inference.workflow import WorkflowRunner
+            workflow_runner = WorkflowRunner(
+                router=router, scheduler=scheduler, agent_db=agent_db,
+            )
+            coordinator.set_workflow_runner(workflow_runner)
+            if workflow_runner.enabled:
+                log.info("WorkflowRunner: voice trigger active")
+        except Exception as _wf_exc:
+            log.warning("WorkflowRunner: failed to init (%s) — voice workflows disabled",
+                        _wf_exc)
 
-    if indexer is not None:
-        await indexer.stop()
+        from calibration.acoustic_profiler import AcousticProfiler
+        profiler = AcousticProfiler(agent_db=agent_db, session_id=session_id)
+        await profiler.load()
 
-    # Flush any in-memory traces that were never persisted (e.g. commands that
-    # completed during the shutdown window but whose fire-and-forget task was
-    # cancelled before it ran).
-    try:
-        from monitoring.trace import get_tracer
-        flushed = await get_tracer().flush_all(agent_db, session_id)
-        if flushed:
-            log.info("Trace flush: %d spans persisted during shutdown", flushed)
-    except Exception as _tf_exc:
-        log.debug("Trace flush skipped: %s", _tf_exc)
+        whisper = WhisperStream()
+        whisper.set_fusion_engine(fusion)
+        whisper.set_agent_db(agent_db, session_id=session_id)
+        whisper.set_acoustic_profiler(profiler)
+        whisper.set_metrics(m)          # wire metrics to WhisperStream (latency + hallucinations)
+        coordinator.set_whisper_stream(whisper)
+        coordinator.set_fusion_engine(fusion)   # pain-day threshold propagation
+        coordinator.set_profiler(profiler)
 
-    await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
-    await audit.log_session_stop(reason="normal")
-    await audit.close()
+        # Wire VoiceCalibrator
+        from calibration.voice_calibrator import VoiceCalibrator
+        try:
+            from tts.polly_stream import get_client as _get_tts
+            _speak_fn = _get_tts().speak_sync
+        except Exception:
+            _speak_fn = None
+        calibrator = VoiceCalibrator(agent_db=agent_db, whisper_stream=whisper, profiler=profiler)
+        if _speak_fn:
+            calibrator.set_tts(_speak_fn)
+        coordinator.set_calibrator(calibrator)
 
-    # Graceful shutdown completed — remove the crash marker so the next
-    # startup doesn't announce a crash. Last step on purpose: anything that
-    # dies before this point IS an unclean exit.
-    crash_marker.clear()
+        # Wire VoicePromptComposer — "hey agent claude compose" → dictate to Claude Code
+        from inference.voice_prompt_composer import VoicePromptComposer
+        composer = VoicePromptComposer()
+        if _speak_fn:
+            composer.set_speak_fn(_speak_fn)
+        composer.set_suppress_fn(whisper.suppress)
+        whisper.set_composer(composer)
 
+        # Wire profiler into fusion engine for rms_ambient telemetry
+        fusion.set_acoustic_profiler(profiler)
 
-# ---------------------------------------------------------------------------
-# Viewer-only mode (bridge + viewer, no inference)
+        # Wire profiler into twin state for voice clarity pain signal
+        if twin_state:
+            twin_state.set_acoustic_profiler(profiler)
+            # Immediate pain-day velocity-floor flips (no 60s ContinuousTrainer lag)
+            twin_state.set_gesture_processor(gesture)
+
+        # ── EventBus + RateLimiter (orchestration gap remediation — schema v3) ────
+        from core.events import EventBus
+        from core.rate_limiter import RateLimiter
+        event_bus = EventBus(agent_db)
+        rate_limiter = RateLimiter(agent_db)
+        coordinator.set_event_bus(event_bus)
+        coordinator.set_rate_limiter(rate_limiter)   # throttles cloud (Anthropic) egress
+        # Share the same 'anthropic' bucket with the cloud plan router (specs/cloud-plan-routing
+        # R4.2) so Sonnet 4.6 plan calls count against the same throttle. No-op for the raw
+        # ModelRouter (flag off) — only CloudPlanRouter defines set_rate_limiter.
+        if dev_router is not router and hasattr(dev_router, "set_rate_limiter"):
+            dev_router.set_rate_limiter(rate_limiter)
+        dev_agent.set_event_bus(event_bus)
+        trainer.set_event_bus(event_bus)   # per-domain SLO breaches → slo.breached alerts
+        router.set_event_bus(event_bus)    # VRAM fallback picks → model.downgraded
+        # Surface silent backend events: Ollama hang (inference.stalled) + breaker open
+        # (breaker.opened). No-op on backends without a set_event_bus method.
+        if hasattr(local, "set_event_bus"):
+            local.set_event_bus(event_bus)
+
+        # ── PC desktop chat UI (opt-in via --chat): chat window + live DAG preview ──
+        # Standalone localhost aiohttp server sharing the live pipeline. Kept separate
+        # from the iPad bridge so the iPad WebSocket protocol stays an iPad concern.
+        chat_server = None
+        if getattr(args, "chat", False):
+            from core.chat_server import ChatServer
+            chat_server = ChatServer(
+                host=args.chat_host, port=args.chat_port,
+                allow_destructive=not args.chat_readonly,
+            )
+            chat_server.set_coordinator(coordinator)
+            chat_server.set_scheduler(scheduler)
+            chat_server.set_event_bus(event_bus)
+            chat_server.set_agent_db(agent_db, session_id)
+
+        # Wire CommandExecutor DB access for per-call timeout + idempotency.
+        coordinator._executor.set_agent_db(agent_db)
+        # Wire audit log so command execution failures appear in the tamper-evident trail.
+        coordinator._executor.set_audit_log(audit)
+
+        # Read cache configs from DB and push to the cache-using components.
+        try:
+            vg_ttl, vg_max = await agent_db.misc.get_cache_config("vision_grounder")
+            if hasattr(coordinator, "_vision_grounder") and coordinator._vision_grounder:
+                coordinator._vision_grounder.set_cache_config(vg_ttl, vg_max)
+        except Exception as _cfg_exc:
+            log.debug("Could not read vision_grounder cache config: %s", _cfg_exc)
+        try:
+            ua_ttl, ua_max = await agent_db.misc.get_cache_config("ui_automation")
+            # UIAutomationProvider is a lazy singleton; update it when first accessed.
+            from core import command_executor as _cex
+            if _cex._ui_provider is not None:
+                _cex._ui_provider.set_cache_config(ua_ttl, ua_max)
+        except Exception as _cfg_exc:
+            log.debug("Could not read ui_automation cache config: %s", _cfg_exc)
+
+        bridge = IPadBridge(port=args.port, host=args.host)
+        bridge.set_fusion_engine(fusion)
+        bridge.set_lidar(lidar)
+        bridge.set_gesture_processor(gesture)
+        bridge.set_whisper_stream(whisper)
+        bridge.set_coordinator(coordinator)  # needed for pain_day_override message
+        bridge.set_agent_db(agent_db, session_id)  # needed for ipad_log DB persistence
+        coordinator.set_bridge(bridge)  # trace_id correlation: coordinator → bridge on command executed
+        coordinator.set_target_cache(target_cache)  # A2UI click-target palette (DA_A2UI_CLICK_TARGETS)
+        fusion.set_agent_db(agent_db)   # D2: throttled sensor-stream persistence
+        await fusion.load_rom_calibration(agent_db)   # D4: ROM → tilt dead zone
+        await profiler.load_rom_bounds(agent_db)       # D4: ROM → initial VAD bounds
+
+        # D6: wire profiler → WhisperStream so VAD changes push immediately
+        profiler.set_whisper_ref(whisper)
+
+        # Wire acoustic drift → provisional VAD relaxation + bridge recalibration request
+        _loop = asyncio.get_event_loop()
+        def _on_drift(drift):
+            # D6: apply provisional relaxation immediately (before recal completes)
+            profiler.apply_provisional_vad_relaxation(factor=0.7)
+            asyncio.run_coroutine_threadsafe(
+                bridge.send_recalibration_request(
+                    reason=drift.reason,
+                    degradation_pct=drift.degradation_pct,
+                ),
+                _loop,
+            )
+            # R-1 foundation: publish voice.drift so observer agents (Fatigue Monitor)
+            # and event rules can react. Best-effort; never blocks the audio thread.
+            asyncio.run_coroutine_threadsafe(
+                event_bus.publish(
+                    "voice.drift",
+                    {"drift_pct": drift.degradation_pct, "reason": drift.reason,
+                     "voice_samples": getattr(drift, "voice_samples", 0)},
+                    source="acoustic_profiler",
+                ),
+                _loop,
+            )
+        profiler.add_drift_callback(_on_drift)
+
+        # A2UI: push an Approve/Deny surface to the iPad when the approval gate opens
+        # (parallel input to the voice gate; a tap writes the same response file).
+        # The callback fires from the WhisperStream audio thread → hop to the bridge
+        # loop with run_coroutine_threadsafe, mirroring _on_drift above.
+        def _on_approval_gate_open(description: str) -> None:
+            from core import a2ui
+            surface = a2ui.approval_surface(description)
+            asyncio.run_coroutine_threadsafe(bridge.send_a2ui_surface(surface), _loop)
+        whisper.on_approval_gate_open = _on_approval_gate_open
+
+        # ── Optional codebase RAG index ────────────────────────────────────────
+        indexer = None
+        if args.index_codebase:
+            try:
+                from inference.codebase_indexer import CodebaseIndexer
+                _project_root = str(Path(__file__).parent)
+                indexer = CodebaseIndexer(
+                    project_root=_project_root,
+                    embedder=_vllm_embedder,   # None → falls back to sentence-transformers
+                )
+                if await indexer.start():
+                    _idx_stats = await indexer.index()
+                    log.info("CodebaseIndexer: %s", _idx_stats)
+                    dev_agent.set_indexer(indexer)
+                    # Start file watcher for continuous incremental indexing
+                    if getattr(args, "watch", False):
+                        if indexer.start_watching():
+                            log.info("CodebaseIndexer: file watcher active")
+                        else:
+                            log.info("CodebaseIndexer: file watcher unavailable (pip install watchdog)")
+                else:
+                    log.warning("CodebaseIndexer: ChromaDB unavailable — RAG disabled")
+                    indexer = None
+            except Exception as _idx_exc:
+                log.warning("CodebaseIndexer: failed to start: %s", _idx_exc)
+                indexer = None
+
+        # ── Start VRAM poller + optional /metrics HTTP endpoint ────────────────
+        await m.start_vram_poller(interval_s=60.0)
+
+        if args.metrics_port:
+            try:
+                from aiohttp import web as _aio_web
+                from monitoring.trace import get_tracer as _get_tracer
+                # H1: bind loopback only. /trace returns recent command text and
+                # /metrics is for local operator inspection — nothing remote needs them.
+                _metrics_host = "127.0.0.1"
+                _metrics_app = _aio_web.Application()
+                _metrics_app.router.add_get("/metrics", m.aiohttp_handler)
+
+                async def _trace_recent(_req):
+                    return _aio_web.json_response({"traces": _get_tracer().get_recent(50)})
+
+                async def _trace_one(req):
+                    tr = _get_tracer().get_trace(req.match_info["tid"])
+                    if tr is None:
+                        return _aio_web.json_response({"error": "not found"}, status=404)
+                    return _aio_web.json_response(tr)
+
+                _metrics_app.router.add_get("/trace", _trace_recent)
+                _metrics_app.router.add_get("/trace/{tid}", _trace_one)
+                _metrics_runner = _aio_web.AppRunner(_metrics_app)
+                await _metrics_runner.setup()
+                _metrics_site = _aio_web.TCPSite(_metrics_runner, _metrics_host, args.metrics_port)
+                await _metrics_site.start()
+                log.info("Metrics endpoint: http://%s:%d/metrics", _metrics_host, args.metrics_port)
+            except Exception as _me_exc:
+                log.warning("Metrics HTTP endpoint failed: %s", _me_exc)
+
+        # ── Optional sensor viewer window ──────────────────────────────────────
+        viewer = None
+        if args.viewer:
+            from sensors.sensor_viewer import SensorViewer
+            viewer = SensorViewer()
+            bridge.set_viewer(viewer)
+            if hasattr(gesture, "set_viewer"):
+                gesture.set_viewer(viewer)
+            if args.viewer and not args.safe_mode and hasattr(gesture, "_flick_engine"):
+                fe = getattr(gesture, "_flick_engine", None)
+                if fe is not None:
+                    viewer.set_flick_engine(fe)
+            viewer.start()
+
+        # ── Optional live dashboard ────────────────────────────────────────────
+        dashboard_obj = None
+        if args.dashboard:
+            try:
+                from monitoring.dashboard import Dashboard
+                dashboard_obj = Dashboard(metrics=m, interval=1.0)
+                await dashboard_obj.start()
+            except Exception as _dash_exc:
+                log.warning("Dashboard failed to start: %s", _dash_exc)
+
+        shutdown = _ShutdownController()
+        shutdown.register(fusion, gesture, whisper)
+        shutdown.register(scheduler)
+        if viewer:
+            shutdown.register(viewer)
+        shutdown.arm()
+
+        # --- Start trainer and WhisperStream ---
+        await trainer.start()
+        await trainer.load_velocity_calibration()  # Gap 3: reload persisted gesture floors
+        await whisper.start()
+
+        # --- ResourceGovernor — pain-aware hardware resource control ---
+        from core.resource_governor import ResourceGovernor
+        governor = ResourceGovernor(memory=memory)
+        governor.set_fusion_engine(fusion)
+        governor.set_whisper_stream(whisper)
+        governor.set_model_router(router)   # eviction targets the live model lineup
+        governor.set_scheduler(scheduler)   # gap #3: flare pauses new dev/background admission
+        governor.set_event_bus(event_bus)   # vram.evicted / vram.restored on flare transitions
+        if indexer is not None:
+            governor.set_indexer(indexer)
+        # Live-refresh the iPad Agent dashboard on each pain-day (flare) transition so
+        # its "Pain day" row reflects current state without waiting for a reconnect.
+        governor.set_flare_change_callback(lambda active: bridge.push_status_dashboard())
+        await governor.start()
+        twin_state.set_resource_governor(governor)   # flare fast-path: <100ms flare response
+        twin_state.set_model_router(router)
+        shutdown.register(governor)
+        if target_cache is not None:
+            shutdown.register(target_cache)
+
+        # --- Proactivity (N+2): time- + event-triggered automation ---
+        # ProactiveScheduler promotes due scheduled goals; EventRuleEngine fires rules
+        # off the EventBus. Both feed the existing goal_queue/drainer; notifications go
+        # out via Notifier (TTS + iPad push).
+        from core.notifier import Notifier
+        from core.proactive_scheduler import ProactiveScheduler
+        from core.event_rule_engine import EventRuleEngine
+        notifier = Notifier(bridge=bridge)
+        # Flush store-and-forward notifications when an iPad (re)connects (E12).
+        if bridge is not None:
+            bridge.register_connect_handler(notifier.flush_pending)
+        proactive = ProactiveScheduler(agent_db, dev_agent=dev_agent, scheduler=scheduler,
+                                       notifier=notifier)
+        event_rules = EventRuleEngine(agent_db, event_bus, notifier=notifier, dev_agent=dev_agent)
+        await proactive.start()
+        await event_rules.start()
+        shutdown.register(proactive)
+        shutdown.register(event_rules)
+
+        # Email watcher (N+2): polls the Gmail skill and publishes email.arrived onto
+        # the bus so event rules can fire. The loop always runs (skill presence is
+        # re-checked per tick) so a google_pim hot-started by voice "connect Google"
+        # is picked up without a restart; the notifier carries the one-time
+        # token-expired alert.
+        from core.email_watcher import EmailWatcher
+        email_watcher = EmailWatcher(
+            skill_registry, event_bus, notifier=notifier,
+            state_path=Path.home() / ".claude" / "email_watcher_seen.json")
+        await email_watcher.start()
+        shutdown.register(email_watcher)
+
+        # --- Supervisor — liveness watchdog for the critical background loops ---
+        # (gap #2) Restarts the scheduler worker / governor poll loop if either dies
+        # unexpectedly. Registered LAST so reversed-order shutdown stops it FIRST —
+        # it must not try to restart a subsystem that shutdown is tearing down.
+        from core.supervisor import Supervisor, SupervisedSpec
+        supervisor = Supervisor()
+        supervisor.supervise(SupervisedSpec(
+            name="scheduler",
+            is_alive=scheduler.is_healthy,
+            restart=scheduler.restart,
+            enabled=lambda: scheduler._running,
+        ))
+        # Periodic loops also expose a heartbeat + stale_after_s so the Supervisor
+        # catches an ALIVE-BUT-WEDGED loop (stuck on a hung await), not just a crashed
+        # one. stale_after_s is sized well above each loop's period + slowest legit
+        # iteration so a healthy-but-slow tick is never killed. Event-driven loops
+        # (scheduler worker, event_rule_engine) block idle by design — no heartbeat.
+        supervisor.supervise(SupervisedSpec(
+            name="resource_governor",
+            is_alive=governor.is_healthy,
+            restart=governor.restart,
+            enabled=lambda: governor._running,
+            last_heartbeat=governor.last_heartbeat,
+            stale_after_s=60.0,    # poll=5s
+        ))
+        supervisor.supervise(SupervisedSpec(
+            name="proactive_scheduler",
+            is_alive=proactive.is_healthy,
+            restart=proactive.restart,
+            enabled=lambda: proactive._running,
+            last_heartbeat=proactive.last_heartbeat,
+            stale_after_s=180.0,   # poll=30s
+        ))
+        supervisor.supervise(SupervisedSpec(
+            name="event_rule_engine",
+            is_alive=event_rules.is_healthy,
+            restart=event_rules.restart,
+            enabled=lambda: event_rules._running,
+        ))
+        supervisor.supervise(SupervisedSpec(
+            name="email_watcher",
+            is_alive=email_watcher.is_healthy,
+            restart=email_watcher.restart,
+            enabled=lambda: email_watcher._running,
+            last_heartbeat=email_watcher.last_heartbeat,
+            stale_after_s=360.0,   # poll=120s; a wedged skill stdio call stalls here
+        ))
+
+        # Escalation (gap E): when a subsystem can't be restarted, TELL the user
+        # (spoken warning — they may be unattended) and degrade rather than silently
+        # die. A FAILED scheduler → bypass it: FusionEngine._emit falls back to direct
+        # create_task dispatch when set_scheduler(None), so accessibility keeps working.
+        async def _on_subsystem_failed(name: str) -> None:
+            log.critical("Supervisor escalation: subsystem %r is FAILED (unrecoverable)", name)
+            if name == "scheduler":
+                try:
+                    fusion.set_scheduler(None)   # degrade to direct dispatch
+                    log.warning("Degraded mode: FusionEngine now dispatches directly "
+                                "(scheduler bypassed); accessibility unaffected, "
+                                "dev/background gating lost until restart")
+                except Exception as exc:
+                    log.error("Degraded-mode handoff failed: %s", exc)
+            try:
+                from tts.polly_stream import get_client as _get_tts
+                msg = (f"Warning. The {name.replace('_', ' ')} stopped responding and "
+                       "could not be restarted. The system is running in a reduced mode.")
+                await asyncio.to_thread(_get_tts().speak_sync, msg)
+            except Exception as exc:
+                log.debug("Supervisor escalation TTS unavailable: %s", exc)
+
+        supervisor.set_on_failed(_on_subsystem_failed)
+        supervisor.set_metrics(m)
+        await supervisor.start()
+        shutdown.register(supervisor)
+
+        # --- Sync hotwords into WhisperStream once trainer is ready ---
+        hotwords = await trainer.get_hotwords()
+        if hotwords:
+            whisper.update_hotwords(hotwords)
+
+        # --- Print startup table (task 4.4) ---
+        if not args.quiet:
+            _print_startup_table(
+                args.port, args.safe_mode, host=args.host,
+                backend=_backend,
+                vllm_server_url=getattr(args, "vllm_server_url", "http://localhost:8000"),
+                cloud_dev_agent=getattr(args, "cloud_dev_agent", False),
+                cloud_dev_model=(_cloud_dev_agent.model if _cloud_dev_agent else "claude-opus-4-8"),
+            )
+
+        # Durable goal backlog (gap D): drain any goals queued/requeued from a previous
+        # session now that the full pipeline is wired. Fire-and-forget — each goal runs
+        # through plan_and_run with its own approval gate + crash-recoverable ledger.
+        from core.async_utils import fire_and_log
+        fire_and_log(dev_agent.drain_goal_queue(), log, label="startup_goal_drain")
+
+        # Warm the command model so the FIRST real command doesn't pay the cold-load
+        # penalty (~7.5 s observed for llama3.1:8b loading into VRAM vs ~190 ms warm).
+        # Fire-and-forget: never blocks startup or the 60 Hz loop. No-op on non-Ollama
+        # backends (warmup() defaults to a no-op; only OllamaInference pre-loads).
+        # Opt out with DA_COMMAND_WARMUP=0.
+        if os.environ.get("DA_COMMAND_WARMUP", "1") != "0":
+            fire_and_log(local.warmup(), log, label="command_model_warmup")
+
+        # Crash notice: the previous process exited uncleanly (marker survived).
+        # Tell the user briefly — they may have been away when it happened and
+        # should know that recovered state (requeued goals, interrupted plans)
+        # may apply. Fire-and-forget: TTS being down must not block startup.
+        if _unclean_exit:
+            async def _speak_crash_notice() -> None:
+                from tts.polly_stream import get_client as _get_tts
+                await asyncio.to_thread(
+                    _get_tts().speak_sync,
+                    "I restarted after a crash. Any in-progress work was recovered "
+                    "where possible — say 'resume task' if something was interrupted.",
+                )
+            fire_and_log(_speak_crash_notice(), log, label="crash_notice_tts")
+
+        # --- Run bridge + fusion + watchdog + metric watcher concurrently ---
+        bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
+        fusion_task = asyncio.create_task(fusion.run())
+        watchdog_task = asyncio.create_task(_watchdog(fusion, whisper, session_id))
+        from monitoring.metric_watcher import MetricWatcher
+        metric_watcher = MetricWatcher(event_bus=event_bus)
+        metric_watcher_task = asyncio.create_task(metric_watcher.run())
+
+        # Start the chat UI server (if enabled) and open the desktop window/browser
+        # once it is actually listening.
+        if chat_server is not None:
+            await chat_server.start()
+            if not getattr(args, "chat_no_browser", False):
+                _open_chat_shell(chat_server.url(with_token=True),
+                                 getattr(args, "chat_window", False))
+
+        # Wait for Ctrl-C
+        await shutdown.wait_for_shutdown()
+    finally:
+        # Cancel running tasks
+        for t in (bridge_task, fusion_task, watchdog_task, metric_watcher_task):
+            if t is not None:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        if macro_detector is not None:
+            try:
+                await macro_detector.stop()
+            except Exception:
+                pass
+
+        if skill_registry is not None:
+            try:
+                await skill_registry.stop()
+            except Exception:
+                pass
+
+        if personal_kb is not None:
+            try:
+                await personal_kb.stop()
+            except Exception:
+                pass
+            
+        if _kb_index_task is not None and not _kb_index_task.done():
+            try:
+                await asyncio.wait_for(_kb_index_task, timeout=10)
+            except Exception:
+                pass
+
+        if chat_server is not None:
+            try:
+                await chat_server.stop()
+            except Exception:
+                pass
+
+        if _vllm_pool is not None:
+            try:
+                await _vllm_pool.stop()
+            except Exception:
+                pass
+
+        if dashboard_obj is not None:
+            try:
+                dashboard_obj.stop()
+            except Exception:
+                pass
+            
+        if m is not None:
+            try:
+                m.stop_vram_poller()
+            except Exception:
+                pass
+
+        if session_id >= 0 and agent_db is not None:
+            try:
+                analyzer = SessionAnalyzer(agent_db_path=str(Path("agent.db")))
+                summary = await analyzer.run_and_persist(session_id, agent_db)
+                analyzer.close()
+                report = analyzer.format_report(summary)
+                log.info("Session summary:\n%s", report)
+            except Exception:
+                pass
+
+        if indexer is not None:
+            try:
+                await indexer.stop()
+            except Exception:
+                pass
+
+        if agent_db is not None and session_id >= 0:
+            try:
+                from monitoring.trace import get_tracer
+                flushed = await get_tracer().flush_all(agent_db, session_id)
+                if flushed:
+                    log.info("Trace flush: %d spans persisted during shutdown", flushed)
+            except Exception:
+                pass
+
+        if shutdown is not None:
+            try:
+                await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
+            except Exception:
+                pass
+            
+        if audit is not None:
+            try:
+                await audit.log_session_stop(reason="normal")
+                await audit.close()
+            except Exception:
+                pass
+            
+        if crash_marker is not None:
+            try:
+                crash_marker.clear()
+            except Exception:
+                pass
 # ---------------------------------------------------------------------------
 
 async def _run_viewer_only(args: argparse.Namespace) -> None:

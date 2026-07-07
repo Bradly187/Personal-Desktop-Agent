@@ -76,7 +76,7 @@ async def test_r3_2_resume_seed_empty_when_no_steps(monkeypatch):
     monkeypatch.setenv("DA_RESUME_MEMORY", "1")
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_steps_for_run = AsyncMock(return_value=[])
+    db.runs.get_steps_for_run = AsyncMock(return_value=[])
     agent._db = MagicMock(return_value=db)
     seed = await agent._resume_seed_context(7, "goal")
     assert seed == ""
@@ -91,11 +91,11 @@ async def test_r3_4_disabled_returns_empty_seed(monkeypatch):
     monkeypatch.setenv("DA_RESUME_MEMORY", "0")
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_steps_for_run = AsyncMock(return_value=_steps())
+    db.runs.get_steps_for_run = AsyncMock(return_value=_steps())
     agent._db = MagicMock(return_value=db)
     seed = await agent._resume_seed_context(7, "goal")
     assert seed == ""                       # off → byte-identical (no DB read used)
-    db.get_steps_for_run.assert_not_called()
+    db.runs.get_steps_for_run.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -103,7 +103,7 @@ async def test_r2_1_enabled_builds_seed(monkeypatch):
     monkeypatch.setenv("DA_RESUME_MEMORY", "1")
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_steps_for_run = AsyncMock(return_value=_steps())
+    db.runs.get_steps_for_run = AsyncMock(return_value=_steps())
     agent._db = MagicMock(return_value=db)
     seed = await agent._resume_seed_context(7, "fix build")
     assert "resumed-task-memory" in seed
@@ -115,7 +115,7 @@ async def test_r3_2_db_error_degrades(monkeypatch):
     monkeypatch.setenv("DA_RESUME_MEMORY", "1")
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_steps_for_run = AsyncMock(side_effect=RuntimeError("db gone"))
+    db.runs.get_steps_for_run = AsyncMock(side_effect=RuntimeError("db gone"))
     agent._db = MagicMock(return_value=db)
     seed = await agent._resume_seed_context(7, "goal")
     assert seed == ""                       # never raises into resume
@@ -129,8 +129,8 @@ async def test_5b_resume_seeds_plan_when_enabled(monkeypatch):
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
     db.available = True
-    db.get_interrupted_runs = AsyncMock(return_value=[{"id": 7, "goal": "fix the build"}])
-    db.get_steps_for_run = AsyncMock(return_value=_steps())
+    db.runs.get_interrupted_runs = AsyncMock(return_value=[{"id": 7, "goal": "fix the build"}])
+    db.runs.get_steps_for_run = AsyncMock(return_value=_steps())
     agent._db = MagicMock(return_value=db)
     agent._confirm_destructive_op = AsyncMock(return_value=True)   # voice "yes"
     agent.plan_and_run = AsyncMock()
@@ -150,8 +150,8 @@ async def test_5b_resume_bare_goal_when_disabled(monkeypatch):
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
     db.available = True
-    db.get_interrupted_runs = AsyncMock(return_value=[{"id": 7, "goal": "fix the build"}])
-    db.get_steps_for_run = AsyncMock(return_value=_steps())
+    db.runs.get_interrupted_runs = AsyncMock(return_value=[{"id": 7, "goal": "fix the build"}])
+    db.runs.get_steps_for_run = AsyncMock(return_value=_steps())
     agent._db = MagicMock(return_value=db)
     agent._confirm_destructive_op = AsyncMock(return_value=True)
     agent.plan_and_run = AsyncMock()
@@ -228,14 +228,14 @@ async def test_r4_session_seed_built_when_enabled(monkeypatch):
     monkeypatch.setenv("DA_SESSION_MEMORY", "1")
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_recent_runs = AsyncMock(return_value=_related_runs())
-    db.get_steps_for_run = AsyncMock(return_value=_steps())
+    db.runs.get_recent_runs = AsyncMock(return_value=_related_runs())
+    db.runs.get_steps_for_run = AsyncMock(return_value=_steps())
     agent._db = MagicMock(return_value=db)
     seed = await agent._session_seed_context("fix websocket reconnect bridge")
     assert "prior-session-memory" in seed
     assert "a.py" in seed                       # file from the related run's steps
     # only the related run's steps were fetched (unrelated #2 filtered out)
-    db.get_steps_for_run.assert_awaited_once_with(1)
+    db.runs.get_steps_for_run.assert_awaited_once_with(1)
 
 
 @pytest.mark.asyncio
@@ -243,11 +243,11 @@ async def test_r4_session_seed_empty_when_disabled(monkeypatch):
     monkeypatch.delenv("DA_SESSION_MEMORY", raising=False)   # default OFF
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_recent_runs = AsyncMock(return_value=_related_runs())
+    db.runs.get_recent_runs = AsyncMock(return_value=_related_runs())
     agent._db = MagicMock(return_value=db)
     seed = await agent._session_seed_context("fix websocket reconnect bridge")
     assert seed == ""
-    db.get_recent_runs.assert_not_called()      # off → no DB read
+    db.runs.get_recent_runs.assert_not_called()      # off → no DB read
 
 
 @pytest.mark.asyncio
@@ -255,8 +255,8 @@ async def test_r4_session_seed_empty_when_no_related(monkeypatch):
     monkeypatch.setenv("DA_SESSION_MEMORY", "1")
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_recent_runs = AsyncMock(return_value=_related_runs())
-    db.get_steps_for_run = AsyncMock(return_value=_steps())
+    db.runs.get_recent_runs = AsyncMock(return_value=_related_runs())
+    db.runs.get_steps_for_run = AsyncMock(return_value=_steps())
     agent._db = MagicMock(return_value=db)
     seed = await agent._session_seed_context("entirely unrelated quantum circuit topic")
     assert seed == ""                           # nothing clears min_score
@@ -267,7 +267,7 @@ async def test_r4_session_seed_db_error_degrades(monkeypatch):
     monkeypatch.setenv("DA_SESSION_MEMORY", "1")
     agent = DevAgent(router=MagicMock())
     db = MagicMock()
-    db.get_recent_runs = AsyncMock(side_effect=RuntimeError("db gone"))
+    db.runs.get_recent_runs = AsyncMock(side_effect=RuntimeError("db gone"))
     agent._db = MagicMock(return_value=db)
     seed = await agent._session_seed_context("fix websocket reconnect bridge")
     assert seed == ""                           # never raises into planning
@@ -299,8 +299,8 @@ async def test_r4_plan_context_carries_session_seed(monkeypatch):
 
         agent._router.infer = AsyncMock(side_effect=_infer)
         db = MagicMock()
-        db.get_recent_runs = AsyncMock(return_value=_related_runs())
-        db.get_steps_for_run = AsyncMock(return_value=_steps())
+        db.runs.get_recent_runs = AsyncMock(return_value=_related_runs())
+        db.runs.get_steps_for_run = AsyncMock(return_value=_steps())
         agent._db = MagicMock(return_value=db)
         return agent
 

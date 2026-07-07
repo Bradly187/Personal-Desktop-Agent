@@ -24,6 +24,15 @@ from adaptive.behavioral_twin_state import (
 
 class MockAgentDB:
     available = True
+    def __init__(self):
+        self.commands = self
+        self.sessions = self
+        self.profile = self
+        self.telemetry = self
+        self.routing = self
+        self.misc = self
+        self.memory = self
+        self.events = self
 
 
 def _make_twin(

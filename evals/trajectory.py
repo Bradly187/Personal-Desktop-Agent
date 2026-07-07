@@ -366,7 +366,7 @@ class TrajectoryReplayer:
         return verbs
 
     async def verbs_for(self, trace_id: str) -> list[str]:
-        spans = await self.agent_db.get_trace_spans(trace_id)
+        spans = await self.agent_db.logs.get_trace_spans(trace_id)
         return self.extract_executed_verbs(spans)
 
     async def score(self, case: TrajectoryCase, trace_id: str) -> TrajResult:

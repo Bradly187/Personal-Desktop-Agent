@@ -562,7 +562,7 @@ class OllamaInference(LocalInference):
         # knows whether the inner finally already updated the breaker.
         _entered_sem = False
         try:
-            async with asyncio.timeout(_hang_timeout_s):
+            async with asyncio.timeout(_hang_timeout_s):  # type: ignore[attr-defined]
                 async with self._request_sem:
                     _entered_sem = True
                     try:

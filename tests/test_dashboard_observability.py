@@ -151,6 +151,11 @@ async def test_continuous_trainer_publishes_slo_breached():
 
     class _DB:
         available = True
+        def __init__(self):
+            self.telemetry = self
+            self.routing = self
+            self.profile = self
+            self.inferences = self
         async def get_inference_stats_by_domain(self, limit=1000):
             # command budget is 600 ms / 0.95 — this breaches latency.
             return {"command": {"count": 100, "p50_latency_ms": 5000.0, "success_rate": 0.99}}

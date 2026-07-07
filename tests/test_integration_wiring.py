@@ -15,7 +15,6 @@ import asyncio
 import sys
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -34,11 +33,23 @@ class MockAgentDB:
     """Minimal AgentDB stub for integration tests."""
     available = True
 
-    def __init__(self):
-        self._commands: list[dict] = []
-        self._session_history: list[dict] = []
-        self._preference_json: Optional[str] = None
-        self._written_history: list[dict] = []
+    def __init__(self, commands=None, session_history=None, preference_json=None):
+        self._commands = commands or []
+        self._session_history = session_history or []
+        self._preference_json = preference_json
+        self._written_history = []
+        self._logged_settings = []
+        self.commands = self
+        self.sessions = self
+        self.profile = self
+        self.telemetry = self
+        self.routing = self
+        self.misc = self
+        self.memory = self
+        self.events = self
+        self.inferences = self
+        self.skills = self
+        self.gestures = self
         self._few_shot_calls: list = []
         self._gesture_samples: dict[str, list[float]] = {}
         self._gesture_floors: dict[str, float] = {}
@@ -46,6 +57,15 @@ class MockAgentDB:
 
     async def get_recent_successful_commands(self, limit=500):
         return self._commands[:limit]
+
+    async def insert_command(self, *args, **kwargs):
+        return 42
+
+    async def mark_command_executed(self, *args, **kwargs):
+        pass
+
+    async def insert_inference(self, *args, **kwargs):
+        return 99
 
     async def get_most_recent_session_id(self, exclude_session_id=None):
         return 1
@@ -214,7 +234,7 @@ def test_15_2_hybrid_coordinator_calls_get_snapshot():
         config = CoordinatorConfig()
         # Mock out the local inference and DB so route() doesn't actually call LLMs
         mock_local = MagicMock()
-        mock_local.generate = AsyncMock(return_value="CLICK")
+        mock_local.infer = AsyncMock(return_value="CLICK")
         mock_executor = MagicMock()
         mock_executor.execute = AsyncMock(return_value={"status": "ok"})
 
@@ -228,12 +248,7 @@ def test_15_2_hybrid_coordinator_calls_get_snapshot():
 
         cmd = Command(text="click the button", action="CLICK", source="voice")
 
-        try:
-            await coordinator.route(cmd)
-        except Exception:
-            # route() may fail due to missing real inference — that's OK
-            # We only care that get_snapshot() was called
-            pass
+        await coordinator.route(cmd)
 
         assert len(get_snapshot_calls) >= 1, (
             "HybridCoordinator.route() did not call BehavioralTwinState.get_snapshot()"

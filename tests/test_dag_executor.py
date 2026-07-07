@@ -17,7 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from inference.dev_agent import DevAgent, AgentStep, _parse_deps, _parse_plan
+from inference.dev_agent import DevAgent, AgentStep
+from inference.plan_parser import _parse_deps, _parse_plan
 from core.scheduler import AccessibilityScheduler
 from core.goal_session import GoalSessionStore
 

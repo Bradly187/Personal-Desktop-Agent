@@ -442,7 +442,8 @@ class Dashboard:
         while self._running:
             try:
                 snap = self._fetcher.fetch()
-                renderer.render(snap, self._fetcher.error)
+                if snap is not None:
+                    renderer.render(snap, self._fetcher.error)
             except Exception as exc:
                 log.warning("Dashboard: render error: %s", exc)
             await asyncio.sleep(self._interval)
@@ -464,7 +465,8 @@ def _run_curses(fetcher: SnapshotFetcher, interval: float) -> None:
 
         while True:
             snap = fetcher.fetch()
-            renderer.render(snap, fetcher.error)
+            if snap is not None:
+                renderer.render(snap, fetcher.error)
 
             key = stdscr.getch()
             if key in (ord("q"), ord("Q"), 3):   # 3 = Ctrl-C
@@ -501,7 +503,8 @@ def main() -> None:
         try:
             while True:
                 snap = fetcher.fetch()
-                renderer.render(snap, fetcher.error)
+                if snap is not None:
+                    renderer.render(snap, fetcher.error)
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             pass
@@ -519,7 +522,8 @@ def main() -> None:
         try:
             while True:
                 snap = fetcher.fetch()
-                renderer.render(snap, fetcher.error)
+                if snap is not None:
+                    renderer.render(snap, fetcher.error)
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             pass

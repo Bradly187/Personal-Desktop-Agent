@@ -54,6 +54,7 @@ _DASHBOARD_TOPICS = {
     # Alerting + autonomous-action topics surfaced in the Activity feed.
     "metric.threshold_crossed", "slo.breached",
     "voice.drift", "step.failed", "replan.exhausted", "email.arrived",
+    "file.written",
 }
 
 # Topics surfaced in the Alerts panel (durable read from event_log).
@@ -227,7 +228,8 @@ def _trace_usage(db_path: str, trace_id: str) -> dict:
     try:
         from monitoring.cost_ledger import estimate_cost
     except Exception:
-        estimate_cost = lambda m, ti, to: 0.0  # noqa: E731
+        def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+            return 0.0
     tokens_in = sum(r["tokens_in"] or 0 for r in rows)
     tokens_out = sum(r["tokens_out"] or 0 for r in rows)
     cost = sum(estimate_cost(r["model"] or "", r["tokens_in"] or 0,
@@ -351,10 +353,11 @@ class ChatServer:
         self._token = token or _load_or_create_chat_token()
 
         # Injected pipeline references (set_* before run()).
-        self._coordinator = None
-        self._scheduler = None
-        self._event_bus = None
-        self._agent_db = None
+        import typing
+        self._coordinator: typing.Any = None
+        self._scheduler: typing.Any = None
+        self._event_bus: typing.Any = None
+        self._agent_db: typing.Any = None
         self._session_id: Optional[int] = None
 
         self._clients: dict[str, _ChatClient] = {}      # ws_id -> client
@@ -520,7 +523,8 @@ class ChatServer:
         from inference.attachments import is_allowed, ALLOWED_EXTS
         try:
             reader = await request.multipart()
-            field = await reader.next()
+            import typing
+            field: typing.Any = await reader.next()
             if field is None or field.name != "file":
                 return web.json_response({"error": "expected a 'file' part"}, status=400)
             raw_name = os.path.basename(field.filename or "")
@@ -591,7 +595,14 @@ class ChatServer:
     async def _api_metrics(self, request: web.Request) -> web.Response:
         try:
             from monitoring.metrics import get_metrics
-            return web.json_response(get_metrics().get_snapshot())
+            data = get_metrics().get_snapshot()
+            if request.query.get("series") == "1":
+                from monitoring.trends import session_trends
+                path = self._db_path()
+                if path:
+                    trends = await asyncio.to_thread(session_trends, path, 30)
+                    data["series"] = trends.get("sessions", [])
+            return web.json_response(data)
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"error": str(exc)}, status=500)
 
@@ -832,7 +843,7 @@ class ChatServer:
             self._run_request(client, trace_id, text, attachment_ids or []))
         self._requests[trace_id] = task
         task.add_done_callback(
-            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))
+            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))  # type: ignore[misc]
 
     def _on_request_done(self, task: asyncio.Task, trace_id: str,
                          client: _ChatClient) -> None:
@@ -879,7 +890,7 @@ class ChatServer:
         task = asyncio.create_task(self._run_rewind(client, trace_id))
         self._requests[trace_id] = task
         task.add_done_callback(
-            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))
+            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))  # type: ignore[misc]
 
     async def _run_rewind(self, client: _ChatClient, trace_id: str) -> None:
         try:
@@ -1121,4 +1132,7 @@ class ChatServer:
         if topic == "email.arrived":
             return {"type": "dash_event", "kind": "email", "ts": ts, "severity": "info",
                     "text": f"email: {str(p.get('subject', ''))[:80]}"}
+        if topic == "file.written":
+            return {"type": "dash_event", "kind": "file_written", "ts": ts, "severity": "info",
+                    "path": p.get("path"), "content": p.get("content")}
         return None

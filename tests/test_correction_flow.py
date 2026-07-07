@@ -28,7 +28,7 @@ async def test_coordinator_correct_calls_trainer():
 
     mock_trainer = MagicMock()
     mock_trainer.record_correction = AsyncMock()
-    mock_trainer.get_few_shot_examples = AsyncMock(return_value=[])
+    mock_trainer.memory.get_few_shot_examples = AsyncMock(return_value=[])
 
     coordinator = HybridCoordinator(config=CoordinatorConfig(), trainer=mock_trainer)
 
@@ -73,7 +73,7 @@ async def test_trainer_record_correction_stores_locally():
 
     mock_db = AsyncMock()
     mock_db.available = True
-    mock_db.upsert_few_shot_example = AsyncMock()
+    mock_db.memory.upsert_few_shot_example = AsyncMock()
     mock_db.get_recent_commands = AsyncMock(return_value=[])
 
     trainer = ContinuousTrainer(agent_db=mock_db)
@@ -87,8 +87,8 @@ async def test_trainer_record_correction_stores_locally():
 
     await trainer.record_correction(cmd, "TYPE pen notepad", "OPEN notepad")
 
-    mock_db.upsert_few_shot_example.assert_called_once()
-    call_args = mock_db.upsert_few_shot_example.call_args
+    mock_db.memory.upsert_few_shot_example.assert_called_once()
+    call_args = mock_db.memory.upsert_few_shot_example.call_args
     assert "oh pen notepad" in str(call_args), \
         f"Expected 'oh pen notepad' in call args: {call_args}"
     print("✓ test_trainer_record_correction_stores_locally passed")

@@ -254,7 +254,7 @@ class AcousticProfiler:
         log.info("AcousticProfiler: marked as freshly calibrated")
         if self._db.available and self._event_loop:
             fut = asyncio.run_coroutine_threadsafe(
-                self._db.upsert_voice_profile({
+                self._db.voice.upsert_voice_profile({
                     "baseline_rms":     statistics.median([m.rms_amplitude for m in self._healthy_samples] or [0]),
                     "baseline_logprob": statistics.median([m.avg_logprob for m in self._healthy_samples] or [-1]),
                     "baseline_freq":    statistics.median([m.freq_centroid for m in self._healthy_samples] or [0]),
@@ -280,7 +280,7 @@ class AcousticProfiler:
         if self._calibrated:
             return  # already have learned data — don't override
         try:
-            rom = await db.get_sensor_rom("voice")
+            rom = await db.telemetry.get_sensor_rom("voice")
             rms_row = rom.get("rms")
             if rms_row:
                 comfortable_rms = rms_row.get("comfortable_value")
@@ -309,7 +309,7 @@ class AcousticProfiler:
         except RuntimeError:
             pass
 
-        profile = await self._db.get_voice_profile()
+        profile = await self._db.voice.get_voice_profile()
         if profile:
             self._sample_count = profile.get("sample_count", 0)
             self._flare_vad_scale = profile.get("flare_rms_scale", 0.5)
@@ -328,14 +328,14 @@ class AcousticProfiler:
             log.info("AcousticProfiler: no stored profile — using defaults")
 
         # Also load flare profile for vad_scale
-        flare = await self._db.get_flare_profile()
+        flare = await self._db.profile.get_flare_profile()
         if flare and flare.get("flare_vad_scale"):
             self._flare_vad_scale = flare["flare_vad_scale"]
 
         # Load condition-specific calibrated overrides if requested
         if condition:
             self._active_condition = condition
-            cond_profile = await self._db.load_voice_profile(condition)
+            cond_profile = await self._db.voice.load_voice_profile(condition)
             if cond_profile:
                 if cond_profile.get("vad_threshold"):
                     self._vad_threshold = cond_profile["vad_threshold"]
@@ -415,7 +415,7 @@ class AcousticProfiler:
         # Persist to AgentDB (thread-safe)
         if self._db.available and self._event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._db.insert_voice_calibration(
+                self._db.voice.insert_voice_calibration(
                     session_id=self._session_id,
                     phrase=phrase,
                     actual_text=actual_text,
@@ -515,7 +515,7 @@ class AcousticProfiler:
         # Persist
         if self._db.available and self._event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._db.upsert_voice_profile({
+                self._db.voice.upsert_voice_profile({
                     "baseline_rms":    baseline_rms,
                     "baseline_logprob": baseline_logprob,
                     "baseline_freq":   baseline_freq,

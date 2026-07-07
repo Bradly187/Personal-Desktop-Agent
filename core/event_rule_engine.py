@@ -127,7 +127,7 @@ class EventRuleEngine:
         payload = event.get("payload", {}) or {}
         now = time.time()
         fired = 0
-        for rule in await self._db.list_event_rules(enabled_only=True):
+        for rule in await self._db.events.list_event_rules(enabled_only=True):
             if not _topic_matches(topic, rule["topic_pattern"]):
                 continue
             if not _eval_predicate(rule.get("predicate"), payload):
@@ -149,13 +149,13 @@ class EventRuleEngine:
         rendered = _render(rule.get("goal_template", ""), payload)
         if rule.get("action_kind") == "enqueue_goal" and self._dev_agent is not None:
             key = f"event_rule:{rule['id']}:{payload.get('id', now)}"
-            await self._db.enqueue_goal(rendered, domain="plan", idempotency_key=key)
+            await self._db.goals.enqueue_goal(rendered, domain="plan", idempotency_key=key)
             t = asyncio.create_task(self._dev_agent.drain_goal_queue())
             self._bg.add(t)
             t.add_done_callback(self._bg.discard)
         elif self._notifier is not None:
             await self._notifier.notify(rule.get("name") or "Notification", rendered)
-        await self._db.touch_rule_fired(rule["id"], now)
+        await self._db.events.touch_rule_fired(rule["id"], now)
 
     # ── Supervision ────────────────────────────────────────────────────────
     def is_healthy(self) -> bool:

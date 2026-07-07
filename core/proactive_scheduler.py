@@ -124,7 +124,7 @@ class ProactiveScheduler:
         # flare gate so a stale lease is recovered even while dev is paused. Only
         # touches leases older than the TTL — never an actively-executing goal.
         try:
-            await self._db.reap_expired_leases()
+            await self._db.misc.reap_expired_leases()
         except Exception as exc:
             log.debug("ProactiveScheduler lease reap failed: %s", exc)
 
@@ -136,7 +136,7 @@ class ProactiveScheduler:
         # Flare gate: while dev admission is paused, defer (re-ticks in 30 s).
         if self._scheduler is not None and getattr(self._scheduler, "dev_paused", False):
             return 0
-        promoted = await self._db.promote_due_goals(now)
+        promoted = await self._db.goals.promote_due_goals(now)
         if not promoted:
             return 0
         for row in promoted:
@@ -152,7 +152,7 @@ class ProactiveScheduler:
                     # occurrence collapses to one 'scheduled' row instead of
                     # accumulating duplicates (#2 — recurrence storm guard).
                     key = f"{trig}:{row['goal']}:{int(nxt)}"
-                    await self._db.enqueue_scheduled_goal(
+                    await self._db.goals.enqueue_scheduled_goal(
                         row["goal"], execute_at=nxt, recurrence=rec,
                         domain=row.get("domain", "plan"),
                         source_trigger=trig,
@@ -183,7 +183,7 @@ class ProactiveScheduler:
         if self._notifier is None or self._nudged_escalations:
             return
         try:
-            count = await self._db.count_pending_escalations()
+            count = await self._db.sagas.count_pending_escalations()
         except Exception as exc:
             log.debug("escalation count failed: %s", exc)
             return

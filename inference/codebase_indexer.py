@@ -327,7 +327,7 @@ def _chunk_pdf(path: Path, project_root: Path) -> list[Chunk]:
     try:
         from pypdf import PdfReader
         reader = PdfReader(str(path))
-        for i, page in enumerate(reader.pages, 1):
+        for i, page in enumerate(reader.pages, 1):  # type: ignore[assignment]
             text = (page.extract_text() or "").strip()
             if text:
                 _emit_chunks(chunks, file=rel, chunk_type="page",
@@ -400,16 +400,17 @@ class CodebaseIndexer:
         # MiniLM default), exposed for diagnostics / tests.
         self._embedding_fn = None
 
-        self._client = None
-        self._codebase_col = None
-        self._documents_col = None
+        import typing
+        self._client: typing.Any = None
+        self._codebase_col: typing.Any = None
+        self._documents_col: typing.Any = None
         self._available = False
 
         # mtime state: {rel_path: mtime}
         self._state: dict[str, float] = {}
 
         # File watcher state (roadmap item #5)
-        self._observer = None
+        self._observer: typing.Any = None
         self._watch_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # ResourceGovernor pause flag — when True, new index/re-index jobs are

@@ -386,8 +386,8 @@ def _rlimits() -> None:  # pragma: no cover - runs in the child process
     """preexec_fn: cap CPU time + address space for the child (POSIX only)."""
     try:
         import resource
-        resource.setrlimit(resource.RLIMIT_CPU, (_CPU_SECONDS, _CPU_SECONDS))
-        resource.setrlimit(resource.RLIMIT_AS, (_MEM_BYTES, _MEM_BYTES))
+        resource.setrlimit(resource.RLIMIT_CPU, (_CPU_SECONDS, _CPU_SECONDS))  # type: ignore[attr-defined]
+        resource.setrlimit(resource.RLIMIT_AS, (_MEM_BYTES, _MEM_BYTES))  # type: ignore[attr-defined]
     except Exception:
         pass
 

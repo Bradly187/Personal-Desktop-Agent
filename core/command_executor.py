@@ -566,7 +566,7 @@ class CommandExecutor:
         """Return the configured timeout for action (ms). Falls back to 30 000."""
         if self._agent_db and getattr(self._agent_db, "available", False):
             try:
-                timeout_ms, _ = await self._agent_db.get_tool_timeout(action.lower())
+                timeout_ms, _ = await self._agent_db.logs.get_tool_timeout(action.lower())
                 return timeout_ms
             except Exception:
                 pass
@@ -646,7 +646,7 @@ class CommandExecutor:
             idem_key = self._make_idempotency_key(action, cmd.params)
             if self._agent_db and getattr(self._agent_db, "available", False):
                 try:
-                    cached = await self._agent_db.get_tool_call_by_idempotency(idem_key)
+                    cached = await self._agent_db.logs.get_tool_call_by_idempotency(idem_key)
                     if cached:
                         log.info("CommandExecutor: idempotency hit for %s — skipping", action)
                         import json as _j
@@ -727,7 +727,7 @@ class CommandExecutor:
         if self._agent_db and getattr(self._agent_db, "available", False):
             try:
                 import json as _j
-                await self._agent_db.insert_tool_call(
+                await self._agent_db.logs.insert_tool_call(
                     action.lower(),
                     idempotency_key=idem_key,
                     args_json=_j.dumps(cmd.params, separators=(",", ":")) if cmd.params else None,

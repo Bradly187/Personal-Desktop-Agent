@@ -547,7 +547,7 @@ class IPadBridge:
             }
             log.info("ipad_bridge: flare_profile %s", flags)
             if self._agent_db:
-                await self._agent_db.upsert_flare_profile(flags)
+                await self._agent_db.profile.upsert_flare_profile(flags)
             if self._coordinator and hasattr(self._coordinator, "_twin") \
                     and self._coordinator._twin:
                 self._coordinator._twin.set_flare_profile(flags)
@@ -642,7 +642,7 @@ class IPadBridge:
             report = await calibrator.run(
                 condition=condition,
                 quick=quick,
-                on_progress=lambda idx, total, result: (
+                on_progress=lambda idx, total, result: (  # type: ignore[func-returns-value]
                     _on_progress(idx, total, result),
                     asyncio.create_task(ws.send_json({
                         "type": "calibration_phrase",
@@ -1004,7 +1004,7 @@ class IPadBridge:
             ):
                 trace_id = self._active_trace_id
             task = asyncio.create_task(
-                self._agent_db.log_ipad_events(
+                self._agent_db.events.log_ipad_events(
                     self._session_id, db_entries, trace_id=trace_id
                 )
             )
