@@ -48,7 +48,7 @@ class CorrectionHandler:
         if self._state.session_intent is None:
             self._state.session_intent = text
             return
-        from storage.db import _tokens, _jaccard
+        from storage.embeddings import _tokens, _jaccard
         sim = _jaccard(_tokens(self._state.session_intent), _tokens(text))
         if sim >= self._DRIFT_SIM_THRESHOLD:
             self._state.drift_streak = 0

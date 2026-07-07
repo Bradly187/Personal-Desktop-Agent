@@ -47,12 +47,14 @@ async def db(tmp_path):
 def _force_jaccard(monkeypatch):
     """Disable the MiniLM encoder for every test in this module: similarity
     becomes deterministic word overlap (Jaccard) and no model load happens."""
-    import storage.db as db_mod
+    import storage.repositories.memory_repo as mem_mod
 
     async def _no_encoder():
         return None
 
-    monkeypatch.setattr(db_mod, "_get_encoder", _no_encoder)
+    # _get_encoder moved to storage.embeddings in the god-object split; patch it
+    # where memory_repo (the counterexample store) bound the name at import.
+    monkeypatch.setattr(mem_mod, "_get_encoder", _no_encoder)
 
 
 # ============================================================================

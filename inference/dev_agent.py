@@ -80,6 +80,10 @@ log = logging.getLogger(__name__)
 # heavier module.
 from storage.personal_kb import is_personal_query as _is_personal_query
 from inference.plan_parser import AgentStep, AgentResult, _parse_plan_json, _parse_plan_json_report, _parse_plan, _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS
+# Back-compat re-exports: these moved to plan_parser in the god-object split,
+# but external callers (macro_store, macro_detector, tests) still import them
+# from here. Keep the bridge so the split stays internal.
+from inference.plan_parser import _PLAN_ACTIONS, _parse_deps, _extract_json_obj, _STEP_PATTERN  # noqa: F401
 from inference.context_builder import ContextBuilder
 from inference.saga_manager import SagaManager
 from inference.step_executor import StepExecutor

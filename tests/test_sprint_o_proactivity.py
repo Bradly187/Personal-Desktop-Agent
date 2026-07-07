@@ -26,7 +26,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from storage.db import AgentDB, _pid_alive
+from storage.db import AgentDB
+from storage.repositories.common import _pid_alive
 from core.proactive_scheduler import ProactiveScheduler, next_occurrence
 from core.event_rule_engine import EventRuleEngine, _eval_predicate, _get_path, _MISSING
 from core.email_watcher import EmailWatcher
