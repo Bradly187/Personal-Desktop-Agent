@@ -45,14 +45,16 @@ const BackendPanel = (() => {
     renderStatus(await window.agent.backend.status());
   }
 
+  function toggleOverlay() {
+    overlay().hidden = !overlay().hidden;
+    if (!overlay().hidden) {
+      logEl().textContent = logLines.join("\n");
+      logEl().scrollTop = logEl().scrollHeight;
+    }
+  }
+
   function init() {
-    pill().addEventListener("click", () => {
-      overlay().hidden = !overlay().hidden;
-      if (!overlay().hidden) {
-        logEl().textContent = logLines.join("\n");
-        logEl().scrollTop = logEl().scrollHeight;
-      }
-    });
+    pill().addEventListener("click", toggleOverlay);
     document.getElementById("overlay-close").addEventListener("click", () => {
       overlay().hidden = true;
     });
@@ -75,5 +77,5 @@ const BackendPanel = (() => {
     });
   }
 
-  return { init };
+  return { init, toggleOverlay };
 })();

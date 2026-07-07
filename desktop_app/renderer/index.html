@@ -33,6 +33,10 @@
         <div id="editor-host" class="center-view" hidden>
           <div id="editor"></div>
         </div>
+        <div id="diff-host" class="center-view" hidden>
+          <div id="diff-banner" hidden></div>
+          <div id="diff-editor"></div>
+        </div>
         <div id="image-host" class="center-view" hidden style="display: flex; justify-content: center; align-items: center; background: #0a0b0f; overflow: auto; padding: 20px;">
           <img id="image-preview" src="" alt="Image preview" style="max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 4px 12px rgba(0,0,0,0.3);" />
         </div>
@@ -46,6 +50,13 @@
       <div id="backend-bar">
         <button id="backend-pill" class="pill down" title="Backend status">backend: …</button>
         <span id="token-warning" hidden>token missing</span>
+      </div>
+      <div id="runs-panel">
+        <button id="runs-header" class="panel-title" title="Recent agent runs (click to collapse)">
+          <span>Runs <span id="runs-count"></span></span>
+          <span class="runs-chevron">▾</span>
+        </button>
+        <div id="runs-list"></div>
       </div>
       <div id="chat-host">
         <div class="frame-placeholder" id="chat-placeholder">Waiting for backend…</div>
@@ -70,6 +81,14 @@
     </section>
   </div>
 
+  <!-- Command palette / fuzzy file opener (Ctrl+Shift+P / Ctrl+P) -->
+  <div id="palette-overlay" hidden>
+    <div id="palette-box" role="dialog" aria-label="Command palette">
+      <input id="palette-input" type="text" spellcheck="false" autocomplete="off" />
+      <div id="palette-list" role="listbox"></div>
+    </div>
+  </div>
+
   <!-- xterm UMD must load BEFORE Monaco's AMD loader: with an AMD `define`
        present the UMD wrappers would register as modules instead of setting
        window.Terminal / window.FitAddon. -->
@@ -79,6 +98,8 @@
 
   <script src="splitters.js"></script>
   <script src="backend-panel.js"></script>
+  <script src="palette.js"></script>
+  <script src="sessions.js"></script>
   <script src="fs-tree.js"></script>
   <script src="terminal.js"></script>
   <script src="editor.js"></script>

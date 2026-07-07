@@ -9,8 +9,11 @@ const Editor = (() => {
   const monacoBase = new URL("../node_modules/monaco-editor/min", location.href).href;
 
   let editor = null;
+  let diffEditor = null;
   /** @type {Map<string, {model: any, savedVersionId: number, mtimeMs: number}>} */
   const files = new Map();
+  /** @type {Map<string, {originalModel: any, untracked: boolean}>} keyed by file path */
+  const diffs = new Map();
 
   function boot() {
     return new Promise((resolve) => {
@@ -93,5 +96,55 @@ const Editor = (() => {
     files.delete(path);
   }
 
-  return { boot, open, activate, isDirty, save, close };
+  // ---- Diff view (working copy vs git HEAD) --------------------------------
+  // The modified side IS the file's live model: edits made in the diff view
+  // mark the tab dirty and Ctrl+S saves them like any other edit.
+
+  function ensureDiffEditor() {
+    if (diffEditor) return diffEditor;
+    diffEditor = monaco.editor.createDiffEditor(document.getElementById("diff-editor"), {
+      theme: "vs-dark",
+      fontSize: 15,
+      automaticLayout: true,
+      originalEditable: false,
+      renderSideBySide: true,
+    });
+    diffEditor.getModifiedEditor().onDidChangeModelContent(() => App.renderTabs());
+    return diffEditor;
+  }
+
+  // {ok} | {ok, untracked} | {notRepo} | {error} — caller messages on the rest.
+  async function openDiff(path) {
+    const opened = await open(path);
+    if (!opened.ok) return opened;
+    const head = await window.agent.git.headContent(path);
+    if (head.notRepo || head.error) return head;
+
+    const old = diffs.get(path);
+    if (old) old.originalModel.dispose();
+    const originalModel = monaco.editor.createModel(head.content || "", languageFor(path));
+    diffs.set(path, { originalModel, untracked: !!head.untracked });
+    return { ok: true, untracked: !!head.untracked };
+  }
+
+  function activateDiff(path) {
+    const d = diffs.get(path);
+    const f = files.get(path);
+    if (!d || !f) return;
+    ensureDiffEditor().setModel({ original: d.originalModel, modified: f.model });
+    const banner = document.getElementById("diff-banner");
+    banner.hidden = !d.untracked;
+    if (d.untracked) banner.textContent = "Not in HEAD yet — showing the whole file as added.";
+    diffEditor.getModifiedEditor().focus();
+  }
+
+  function closeDiff(path) {
+    const d = diffs.get(path);
+    if (!d) return;
+    if (diffEditor && diffEditor.getModel()?.original === d.originalModel) diffEditor.setModel(null);
+    d.originalModel.dispose();
+    diffs.delete(path);
+  }
+
+  return { boot, open, activate, isDirty, save, close, openDiff, activateDiff, closeDiff };
 })();
