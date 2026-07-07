@@ -102,7 +102,6 @@ def test_r2_1_built_once_memoized(repo: Path, monkeypatch):
     agent._repo_context_enabled = True
     agent._repo_root = str(repo)
     calls = {"n": 0}
-    import inference.dev_agent as da
 
     real = build_workspace_context
 

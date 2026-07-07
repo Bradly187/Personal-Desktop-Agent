@@ -23,7 +23,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -93,7 +92,8 @@ def _measure_vram() -> None:
     # --- Ollama — use largest locally-available model ---
     print("\n  Querying Ollama for available models ...")
     try:
-        import urllib.request, json as _json
+        import urllib.request
+        import json as _json
 
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
             tags = _json.loads(r.read())
@@ -125,8 +125,8 @@ def _measure_vram() -> None:
         with urllib.request.urlopen(req, timeout=300) as resp:
             _json.loads(resp.read())
         _nvml_snapshot(f"After Ollama {chosen}")
-        print(f"\n  NOTE: llama3.1:70b not pulled. For full task-1.2 measurement,")
-        print(f"  run: ollama pull llama3.1:70b  then re-run --measure-vram")
+        print("\n  NOTE: llama3.1:70b not pulled. For full task-1.2 measurement,")
+        print("  run: ollama pull llama3.1:70b  then re-run --measure-vram")
     except Exception as exc:
         print(f"  [FAIL/SKIP] Ollama: {exc}")
 
@@ -480,14 +480,13 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 async def _run_pipeline(args: argparse.Namespace) -> None:
-    from core.command_executor import CommandExecutor
     from storage.db import AgentDB
     from inference.local_inference import (
         OllamaInference, LlamaCppInference, VLLMInference, VLLMServerInference, VLLMEmbedder,
     )
     from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
     from adaptive.behavioral_twin_state import BehavioralTwinState
-    from core.fusion_engine import FusionEngine, FusionConfig
+    from core.fusion_engine import FusionEngine
     from core.ipad_bridge import IPadBridge
     from adaptive.continuous_trainer import ContinuousTrainer
     from sensors.lidar_receiver import LiDARReceiver
@@ -729,7 +728,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         # Transparent proxy: every other domain/method delegates to the raw router, and
         # any cloud failure / missing credential falls back to the local plan model, so
         # OFF (or no credential) is byte-identical to legacy.
-        import typing
         dev_router: typing.Any = router
         try:
             from inference.cloud_plan_router import CloudPlanRouter, cloud_plan_enabled
@@ -1026,7 +1024,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             log.debug("Could not read vision_grounder cache config: %s", _cfg_exc)
         try:
             ua_ttl, ua_max = await agent_db.misc.get_cache_config("ui_automation")
-            from desktop.ui_automation import UIAutomationProvider as _UAP
             # UIAutomationProvider is a lazy singleton; update it when first accessed.
             from core import command_executor as _cex
             if _cex._ui_provider is not None:
@@ -1378,36 +1375,52 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                     pass
 
         if macro_detector is not None:
-            try: await macro_detector.stop()
-            except Exception: pass
+            try:
+                await macro_detector.stop()
+            except Exception:
+                pass
 
         if skill_registry is not None:
-            try: await skill_registry.stop()
-            except Exception: pass
+            try:
+                await skill_registry.stop()
+            except Exception:
+                pass
 
         if personal_kb is not None:
-            try: await personal_kb.stop()
-            except Exception: pass
+            try:
+                await personal_kb.stop()
+            except Exception:
+                pass
             
         if _kb_index_task is not None and not _kb_index_task.done():
-            try: await asyncio.wait_for(_kb_index_task, timeout=10)
-            except Exception: pass
+            try:
+                await asyncio.wait_for(_kb_index_task, timeout=10)
+            except Exception:
+                pass
 
         if chat_server is not None:
-            try: await chat_server.stop()
-            except Exception: pass
+            try:
+                await chat_server.stop()
+            except Exception:
+                pass
 
         if _vllm_pool is not None:
-            try: await _vllm_pool.stop()
-            except Exception: pass
+            try:
+                await _vllm_pool.stop()
+            except Exception:
+                pass
 
         if dashboard_obj is not None:
-            try: dashboard_obj.stop()
-            except Exception: pass
+            try:
+                dashboard_obj.stop()
+            except Exception:
+                pass
             
         if m is not None:
-            try: m.stop_vram_poller()
-            except Exception: pass
+            try:
+                m.stop_vram_poller()
+            except Exception:
+                pass
 
         if session_id >= 0 and agent_db is not None:
             try:
@@ -1416,11 +1429,14 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                 analyzer.close()
                 report = analyzer.format_report(summary)
                 log.info("Session summary:\n%s", report)
-            except Exception: pass
+            except Exception:
+                pass
 
         if indexer is not None:
-            try: await indexer.stop()
-            except Exception: pass
+            try:
+                await indexer.stop()
+            except Exception:
+                pass
 
         if agent_db is not None and session_id >= 0:
             try:
@@ -1428,21 +1444,27 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                 flushed = await get_tracer().flush_all(agent_db, session_id)
                 if flushed:
                     log.info("Trace flush: %d spans persisted during shutdown", flushed)
-            except Exception: pass
+            except Exception:
+                pass
 
         if shutdown is not None:
-            try: await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
-            except Exception: pass
+            try:
+                await shutdown.shutdown(trainer=trainer, agent_db=agent_db, session_id=session_id, twin_state=twin_state)
+            except Exception:
+                pass
             
         if audit is not None:
             try:
                 await audit.log_session_stop(reason="normal")
                 await audit.close()
-            except Exception: pass
+            except Exception:
+                pass
             
         if crash_marker is not None:
-            try: crash_marker.clear()
-            except Exception: pass
+            try:
+                crash_marker.clear()
+            except Exception:
+                pass
 # ---------------------------------------------------------------------------
 
 async def _run_viewer_only(args: argparse.Namespace) -> None:
@@ -1702,6 +1724,11 @@ def main() -> None:
     # non-default set so a session's configuration is visible in the log head.
     from core.flags import report_da_flags
     report_da_flags()
+
+    # approval_config.json schema check (IG-9): a typo'd key or bad policy
+    # value must fail loudly at boot, not silently weaken the approval gate.
+    from core.config_validation import check_approval_config_at_startup
+    check_approval_config_at_startup()
 
     # Register a last-resort trace dump so the in-memory ring buffer survives
     # unclean exits (OOM, uncaught exception, kill -9 on parent process).

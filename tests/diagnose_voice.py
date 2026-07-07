@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import struct
 import sys
 import time
 from pathlib import Path
@@ -178,7 +177,7 @@ async def _test_pipeline():
     try:
         from core.command_executor import Command
         from sensors.whisper_stream import WhisperStream
-        from core.fusion_engine import FusionEngine, FusionConfig
+        from core.fusion_engine import FusionEngine
 
         received: list[Command] = []
 

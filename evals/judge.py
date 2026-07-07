@@ -25,7 +25,6 @@ import re
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
 
 _SUITES_DIR = Path(__file__).parent / "suites"
 

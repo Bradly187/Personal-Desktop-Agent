@@ -15,14 +15,13 @@ import asyncio
 import sys
 import os
 from dataclasses import dataclass, field
-from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from adaptive.behavioral_twin_state import BehavioralTwinState, TwinSnapshot, _DEFAULT_SNAPSHOT
+from adaptive.behavioral_twin_state import BehavioralTwinState, TwinSnapshot
 from adaptive.continuous_trainer import ContinuousTrainer
 
 

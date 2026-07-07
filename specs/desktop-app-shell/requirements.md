@@ -8,8 +8,8 @@ Brad drives the agent through the browser chat UI (`:8770/`) and dashboard (`:87
 
 Related: `../chat-workbench-parity/` (the chat UI this shell embeds), `../dashboard-observability-gaps/` (the dashboard it embeds).
 
-**Status:** Shipped (PR #160)
-**Approved:** Brad, 2026-07-02 (spec + tasks approved in-session via plan approval; layout, whole-filesystem scope, and backend-lifecycle-owner decisions confirmed by Brad in the same session)
+**Status:** Shipped (PR #160); v1.1 gap-closure additions (R6–R9) in progress per `docs/audits/2026-07-03-desktop-shell-gap-analysis.md`
+**Approved:** Brad, 2026-07-02 (spec + tasks approved in-session via plan approval; layout, whole-filesystem scope, and backend-lifecycle-owner decisions confirmed by Brad in the same session); v1.1 additions requested by Brad 2026-07-03 ("tackle the recommendations in order")
 **Owner / author session:** Claude Code
 
 ---
@@ -85,6 +85,44 @@ Related: `../chat-workbench-parity/` (the chat UI this shell embeds), `../dashbo
 4. THE Shell SHALL provide keyboard shortcuts: `Ctrl+1..9` (tabs), `Ctrl+PgUp/PgDn` (cycle), `Ctrl+W` (close tab), `Ctrl+S` (save), ``Ctrl+` `` (focus terminal), `Ctrl+B` (toggle tree); tab-switch shortcuts SHALL also be registered as Menu accelerators so they work while an iframe has focus.
 5. FOR ALL clickable controls (tabs, tree rows, buttons), targets SHALL be ≥ 28 px in the smaller dimension.
 
+### Requirement 6: Diff view (v1.1 — SG-2)
+
+**User Story:** As Brad, I want to see what changed in a file against the last commit, so that I can review agent edits without leaving the shell.
+
+#### Acceptance Criteria
+1. WHEN `Ctrl+Shift+D` is pressed on a file tab (or the palette command is run), THE Shell SHALL open a `⇄`-titled diff tab showing git `HEAD` (left, read-only) against the live working model (right, editable) in Monaco's side-by-side diff editor.
+2. THE modified side SHALL be the file's live model: edits made in the diff view mark the tab dirty and `Ctrl+S` saves them.
+3. IF the file is untracked, THEN THE Shell SHALL show the whole file as added with a banner; IF the file is outside a git repository or binary/oversized, THEN THE Shell SHALL refuse with a message.
+4. Diff tabs SHALL NOT persist across restart; closing a file tab SHALL also close its diff tab (shared model).
+
+### Requirement 7: OS notifications (v1.1 — SG-4)
+
+**User Story:** As Brad, I want a toast when the agent needs me, so that a buried window plus a muted PC can't silently deny an approval.
+
+#### Acceptance Criteria
+1. WHEN `~/.claude/approval/pending` appears, THE Shell SHALL raise an OS notification carrying the prompt text; clicking it SHALL focus the shell window.
+2. WHEN the backend transitions from a live mode to `down` unexpectedly, THE Shell SHALL raise an OS notification with the last error. Deliberate stops (Stop button, quit) SHALL NOT notify.
+3. WHEN a run completes with latency ≥ 10 s, THE Shell SHALL raise a finished/failed notification (short runs finish while being watched — no toast).
+4. THE Shell SHALL suppress all toasts while the window is focused; notifications are best-effort and SHALL never crash the shell.
+
+### Requirement 8: Command palette + fuzzy file open (v1.1 — SG-3)
+
+**User Story:** As Brad, I want keyboard-first navigation, so that pointing — the expensive input on flare days — is optional.
+
+#### Acceptance Criteria
+1. WHEN `Ctrl+Shift+P` is pressed (works with iframe focus — Menu accelerator), THE Shell SHALL open a command palette listing all shell actions plus open tabs; `Ctrl+P` SHALL open the same surface in fuzzy file mode.
+2. File mode SHALL rank recent files first (localStorage, cap 50), then a repo-root index (BFS, ignore set incl. node_modules/.venv, capped at 20 000 files with truncation reported).
+3. THE palette SHALL be fully operable by keyboard (type-to-filter, arrows, Enter, Esc) with rows ≥ 28 px.
+
+### Requirement 9: Recent runs panel (v1.1 — SG-1)
+
+**User Story:** As Brad, I want to see recent agent runs at a glance, so that the shell reflects what the agent has been doing without opening the dashboard.
+
+#### Acceptance Criteria
+1. THE Shell SHALL show a collapsible Runs section (right panel, above chat) listing recent traces from the existing `GET /api/recent-traces` — success dot, action·source, latency, relative time; rows ≥ 28 px; collapse state persisted.
+2. THE panel SHALL poll every 5 s, degrade to a "Backend not reachable" note on failure, and SHALL NOT add any backend endpoint or store (surface only).
+3. WHEN a run row is clicked, THE Shell SHALL switch to the Dashboard tab (replay/detail lives there).
+
 ---
 
 ## 4. Technical Design
@@ -110,11 +148,18 @@ desktop_app_shell:
   log_tail_lines: 500
 ```
 
-### Non-goals (v1)
-- Packaging/installer (electron-builder) — run via `npm start`.
+### Non-goals — permanent (declared 2026-07-03, gap analysis SG-12 et al.)
+
+These are *decisions*, not deferrals — do not re-open without a new spec:
+
+- **LSP / IntelliSense, debugger, refactoring assists, extension system** — full-IDE territory. The editor is a spot-edit surface (same posture as Claude Code Desktop's); heavy editing belongs to VS Code or the agent's own verbs. Adding an LSP stack would drag in per-language servers, config UI, and update churn that a single-user shell can't amortize.
+- **Packaging / installer / auto-update (electron-builder)** — single user, single machine; `npm start` + the logon-task/watchdog path covers launch. Revisit only if the shell is ever distributed.
+
+### Non-goals (v1 — still open to later specs)
 - Graceful backend shutdown endpoint (taskkill /F is crash-safe: SQLite WAL).
 - Pidfile re-adopt of an orphaned owned backend (attach covers it).
 - Agent-driven control of the shell (it is a user-driven surface; approval gates unaffected).
+- Multi-terminal / shell selection; settings UI; git status decorations in the tree; HTML/app preview tab (SG-5/6/9/10/11 in the 2026-07-03 gap analysis — candidates for v1.2).
 
 ---
 

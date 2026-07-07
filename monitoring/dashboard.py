@@ -31,11 +31,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
-import os
 import sys
 import time
-import threading
 import urllib.request
 import urllib.error
 from typing import Optional, TYPE_CHECKING
@@ -283,7 +280,7 @@ class CursesRenderer:
             self._attr(_COL_WARN) if (lat_ema or 9999) < 700 else
             self._attr(_COL_ERR)
         )
-        self._addstr(row, 4, f"EMA: ")
+        self._addstr(row, 4, "EMA: ")
         self._addstr(row, 9, _ms(lat_ema), ema_attr)
         self._addstr(row, 19, f"  p50: {_ms(p50)}  p95: {_ms(p95)}  n={lat_count}")
         row += 1
@@ -515,8 +512,8 @@ def main() -> None:
 
     # Try curses
     try:
-        import curses
-        print(f"Starting live dashboard (q or Ctrl-C to quit) …")
+        import curses  # noqa: F401 — the import itself is the availability probe
+        print("Starting live dashboard (q or Ctrl-C to quit) …")
         _run_curses(fetcher, args.interval)
     except ImportError:
         print("curses not available — falling back to plain text (pip install windows-curses)")

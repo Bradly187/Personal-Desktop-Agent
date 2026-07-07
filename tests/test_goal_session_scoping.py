@@ -7,7 +7,6 @@ allows_action() adds two guards on top of allows():
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path

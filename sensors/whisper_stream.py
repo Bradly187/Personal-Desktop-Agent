@@ -107,7 +107,6 @@ except ImportError:
                 "energy gate. Install with: pip install webrtcvad-wheels")
 
 if TYPE_CHECKING:
-    from core.command_executor import Command
     from core.fusion_engine import FusionEngine
 
 

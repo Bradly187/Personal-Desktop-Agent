@@ -12,6 +12,7 @@ import CoreMotion
 /// angle == -tiltRange mapping to 0.0 (or 1.0 for pitch).
 ///
 /// **Validates: Requirements 1.3, 1.4, 3.5**
+@MainActor
 final class LinearMappingPropertyTests: XCTestCase {
 
     private var suiteName: String!
@@ -114,6 +115,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(true, forKey: "tiltPositionMode")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -156,6 +158,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -178,6 +181,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -199,6 +203,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -220,6 +225,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -241,6 +247,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral
@@ -270,11 +277,17 @@ final class LinearMappingPropertyTests: XCTestCase {
             suite.set(tiltRange, forKey: "tiltRange")
 
             let settings = SettingsStore(defaults: suite)
+            // defaults treats 0.0 as "unset" (.nonZero ?? 1.5), so disabling the
+            // dead zone must happen on the live instance, not via the suite.
+            settings.tiltDeadZone = 0.0
             let sensor = TiltSensor(ws: ws, settings: settings)
             sensor.neutralGravity = defaultNeutral
 
-            let deltaPitchDeg = Double.random(in: -tiltRange...tiltRange)
-            let deltaRollDeg = Double.random(in: -tiltRange...tiltRange)
+            // Neutral pitch is 45 deg; keep total pitch/roll clear of the +/-90 deg
+            // atan2 singularity where this test's gravityVector construction wraps.
+            let deltaCap = min(tiltRange, 40.0)
+            let deltaPitchDeg = Double.random(in: -deltaCap...deltaCap)
+            let deltaRollDeg = Double.random(in: -deltaCap...deltaCap)
 
             let gravity = gravityVector(
                 deltaPitchDeg: deltaPitchDeg,
@@ -304,6 +317,7 @@ final class LinearMappingPropertyTests: XCTestCase {
         suite.set(25.0, forKey: "tiltRange")
 
         let settings = SettingsStore(defaults: suite)
+        settings.tiltDeadZone = 0.0  // suite write of 0.0 is a no-op (.nonZero ?? 1.5)
         let ws = WebSocketManager()
         let sensor = TiltSensor(ws: ws, settings: settings)
         sensor.neutralGravity = defaultNeutral

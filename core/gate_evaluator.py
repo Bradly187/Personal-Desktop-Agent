@@ -20,7 +20,7 @@ import asyncio
 import logging
 import time
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Any, Coroutine
+from typing import TYPE_CHECKING, Callable, Optional, Any, Coroutine
 
 from dataclasses import dataclass
 from storage.personal_kb import is_personal_query as _is_personal_query

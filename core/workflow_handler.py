@@ -20,7 +20,7 @@ this module (never read outside these methods on the original class).
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 from core.workflow_voice import (
     parse_workflow_request,
@@ -34,10 +34,10 @@ from core.workflow_voice import (
 log = logging.getLogger(__name__)
 
 
-from typing import Any, Callable, Coroutine, Optional, TYPE_CHECKING
+from typing import Any, Coroutine, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from core.event_dispatcher import Command
+    pass
 
 class WorkflowHandler:
     def __init__(

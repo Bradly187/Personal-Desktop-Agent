@@ -4,7 +4,11 @@ For each model, run the 12-prompt verb suite at increasing num_predict budgets a
 report accuracy + empty-output count per budget. Single run per prompt (trend, not
 latency percentiles). Keeps each model resident across its budget sweep (no eviction).
 """
-import argparse, json, urllib.request, re, sys, time
+import argparse
+import json
+import urllib.request
+import re
+import time
 
 _ap = argparse.ArgumentParser(description="Accuracy vs num_predict sweep (verb suite).")
 _ap.add_argument("--models", default="", help="comma-separated models (default: gemma4 reasoning variants)")

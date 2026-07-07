@@ -24,50 +24,38 @@ All dev-domain queries are handled by specialist models.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
-import shutil
-import subprocess
 import time
-import uuid
-import webbrowser
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from core.approval_keywords import classify_confirmation
 from core.domain_classifier import DomainClassifier
 from core.events import (
-    TOPIC_REPLAN_EXHAUSTED, TOPIC_STEP_FAILED,
     TOPIC_PLAN_GENERATED, TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
     TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
-    TOPIC_DAG_WALKTHROUGH, TOPIC_DAG_RUN_FINALIZED,
-    TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
+    TOPIC_DAG_WALKTHROUGH, TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
 )
 from inference.edit_format import (
     HASHLINE,
     HASHLINE_PROMPT_INSTRUCTIONS,
-    SEARCH_REPLACE,
     SEARCH_REPLACE_PROMPT_INSTRUCTIONS,
     UDIFF,
     UDIFF_PROMPT_INSTRUCTIONS,
     EditApplier,
-    render_hashline,
 )
-from inference.critic import BLOCK, PASS, REVISE, Critic, CriticVerdict, Finding
+from inference.critic import PASS, REVISE, Critic, CriticVerdict, Finding
 from inference.tester import Tester, is_testable_source
 from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
     from inference.codebase_indexer import CodebaseIndexer
-    from core.command_executor import Command, CommandExecutor
     from adaptive.continuous_trainer import ContinuousTrainer
     from storage.db import AgentDB
     from core.hybrid_coordinator import HybridCoordinator
     from inference.bridge_client import BridgeClient
-    from mcp_server.tools import screen as screen_tools
 
 log = logging.getLogger(__name__)
 
@@ -75,10 +63,6 @@ log = logging.getLogger(__name__)
 # RAG taint fences + trust-classifier / content-filter singletons moved to
 # inference/dev_common.py during the god-object split (shared with
 # step_executor and context_builder without a circular import).
-from inference.dev_common import (
-    _RAG_OPEN_FENCE, _RAG_CLOSE_FENCE, _RAG_MAX_CHARS,
-    _get_trust_classifier, _get_content_filter, _strip_html,
-)
 
 # ---------------------------------------------------------------------------
 # Step model
@@ -95,7 +79,7 @@ from inference.dev_common import (
 # coordinator can share it (forcing such queries local) without importing this
 # heavier module.
 from storage.personal_kb import is_personal_query as _is_personal_query
-from inference.plan_parser import AgentStep, AgentResult, DroppedStep, PlanParseReport, _PLAN_ACTIONS, _STEP_PATTERN, _extract_json_obj, _parse_plan_json, _parse_plan_json_report, _parse_plan, _parse_deps, _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS
+from inference.plan_parser import AgentStep, AgentResult, _parse_plan_json, _parse_plan_json_report, _parse_plan, _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS
 from inference.context_builder import ContextBuilder
 from inference.saga_manager import SagaManager
 from inference.step_executor import StepExecutor
@@ -1988,7 +1972,7 @@ class DevAgent:
             log.debug("DevAgent._speak_plan_completion: TTS failed: %s", exc)
 
     async def _generate_walkthrough(self, result: AgentResult) -> Optional[str]:
-        if not os.environ.get("DA_POST_RUN_WALKTHROUGH", "0").strip().lower() in ("1", "true", "yes", "on"):
+        if os.environ.get("DA_POST_RUN_WALKTHROUGH", "0").strip().lower() not in ("1", "true", "yes", "on"):
             return None
             
         try:

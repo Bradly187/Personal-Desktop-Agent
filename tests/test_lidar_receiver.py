@@ -11,10 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import base64
 import time
-from unittest.mock import patch
 
 import numpy as np
-import pytest
 
 from sensors.lidar_receiver import LiDARReceiver
 from tests.conftest import make_depth_msg

@@ -3,10 +3,8 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import time
-import uuid
 import webbrowser
 from typing import Optional, TYPE_CHECKING
 from pathlib import Path
@@ -14,8 +12,8 @@ from pathlib import Path
 from inference.plan_parser import AgentStep, AgentResult, _extract_json_obj
 from core.approval_keywords import classify_confirmation
 from core.events import TOPIC_DAG_APPROVAL
-from inference.edit_format import EditApplier, render_hashline, HASHLINE, UDIFF, SEARCH_REPLACE
-from inference.critic import BLOCK, PASS, REVISE, Critic, CriticVerdict, Finding
+from inference.edit_format import EditApplier, render_hashline, HASHLINE, SEARCH_REPLACE
+from inference.critic import BLOCK, REVISE
 from inference.dev_common import (
     _RAG_OPEN_FENCE, _RAG_CLOSE_FENCE,
     _get_trust_classifier, _get_content_filter, _strip_html,
@@ -25,7 +23,6 @@ if TYPE_CHECKING:
     from inference.dev_agent import DevAgent
     from inference.model_router import ModelRouter
     from core.hybrid_coordinator import HybridCoordinator
-    from inference.bridge_client import BridgeClient
     from storage.db import AgentDB
 
 log = logging.getLogger(__name__)

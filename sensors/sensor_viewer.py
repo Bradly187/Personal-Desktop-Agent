@@ -26,7 +26,6 @@ from __future__ import annotations
 import base64
 import io
 import logging
-import os
 import queue
 import threading
 import time
@@ -35,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 log = logging.getLogger("sensor_viewer")
 
@@ -378,7 +377,6 @@ class SensorViewer:
 
     def _run_tk(self) -> None:
         import tkinter as tk
-        from tkinter import ttk
 
         root = tk.Tk()
         root.title(self._title)
@@ -685,7 +683,6 @@ class SensorViewer:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import sys
 
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(name)s %(message)s")
 

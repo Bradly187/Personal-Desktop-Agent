@@ -27,7 +27,8 @@ class ContextBuilder:
 
     def set_repo_root(self, path: str) -> bool:
         rp = os.path.realpath(os.path.expanduser(path or ''))
-        if not os.path.isdir(rp): return False
+        if not os.path.isdir(rp):
+            return False
         self._repo_root = rp
         return True
 

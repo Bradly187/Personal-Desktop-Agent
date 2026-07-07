@@ -1,6 +1,5 @@
 """Retry utility — fixture for dev_critic eval (dc-06)."""
 
-import time
 
 
 def with_timeout(fn, timeout):

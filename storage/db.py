@@ -29,12 +29,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
-from storage.repositories.common import _GOAL_LEASE_TTL_S, _pid_alive
-import math
-import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -55,12 +50,9 @@ except ImportError:
     _DUCKDB_AVAILABLE = False
     log.warning("duckdb not installed — AnalyticsDB disabled")
 
-from storage.embeddings import (
-    _get_encoder, _encode_sync, _cosine, _tokens, _jaccard, _recency_weight, _fse_score
-)
 
 if TYPE_CHECKING:
-    from core.command_executor import Command
+    pass
 
 
 # ---------------------------------------------------------------------------

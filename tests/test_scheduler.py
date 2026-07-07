@@ -278,7 +278,6 @@ class TestDevTaskTimeout:
     @pytest.mark.asyncio
     async def test_dev_task_timeout_sets_future_exception(self):
         """A DEV_AGENT task that never completes should raise TimeoutError on its future."""
-        from core.scheduler import _DEV_TASK_TIMEOUT_S
 
         # Patch timeout to a tiny value so the test runs fast
         import core.scheduler as sched_mod

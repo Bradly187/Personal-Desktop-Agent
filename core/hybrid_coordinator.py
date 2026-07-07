@@ -42,18 +42,15 @@ discarded gestures (Gate 1, low confidence) return early WITHOUT a DB row, so
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
-from core.gate_evaluator import GateEvaluator, _EFFECTIVE_CFG
-from core.inference_runner import InferenceRunner, _CloudInference, _PENDING_INFERENCE_IDS
+from core.gate_evaluator import GateEvaluator
+from core.inference_runner import InferenceRunner, _CloudInference
 from core.action_executor import ActionExecutor
 from core.workflow_handler import WorkflowHandler
 from core.coordinator_state import CoordinatorState
@@ -64,9 +61,6 @@ from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
     OllamaInference,
-    _build_prompt,
-    get_inference_capture,
-    set_inference_capture,
 )
 from desktop.vision_grounder import VisionGrounder
 from core.conversation_state import ConversationState
@@ -74,7 +68,6 @@ from core.workflow_voice import workflow_voice_config
 from core.conversation_mode import ConversationMode, conversation_mode_config
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
-from monitoring.cost_ledger import estimate_cost
 
 if TYPE_CHECKING:
     from storage.audit_log import AuditLog

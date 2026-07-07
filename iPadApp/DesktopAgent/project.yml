@@ -62,3 +62,30 @@ targets:
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGNING_ALLOWED: NO
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
+
+  # IG-6 (2026-07-05 audit): unit-test bundle so the 20 XCTest files in
+  # ../Tests actually run in CI. XcodeGen sets TEST_HOST automatically from
+  # the app-target dependency, which @testable import DesktopAgent needs.
+  DesktopAgentTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ../Tests
+    dependencies:
+      - target: DesktopAgent
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+
+schemes:
+  DesktopAgent:
+    build:
+      targets:
+        DesktopAgent: all
+        DesktopAgentTests: [test]
+    test:
+      targets:
+        - DesktopAgentTests

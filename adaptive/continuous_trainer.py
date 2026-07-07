@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import TYPE_CHECKING, Optional
 
 log = logging.getLogger(__name__)
@@ -361,7 +360,7 @@ class ContinuousTrainer:
         if not self._config:
             return
         try:
-            from core.slo import evaluate, BREACH_LATENCY, BREACH_SUCCESS, HEADROOM
+            from core.slo import evaluate, BREACH_LATENCY, BREACH_SUCCESS
             stats = await self._db.inferences.get_inference_stats_by_domain(limit=1000)
         except Exception as exc:
             log.debug("ContinuousTrainer._adapt_per_domain_slo: stats failed: %s", exc)
@@ -661,7 +660,6 @@ class ContinuousTrainer:
         After calibration, pushes the updated thresholds directly into the
         GestureProcessor instance so changes take effect immediately.
         """
-        from sensors.gesture_processor import _PAIN_DAY_VELOCITY_FACTOR
 
         motion_gestures = [
             "PEACE_SWIPE_LEFT", "PEACE_SWIPE_RIGHT",

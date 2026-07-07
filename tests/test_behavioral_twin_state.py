@@ -21,7 +21,6 @@ import asyncio
 import dataclasses
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 from hypothesis import given, settings

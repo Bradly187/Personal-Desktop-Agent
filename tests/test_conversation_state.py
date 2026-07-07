@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.conversation_state import ConversationState, Turn
+from core.conversation_state import ConversationState
 from core.command_executor import Command
 
 

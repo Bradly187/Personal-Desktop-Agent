@@ -3,9 +3,7 @@
 Provides structured wrappers around git operations to avoid terminal parsing errors.
 """
 
-import os
 import subprocess
-from pathlib import Path
 from typing import Dict, Any
 
 from core.goal_session import GoalSessionStore, _path_in_scope

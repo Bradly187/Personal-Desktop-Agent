@@ -7,7 +7,15 @@ with a hard timeout. Pass = subprocess exits 0. Failure is classified
 
 Gates the code/plan slot consolidation decision (gemma4 vs qwen3-coder:30b).
 """
-import argparse, json, urllib.request, re, subprocess, sys, tempfile, time, os
+import argparse
+import json
+import urllib.request
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import os
 
 OLLAMA = "http://localhost:11434/api/generate"
 NUM_PREDICT = 4096          # generous: thinking trace + function body

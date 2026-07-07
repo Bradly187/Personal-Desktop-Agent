@@ -52,7 +52,6 @@ _DELEGATE_PROMPT_INSTRUCTIONS = (
 # Personal-document query detection lives in storage.personal_kb so the
 # coordinator can share it (forcing such queries local) without importing this
 # heavier module.
-from storage.personal_kb import is_personal_query as _is_personal_query
 
 
 @dataclass

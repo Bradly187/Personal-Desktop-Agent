@@ -18,12 +18,10 @@ Usage (wired by CommandExecutor.execute):
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +171,6 @@ class ActionVerifier:
             return 0.0
 
         # Threshold diff at 10/255 to ignore JPEG compression noise
-        import struct
         changed = sum(
             1 for r, g, b in diff.getdata()  # type: ignore[attr-defined,misc]
             if r > 10 or g > 10 or b > 10

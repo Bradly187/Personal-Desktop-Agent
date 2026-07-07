@@ -4,7 +4,15 @@ Discriminating follow-up to coding_eval.py (which hit a ceiling: all models 10/1
 Reasoning coders run in their real think=true mode (clean answer in `response`).
 Execute-and-check, subprocess-sandboxed with a hard timeout.
 """
-import argparse, json, urllib.request, re, subprocess, sys, tempfile, time, os
+import argparse
+import json
+import urllib.request
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import os
 
 OLLAMA = "http://localhost:11434/api/generate"
 NUM_PREDICT = 6144

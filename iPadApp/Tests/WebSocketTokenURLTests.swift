@@ -4,6 +4,7 @@ import XCTest
 /// Unit tests for `WebSocketManager.appendingToken(_:to:)` — the pairing-token
 /// (security fix C1) query-param builder. Verifies the iPad sends `?token=…` on
 /// the WebSocket URL so the bridge does not reject the connection with HTTP 401.
+@MainActor
 final class WebSocketTokenURLTests: XCTestCase {
 
     private let base = URL(string: "ws://192.168.1.50:8765/ws")!

@@ -15,6 +15,7 @@ function subscribe(channel) {
 contextBridge.exposeInMainWorld("agent", {
   fs: {
     listDrives: () => ipcRenderer.invoke("fs:listDrives"),
+    listFilesRec: (path) => ipcRenderer.invoke("fs:listFilesRec", path),
     listDir: (path) => ipcRenderer.invoke("fs:listDir", path),
     readFile: (path, opts) => ipcRenderer.invoke("fs:readFile", path, opts),
     readFileBase64: (path) => ipcRenderer.invoke("fs:readFileBase64", path),
@@ -30,6 +31,9 @@ contextBridge.exposeInMainWorld("agent", {
     onData: subscribe("pty:data"),
     onExit: subscribe("pty:exit"),
   },
+  git: {
+    headContent: (path) => ipcRenderer.invoke("git:headContent", path),
+  },
   backend: {
     status: () => ipcRenderer.invoke("backend:status"),
     start: () => ipcRenderer.invoke("backend:start"),
@@ -40,5 +44,8 @@ contextBridge.exposeInMainWorld("agent", {
   app: {
     pickFolder: () => ipcRenderer.invoke("app:pickFolder"),
     onShortcut: subscribe("shortcut"),
+  },
+  notify: {
+    toast: (title, body) => ipcRenderer.send("notify:toast", { title, body }),
   },
 });

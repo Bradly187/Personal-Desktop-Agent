@@ -1,48 +1,55 @@
-name: CI Tests
+name: Tests & Lint
+
+# IG-1 / IG-2a (2026-07-05 industry-patterns audit).
+# - lint: ruff on a stock ubuntu runner (~seconds).
+# - pytest: the FULL unit suite (~1,200 tests, ~93% mocked) on windows-latest.
+#   Windows is the product's only target platform (pywin32 / windows-curses /
+#   Win32 UIAutomation), so a Linux runner would test a platform we don't ship.
+#   Model-backed suites still gate locally at pre-push (they need Ollama); the
+#   Tier-1 behavioral evals live in evals.yml. See docs/decisions.md D029.
 
 on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ruff
+        run: pip install ruff
+      - name: Ruff check
+        run: ruff check . --output-format github
+
   pytest:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      
+      - uses: actions/checkout@v5
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          
+          python-version: '3.14'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
       - name: Install dependencies
-        run: pip install -r requirements.lock
-        
-      - name: Run pytest with coverage
+        # pytest itself is not in requirements.txt (only pytest-asyncio is);
+        # torch/vllm/playwright are optional installs the suite degrades without.
         run: |
-          pip install pytest-cov
-          pytest --cov=core --cov=inference --cov=storage --cov=monitoring --cov=sensors --cov=adaptive --cov=desktop --cov=evals --cov-report=term --cov-report=xml
-          
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage.xml
-
-  mypy:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          
-      - name: Install dependencies
-        run: pip install -r requirements.lock mypy
-        
-      - name: Run mypy on monitoring
-        run: mypy --ignore-missing-imports monitoring/
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run unit suite
+        # Root conftest.py already excludes the 3 standalone E2E harnesses.
+        run: python -m pytest tests/ -q

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -144,7 +143,7 @@ class TestAcousticProfilerThresholds:
         return profiler
 
     def test_vad_threshold_is_fraction_of_baseline_rms(self):
-        from calibration.acoustic_profiler import AcousticProfiler, VAD_FRACTION
+        from calibration.acoustic_profiler import VAD_FRACTION
         profiler = self._seeded_profiler(rms=0.08)
         expected = 0.08 * VAD_FRACTION
         assert profiler._vad_threshold == pytest.approx(expected, abs=0.005)
@@ -197,7 +196,7 @@ class TestAcousticProfilerDrift:
         assert clarity > 0.0, "Degraded voice should produce nonzero clarity score"
 
     def test_drift_callback_fired_on_threshold(self):
-        from calibration.acoustic_profiler import AcousticProfiler, VoiceMetrics, DRIFT_RECAL_THRESHOLD
+        from calibration.acoustic_profiler import AcousticProfiler, VoiceMetrics
         db = _make_db()
         profiler = AcousticProfiler(agent_db=db)
         profiler._event_loop = asyncio.new_event_loop()

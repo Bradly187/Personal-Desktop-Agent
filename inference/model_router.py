@@ -84,7 +84,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Optional
 

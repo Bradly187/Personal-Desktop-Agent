@@ -25,7 +25,7 @@ import logging
 import math
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command
@@ -311,10 +311,6 @@ class FusionEngine:
     def set_scheduler(self, scheduler) -> None:
         """Wire AccessibilityScheduler so _emit() submits at the correct priority."""
         self._scheduler = scheduler
-
-    def set_metrics(self, metrics) -> None:
-        """Wire Metrics singleton for in-flight route-task tracking."""
-        self._metrics = metrics
 
     @staticmethod
     def _source_to_priority(source: str):

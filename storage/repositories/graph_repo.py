@@ -1,17 +1,11 @@
 from __future__ import annotations
 import json
 import logging
-from storage.repositories.common import _GOAL_LEASE_TTL_S, _pid_alive
-import math
-import os
-import time
-import hashlib
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from storage.embeddings import _get_encoder, _encode_sync, _cosine, _tokens, _jaccard, _recency_weight, _fse_score
 
 if TYPE_CHECKING:
-    from core.command_executor import Command
+    pass
 
 log = logging.getLogger(__name__)
 

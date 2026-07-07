@@ -17,9 +17,7 @@ Exit codes:
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
-import time
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 

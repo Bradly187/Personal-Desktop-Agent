@@ -10,10 +10,13 @@ const auth = require("./main/auth");
 const backend = require("./main/backend");
 const ptyIpc = require("./main/pty");
 const fsIpc = require("./main/fs-ipc");
+const gitIpc = require("./main/git-ipc");
+const notify = require("./main/notify");
 
 let win = null;
 
 function sendToRenderer(channel, payload) {
+  if (channel === "backend:state-changed") notify.onBackendState(payload);
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
@@ -62,6 +65,7 @@ function buildMenu() {
       label: "File",
       submenu: [
         { label: "Save", accelerator: "CmdOrCtrl+S", click: fwd("save") },
+        { label: "Diff vs Git HEAD", accelerator: "CmdOrCtrl+Shift+D", click: fwd("diffActive") },
         { label: "Close Tab", accelerator: "CmdOrCtrl+W", click: fwd("closeTab") },
         { type: "separator" },
         { role: "quit" },
@@ -70,6 +74,9 @@ function buildMenu() {
     {
       label: "View",
       submenu: [
+        { label: "Go to File…", accelerator: "CmdOrCtrl+P", click: fwd("paletteFiles") },
+        { label: "Command Palette…", accelerator: "CmdOrCtrl+Shift+P", click: fwd("paletteCommands") },
+        { type: "separator" },
         ...tabItems,
         { type: "separator" },
         { label: "Next Tab", accelerator: "CmdOrCtrl+PageDown", click: fwd("tabNext") },
@@ -139,10 +146,12 @@ app.whenReady().then(() => {
   nativeTheme.themeSource = "dark";
   auth.installAuthInjection();
   fsIpc.register();
+  gitIpc.register();
   ptyIpc.register();
   backend.register(sendToRenderer);
   buildMenu();
   createWindow();
+  notify.init(() => win);
   backend.ensureBackend();
   if (process.env.SHELL_SMOKE) require("./main/smoke").run(win);
 });

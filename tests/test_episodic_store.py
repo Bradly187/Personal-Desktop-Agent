@@ -7,7 +7,6 @@ falls back to Jaccard, so these tests pass with or without sentence-transformers
 import os
 import tempfile
 
-import pytest
 
 from storage.db import AgentDB
 from storage.memory_manager import MemoryManager

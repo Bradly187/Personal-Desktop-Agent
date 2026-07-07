@@ -26,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from inference.dev_agent import AgentResult, AgentStep, DevAgent
+from inference.dev_agent import AgentResult, DevAgent
 
 _GIT = shutil.which("git")
 requires_git = pytest.mark.skipif(_GIT is None, reason="git not on PATH")

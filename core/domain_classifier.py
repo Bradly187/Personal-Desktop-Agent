@@ -21,7 +21,6 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 log = logging.getLogger(__name__)
 

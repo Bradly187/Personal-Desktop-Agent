@@ -2,7 +2,11 @@
 Phase 2: reasoning probe — general/dev-style questions with verifiable answers, scored
 by extracting a final 'ANSWER:' line. Reasoning models get a generous budget (1024).
 """
-import argparse, json, urllib.request, re, time
+import argparse
+import json
+import urllib.request
+import re
+import time
 
 OLLAMA = "http://localhost:11434/api/generate"
 

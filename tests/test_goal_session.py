@@ -189,7 +189,6 @@ class TestApprovalHookIntegration:
     def test_silent_approve_under_active_session(self, isolated_session_path):
         GoalSessionStore.create(goal="test hook", domain="coding")
 
-        import io
         hook_input = json.dumps({
             "tool_use_id": "x",
             "tool_name": "Bash",

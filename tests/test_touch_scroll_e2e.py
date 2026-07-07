@@ -20,7 +20,6 @@ Exit codes:
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from unittest.mock import patch, MagicMock
 
@@ -131,7 +130,7 @@ async def test_scroll_up_e2e(mock_scroll: MagicMock) -> tuple[bool, str]:
             if clicks != 5:
                 return False, f"Expected clicks=5, got {clicks}"
 
-            return True, f"mouse_scroll called with direction='up', clicks=5"
+            return True, "mouse_scroll called with direction='up', clicks=5"
 
 
 async def test_scroll_default_params(mock_scroll: MagicMock) -> tuple[bool, str]:
@@ -164,7 +163,7 @@ async def test_scroll_default_params(mock_scroll: MagicMock) -> tuple[bool, str]
             if clicks != 3:
                 return False, f"Expected clicks=3, got {clicks}"
 
-            return True, f"mouse_scroll defaults: direction='down', clicks=3"
+            return True, "mouse_scroll defaults: direction='down', clicks=3"
 
 
 async def test_touch_click_e2e(mock_click: MagicMock) -> tuple[bool, str]:
@@ -196,7 +195,7 @@ async def test_touch_click_e2e(mock_click: MagicMock) -> tuple[bool, str]:
             if button != "left":
                 return False, f"Expected button='left', got '{button}'"
 
-            return True, f"mouse_click called at (500, 300), button='left'"
+            return True, "mouse_click called at (500, 300), button='left'"
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +207,7 @@ async def run_tests() -> int:
 
     # Patch where the functions are looked up: command_executor imports `mouse` module
     # so we patch the functions on that module object.
-    import core.command_executor
+    from core import command_executor
     with patch.object(command_executor.mouse, "mouse_scroll") as mock_scroll, \
          patch.object(command_executor.mouse, "mouse_click") as mock_click, \
          patch("pyautogui.position", return_value=(960, 540)):

@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from inference.dev_agent import _parse_plan_json, _parse_plan, AgentStep, DevAgent
+from inference.dev_agent import _parse_plan_json, DevAgent
 from inference.model_router import _PLAN_JSON_SCHEMA, _PROFILES
 from core.goal_session import GoalSessionStore
 

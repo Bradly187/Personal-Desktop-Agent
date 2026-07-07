@@ -22,12 +22,21 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "win32", reason="exercises Windows cmd/PowerShell semantics"
-)
-
 _REPO = Path(__file__).resolve().parent.parent
 _WATCHDOG = _REPO / "scripts" / "agent_watchdog.ps1"
+_VENV_PY = _REPO / ".venv" / "Scripts" / "python.exe"
+
+pytestmark = [
+    pytest.mark.skipif(
+        sys.platform != "win32", reason="exercises Windows cmd/PowerShell semantics"
+    ),
+    # The watchdog hard-requires the repo venv interpreter (it refuses to start
+    # without it). Worktrees and CI checkouts have no .venv — skip, don't fail.
+    pytest.mark.skipif(
+        sys.platform == "win32" and not _VENV_PY.exists(),
+        reason="requires .venv/Scripts/python.exe (watchdog launch path)",
+    ),
+]
 
 
 def _run_watchdog(child: Path, logdir: Path, *extra: str) -> subprocess.CompletedProcess:

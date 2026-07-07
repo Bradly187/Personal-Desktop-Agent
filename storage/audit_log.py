@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import time
+import typing
 from pathlib import Path
 from typing import Optional
 
@@ -358,7 +359,6 @@ class AuditLog:
         detectable against an external checkpoint of chain_head() — a self-
         contained walk can't know rows are missing from the end.
         """
-        import typing
         result: dict[str, typing.Any] = {"ok": True, "rows_checked": 0, "unchained": 0, "break_at": None}
         if not self._conn:
             result["ok"] = False
