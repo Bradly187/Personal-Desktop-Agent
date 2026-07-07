@@ -165,8 +165,9 @@ class PersonalKB:
         self._extensions = tuple(cfg.get("extensions") or _DEFAULT_EXTENSIONS)
         self._chroma_dir = str(chroma_dir) if chroma_dir else str(_CHROMA_DIR)
         self._embedder = embedder
-        self._client = None
-        self._col = None
+        import typing
+        self._client: typing.Any = None
+        self._col: typing.Any = None
         self.available = False
         self._state: dict[str, float] = {}   # abs path -> mtime at last index
         self._paused = False

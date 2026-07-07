@@ -27,13 +27,19 @@ import asyncio
 import logging
 import os
 from dataclasses import replace as _dc_replace
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING, Any
 
 from core.command_executor import Command
 from monitoring.trace import get_tracer
 
 if TYPE_CHECKING:
     from core.coordinator_state import CoordinatorState
+    from core.command_executor import CommandExecutor
+    from desktop.vision_grounder import VisionGrounder
+    from core.conversation_state import ConversationState
+    from sensors.whisper_stream import WhisperStream
+    from core.ipad_bridge import IPadBridge
+    from adaptive.target_cache import TargetCache
 
 log = logging.getLogger(__name__)
 
@@ -42,13 +48,13 @@ class ActionExecutor:
     def __init__(
         self,
         *,
-        executor: Callable[[], object],
-        grounder: Callable[[], object],
-        conversation: Callable[[], object],
-        metrics: Callable[[], object],
-        whisper: Callable[[], object],
-        bridge: Callable[[], object],
-        target_cache: Callable[[], object],
+        executor: Callable[[], Optional['CommandExecutor']],
+        grounder: Callable[[], Optional['VisionGrounder']],
+        conversation: Callable[[], Optional['ConversationState']],
+        metrics: Callable[[], Any],
+        whisper: Callable[[], Optional['WhisperStream']],
+        bridge: Callable[[], Optional['IPadBridge']],
+        target_cache: Callable[[], Optional['TargetCache']],
         state: "CoordinatorState",
     ) -> None:
         self._executor = executor
@@ -142,6 +148,7 @@ class ActionExecutor:
             log.debug("Pre-CLARIFY mic suppressed for %.1fs", pre_suppress_s)
 
         executor = self._executor()
+        assert executor is not None
         with get_tracer().timed("execute", verb=verb):
             result = await executor.execute(exec_cmd)
 
@@ -213,16 +220,18 @@ class ActionExecutor:
         # Record the resolved turn so the NEXT utterance can resolve anaphora
         # ("do that again", "click it") and the prompt can carry a last-action
         # hint. Best-effort — never let bookkeeping fail a command.
-        try:
-            self._conversation().record(
-                command_text=cmd.text,
+        conv = self._conversation()
+        if conv is not None:
+            try:
+                conv.record(
+                    command_text=cmd.text,
                 verb=verb,
                 target=target or "",
                 coords=grounded_coords,
                 success=result.get("status") == "ok",
             )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("ConversationState.record failed: %s", exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.debug("ConversationState.record failed: %s", exc)
 
         return result
 
@@ -235,8 +244,11 @@ class ActionExecutor:
             screenshot_b64: str = screenshot_result.get("image_base64", "")
             if not screenshot_b64:
                 return None
+            grounder = self._grounder()
+            if grounder is None:
+                return None
             result = await asyncio.to_thread(
-                self._grounder().ground, target, screenshot_b64
+                grounder.ground, target, screenshot_b64
             )
             if result is None:
                 return None

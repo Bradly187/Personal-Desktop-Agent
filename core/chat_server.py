@@ -229,7 +229,8 @@ def _trace_usage(db_path: str, trace_id: str) -> dict:
     try:
         from monitoring.cost_ledger import estimate_cost
     except Exception:
-        estimate_cost = lambda m, ti, to: 0.0  # noqa: E731
+        def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+            return 0.0
     tokens_in = sum(r["tokens_in"] or 0 for r in rows)
     tokens_out = sum(r["tokens_out"] or 0 for r in rows)
     cost = sum(estimate_cost(r["model"] or "", r["tokens_in"] or 0,
@@ -353,10 +354,11 @@ class ChatServer:
         self._token = token or _load_or_create_chat_token()
 
         # Injected pipeline references (set_* before run()).
-        self._coordinator = None
-        self._scheduler = None
-        self._event_bus = None
-        self._agent_db = None
+        import typing
+        self._coordinator: typing.Any = None
+        self._scheduler: typing.Any = None
+        self._event_bus: typing.Any = None
+        self._agent_db: typing.Any = None
         self._session_id: Optional[int] = None
 
         self._clients: dict[str, _ChatClient] = {}      # ws_id -> client
@@ -522,7 +524,8 @@ class ChatServer:
         from inference.attachments import is_allowed, ALLOWED_EXTS
         try:
             reader = await request.multipart()
-            field = await reader.next()
+            import typing
+            field: typing.Any = await reader.next()
             if field is None or field.name != "file":
                 return web.json_response({"error": "expected a 'file' part"}, status=400)
             raw_name = os.path.basename(field.filename or "")
@@ -841,7 +844,7 @@ class ChatServer:
             self._run_request(client, trace_id, text, attachment_ids or []))
         self._requests[trace_id] = task
         task.add_done_callback(
-            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))
+            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))  # type: ignore[misc]
 
     def _on_request_done(self, task: asyncio.Task, trace_id: str,
                          client: _ChatClient) -> None:
@@ -888,7 +891,7 @@ class ChatServer:
         task = asyncio.create_task(self._run_rewind(client, trace_id))
         self._requests[trace_id] = task
         task.add_done_callback(
-            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))
+            lambda t, tid=trace_id, c=client: self._on_request_done(t, tid, c))  # type: ignore[misc]
 
     async def _run_rewind(self, client: _ChatClient, trace_id: str) -> None:
         try:

@@ -81,10 +81,10 @@ def _kill_tree_no_psutil(pid: int) -> None:
         return
     import signal
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        os.killpg(os.getpgid(pid), signal.SIGKILL)  # type: ignore[attr-defined]
     except (ProcessLookupError, PermissionError):
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)  # type: ignore[attr-defined]
         except ProcessLookupError:
             pass
     except Exception as exc:

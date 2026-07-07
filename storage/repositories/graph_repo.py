@@ -19,7 +19,7 @@ class GraphRepo:
     def __init__(self, conn):
         self._conn = conn
 
-    async def insert_knowledge_node(self, name: str, node_type: str, attributes: dict = None) -> int:
+    async def insert_knowledge_node(self, name: str, node_type: str, attributes: dict = None) -> int:  # type: ignore[assignment]
         if not self._conn:
             return -1
         try:

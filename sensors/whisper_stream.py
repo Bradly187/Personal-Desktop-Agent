@@ -396,7 +396,8 @@ class WhisperStream:
         self._agent_db = None
         self._session_id: int = -1
         self._lecture_mode: bool = False
-        self._event_loop = None
+        import typing
+        self._event_loop: typing.Any = None
         self._calibration_capture = None
         self._profiler = None
         self._metrics = None   # set via set_metrics()
@@ -860,6 +861,7 @@ class WhisperStream:
         hallucination filter is unchanged. Raises only when no local model can
         produce a result.
         """
+        assert self._model is not None
         seg_iter, info = self._model.transcribe(
             audio,
             language="en",

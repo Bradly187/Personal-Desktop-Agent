@@ -72,6 +72,7 @@ class PTYSession:
     def read_stream(self, max_lines: int = 100) -> str:
         with self.lock:
             self.last_activity = time.time()
+            buffer: bytes = b"".join(self.buffer)
             output = "".join(self.buffer)
             self.buffer.clear()
             

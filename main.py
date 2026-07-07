@@ -525,8 +525,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
     _vllm_pool = dashboard_obj = indexer = agent_db = trainer = twin_state = audit = None
     session_id = -1
     shutdown = None
-    m = None
-    crash_marker = None
+    import typing
+    m: typing.Any = None
     try:
         agent_db = AgentDB()
         await agent_db.open(Path("agent.db"))
@@ -625,6 +625,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             from inference.local_inference import ensure_ollama_running
             await asyncio.to_thread(ensure_ollama_running)
 
+        import typing
+        local: typing.Any
         if _backend == "llamacpp":
             local = LlamaCppInference(
                 model=getattr(args, "llamacpp_model", "local-model"),
@@ -659,7 +661,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         # Architecture 2: INT4 AWQ specialists in vLLM, TTL-slept between requests.
         # Requires --backend vllm (command model) + WSL2 with vllm installed.
         # Ollama remains the automatic fallback if the pool raises.
-        _vllm_pool: Optional[VLLMSpecialistPool] = None
+        _vllm_pool = None
         _no_local_specialists = getattr(args, "no_local_specialists", False)
         if _no_local_specialists and getattr(args, "vllm_pool", False):
             log.warning("--no-local-specialists overrides --vllm-pool; specialist pool disabled "
@@ -727,7 +729,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         # Transparent proxy: every other domain/method delegates to the raw router, and
         # any cloud failure / missing credential falls back to the local plan model, so
         # OFF (or no credential) is byte-identical to legacy.
-        dev_router = router
+        import typing
+        dev_router: typing.Any = router
         try:
             from inference.cloud_plan_router import CloudPlanRouter, cloud_plan_enabled
             if cloud_plan_enabled():
@@ -865,8 +868,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                 # Establish the shared auth token now so the extension can
                 # authenticate on its next connect (generate-if-missing, 0600).
                 bridge_protocol.ensure_token()
-                bridge = BridgeClient()
-                dev_agent.set_bridge(bridge)
+                vs_bridge = BridgeClient()
+                dev_agent.set_bridge(vs_bridge)
                 log.info("BridgeClient: wired to DevAgent (authenticated ws://127.0.0.1:8767)")
             except Exception as _bridge_exc:
                 log.warning("BridgeClient: failed to initialise: %s", _bridge_exc)

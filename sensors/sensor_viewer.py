@@ -208,7 +208,7 @@ class SensorViewer:
             self._cam_aspect = img.width / img.height
             self._panel_h = int(self._panel_w / self._cam_aspect)
 
-        img = img.resize((self._panel_w, self._panel_h), Image.LANCZOS)
+        img = img.resize((self._panel_w, self._panel_h), Image.LANCZOS)  # type: ignore[attr-defined]
 
         # Draw hand landmarks overlay
         if self._landmarks:
@@ -261,7 +261,7 @@ class SensorViewer:
 
         # Colorize and resize
         rgb = _depth_to_rgb(depth)
-        img = Image.fromarray(rgb).resize((self._panel_w, self._panel_h), Image.LANCZOS)
+        img = Image.fromarray(rgb).resize((self._panel_w, self._panel_h), Image.LANCZOS)  # type: ignore[attr-defined]
 
         # Update FPS
         now = time.monotonic()

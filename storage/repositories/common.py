@@ -18,6 +18,8 @@ class PruneRetryMixin:
     off and retry here. Stays non-fatal: returns 0 if every attempt loses the
     race.
     """
+    import typing
+    _conn: typing.Any
 
     async def _prune_with_retry(
         self,

@@ -642,7 +642,7 @@ class IPadBridge:
             report = await calibrator.run(
                 condition=condition,
                 quick=quick,
-                on_progress=lambda idx, total, result: (
+                on_progress=lambda idx, total, result: (  # type: ignore[func-returns-value]
                     _on_progress(idx, total, result),
                     asyncio.create_task(ws.send_json({
                         "type": "calibration_phrase",

@@ -45,8 +45,9 @@ class SemanticMemory:
         self._chroma_dir = chroma_dir
         self._agent_db = agent_db
         self._encoder = encoder
-        self._client = None
-        self._collection = None
+        import typing
+        self._client: typing.Any = None
+        self._collection: typing.Any = None
         self._available: bool = False
         self._bg_tasks: set = set()  # keeps fire-and-forget create_task refs alive
         # Lazy re-probe (C4): retry start() after a failure, but only once the

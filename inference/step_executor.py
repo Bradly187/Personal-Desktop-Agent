@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 class StepExecutor:
+    # Safety limit: max lines of diff to include in a single prompt
+    _CONFIRM_DIFF_MAX_LINES = 100
+
     def __init__(self, agent: "DevAgent", router: 'ModelRouter', coordinator: Optional['HybridCoordinator'], agent_db: Optional['AgentDB'] = None):
         # Wiring state (_bridge, _skill_registry, _personal_kb, _critic,
         # _critic_enabled, ...) lives on the agent — DevAgent's set_* methods
@@ -257,13 +260,13 @@ class StepExecutor:
         # Fall through: accessibility verbs → CommandExecutor
         if self._coordinator:
             from core.command_executor import Command
-            cmd = Command(
+            action_cmd = Command(
                 text=step.args,
                 action=action,
                 source="dev_agent",
                 params=self._parse_accessibility_params(action, step.args),
             )
-            result_dict = await self._coordinator._executor.execute(cmd)
+            result_dict = await self._coordinator._executor.execute(action_cmd)
             return json.dumps(result_dict)
 
         return f"No executor for action: {action}"
@@ -805,10 +808,12 @@ class StepExecutor:
         try:
             if getattr(self._agent, "_confirm_whisper", None) is None:
                 from faster_whisper import WhisperModel
-                self._agent._confirm_whisper = await asyncio.to_thread(
+                import typing
+                self._agent._confirm_whisper = typing.cast(typing.Any, await asyncio.to_thread(
                     WhisperModel, "tiny", device="cpu", compute_type="int8"
-                )
-            model = self._agent._confirm_whisper
+                ))
+            import typing
+            model: typing.Any = self._agent._confirm_whisper
 
             def _transcribe() -> str:
                 segs, _ = model.transcribe(

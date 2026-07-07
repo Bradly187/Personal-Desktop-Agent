@@ -148,8 +148,8 @@ class MemoryManager:
                     source = "voice"
                     whisper_logprob = 0.0
                     gesture_confidence = 1.0
-                    session_context = []
-                    params = {}
+                    session_context: list = []
+                    params: dict = {}
                 return await self._db.memory.get_few_shot_examples(
                     _FakeCmd(), n=n, domain=namespace
                 )

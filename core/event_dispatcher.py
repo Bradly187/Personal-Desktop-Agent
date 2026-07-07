@@ -262,8 +262,8 @@ class EventDispatcher:
             # is answering.  Prepended so it appears closest to the user turn.
             if self._coordinator.state.pending_clarification and cmd.source in ("voice", "voice_local"):
                 clarify_ctx = f"[PENDING CLARIFICATION: {self._coordinator.state.pending_clarification}]"
-                ctx = [clarify_ctx] + list(cmd.session_context or [])
-                cmd = _dc_replace(cmd, session_context=ctx)
+                clarify_session_ctx = [clarify_ctx] + list(cmd.session_context or [])
+                cmd = _dc_replace(cmd, session_context=clarify_session_ctx)
 
             # Gate evaluation — set effective_cfg in a task-local ContextVar so
             # concurrent route() tasks each see their own pain-day-adjusted config

@@ -20,7 +20,7 @@ import asyncio
 import logging
 import time
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Any, Coroutine
 
 from dataclasses import dataclass
 from storage.personal_kb import is_personal_query as _is_personal_query
@@ -69,11 +69,11 @@ class GateEvaluator:
         self,
         cfg: "CoordinatorConfig",
         *,
-        run_local: Callable[["Command"], Awaitable[str]],
-        run_cloud: Callable[["Command"], Awaitable[str]],
+        run_local: Callable[["Command"], Coroutine[Any, Any, str]],
+        run_cloud: Callable[["Command"], Coroutine[Any, Any, str]],
         approval_config: Callable[[], dict],
-        audit=None,
-        tts_speak: Optional[Callable[[str], Awaitable[None]]] = None,
+        audit: Any = None,
+        tts_speak: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
     ) -> None:
         self._cfg = cfg
         self._run_local = run_local

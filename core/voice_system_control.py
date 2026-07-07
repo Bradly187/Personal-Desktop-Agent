@@ -20,7 +20,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Coroutine, Optional, TYPE_CHECKING
+from typing import Any
+
+if TYPE_CHECKING:
+    from sensors.whisper_stream import WhisperStream
+    from storage.db import AgentDB
+    from adaptive.behavioral_twin_state import BehavioralTwinState
+    from adaptive.condition_profiler import ConditionProfiler
+    from adaptive.condition_calibration import ConditionCalibration
+    from inference.dev_agent import DevAgent
+    from storage.personal_kb import PersonalKB
+    from skills.registry import SkillRegistry
+    from storage.audit_log import AuditLog
+    from core.event_dispatcher import Command
 
 from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
 
@@ -66,7 +79,7 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "set up google",
 })
 
-def _is_system_control_voice(cmd) -> bool:
+def _is_system_control_voice(cmd: 'Command') -> bool:
     """True if `cmd` is a voice system-control keyword that route()'s keyword
     block handles — so the dev-agent pre-gate leaves it alone."""
     if cmd.source not in ("voice", "voice_local"):
@@ -109,19 +122,19 @@ class VoiceSystemControl:
     def __init__(
         self,
         *,
-        whisper: Callable[[], object],
-        agent_db: Callable[[], object],
-        twin: Callable[[], object],
-        profiler: Callable[[], object],
-        calibrator: Callable[[], object],
-        dev_agent: Callable[[], object],
-        personal_kb: Callable[[], object],
-        skill_registry: Callable[[], object],
-        audit: Callable[[], object],
-        tts_speak: Callable[[str], Awaitable[None]],
+        whisper: Callable[[], Optional['WhisperStream']],
+        agent_db: Callable[[], Optional['AgentDB']],
+        twin: Callable[[], Optional['BehavioralTwinState']],
+        profiler: Callable[[], Optional['ConditionProfiler']],
+        calibrator: Callable[[], Optional['ConditionCalibration']],
+        dev_agent: Callable[[], Optional['DevAgent']],
+        personal_kb: Callable[[], Optional['PersonalKB']],
+        skill_registry: Callable[[], Optional['SkillRegistry']],
+        audit: Callable[[], Optional['AuditLog']],
+        tts_speak: Callable[[str], Coroutine[Any, Any, None]],
         approval_config: Callable[[], dict],
-        switch_condition: Callable[[str], Awaitable[None]],
-        run_calibration: Callable[[str, bool], Awaitable[None]],
+        switch_condition: Callable[[str], Coroutine[Any, Any, None]],
+        run_calibration: Callable[[str, bool], Coroutine[Any, Any, None]],
     ) -> None:
         self._whisper = whisper
         self._agent_db = agent_db
@@ -139,7 +152,7 @@ class VoiceSystemControl:
         self._lecture_mode: bool = False
 
     @staticmethod
-    def _on_task_done(task: "asyncio.Task[None]", label: str) -> None:
+    def _on_task_done(task: "asyncio.Task[Any]", label: str) -> None:
         """Log any exception from a fire-and-forget task so failures are visible."""
         if not task.cancelled() and task.exception():
             log.error("%s raised: %s", label, task.exception())
@@ -284,7 +297,7 @@ class VoiceSystemControl:
                 from core.async_utils import fire_and_log
                 fire_and_log(self._tts_speak("No interrupted task to resume."), log, label="tts resume none")  # fix #15
                 return {"status": "ok", "action": "AGENT_RESUME", "offered": False}
-            t = asyncio.create_task(dev_agent.resume_pending_plan())
+            t = asyncio.create_task(dev_agent.resume_pending_plan())  # type: ignore[arg-type]
             t.add_done_callback(lambda t: self._on_task_done(t, "resume_pending_plan"))
             return {"status": "ok", "action": "AGENT_RESUME", "offered": True,
                     "goal": pending[0].get("goal", "")[:80]}

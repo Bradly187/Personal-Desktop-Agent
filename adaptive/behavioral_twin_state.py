@@ -384,7 +384,7 @@ class BehavioralTwinState:
         """
         self._is_ready = False
         try:
-            async with asyncio.timeout(self.STARTUP_TIMEOUT_S):
+            async with asyncio.timeout(self.STARTUP_TIMEOUT_S):  # type: ignore[attr-defined]
                 await asyncio.gather(
                     self._init_agent_db(),
                     self._init_chroma(),
@@ -938,7 +938,7 @@ class BehavioralTwinState:
     async def _init_chroma(self) -> None:
         """Connect ChromaDB, create/open collection."""
         try:
-            async with asyncio.timeout(self.STARTUP_TIMEOUT_S):
+            async with asyncio.timeout(self.STARTUP_TIMEOUT_S):  # type: ignore[attr-defined]
                 available = await self._semantic_memory.start()
                 if not available:
                     log.warning("SemanticMemory: ChromaDB unavailable — AgentDB fallback active")

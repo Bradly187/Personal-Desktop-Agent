@@ -34,20 +34,25 @@ from core.workflow_voice import (
 log = logging.getLogger(__name__)
 
 
+from typing import Any, Callable, Coroutine, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.event_dispatcher import Command
+
 class WorkflowHandler:
     def __init__(
         self,
         *,
-        workflow_runner: Callable[[], object],
-        dev_agent: Callable[[], object],
+        workflow_runner: Callable[[], Any],
+        dev_agent: Callable[[], Any],
         wf_cfg: Callable[[], dict],
-        twin: Callable[[], object],
-        conv_mode: Callable[[], object],
-        macro_store: Callable[[], object],
-        agent_db: Callable[[], object],
-        executor: Callable[[], object],
-        tts_speak: Callable[[str], Awaitable[None]],
-        speak_and_suppress: Callable[[str], Awaitable[None]],
+        twin: Callable[[], Any],
+        conv_mode: Callable[[], Any],
+        macro_store: Callable[[], Any],
+        agent_db: Callable[[], Any],
+        executor: Callable[[], Any],
+        tts_speak: Callable[[str], Coroutine[Any, Any, None]],
+        speak_and_suppress: Callable[[str], Coroutine[Any, Any, None]],
     ) -> None:
         self._workflow_runner = workflow_runner
         self._dev_agent = dev_agent

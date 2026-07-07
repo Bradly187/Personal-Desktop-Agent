@@ -1245,6 +1245,7 @@ class AnalyticsDB:
         if not self._conn:
             return -1
         row = self._conn.execute("SELECT nextval('seq_benchmark_runs')").fetchone()
+        assert row is not None
         new_id = int(row[0])
         self._conn.execute(
             "INSERT INTO benchmark_runs (id, ts, git_hash, mode, notes) VALUES (?,?,?,?,?)",
@@ -1269,6 +1270,7 @@ class AnalyticsDB:
         if not self._conn:
             return -1
         row = self._conn.execute("SELECT nextval('seq_benchmark_results')").fetchone()
+        assert row is not None
         new_id = int(row[0])
         self._conn.execute(
             """INSERT INTO benchmark_results
@@ -1295,6 +1297,7 @@ class AnalyticsDB:
         if not self._conn:
             return
         row = self._conn.execute("SELECT nextval('seq_benchmark_prompts')").fetchone()
+        assert row is not None
         new_id = int(row[0])
         self._conn.execute(
             """INSERT INTO benchmark_prompts
