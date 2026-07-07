@@ -164,4 +164,4 @@ hypothesis==6.119.3  # property-based tests (test_prop_*, twin/semantic-memory);
 # dep of aiohttp/requests and not otherwise constrained. Exposure in this
 # project: mDNS-discovered hostnames passed to aiohttp — low risk, closed anyway.
 idna>=3.18
-comtypes>=1.4  # Win32 UIAutomation COM (magnetic click / element resolution)
+comtypes>=1.4.16  # Win32 UIAutomation COM (magnetic click / element resolution)
