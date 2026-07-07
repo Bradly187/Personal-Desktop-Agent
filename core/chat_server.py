@@ -116,7 +116,6 @@ def _live_session_kpis(db_path: str, session_id: int) -> dict:
     can treat both interchangeably. Never raises; returns {} on any error.
     """
     import sqlite3
-    import statistics
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
         con.row_factory = sqlite3.Row
@@ -782,6 +781,21 @@ class ChatServer:
             client.push({"type": "active_dir",
                          **self._set_active_dir(msg.get("path") or "",
                                                 bool(msg.get("confirm")))})
+        elif mtype == "toggle_tts":
+            enabled = bool(msg.get("enabled", True))
+            try:
+                import tts.polly_stream
+                tts.polly_stream.set_muted(not enabled)
+            except Exception as e:
+                log.debug("Failed to toggle TTS: %s", e)
+        elif mtype == "reload_tts":
+            try:
+                import tts.polly_stream
+                tts.polly_stream.reload_config()
+            except Exception as e:
+                log.debug("Failed to reload TTS config: %s", e)
+
+
 
     # ── active-directory switching (specs/chat-context-attachments R1) ─────────
     def _list_dirs(self) -> dict:

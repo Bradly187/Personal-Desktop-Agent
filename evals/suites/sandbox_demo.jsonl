@@ -1,0 +1,2 @@
+{"id": "sandbox-1", "suite": "sandbox_demo", "goal": "Create a python script called hello.py that prints 'Hello World'", "assert_script": "python -c \"import subprocess; out = subprocess.check_output(['python', 'hello.py']).decode(); assert 'Hello World' in out\""}
+{"id": "sandbox-2", "suite": "sandbox_demo", "goal": "Fix the syntax error in broken.py", "setup_script": "python -c \"open('broken.py', 'w').write('print(Hello World)')\"", "assert_script": "python broken.py"}

@@ -12,13 +12,13 @@ import asyncio
 import os
 import sys
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.command_executor import Command
 from core.fusion_engine import FusionEngine
-from monitoring.metrics import get_metrics, Metrics
+from monitoring.metrics import Metrics
 
 
 class TestRouteTaskCircuitBreaker(unittest.TestCase):

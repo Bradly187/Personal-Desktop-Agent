@@ -1,6 +1,5 @@
 """Tests for GyroBiasCalibrator — continuous gyro drift correction."""
 
-import pytest
 
 from calibration.gyro_bias_calibrator import BiasState, GyroBiasCalibrator
 

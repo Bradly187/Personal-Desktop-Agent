@@ -32,10 +32,12 @@
   const attachBtn = document.getElementById("attach-btn");
   const fileInput = document.getElementById("file-input");
   const attachChips = document.getElementById("attach-chips");
+  const ttsBtn = document.getElementById("tts-btn");
 
   let ws = null;
   let allowDestructive = true;
   let attachments = [];  // [{id, name, kind}] pending for the next message
+  let ttsEnabled = localStorage.getItem("da_tts_enabled") !== "false"; // default true
 
   // ── turns (R1) ────────────────────────────────────────────────────────────
   // trace_id → turn. Locally created turns queue in `pendingTurns` until the
@@ -323,6 +325,7 @@
       case "ready":
         allowDestructive = !(f.config && f.config.allow_destructive === false);
         send({ type: "list_dirs" });
+        send({ type: "toggle_tts", enabled: ttsEnabled });
         return;
       case "dirs":
         renderDirs(f);
@@ -692,6 +695,25 @@
       fileInput.value = "";
     });
   }
+  if (ttsBtn) {
+    const updateTtsBtn = () => {
+      ttsBtn.textContent = ttsEnabled ? "🔊" : "🔇";
+      ttsBtn.title = ttsEnabled ? "Disable Text-to-Speech" : "Enable Text-to-Speech";
+    };
+    updateTtsBtn();
+    ttsBtn.addEventListener("click", () => {
+      ttsEnabled = !ttsEnabled;
+      localStorage.setItem("da_tts_enabled", ttsEnabled);
+      updateTtsBtn();
+      send({ type: "toggle_tts", enabled: ttsEnabled });
+    });
+  }
+
+  window.addEventListener("message", (e) => {
+    if (e.data && e.data.type === "reload_tts") {
+      send({ type: "reload_tts" });
+    }
+  });
 
   rehydrate();
   setConn(false, "connecting…");

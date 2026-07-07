@@ -11,9 +11,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 

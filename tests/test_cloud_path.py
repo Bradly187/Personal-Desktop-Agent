@@ -32,7 +32,7 @@ from core.hybrid_coordinator import (
     _apply_vocabulary_corrections,
     _retranscribe,
 )
-from core.inference_runner import _CloudInference, _CLOUD_SYSTEM_PROMPT
+from core.inference_runner import _CloudInference
 
 
 # ---------------------------------------------------------------------------

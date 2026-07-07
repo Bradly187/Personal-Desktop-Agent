@@ -9,7 +9,6 @@ Run: python -m pytest tests/test_evals.py -q
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -143,7 +142,6 @@ def test_suite_roundtrip(tmp_path):
 def test_shipped_command_suite_loads_and_is_valid():
     cases = load_suite("command_verbs")
     assert len(cases) >= 12
-    from core.command_executor import Command  # vocab source of truth lives nearby
     valid = {"CLICK", "SCROLL", "TYPE", "OPEN", "CLOSE", "HOTKEY", "DICTATE",
              "CLARIFY", "SCREENSHOT", "MOUSEDOWN", "MOUSEUP"}
     for c in cases:

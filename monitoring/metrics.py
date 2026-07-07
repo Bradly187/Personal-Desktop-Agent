@@ -61,12 +61,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import aiohttp.web
 
 log = logging.getLogger(__name__)
 

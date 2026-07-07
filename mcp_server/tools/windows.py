@@ -4,7 +4,6 @@ import logging
 
 import win32gui
 import win32process
-import psutil
 
 log = logging.getLogger(__name__)
 

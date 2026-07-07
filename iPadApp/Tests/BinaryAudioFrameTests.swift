@@ -5,6 +5,7 @@ import XCTest
 /// frame builder (PR-3). The PC bridge parses byte 0 as the message tag and the
 /// remainder as little-endian int16 PCM, so the framing must put the tag first
 /// and leave the payload byte-for-byte intact.
+@MainActor
 final class BinaryAudioFrameTests: XCTestCase {
 
     func testFramePrependsAudioTag() {

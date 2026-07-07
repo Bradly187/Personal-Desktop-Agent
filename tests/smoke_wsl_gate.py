@@ -84,7 +84,7 @@ check("R2.2 stderr contains 'Read-only'",
 # -------------------------------------------------------------------------
 print("\nTest 4 -- bwrap absent degrades gracefully (R3.1)")
 
-import subprocess, shutil
+import subprocess
 
 # Rename bwrap temporarily (as root).
 renamed = False

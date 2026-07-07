@@ -84,7 +84,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Optional
 
@@ -250,6 +250,10 @@ _PLAN_VERBS: list[str] = [
 _PLAN_JSON_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "assumptions": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
         "steps": {
             "type": "array",
             "items": {

@@ -3,6 +3,7 @@
 // Spec: specs/desktop-app-shell/requirements.md
 
 const path = require("path");
+const fs = require("fs");
 const { app, BrowserWindow, Menu, shell, nativeTheme } = require("electron");
 
 const auth = require("./main/auth");
@@ -90,6 +91,52 @@ function buildMenu() {
         { role: "zoomIn" },
         { role: "zoomOut" },
       ],
+    },
+    {
+      label: "TTS",
+      submenu: (() => {
+        let cfg = {};
+        try {
+          cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "approval_config.json"), "utf8"));
+        } catch(e) {}
+        const backend = cfg.tts_backend || "kokoro";
+        const voice = cfg.kokoro_voice || "af_bella";
+        const speed = cfg.kokoro_speed || 1.0;
+        
+        const updateTtsConfig = (key, value) => {
+          try {
+            const cfgPath = path.join(__dirname, "..", "approval_config.json");
+            let c = {};
+            if (fs.existsSync(cfgPath)) {
+              c = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+            }
+            c[key] = value;
+            fs.writeFileSync(cfgPath, JSON.stringify(c, null, 2), "utf8");
+            fwd("reloadTts")();
+          } catch (e) {
+            console.error("Failed to update TTS config:", e);
+          }
+        };
+
+        return [
+          { label: "Backend", submenu: [
+            { label: "Kokoro (AI)", type: "radio", checked: backend === "kokoro", click: () => updateTtsConfig("tts_backend", "kokoro") },
+            { label: "AWS Polly", type: "radio", checked: backend === "polly", click: () => updateTtsConfig("tts_backend", "polly") },
+            { label: "Windows SAPI", type: "radio", checked: backend === "sapi", click: () => updateTtsConfig("tts_backend", "sapi") }
+          ]},
+          { label: "Kokoro Voice", submenu: [
+            { label: "af_bella", type: "radio", checked: voice === "af_bella", click: () => updateTtsConfig("kokoro_voice", "af_bella") },
+            { label: "af_sarah", type: "radio", checked: voice === "af_sarah", click: () => updateTtsConfig("kokoro_voice", "af_sarah") },
+            { label: "am_adam", type: "radio", checked: voice === "am_adam", click: () => updateTtsConfig("kokoro_voice", "am_adam") },
+            { label: "am_michael", type: "radio", checked: voice === "am_michael", click: () => updateTtsConfig("kokoro_voice", "am_michael") }
+          ]},
+          { label: "Kokoro Speed", submenu: [
+            { label: "0.8x", type: "radio", checked: speed === 0.8, click: () => updateTtsConfig("kokoro_speed", 0.8) },
+            { label: "1.0x (Normal)", type: "radio", checked: speed === 1.0, click: () => updateTtsConfig("kokoro_speed", 1.0) },
+            { label: "1.2x", type: "radio", checked: speed === 1.2, click: () => updateTtsConfig("kokoro_speed", 1.2) }
+          ]}
+        ];
+      })()
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));

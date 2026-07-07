@@ -229,7 +229,8 @@ def file_roots(tmp_path):
     docs = tmp_path / "Documents"; docs.mkdir()
     (dl / "report-budget.pdf").write_bytes(b"x" * 2048)
     (docs / "old.txt").write_text("old", encoding="utf-8")
-    import os, time
+    import os
+    import time
     os.utime(docs / "old.txt", (time.time() - 86400 * 30,) * 2)
     return [dl, docs]
 

@@ -637,3 +637,88 @@ def llm_judge(infer_text: TextFn, *, timeout_s: float = 30.0):
         return v
 
     return judge
+
+
+# --------------------------------------------------------------------------- #
+# Sandbox evals — evaluate a goal in a dynamic sandbox
+# --------------------------------------------------------------------------- #
+
+def run_sandbox_suite(cases: list, build_dev_agent, *, timeout_s: float = 120.0):
+    """Score sandbox cases by executing them in an isolated temporary directory.
+    
+    Provisions a temporary directory, optionally runs a setup script, runs the
+    DevAgent with its workspace isolated to the temp dir, and finally evaluates
+    success via an assertion script.
+    """
+    from evals.sandbox import score_sandbox, aggregate_sandbox
+    import tempfile
+    import subprocess
+
+    async def _run_all():
+        dev = build_dev_agent()
+
+        async def _auto_approve(goal: str, steps, **kwargs) -> str:
+            return "auto"
+        dev._approve_plan_upfront = _auto_approve   # type: ignore[attr-defined]
+
+        results = []
+        for case in cases:
+            t0 = time.monotonic()
+            try:
+                dev._context.clear()
+            except Exception:
+                pass
+                
+            with tempfile.TemporaryDirectory() as temp_dir:
+                if case.setup_script:
+                    try:
+                        subprocess.run(
+                            case.setup_script, 
+                            shell=True, 
+                            cwd=temp_dir, 
+                            check=True, 
+                            capture_output=True, 
+                            timeout=30.0
+                        )
+                    except subprocess.CalledProcessError as e:
+                        lat = (time.monotonic() - t0) * 1000
+                        results.append(score_sandbox(case, passed=False, error="setup failed", detail=e.stderr.decode("utf-8", "ignore"), latency_ms=lat))
+                        continue
+                    except subprocess.TimeoutExpired:
+                        lat = (time.monotonic() - t0) * 1000
+                        results.append(score_sandbox(case, passed=False, error="setup timeout", latency_ms=lat))
+                        continue
+                        
+                dev.set_repo_root(temp_dir)
+                
+                try:
+                    res = await asyncio.wait_for(dev.plan_and_run(case.goal), timeout_s)
+                except Exception as exc:
+                    lat = (time.monotonic() - t0) * 1000
+                    results.append(score_sandbox(case, passed=False, error=f"agent exception: {type(exc).__name__}: {exc}", latency_ms=lat))
+                    continue
+                    
+                lat = (time.monotonic() - t0) * 1000
+                
+                if case.assert_script:
+                    try:
+                        subprocess.run(
+                            case.assert_script, 
+                            shell=True, 
+                            cwd=temp_dir, 
+                            check=True, 
+                            capture_output=True, 
+                            timeout=30.0
+                        )
+                        results.append(score_sandbox(case, passed=True, latency_ms=lat))
+                    except subprocess.CalledProcessError as e:
+                        err_msg = e.stdout.decode("utf-8", "ignore") + "\\n" + e.stderr.decode("utf-8", "ignore")
+                        results.append(score_sandbox(case, passed=False, detail="assertion failed: " + err_msg.strip(), latency_ms=lat))
+                    except subprocess.TimeoutExpired:
+                        results.append(score_sandbox(case, passed=False, detail="assertion timeout", latency_ms=lat))
+                else:
+                    results.append(score_sandbox(case, passed=True, latency_ms=lat, detail="no assertion script, auto-pass"))
+                    
+        return aggregate_sandbox(results)
+
+    return asyncio.run(_run_all())

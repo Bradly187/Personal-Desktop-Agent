@@ -86,6 +86,27 @@ Respond with ONLY a JSON object and nothing else:
 When uncertain, prefer "revise" over "pass". Be terse."""
 
 
+_PLAN_REVIEW_PROMPT = """\
+You are an INDEPENDENT reviewer. Review the proposed recovery plan below strictly against the stated GOAL.
+Look for: correctness bugs, logical errors, or repeated failed steps.
+
+GOAL: {goal}
+
+RECOVERY PLAN:
+{plan}
+
+Respond with ONLY a JSON object and nothing else:
+{{"decision": "pass" | "revise" | "block",
+  "confidence": <0.0-1.0>,
+  "findings": [{{"severity": "correctness"|"security"|"style"|"info", "message": "...", "target": "..."}}],
+  "suggested_fix": "<short hint or empty>"}}
+
+- "pass": the plan correctly addresses the goal.
+- "revise": there are fixable problems or repeated failures — list each in findings.
+- "block": a serious safety or correctness issue.
+When uncertain, prefer "revise" over "pass". Be terse."""
+
+
 def _build_diff(old_text: str, new_text: str, path: str) -> str:
     """A bounded unified diff old->new (or the new file when there is no old)."""
     if not old_text:
@@ -180,4 +201,19 @@ class Critic:
             raise RuntimeError(getattr(result, "error", None) or "critic inference not ok")
         verdict = parse_verdict(getattr(result, "text", "") or "", self._block_severities)
         log.info("Critic[%s]: %s", path, verdict.summary())
+        return verdict
+
+    async def review_plan(self, goal: str, plan_text: str) -> CriticVerdict:
+        """Review a proposed recovery plan against the stated goal."""
+        prompt = _PLAN_REVIEW_PROMPT.format(
+            goal=(goal or "(no goal stated)")[:500],
+            plan=plan_text[:6000],
+        )
+        result = await self._router.infer(
+            domain=self._model_domain, user_text=prompt, context="",
+        )
+        if not getattr(result, "ok", True):
+            raise RuntimeError(getattr(result, "error", None) or "critic plan inference not ok")
+        verdict = parse_verdict(getattr(result, "text", "") or "", self._block_severities)
+        log.info("Critic[Replan]: %s", verdict.summary())
         return verdict

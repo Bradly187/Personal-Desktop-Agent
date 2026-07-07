@@ -266,6 +266,11 @@ class WorkflowRunner:
         ``SubResult.verified``; any reviewer error → NOT verified (fail-safe)."""
         if not verify_criterion:
             return None
+
+        # Gap 3: Route workflow verify checks to the cloud model for higher capability
+        if os.environ.get("DA_WORKFLOW_VERIFY_CLOUD", "0").strip().lower() in ("1", "true", "yes", "on"):
+            verify_domain = "cloud"
+
         verdicts = await self._run_concurrent(
             [self._verify_one(sr, verify_criterion, verify_domain) for sr in norm],
             label=f"{label}:verify")

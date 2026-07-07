@@ -20,7 +20,6 @@ CommandExecutor knows to delegate here instead of calling tools directly.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import sys
 from pathlib import Path

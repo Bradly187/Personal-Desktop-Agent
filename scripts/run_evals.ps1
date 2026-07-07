@@ -56,7 +56,7 @@ function Invoke-Gate {
 Write-Host "=== eval-harness logic tests ===" -ForegroundColor Cyan
 $logicTests = @("tests/test_evals.py", "tests/test_evals_trajectory.py",
                 "tests/test_evals_judge.py", "tests/test_evals_router.py",
-                "tests/test_evals_skill_trigger.py")
+                "tests/test_evals_skill_trigger.py", "tests/test_evals_retrieval.py")
 & $py -m pytest @logicTests -q
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
 
@@ -89,6 +89,10 @@ if (-not $SkipModel) {
     # Judges against an explicit per-case reference + rubric, so a same-family judge is
     # adequate here. Wide tolerance — small n + LM-judge nondeterminism.
     Invoke-Gate "intent gate" @("--suite", "intent_satisfaction", "--mode", "judge", "--model", "gemma4:12b", "--judge-model", "gemma4:12b", "--timeout", "120", "--check") $true
+    # Retrieval-rank gate (specs/retrieval-quality-eval): scoring is model-free but
+    # it needs the persisted chroma_db + MiniLM embedder, so it sits in the
+    # model-backed slot — a missing/empty index exits 2 -> SKIP, never a blocked push.
+    Invoke-Gate "retrieval gate" @("--suite", "retrieval_synthetic", "--mode", "retrieval", "--check") $true
     # Live-DevAgent execution gate — opt-in (slow: real plans run end-to-end).
     if ($Execution) {
         Invoke-Gate "execution gate" @("--suite", "dev_execution", "--mode", "execution", "--timeout", "200", "--check") $true

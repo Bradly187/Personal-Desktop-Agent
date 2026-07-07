@@ -21,7 +21,7 @@ import json
 import logging
 import time
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from dataclasses import replace as _dc_replace
 
@@ -74,7 +74,7 @@ class _CloudInference:
     def _get_client(self):
         if self._client is None:
             try:
-                import anthropic
+                import anthropic  # noqa: F401 — the import itself is the availability probe
             except ImportError:
                 raise RuntimeError("anthropic not installed — run: pip install anthropic")
             # Resolve the backend (direct Anthropic vs Amazon Bedrock) and the

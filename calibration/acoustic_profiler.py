@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import statistics
 import time
 from dataclasses import dataclass, field

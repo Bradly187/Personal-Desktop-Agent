@@ -23,7 +23,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -93,7 +92,8 @@ def _measure_vram() -> None:
     # --- Ollama — use largest locally-available model ---
     print("\n  Querying Ollama for available models ...")
     try:
-        import urllib.request, json as _json
+        import urllib.request
+        import json as _json
 
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as r:
             tags = _json.loads(r.read())
@@ -125,8 +125,8 @@ def _measure_vram() -> None:
         with urllib.request.urlopen(req, timeout=300) as resp:
             _json.loads(resp.read())
         _nvml_snapshot(f"After Ollama {chosen}")
-        print(f"\n  NOTE: llama3.1:70b not pulled. For full task-1.2 measurement,")
-        print(f"  run: ollama pull llama3.1:70b  then re-run --measure-vram")
+        print("\n  NOTE: llama3.1:70b not pulled. For full task-1.2 measurement,")
+        print("  run: ollama pull llama3.1:70b  then re-run --measure-vram")
     except Exception as exc:
         print(f"  [FAIL/SKIP] Ollama: {exc}")
 
@@ -480,14 +480,13 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 async def _run_pipeline(args: argparse.Namespace) -> None:
-    from core.command_executor import CommandExecutor
     from storage.db import AgentDB
     from inference.local_inference import (
         OllamaInference, LlamaCppInference, VLLMInference, VLLMServerInference, VLLMEmbedder,
     )
     from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig
     from adaptive.behavioral_twin_state import BehavioralTwinState
-    from core.fusion_engine import FusionEngine, FusionConfig
+    from core.fusion_engine import FusionEngine
     from core.ipad_bridge import IPadBridge
     from adaptive.continuous_trainer import ContinuousTrainer
     from sensors.lidar_receiver import LiDARReceiver
@@ -1015,7 +1014,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         log.debug("Could not read vision_grounder cache config: %s", _cfg_exc)
     try:
         ua_ttl, ua_max = await agent_db.get_cache_config("ui_automation")
-        from desktop.ui_automation import UIAutomationProvider as _UAP
         # UIAutomationProvider is a lazy singleton; update it when first accessed.
         from core import command_executor as _cex
         if _cex._ui_provider is not None:
@@ -1693,6 +1691,11 @@ def main() -> None:
     # non-default set so a session's configuration is visible in the log head.
     from core.flags import report_da_flags
     report_da_flags()
+
+    # approval_config.json schema check (IG-9): a typo'd key or bad policy
+    # value must fail loudly at boot, not silently weaken the approval gate.
+    from core.config_validation import check_approval_config_at_startup
+    check_approval_config_at_startup()
 
     # Register a last-resort trace dump so the in-memory ring buffer survives
     # unclean exits (OOM, uncaught exception, kill -9 on parent process).

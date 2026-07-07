@@ -190,7 +190,7 @@ async def test_gate3_is_async_and_returns_bool(monkeypatch):
 # ---------------------------------------------------------------------------
 
 async def test_rate_limiter_waits_instead_of_admitting_free(monkeypatch):
-    from core.rate_limiter import RateLimiter, _TokenBucket
+    from core.rate_limiter import RateLimiter
 
     db = MagicMock()
 

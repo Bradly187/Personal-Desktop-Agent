@@ -9,6 +9,12 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D029 — 2026-07-05 — Full pytest suite gates in CI on windows-latest; ruff gate with parked style ignores](#d029)
+- [D028 — 2026-07-03 — Retrieval quality measured natively in evals/, not via pgvector migration + deepeval](#d028)
+- [D027 — 2026-07-03 — Staleness check on resume seed and replayed reads](#d027)
+- [D026 — 2026-07-03 — Cross-model verify judge for workflow fan-out](#d026)
+- [D025 — 2026-07-03 — Independent review of recovery plans (replan critic)](#d025)
+- [D024 — 2026-07-03 — Assumption surfacing in the planner prompt](#d024)
 - [D023 — 2026-07-02 — Chat transcript markdown renders via vendored marked+DOMPurify, not CDN or hand-rolled](#d023)
 - [D022 — 2026-07-01 — VoiceSystemControl keeps condition/calibration switching on HybridCoordinator, not moved](#d022)
 - [D021 — 2026-07-01 — Flag registry is a passive validation mirror, not a config read-through](#d021)
@@ -36,6 +42,58 @@ See AGENTS.md Rule 12 for when and how to add entries.
 ---
 
 ## Entries
+
+---
+
+### D029 — Full pytest suite gates in CI on windows-latest; ruff gate with parked style ignores {#d029}
+**Date:** 2026-07-05
+**Chose:** New `tests.yml` workflow: the full unit suite (~2,750 tests) runs on `windows-latest` with the pinned `requirements.txt`, plus a `ruff check` job on ubuntu. Ruff starts with pyflakes + pycodestyle-error defaults and parks five style rules (E402/E702/E731/E741/F841) as documented ratchet ignores in `pyproject.toml`; availability-probe imports keep `# noqa: F401` (the import IS the probe — `find_spec` would not exercise side effects like `comtypes.gen` codegen).
+**Rejected:** (a) ubuntu runner with a curated dependency subset — Windows is the only ship target (pywin32, windows-curses, Win32 UIAutomation); a Linux run would validate a platform we don't ship and need a second requirements file that drifts; (b) adopting `ruff format`/black in the same change — a whole-repo reformat buries the 12 real F821/F811 findings in noise; (c) fixing all 446 lint findings at once — the parked rules are style-only debt, tightened one rule at a time.
+**Ref:** `.github/workflows/tests.yml`, `pyproject.toml` [tool.ruff], `docs/audits/2026-07-05-industry-patterns-gap-analysis.md` (IG-1/IG-2)
+
+---
+
+### D028 — Retrieval quality measured natively in evals/, not via pgvector migration + deepeval {#d028}
+**Date:** 2026-07-03
+**Chose:** A retrieval-rank eval mode (`--mode retrieval`, MRR gated + Hit@5) in the existing `evals/` harness, with ground truth generated locally (`scripts/generate_retrieval_eval_data.py`, Ollama `llama3.1:8b`, self-retrieval filter). Targets match on `(file, name)` hit metadata, never chroma ids (ids hash mtime and churn on reindex).
+**Rejected:** (a) Migrating vector memory to PostgreSQL+pgvector via Docker — `docs/architecture/database-design.md` §1 already rejects a DB server as overkill for a single-user local tool, and ChromaDB provides the same vector+metadata hybrid queries; (b) SQS/Lambda queue-driven ingestion — violates the single-machine local-first posture (D015; `specs/behavioral-twin-state` no-cloud requirement) with no throughput problem to solve; (c) a deepeval/pytest parallel harness — AGENTS.md Rule 9 routes behavioral verification into `evals/`, and MRR/Hit@K are ~20 lines of arithmetic; (d) NDCG — with one relevant chunk per case it is a monotone transform of MRR.
+**Ref:** `specs/retrieval-quality-eval/`, `evals/retrieval.py`, `scripts/generate_retrieval_eval_data.py`
+
+---
+
+### D027 — Staleness check on resume seed and replayed reads {#d027}
+**Date:** 2026-07-03
+**Chose:** At resume, stat each path in WorkingMemory.files; annotate entries changed since the step timestamp as stale, and drop stale notes derived from those files. Do not re-execute reads — just label, and let the planner decide to re-read.
+**Rejected:** Silently resuming with potentially outdated files, or re-executing all reads automatically.
+**Why:** Files can be modified between a crash and resume. Automatic re-execution is unnecessary and can be expensive. Flagging them as stale empowers the planner to decide if it needs fresh context.
+**Ref:** `inference/working_memory.py`, `inference/dev_agent.py`
+
+---
+
+### D026 — Cross-model verify judge for workflow fan-out {#d026}
+**Date:** 2026-07-03
+**Chose:** Route the verify judge through the Bedrock cloud backend when available (`DA_WORKFLOW_VERIFY_CLOUD`), falling back to local judge if cloud is down/disabled.
+**Rejected:** Use multiple models voting (voting judge) or run entirely locally.
+**Why:** Voting was considered and is not worth the token cost at this scale; a different-model judge captures most of the benefit of independent weights to avoid correlated reviewer blind spots.
+**Ref:** `inference/workflow.py`, `core/cloud_backend.py`
+
+---
+
+### D025 — Independent review of recovery plans (replan critic) {#d025}
+**Date:** 2026-07-03
+**Chose:** Run a bounded critic-style check over a new recovery plan after parsing (`DA_REPLAN_CRITIC`). REVISE consumes the existing replan budget.
+**Rejected:** Let recovery plans run unreviewed (since they are generated after something went wrong), or add unbounded loop.
+**Why:** Closes the only unreviewed self-grading loop. Recovery plans are generated precisely when context is most likely poisoned.
+**Ref:** `inference/dev_agent.py`
+
+---
+
+### D024 — Assumption surfacing in the planner prompt {#d024}
+**Date:** 2026-07-03
+**Chose:** Add an optional `assumptions` array to `_PLAN_JSON_SCHEMA` and instruct planner to list assumptions about repo/system state (`DA_PLAN_ASSUMPTIONS`).
+**Rejected:** Leave assumptions implicit.
+**Why:** A wrong premise enters the trajectory silently and conditions every later step. Surfacing them allows for observability and debugging, especially when plans fail.
+**Ref:** `inference/model_router.py`, `inference/dev_agent.py`
 
 ---
 

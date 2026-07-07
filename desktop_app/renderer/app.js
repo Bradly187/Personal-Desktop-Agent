@@ -258,6 +258,13 @@ const App = (() => {
       case "tabId": selectTab(arg); break;
       case "paletteFiles": Palette.open("files"); break;
       case "paletteCommands": Palette.open("commands"); break;
+      case "reloadTts": {
+        const frame = document.getElementById("chat-frame");
+        if (frame && frame.contentWindow) {
+          frame.contentWindow.postMessage({ type: "reload_tts" }, "*");
+        }
+        break;
+      }
     }
   }
 

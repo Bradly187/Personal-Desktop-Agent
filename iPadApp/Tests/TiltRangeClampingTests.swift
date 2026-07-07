@@ -9,6 +9,7 @@ import XCTest
 /// [5, 60] degrees.
 ///
 /// **Validates: Requirements 3.3**
+@MainActor
 final class TiltRangeClampingTests: XCTestCase {
 
     /// Unique suite name regenerated per test run to guarantee isolation.

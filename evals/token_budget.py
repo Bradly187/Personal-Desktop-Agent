@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from pathlib import Path
 
 _MANIFEST_DIR = Path(__file__).parent.parent / "skills" / "manifests"

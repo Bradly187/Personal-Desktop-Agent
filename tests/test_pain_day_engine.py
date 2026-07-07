@@ -7,12 +7,11 @@ PBT library: Hypothesis (pip install hypothesis)
 
 import time
 
-import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from adaptive.behavioral_twin_state import (
-    BehavioralTwinState, PreferenceModel, ActionStats, _DEFAULT_SNAPSHOT,
+    BehavioralTwinState, PreferenceModel, ActionStats,
 )
 
 

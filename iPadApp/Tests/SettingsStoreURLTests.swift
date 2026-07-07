@@ -3,6 +3,7 @@ import XCTest
 
 /// Unit tests for SettingsStore.wsURL and wsURLOrDefault
 /// Validates Requirements 3.1, 3.2, 3.3, 3.4, 3.5
+@MainActor
 final class SettingsStoreURLTests: XCTestCase {
 
     // MARK: — Requirement 3.1: Empty host returns nil
@@ -109,7 +110,7 @@ final class SettingsStoreURLTests: XCTestCase {
         store.serverHost = ""
         store.serverPort = 0
         let url = store.wsURLOrDefault
-        XCTAssertEqual(url.absoluteString, "ws://192.168.1.100:8765/ws",
+        XCTAssertEqual(url.absoluteString, "ws://192.168.18.2:8765/ws",
                        "wsURLOrDefault should return fallback when wsURL is nil")
     }
 

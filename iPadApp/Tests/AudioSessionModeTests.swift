@@ -8,6 +8,7 @@ import AVFoundation
 /// `.voiceChat` engages the Voice-Processing I/O unit (AEC/AGC/noise
 /// suppression); `.default` leaves the mic input unprocessed. The mapping is a
 /// pure function so it can be verified without an audio session on the host.
+@MainActor
 final class AudioSessionModeTests: XCTestCase {
 
     // MARK: — Pure mode mapping

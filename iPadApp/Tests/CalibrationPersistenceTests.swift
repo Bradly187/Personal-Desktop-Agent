@@ -9,6 +9,7 @@ import XCTest
 /// is equal to the original (within floating-point epsilon).
 ///
 /// **Validates: Requirements 2.1, 2.2**
+@MainActor
 final class CalibrationPersistenceTests: XCTestCase {
 
     /// Unique suite name regenerated per test run to guarantee isolation.

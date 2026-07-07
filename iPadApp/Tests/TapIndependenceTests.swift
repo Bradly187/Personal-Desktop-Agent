@@ -10,6 +10,7 @@ import XCTest
 /// (tap) or not — the position computation uses only the gravity vector.
 ///
 /// **Validates: Requirements 8.3**
+@MainActor
 final class TapIndependenceTests: XCTestCase {
 
     /// Unique suite name regenerated per test run to guarantee isolation.

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -208,7 +208,7 @@ class UIAutomationProvider:
     def _search(self, uia, target: str, timeout_s: float) -> Optional[UIElement]:
         """Walk the UIA tree of the focused window looking for target."""
         try:
-            import comtypes.gen.UIAutomationClient as UIA
+            import comtypes.gen.UIAutomationClient as UIA  # noqa: F401 — the import itself is the availability probe
         except ImportError:
             return None
 
@@ -309,7 +309,7 @@ class UIAutomationProvider:
     def _collect_clickable(self, uia, max_results: int) -> list[UIElement]:
         """Return interactive elements from the focused window."""
         try:
-            import comtypes.gen.UIAutomationClient as UIA
+            import comtypes.gen.UIAutomationClient as UIA  # noqa: F401 — the import itself is the availability probe
         except ImportError:
             return []
 
