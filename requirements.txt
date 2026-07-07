@@ -17,9 +17,9 @@
 #   qrcode>=7.4.2              # Terminal QR code for iPad connection URL
 
 # ── Core bridge & MCP ────────────────────────────────────────────────────────
-mcp==1.27.0
+mcp==1.28.1
 aiohttp==3.14.1
-zeroconf==0.149.16  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
+zeroconf==0.150.0  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
 
 # ── Skills — Google PIM (OPTIONAL; only needed to enable the Gmail/Calendar
 # skill). Install + run `python -m skills.servers.google_pim_auth` once, then
@@ -35,7 +35,7 @@ pywin32==311
 
 # ── Screen / OCR ─────────────────────────────────────────────────────────────
 mss==10.2.0
-Pillow==12.2.0
+Pillow==12.3.0
 pytesseract==0.3.13
 
 # ── Window management ─────────────────────────────────────────────────────────
@@ -54,22 +54,22 @@ sympy==1.14.0
 
 # ── GPU monitoring (Gate 3 VRAM check, --measure-vram) ───────────────────────
 # pynvml is now deprecated; nvidia-ml-py is the maintained package (same API)
-nvidia-ml-py==13.595.45
+nvidia-ml-py==13.610.43
 
 # ── Continuous learning (ContinuousTrainer) ───────────────────────────────────
 aiosqlite==0.22.1
 
 # ── Analytics / ML feature extraction (AnalyticsDB) ──────────────────────────
-duckdb==1.5.2
+duckdb==1.5.4
 
 # ── Semantic few-shot retrieval (MiniLM embeddings in AgentDB) ────────────────
-sentence-transformers==5.4.1
+sentence-transformers==5.6.0
 
 # ── Polly Bidirectional Streaming TTS (polly_stream.py) ──────────────────────
 # soundfile: OGG Vorbis decode for audio returned by the Node.js sidecar.
 # The libsndfile wheel for Windows includes OGG/Vorbis support out of the box.
-soundfile==0.13.1
-boto3==1.43.11  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
+soundfile==0.14.0
+boto3==1.43.41  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
 
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1
@@ -94,7 +94,7 @@ sounddevice==0.5.5
 # PATH as the phonemizer backend, plus the model weights (kokoro-v1.0.onnx +
 # voices.bin) downloaded into tts/ via tts/download_kokoro.py. KokoroClient
 # degrades gracefully (raises an actionable RuntimeError) when missing.
-kokoro-onnx==0.4.7
+kokoro-onnx==0.5.0
 #
 # GPU (RTX 5090) — OPT-IN, install separately, do NOT uncomment here.
 # onnxruntime-gpu installs into the SAME `onnxruntime` import namespace as the
@@ -126,8 +126,8 @@ chromadb==1.5.9
 # ── PDF parsing for codebase_indexer.py document collection ──────────────────
 # pdfplumber is the primary parser (richer layout-aware extraction).
 # pypdf is a lighter fallback if pdfplumber is unavailable.
-pdfplumber==0.11.6
-pypdf==6.13.3  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
+pdfplumber==0.11.10
+pypdf==6.14.2  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
 
 # ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
 # windows-curses provides the stdlib curses module on Windows.
@@ -155,8 +155,8 @@ websockets==16.0
 # playwright==1.49.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
-pytest-asyncio==1.3.0
-hypothesis==6.119.3  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
+pytest-asyncio==1.4.0
+hypothesis==6.156.1  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
 
 # ── Security pins (Dependabot) ────────────────────────────────────────────────
 # idna < 3.15 can bypass the CVE-2024-3651 ReDoS fix via crafted inputs to
