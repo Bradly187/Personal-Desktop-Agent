@@ -111,7 +111,7 @@ kokoro-onnx==0.4.7
 # HybridCoordinator routes gate-failing commands to Claude via Messages API.
 # CloudDevAgent routes dev-domain queries to Claude (--cloud-dev-agent flag).
 # Managed Agents (client.beta.agents/sessions) need >=0.40.0; installed 0.103.1.
-anthropic>=0.40.0
+anthropic>=0.116.0
 
 
 # ── Semantic memory (behavioral-twin-state) ──────────────────────────────────
