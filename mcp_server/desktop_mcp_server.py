@@ -63,7 +63,7 @@ def _search_scopes() -> list[str]:
             _search_scopes_cache = []
     return _search_scopes_cache
 try:
-    from adaptive.mcp_trust_classifier import MCPTrustClassifier, RiskLevel
+    from adaptive.mcp_trust_classifier import MCPTrustClassifier, RiskLevel  # noqa: F401 — the import itself is the availability probe
     _trust_classifier = MCPTrustClassifier()
 except ImportError:
     _trust_classifier = None

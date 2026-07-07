@@ -27,7 +27,6 @@ are blocked in ``SAFE_MODE`` by the dispatcher, like ``keyboard_type``.
 from __future__ import annotations
 
 import logging
-import os
 import queue
 import threading
 from typing import Any, Optional

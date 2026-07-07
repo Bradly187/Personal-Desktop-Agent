@@ -7,12 +7,8 @@ Gap 3 — Gesture velocity floors loaded from DB into GestureProcessor at startu
 
 from __future__ import annotations
 
-import asyncio
-import math
 import struct
-import time
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

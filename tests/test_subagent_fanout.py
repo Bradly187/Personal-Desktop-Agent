@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.scheduler import AccessibilityScheduler, Priority, _MAX_CONCURRENT_SUBAGENTS
+from core.scheduler import AccessibilityScheduler, _MAX_CONCURRENT_SUBAGENTS
 
 
 # ===========================================================================

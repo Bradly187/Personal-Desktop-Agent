@@ -314,7 +314,7 @@ def _print_summary(results: list[dict], baseline_gb: float | None) -> None:
             f"{'+'+str(delta)+' GB':>8}  {fits:>14}"
         )
 
-    print(f"\n  Recommendation:")
+    print("\n  Recommendation:")
     if valid:
         best = valid[0]
         fastest = min(valid, key=lambda r: r["p50_ms"] or 9999)

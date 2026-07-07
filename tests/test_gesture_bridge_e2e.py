@@ -16,7 +16,6 @@ Exit codes:
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,7 +28,7 @@ except ImportError as exc:
     print(f"ERROR: {exc}. Run: pip install aiohttp")
     sys.exit(1)
 
-import core.command_executor
+from core import command_executor
 from core.ipad_bridge import IPadBridge
 from core.fusion_engine import FusionEngine, FusionConfig
 from core.hybrid_coordinator import HybridCoordinator, CoordinatorConfig

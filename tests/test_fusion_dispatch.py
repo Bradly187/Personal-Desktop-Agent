@@ -10,7 +10,6 @@ dual-path contract and that the route-task circuit breaker bounds the fallback.
 
 import asyncio
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from core.command_executor import Command

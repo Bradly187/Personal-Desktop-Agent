@@ -16,6 +16,11 @@ on:
           - 'true'
           - 'false'
 
+# Least privilege: build/test only need checkout; signing uses repo secrets,
+# not the GITHUB_TOKEN (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-26
@@ -189,3 +194,55 @@ jobs:
         if: always()
         run: |
           security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+
+  # IG-6 (2026-07-05 audit): the 20 XCTest files in iPadApp/Tests never ran in
+  # CI despite this workflow already paying for a macOS runner. Runs in
+  # parallel with build; no signing (simulator). Test target + scheme are
+  # defined in iPadApp/DesktopAgent/project.yml (DesktopAgentTests).
+  test:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select Xcode 26.4.1
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cd iPadApp/DesktopAgent
+          xcodegen generate
+
+      - name: Install iOS platform
+        run: xcodebuild -downloadPlatform iOS || true
+
+      - name: Run unit tests (iPad Simulator)
+        shell: bash
+        run: |
+          cd iPadApp/DesktopAgent
+          # App is iPad-only (TARGETED_DEVICE_FAMILY=2) — pick any available iPad sim.
+          DEST_ID=$(xcrun simctl list devices available --json | python3 -c "
+          import json, sys
+          devices = json.load(sys.stdin)['devices']
+          print(next(dev['udid'] for runtime, devs in devices.items()
+                     if 'iOS' in runtime for dev in devs
+                     if dev['isAvailable'] and 'iPad' in dev['name']))")
+          echo "Using simulator: $DEST_ID"
+          xcodebuild test \
+            -project DesktopAgent.xcodeproj \
+            -scheme DesktopAgent \
+            -destination "id=$DEST_ID" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee test.log | grep -E "error:|warning: .*Tests|Test Suite|Test Case.*(passed|failed)|TEST" | tail -80
+          grep -q "TEST SUCCEEDED" test.log
+
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xcodebuild-test-log
+          path: iPadApp/DesktopAgent/test.log
+          retention-days: 7

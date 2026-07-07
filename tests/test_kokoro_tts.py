@@ -24,7 +24,6 @@ Layering:
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -67,9 +66,15 @@ def test_default_backend_is_kokoro():
 # the configured voice. No model load (KokoroClient.__init__ is lazy).
 # ---------------------------------------------------------------------------
 
+def _unwrap(client):
+    """get_client() wraps every backend in _MutedWrapper (mic-mute gate);
+    unwrap to assert on the concrete backend class."""
+    return getattr(client, "_client", client)
+
+
 def test_get_client_dispatches_to_kokoro():
     client = get_client(backend="kokoro")
-    assert client.__class__.__name__ == "KokoroClient"
+    assert _unwrap(client).__class__.__name__ == "KokoroClient"
 
 
 def test_kokoro_client_uses_configured_voice():
@@ -82,7 +87,7 @@ def test_get_client_honors_config_default():
     """With backend=None, get_client() resolves via approval_config.json."""
     client = get_client()
     # config default is kokoro; assert we did NOT silently fall back to Polly.
-    assert client.__class__.__name__ == "KokoroClient"
+    assert _unwrap(client).__class__.__name__ == "KokoroClient"
 
 
 # ---------------------------------------------------------------------------

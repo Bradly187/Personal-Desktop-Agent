@@ -17,11 +17,10 @@ import asyncio
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.supervisor import Supervisor, SupervisedSpec, _SupervisedState
+from core.supervisor import Supervisor, SupervisedSpec
 from core.scheduler import AccessibilityScheduler, Priority
 
 

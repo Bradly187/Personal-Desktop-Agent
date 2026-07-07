@@ -34,7 +34,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -550,7 +550,7 @@ class CodebaseIndexer:
             return True   # already watching
         try:
             from watchdog.observers import Observer
-            from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileCreatedEvent
+            from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileCreatedEvent  # noqa: F401 — the import itself is the availability probe
 
             indexer = self
             loop = asyncio.get_event_loop()
@@ -1094,7 +1094,6 @@ def get_indexer(project_root: str = ".", chroma_dir: Optional[str] = None) -> Co
 
 def main() -> None:
     """CLI: python codebase_indexer.py [--reindex] [--query TEXT] [--docs]"""
-    import sys
     import argparse
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

@@ -8,11 +8,9 @@ These tests verify the math/logic without requiring pyautogui (which is a local
 import inside _tick). We test the components and their composition directly.
 """
 
-import pytest
 
 from core.fusion_engine import FusionConfig, FusionEngine, dead_zone_ramp, power_curve
 from calibration.gyro_bias_calibrator import BiasState
-from sensors.one_euro_filter import OneEuroFilter
 
 
 class TestTiltVelocityPipelineLogic:

@@ -6,14 +6,12 @@ PBT library: Hypothesis (pip install hypothesis)
 """
 
 import datetime
-import json
 import math
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from adaptive.behavioral_twin_state import ActionStats, PreferenceModel
+from adaptive.behavioral_twin_state import PreferenceModel
 
 
 # ---------------------------------------------------------------------------

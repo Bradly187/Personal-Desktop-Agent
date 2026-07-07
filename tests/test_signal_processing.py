@@ -1,7 +1,5 @@
 """Tests for dead_zone_ramp and power_curve signal processing functions."""
 
-import math
-import pytest
 
 from core.fusion_engine import dead_zone_ramp, power_curve
 

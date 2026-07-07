@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from evals.retrieval import (
     RetrievalCase,
     hit_matches,
-    rank_of_target,
     score_retrieval,
     aggregate_retrieval,
     load_retrieval_suite,

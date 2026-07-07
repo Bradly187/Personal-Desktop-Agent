@@ -1,8 +1,7 @@
 import pytest
-from unittest.mock import MagicMock, patch
 import time
 
-from core.pty_manager import manager, PTYSession
+from core.pty_manager import manager
 from mcp_server.tools import terminal
 
 @pytest.fixture(autouse=True)

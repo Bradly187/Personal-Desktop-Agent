@@ -9,7 +9,6 @@ These are the integration checks that would have caught G1 (auto path never
 touched the recognizer) and G2 (logprob floor computed but never applied).
 """
 
-import time
 
 import pytest
 
