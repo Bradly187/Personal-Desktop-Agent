@@ -276,7 +276,12 @@ class HybridCoordinator:
     # re-instantiate per route() call.
     _domain_classifier = None
 
-
+    @classmethod
+    def _get_domain_classifier(cls):
+        if cls._domain_classifier is None:
+            from core.domain_classifier import DomainClassifier
+            cls._domain_classifier = DomainClassifier()
+        return cls._domain_classifier
 
     def __init__(
         self,
