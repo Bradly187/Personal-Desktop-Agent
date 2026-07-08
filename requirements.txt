@@ -94,7 +94,7 @@ sounddevice==0.5.5
 # PATH as the phonemizer backend, plus the model weights (kokoro-v1.0.onnx +
 # voices.bin) downloaded into tts/ via tts/download_kokoro.py. KokoroClient
 # degrades gracefully (raises an actionable RuntimeError) when missing.
-kokoro-onnx==0.5.0
+kokoro-onnx==0.4.7
 #
 # GPU (RTX 5090) — OPT-IN, install separately, do NOT uncomment here.
 # onnxruntime-gpu installs into the SAME `onnxruntime` import namespace as the
