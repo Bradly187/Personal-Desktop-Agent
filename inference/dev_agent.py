@@ -31,23 +31,16 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from core.approval_keywords import classify_confirmation
 from core.domain_classifier import DomainClassifier
 from core.events import (
-    TOPIC_PLAN_GENERATED, TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
-    TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
-    TOPIC_DAG_WALKTHROUGH, TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
+    TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
+    TOPIC_CHAT_TOKEN, TOPIC_DAG_WALKTHROUGH,
 )
 from inference.edit_format import (
-    HASHLINE,
-    HASHLINE_PROMPT_INSTRUCTIONS,
-    SEARCH_REPLACE_PROMPT_INSTRUCTIONS,
-    UDIFF,
-    UDIFF_PROMPT_INSTRUCTIONS,
     EditApplier,
 )
-from inference.critic import PASS, REVISE, Critic, CriticVerdict, Finding
-from inference.tester import Tester, is_testable_source
+from inference.critic import Critic
+from inference.tester import Tester
 from inference.model_router import ModelRouter, RouterResult
 
 if TYPE_CHECKING:
@@ -79,11 +72,15 @@ log = logging.getLogger(__name__)
 # coordinator can share it (forcing such queries local) without importing this
 # heavier module.
 from storage.personal_kb import is_personal_query as _is_personal_query
-from inference.plan_parser import AgentStep, AgentResult, _parse_plan_json, _parse_plan_json_report, _parse_plan, _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS
+from inference.plan_parser import AgentStep, AgentResult
 # Back-compat re-exports: these moved to plan_parser in the god-object split,
 # but external callers (macro_store, macro_detector, tests) still import them
 # from here. Keep the bridge so the split stays internal.
 from inference.plan_parser import _PLAN_ACTIONS, _parse_deps, _extract_json_obj, _STEP_PATTERN  # noqa: F401
+from inference.plan_parser import (  # noqa: F401
+    _parse_plan, _parse_plan_json, _parse_plan_json_report,
+    _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS,
+)
 from inference.context_builder import ContextBuilder
 from inference.saga_manager import SagaManager
 

@@ -57,6 +57,10 @@ from core.coordinator_state import CoordinatorState
 from core.correction_handler import CorrectionHandler
 from core.event_dispatcher import EventDispatcher
 from core.voice_system_control import VoiceSystemControl
+# Back-compat re-export (B1): _BYPASS_SOURCES / _SKIP_GATE1_SOURCES live in
+# core.routing_constants, but callers still import them from here (event_dispatcher
+# runtime import + tests). Keep the bridge so the single-source split stays internal.
+from core.routing_constants import _BYPASS_SOURCES, _SKIP_GATE1_SOURCES  # noqa: F401
 from dataclasses import replace as _dc_replace
 from inference.local_inference import (
     LocalInference,
@@ -224,7 +228,6 @@ async def _retranscribe(cmd: Command) -> Command:
 # HybridCoordinator
 # ---------------------------------------------------------------------------
 
-from core.routing_constants import _BYPASS_SOURCES, _SKIP_GATE1_SOURCES
 
 # Output schema for the command-path LLM. The local/cloud command models are
 # prompted to answer verb-first with exactly one of these 11 accessibility

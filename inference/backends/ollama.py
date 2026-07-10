@@ -5,17 +5,14 @@ import json
 import logging
 import os
 import time
-from abc import ABC, abstractmethod
-from contextvars import ContextVar
-from typing import Any, Optional
+from typing import Optional
 
 from core.command_executor import Command
 
 log = logging.getLogger(__name__)
 
 from inference.backends.base import (
-    OllamaTimeoutError, LocalInference, set_inference_capture, get_inference_capture,
-    _SYSTEM_PROMPT, _build_prompt, _build_chat_messages
+    LocalInference, set_inference_capture,
 )
 
 # ---------------------------------------------------------------------------

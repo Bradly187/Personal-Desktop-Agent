@@ -1,4 +1,3 @@
-from typing import Tuple
 
 AGENT_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (

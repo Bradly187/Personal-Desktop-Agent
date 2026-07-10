@@ -1,19 +1,14 @@
 import asyncio
-import json
 import logging
 import os
-import re
 import time
-import traceback
 from pathlib import Path
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Optional
 
 from core.approval_keywords import classify_confirmation
-from core.domain_classifier import DomainClassifier
 from core.events import (
-    TOPIC_PLAN_GENERATED, TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
-    TOPIC_CHAT_TOKEN, TOPIC_DAG_APPROVAL,
-    TOPIC_DAG_WALKTHROUGH, TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
+    TOPIC_PLAN_GENERATED, TOPIC_DAG_APPROVAL,
+    TOPIC_GOAL_DEQUEUED, TOPIC_GOAL_COMPLETED,
 )
 from inference.edit_format import (
     HASHLINE,
@@ -21,24 +16,14 @@ from inference.edit_format import (
     SEARCH_REPLACE_PROMPT_INSTRUCTIONS,
     UDIFF,
     UDIFF_PROMPT_INSTRUCTIONS,
-    EditApplier,
 )
-from inference.critic import PASS, REVISE, Critic, CriticVerdict, Finding
-from inference.tester import Tester, is_testable_source
 from inference.plan_parser import (
-    AgentResult, AgentStep, _parse_plan, _parse_deps, _parse_plan_json, 
-    _parse_plan_json_report, _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS,
-    _PLAN_ACTIONS, _extract_json_obj, _STEP_PATTERN
+    AgentResult, AgentStep, _parse_plan, _parse_plan_json, 
+    _parse_plan_json_report, _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS
 )
-from inference.model_router import ModelRouter, RouterResult
 
-from inference.executors.evaluation_manager import _reflect
 
 log = logging.getLogger(__name__)
-
-
-# Constants missing
-_DELEGATE_PROMPT_INSTRUCTIONS = ''
 
 
 async def _acquire_plan_steps(agent, goal, plan_result, extra_ctx):

@@ -4,12 +4,7 @@ tests/test_routing_constants.py — B1 regression guard
 Ensures _BYPASS_SOURCES is defined exactly once, in the leaf module, with the
 correct values, and that both consumers import from it rather than redefining it.
 """
-import importlib
-import importlib.util
-import sys
-import types
 
-import pytest
 
 from core.routing_constants import _BYPASS_SOURCES, _SKIP_GATE1_SOURCES
 

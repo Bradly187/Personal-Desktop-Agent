@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 from pathlib import Path
 
 from inference.workspace_utils import _git_facts, _layout

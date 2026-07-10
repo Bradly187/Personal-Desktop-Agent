@@ -1,29 +1,23 @@
 import asyncio
 import json
 import logging
-import os
 import re
-import subprocess
-import time
 import webbrowser
 from typing import Optional, TYPE_CHECKING
 from pathlib import Path
 
 from inference.executors.git_executor import git_status, git_diff, git_commit, git_checkout, github_pr
 from inference.executors.terminal_executor import run_terminal
-from inference.executors.web_executor import fetch_url, capture_screenshot, scan_web_content
-from inference.executors.skill_executor import execute_skill_step, handle_skill, handle_personal_query
-from inference.executors.math_verifier import verify_math_with_cas
+from inference.executors.web_executor import fetch_url, capture_screenshot
+from inference.executors.skill_executor import execute_skill_step
 from inference.executors.voice_approval_gate import confirm_destructive_op_locked
 
-from inference.plan_parser import AgentStep, AgentResult, _extract_json_obj
-from core.approval_keywords import classify_confirmation
-from core.events import TOPIC_DAG_APPROVAL
-from inference.edit_format import EditApplier, render_hashline, HASHLINE, SEARCH_REPLACE
+from inference.plan_parser import AgentStep
+from inference.edit_format import render_hashline, HASHLINE, SEARCH_REPLACE
 from inference.critic import BLOCK, REVISE
 from inference.dev_common import (
     _RAG_OPEN_FENCE, _RAG_CLOSE_FENCE,
-    _get_trust_classifier, _get_content_filter, _strip_html,
+    _get_trust_classifier,
 )
 
 if TYPE_CHECKING:

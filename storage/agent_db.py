@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 try:
     import aiosqlite
