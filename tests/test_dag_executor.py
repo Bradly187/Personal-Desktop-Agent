@@ -54,9 +54,10 @@ def test_parse_plan_captures_deps_and_strips_from_args():
     assert "after" not in steps[1].args.lower()   # annotation not swallowed into args
 
 
+import inference.executors.plan_executor as pe
 def test_plan_has_deps():
-    assert DevAgent._plan_has_deps([AgentStep("READ_FILE"), AgentStep("WRITE_FILE", deps=[1])])
-    assert not DevAgent._plan_has_deps([AgentStep("READ_FILE"), AgentStep("WRITE_FILE")])
+    assert pe._plan_has_deps([AgentStep("READ_FILE"), AgentStep("WRITE_FILE", deps=[1])])
+    assert not pe._plan_has_deps([AgentStep("READ_FILE"), AgentStep("WRITE_FILE")])
 
 
 # ---------------------------------------------------------------------------

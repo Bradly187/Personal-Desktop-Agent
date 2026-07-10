@@ -181,6 +181,36 @@ def router_predictor(*, register_skills: bool = True) -> PredictFn:
 
 
 # --------------------------------------------------------------------------- #
+# Bypass-source evals — does a Command.source skip the LLM gate? (MODEL-FREE)
+# --------------------------------------------------------------------------- #
+
+def bypass_predictor() -> PredictFn:
+    """Build a MODEL-FREE predict_fn over the routing bypass decision (specs/
+    bugfix-b1-bypass-sources). A command whose ``source`` is in ``_BYPASS_SOURCES``
+    skips verb de-glue and the dev-agent pre-gate in ``EventDispatcher.route_impl``;
+    every other source is gated.
+
+    The set is imported from ``core.routing_constants`` — the single source of
+    truth B1 established — so editing that constant, or reintroducing a divergent
+    local copy (the "multi" vs "multimodal" split-brain B1 fixed), moves the score.
+    This scores the REAL membership test route_impl runs, not a copy of it.
+
+    The case's ``utterance`` carries the ``Command.source``; ``expected_verb`` is
+    ``"bypass"`` or ``"gate"``.
+    """
+    from core.routing_constants import _BYPASS_SOURCES
+
+    def predict(case) -> Prediction:
+        t0 = time.monotonic()
+        source = (case.utterance or "").strip()
+        verdict = "bypass" if source in _BYPASS_SOURCES else "gate"
+        return Prediction(verb=verdict, raw=verdict,
+                          latency_ms=(time.monotonic() - t0) * 1000)
+
+    return predict
+
+
+# --------------------------------------------------------------------------- #
 # Skill-trigger evals — does an utterance fire the RIGHT skill? (MODEL-FREE)
 # --------------------------------------------------------------------------- #
 
@@ -502,12 +532,14 @@ def replan_predictor(infer_text: TextFn, *, timeout_s: float = 60.0):
 
     Reconstructs the failure state from a ReplanCase (executed + remaining steps),
     builds the EXACT recovery prompt production sends via the live
-    `DevAgent.build_replan_prompt`, runs the plan model, and extracts the recovery
+    `plan_executor.build_replan_prompt`, runs the plan model, and extracts the recovery
     plan's verb sequence. `enabled=` is read from `DA_TRAJECTORY_REDUCE` (the real
     production toggle) so recording the baseline with the flag OFF and re-running
     with it ON gates exactly the spec's "compaction must not degrade recovery"
     claim. Imports dev_agent lazily (model-side only, like `_build_dev_agent`)."""
-    from inference.dev_agent import DevAgent, AgentStep
+    from inference.dev_agent import DevAgent
+    from inference.executors import plan_executor
+    from inference.plan_parser import AgentStep
     from inference.trajectory import reduction_enabled
 
     system = _plan_system()
@@ -525,7 +557,7 @@ def replan_predictor(infer_text: TextFn, *, timeout_s: float = 60.0):
     def predict(case) -> TrajPrediction:
         executed = _steps(getattr(case, "executed", []))
         remaining = _steps(getattr(case, "remaining", []))
-        user, _ = DevAgent.build_replan_prompt(
+        user, _ = plan_executor.build_replan_prompt(DevAgent, 
             case.goal, executed, remaining, enabled=reduce_on
         )
         t0 = time.monotonic()

@@ -10,8 +10,8 @@ truth for cross-tool behavior; do not duplicate these rules elsewhere.
   It imports this file, so the rules below apply in Claude Code too.
 
 ## 1. 🗄️ Database Schema Source of Truth
-- **Rule:** Always read `storage/db.py` to determine the current `agent.db` SQLite schema, table structures, and `PRAGMA user_version`.
-- **Context:** Historical documentation (including older sections of `CLAUDE.md`) frequently has stale table counts. The Python schema definition is the ONLY source of truth. All migrations must be explicitly defined and backwards compatible.
+- **Rule:** Always read `storage/schema/agent.py` to determine the current `agent.db` SQLite schema, table structures, and `PRAGMA user_version`.
+- **Context:** Historical documentation (including older sections of `CLAUDE.md`) frequently has stale table counts. The Python schema definition in `storage/schema/agent.py` is the ONLY source of truth. All migrations must be explicitly defined and backwards compatible.
 
 ## 2. ⚡ 60Hz Tick Loop Protection
 - **Rule:** Never introduce synchronous I/O, heavy computation, or blocking LLM inference inside `core/fusion_engine.py` or the `AccessibilityScheduler`.

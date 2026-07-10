@@ -56,12 +56,14 @@ function Invoke-Gate {
 Write-Host "=== eval-harness logic tests ===" -ForegroundColor Cyan
 $logicTests = @("tests/test_evals.py", "tests/test_evals_trajectory.py",
                 "tests/test_evals_judge.py", "tests/test_evals_router.py",
-                "tests/test_evals_skill_trigger.py", "tests/test_evals_retrieval.py")
+                "tests/test_evals_skill_trigger.py", "tests/test_evals_retrieval.py",
+                "tests/test_evals_bypass.py")
 & $py -m pytest @logicTests -q
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
 
 Invoke-Gate "router gate" @("--suite", "router_domains", "--predictor", "router", "--check") $false
 Invoke-Gate "skill-trigger gate" @("--suite", "skill_triggers", "--predictor", "skill_trigger", "--check") $false
+Invoke-Gate "bypass gate" @("--suite", "routing", "--predictor", "bypass", "--check") $false
 
 # Static always-loaded skill-metadata token budget (model-free; its own module).
 Write-Host ""

@@ -39,11 +39,21 @@ from core.schedule_parser import is_schedule_phrase, parse as parse_schedule
 
 log = logging.getLogger(__name__)
 
+# Undo/revert phrases handled by the undo branch in maybe_handle. Defined here
+# as a named constant so _SYSTEM_CONTROL_PHRASES and the maybe_handle elif
+# both derive from one source — no manual "KEEP IN SYNC" needed.
+_UNDO_PHRASES: frozenset[str] = frozenset({
+    "undo that run", "undo run", "revert run",
+    "undo last task", "revert last task",
+    "undo the run", "undo the last run", "undo task",
+})
+
 # Voice phrases handled by the system-control block in route() (pain day,
-# lecture mode, condition switching, calibration). The dev-agent pre-gate must
-# NOT intercept these: the DomainClassifier maps some (e.g. "pain day on" →
-# general) to dev domains, which would shadow the keyword handler and send the
-# phrase to an LLM instead. KEEP IN SYNC with the keyword block in route().
+# lecture mode, condition switching, calibration, undo). The dev-agent pre-gate
+# must NOT intercept these: the DomainClassifier maps some (e.g. "pain day on"
+# → general) to dev domains, which would shadow the keyword handler and send
+# the phrase to an LLM instead.
+# Undo phrases are enforced structurally via _UNDO_PHRASES above.
 _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     "start lecture mode", "lecture mode on", "begin lecture mode",
     "stop lecture mode", "lecture mode off", "end lecture mode",
@@ -77,7 +87,7 @@ _SYSTEM_CONTROL_PHRASES: frozenset[str] = frozenset({
     # Google PIM auth lifecycle (one-time setup + expired-token recovery)
     "connect google", "reconnect google", "connect gmail", "set up gmail",
     "set up google",
-})
+}) | _UNDO_PHRASES
 
 def _is_system_control_voice(cmd: 'Command') -> bool:
     """True if `cmd` is a voice system-control keyword that route()'s keyword
@@ -303,8 +313,7 @@ class VoiceSystemControl:
                     "goal": pending[0].get("goal", "")[:80]}
 
         # "undo that run" — Revert the most recent dev agent run (VoiceRewindHandler)
-        elif _lower in ("undo that run", "undo run", "revert run", "undo last task", "revert last task", 
-                        "undo the run", "undo the last run", "undo task"):
+        elif _lower in _UNDO_PHRASES:
             dev_agent = self._dev_agent()
             if dev_agent is None:
                 from core.async_utils import fire_and_log

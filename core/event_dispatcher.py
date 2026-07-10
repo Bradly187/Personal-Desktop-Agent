@@ -14,10 +14,7 @@ from storage.personal_kb import is_personal_query as _is_personal_query
 
 log = logging.getLogger(__name__)
 
-# Bypasses: UI gestures/clicks that already carry a concrete target action.
-# 'multi' is a multimodal prompt where the user clicks an element and types text;
-# the click resolves to a target_uid on the client before reaching here.
-_BYPASS_SOURCES = ("touch", "multi")
+from core.routing_constants import _BYPASS_SOURCES
 
 class EventDispatcher:
     """Handles routing Commands through the gate decision tree and dev agents."""

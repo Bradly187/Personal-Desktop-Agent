@@ -29,11 +29,11 @@ def _params(fn) -> list[str]:
 
 
 def test_dev_agent_plan_and_run_signature():
-    from inference.dev_agent import DevAgent
-    assert _params(DevAgent.plan_and_run) == [
-        "self", "goal", "trace_id", "seed_context", "extra_context"], _HOWTO
-    assert _params(DevAgent._plan_and_run_locked) == [
-        "self", "goal", "cmd_trace_id", "seed_context", "turn_context"], _HOWTO
+    from inference.executors import plan_executor
+    assert _params(plan_executor.plan_and_run) == [
+        "agent", "goal", "trace_id", "seed_context", "extra_context"], _HOWTO
+    assert _params(plan_executor._plan_and_run_locked) == [
+        "agent", "goal", "cmd_trace_id", "seed_context", "turn_context"], _HOWTO
 
 
 def test_dev_agent_handle_signature():

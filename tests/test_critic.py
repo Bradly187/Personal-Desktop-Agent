@@ -7,6 +7,7 @@ byte-identical. The model is stubbed so everything runs in CI.
 """
 
 from __future__ import annotations
+import inference.step_executor as se
 
 import sys
 from pathlib import Path
@@ -119,11 +120,11 @@ def _agent_with_critic(verdict=None, *, raises=False, plan_authorized=False,
     agent._critic_confidence_floor = floor
     agent._critic_max_revisions = max_revisions
     # Stub the side-effecting helpers.
-    agent._apply_edit = MagicMock(return_value="NEW CONTENT")
-    agent._write_file = MagicMock(return_value="Written 11 bytes")
+    agent._apply_edit = se.apply_edit = MagicMock(return_value="NEW CONTENT")
+    agent._write_file = se.write_file = MagicMock(return_value="Written 11 bytes")
     agent._snapshot_for_write = MagicMock(return_value={})
     agent._read_current_for_critic = MagicMock(return_value="OLD")
-    agent._confirm_destructive_op = AsyncMock(return_value=confirm)
+    agent._confirm_destructive_op = se.confirm_destructive_op = AsyncMock(return_value=confirm)
     agent.set_critic(_FakeCritic(verdict, raises=raises))
     return agent
 
@@ -214,10 +215,10 @@ async def test_disabled_critic_is_byte_identical_legacy_path(monkeypatch):
     monkeypatch.setenv("DA_CRITIC", "0")
     agent = DevAgent(router=MagicMock())
     assert agent._critic is None and agent._critic_enabled is False
-    agent._apply_edit = MagicMock(return_value="NEW")
-    agent._write_file = MagicMock(return_value="Written 3 bytes")
+    agent._apply_edit = se.apply_edit = MagicMock(return_value="NEW")
+    agent._write_file = se.write_file = MagicMock(return_value="Written 3 bytes")
     agent._snapshot_for_write = MagicMock(return_value={})
-    agent._confirm_destructive_op = AsyncMock(return_value=True)
+    agent._confirm_destructive_op = se.confirm_destructive_op = AsyncMock(return_value=True)
     review_spy = AsyncMock()
     agent._critic_review = review_spy
     out = await agent._execute_step(_wf_step())

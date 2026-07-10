@@ -153,16 +153,17 @@ async def test_governor_spawn_bg_without_start_uses_running_loop():
 
 def test_git_commit_staging_failure_raises_runtimeerror(monkeypatch):
     from inference import dev_agent
-    from inference import step_executor
+    from inference.executors import git_executor
 
     class _Res:
         returncode = 1
         stderr = "fatal: not a git repository"
         stdout = ""
 
-    # _git_commit moved to StepExecutor in the god-object split; patch subprocess
-    # where it is actually called.
-    monkeypatch.setattr(step_executor.subprocess, "run", lambda *a, **k: _Res())
+    # _git_commit moved to executors/git_executor in the god-object split
+    # (DevAgent._git_commit -> git_executor.git_commit); patch subprocess where
+    # it is actually called.
+    monkeypatch.setattr(git_executor.subprocess, "run", lambda *a, **k: _Res())
     with pytest.raises(RuntimeError, match="git add failed"):
         dev_agent.DevAgent._git_commit("msg")
 

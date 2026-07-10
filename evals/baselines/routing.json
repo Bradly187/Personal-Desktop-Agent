@@ -1,0 +1,12 @@
+{
+  "suite": "routing",
+  "mode": "single",
+  "recorded_at": "2026-07-10T14:09:27",
+  "model": "default",
+  "tolerance": 0.05,
+  "n": 9,
+  "verb_acc": 1.0,
+  "exact_acc": 1.0,
+  "p50_latency_ms": 0.0,
+  "errors": 0
+}

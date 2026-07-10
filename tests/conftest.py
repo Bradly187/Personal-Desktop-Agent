@@ -132,3 +132,15 @@ GRAB_LM = make_lm_mock(
     {4: 0.30, 8: 0.33, 12: 0.36, 16: 0.70, 20: 0.70},
     {4: 0.50, 8: 0.50, 12: 0.50},
 )
+
+import inference.step_executor as se
+import pytest
+@pytest.fixture(autouse=True)
+def restore_step_executor():
+    orig_apply = se.apply_edit
+    orig_write = se.write_file
+    orig_confirm = se.confirm_destructive_op
+    yield
+    se.apply_edit = orig_apply
+    se.write_file = orig_write
+    se.confirm_destructive_op = orig_confirm

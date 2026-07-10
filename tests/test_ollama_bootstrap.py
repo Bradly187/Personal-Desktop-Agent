@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import inference.local_inference as li
+import inference.backends.ollama as li
 
 
 def test_noop_when_already_alive(monkeypatch):
