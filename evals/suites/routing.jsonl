@@ -1,0 +1,17 @@
+# routing — Command.source -> bypass/gate decision. MODEL-FREE (--predictor bypass).
+# specs/bugfix-b1-bypass-sources. The `utterance` field carries the Command.source;
+# `expected_verb` is "bypass" (skips verb de-glue + dev-agent pre-gate in
+# EventDispatcher.route_impl) or "gate" (routed through the LLM gate normally).
+# Scored against the single-source-of-truth core.routing_constants._BYPASS_SOURCES,
+# so a reintroduced local/divergent copy (the "multi" vs "multimodal" split-brain
+# B1 fixed) moves the score. Run:
+#   python -m evals.run --suite routing --predictor bypass --check
+{"id": "bypass-multimodal", "suite": "routing", "utterance": "multimodal", "expected_verb": "bypass", "domain": "routing", "tags": ["b1", "voice-click"]}
+{"id": "bypass-touch", "suite": "routing", "utterance": "touch", "expected_verb": "bypass", "domain": "routing", "tags": ["b1", "ipad-touch"]}
+{"id": "gate-multi-stale", "suite": "routing", "utterance": "multi", "expected_verb": "gate", "domain": "routing", "tags": ["b1", "regression-guard", "stale-value"]}
+{"id": "gate-voice", "suite": "routing", "utterance": "voice", "expected_verb": "gate", "domain": "routing", "tags": ["b1", "whisper"]}
+{"id": "gate-voice-local", "suite": "routing", "utterance": "voice_local", "expected_verb": "gate", "domain": "routing", "tags": ["b1", "on-device-keyword"]}
+{"id": "gate-dev-agent", "suite": "routing", "utterance": "dev_agent", "expected_verb": "gate", "domain": "routing", "tags": ["b1", "dev-agent-emitted"]}
+{"id": "gate-trackpad", "suite": "routing", "utterance": "trackpad", "expected_verb": "gate", "domain": "routing", "tags": ["b1"]}
+{"id": "gate-keyword", "suite": "routing", "utterance": "keyword", "expected_verb": "gate", "domain": "routing", "tags": ["b1"]}
+{"id": "gate-empty", "suite": "routing", "utterance": "", "expected_verb": "gate", "domain": "routing", "tags": ["b1", "edge"]}

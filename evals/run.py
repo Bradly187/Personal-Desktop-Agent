@@ -31,7 +31,7 @@ from pathlib import Path
 from evals.corpus import load_suite, harvest_from_agent_db
 from evals.runner import (
     run_suite, command_predictor, slot_predictor, router_predictor,
-    skill_trigger_predictor,
+    skill_trigger_predictor, bypass_predictor,
     run_trajectory_suite, plan_predictor, replan_predictor,
     run_judge_suite, llm_judge, answer_producer,
 )
@@ -86,7 +86,7 @@ def _plan_grammar() -> dict | None:
 
 def _run_single(args):
     cases = load_suite(args.suite)
-    if args.db and args.predictor not in ("router", "skill_trigger"):
+    if args.db and args.predictor not in ("router", "skill_trigger", "bypass"):
         gold = harvest_from_agent_db(args.db, suite=args.suite, limit=args.limit)
         print(f"harvested {len(gold)} gold case(s) from {args.db}")
         cases += gold
@@ -97,6 +97,8 @@ def _run_single(args):
         return run_suite(cases, router_predictor())
     if args.predictor == "skill_trigger":   # deterministic, no model needed
         return run_suite(cases, skill_trigger_predictor())
+    if args.predictor == "bypass":          # deterministic, no model needed
+        return run_suite(cases, bypass_predictor())
     oi, infer_text = _infer_text(args.model)
     predict = (command_predictor(oi.infer, timeout_s=args.timeout)
                if args.predictor == "command"
@@ -395,10 +397,11 @@ def main(argv: list[str] | None = None) -> int:
                          "persisted chroma_db (MRR/Hit@K, model-free scoring — isolates "
                          "the retriever, where ablation measures the whole RAG loop)")
     ap.add_argument("--predictor",
-                    choices=["command", "slots", "router", "skill_trigger"],
+                    choices=["command", "slots", "router", "skill_trigger", "bypass"],
                     default="command",
                     help="single mode only (router = model-free DomainClassifier eval; "
-                         "skill_trigger = model-free skill-router eval)")
+                         "skill_trigger = model-free skill-router eval; "
+                         "bypass = model-free _BYPASS_SOURCES routing eval)")
     ap.add_argument("--model", default=None, help="override local model name")
     ap.add_argument("--judge-model", default=None, help="judge mode: model for the judge")
     ap.add_argument("--timeout", type=float, default=60.0,
