@@ -154,11 +154,11 @@ by `tests/test_flags_registry.py`.
 | `DA_TESTER` | ON | Auto-pytest after `.py` writes; failure = safe-observation, never rollback | D008 | `specs/dev-agent-critic/` |
 | `DA_PLAN_PREVIEW` | OFF | Voice preview intent for large plans (threshold defaults to 3) | D018 | `specs/plan-preview-voice-gate/` |
 | `DA_PLAN_REPAIR` | ON | Re-prompt planner on unknown-verb / unparseable plan (max `DA_PLAN_REPAIR_MAX=1`) | — | `specs/dev-agent-plan-contract/` |
-| `DA_REPO_CONTEXT` | OFF | Inject stable repo facts (AGENTS.md/CLAUDE.md, layout, git) ahead of RAG | — | `specs/repo-context-ingestion/` |
+| `DA_REPO_CONTEXT` | ON | Inject stable repo facts (AGENTS.md/CLAUDE.md, layout, git) ahead of RAG | — | `specs/repo-context-ingestion/` |
 | `DA_TRAJECTORY_DEDUP` | ON | Drop superseded duplicate reads from trajectory | — | `specs/trajectory-read-dedup/` |
 | `DA_RESUME_MEMORY` | ON | Seed crash-resumed plans from prior run's `agent_steps` | — | `specs/resume-working-memory/` |
 | `DA_SESSION_MEMORY` | OFF | Cross-session seed from related prior runs (Jaccard); precondition unmet — see D014 | D014 | `specs/resume-working-memory/` |
-| `DA_DELEGATE` | OFF | Planner `[DELEGATE q]`: bounded read-only sub-agent investigation | — | `specs/dev-agent-delegate-verb/` |
+| `DA_DELEGATE` | ON | Planner `[DELEGATE q]`: bounded read-only sub-agent investigation | — | `specs/dev-agent-delegate-verb/` |
 | `DA_SAGA_ANNOUNCE` | ON | Speak TTS summary after saga rollback | — | `specs/dev-agent-sagas/` |
 | `DA_SAGA_GIT_BACKEND` | OFF | git-blob snapshots instead of file-copy (no 256 KB cap) | D009 | `specs/dev-agent-sagas/` |
 | `DA_DOMAIN_LEARN` | OFF | Dynamic domain-keyword overlay learning via `ContinuousTrainer` | — | — |

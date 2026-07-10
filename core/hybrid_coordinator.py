@@ -224,8 +224,7 @@ async def _retranscribe(cmd: Command) -> Command:
 # HybridCoordinator
 # ---------------------------------------------------------------------------
 
-_BYPASS_SOURCES = {"touch", "multimodal"}
-_SKIP_GATE1_SOURCES = {"voice_local"}
+from core.routing_constants import _BYPASS_SOURCES, _SKIP_GATE1_SOURCES
 
 # Output schema for the command-path LLM. The local/cloud command models are
 # prompted to answer verb-first with exactly one of these 11 accessibility

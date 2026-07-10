@@ -65,6 +65,7 @@ log = logging.getLogger("ipad_bridge")
 # TYPE_CHECKING imports — avoid circular deps at runtime
 from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
+    from core.hybrid_coordinator import HybridCoordinator
     from core.fusion_engine import FusionEngine
     from sensors.gesture_processor import GestureProcessor
     from sensors.lidar_receiver import LiDARReceiver
@@ -176,6 +177,8 @@ class IPadBridge:
         self._gesture: Optional["GestureProcessor"] = None
         self._whisper: Optional["WhisperStream"] = None
         self._viewer: Optional["SensorViewer"] = None
+        # Coordinator wired by main.py via set_coordinator(); None in standalone mode.
+        self._coordinator: Optional["HybridCoordinator"] = None
 
         # DB for persistent iPad log storage (wired by main.py)
         self._agent_db = None
