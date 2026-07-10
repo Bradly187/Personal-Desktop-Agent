@@ -14,6 +14,7 @@ Enhancement 2 — git-blob saga snapshot backend (DA_SAGA_GIT_BACKEND):
 """
 
 from __future__ import annotations
+from inference.saga_manager import SagaManager
 
 import json
 import shutil
@@ -194,9 +195,9 @@ async def test_speak_completion_cancel_silent_when_no_rollback():
 
 def test_git_backend_disabled_by_default(monkeypatch):
     monkeypatch.delenv("DA_SAGA_GIT_BACKEND", raising=False)
-    assert DevAgent._saga_git_backend_enabled() is False
+    assert SagaManager._saga_git_backend_enabled() is False
     monkeypatch.setenv("DA_SAGA_GIT_BACKEND", "1")
-    assert DevAgent._saga_git_backend_enabled() is True
+    assert SagaManager._saga_git_backend_enabled() is True
 
 
 @requires_git

@@ -2,8 +2,8 @@
 name: changing-the-db-schema
 description: >
   Change the agent.db SQLite schema safely — add or alter a table, column, index, or
-  migration in storage/db.py. Use whenever you add or change persisted state for the
-  runtime agent. Enforces this repo's rules: db.py is the schema source of truth,
+  migration in storage/schema/agent.py. Use whenever you add or change persisted state for the
+  runtime agent. Enforces this repo's rules: storage/schema/agent.py is the schema source of truth,
   additive + backwards-compatible migrations gated by PRAGMA user_version, and an
   updated table count. Do NOT use for the DuckDB AnalyticsDB or the ChromaDB stores.
 version: 1.0.0
@@ -13,7 +13,7 @@ allowed-tools: Read Edit Grep Bash
 
 # Changing the agent.db schema
 
-`storage/db.py` is the **single source of truth** for the `agent.db` schema — never a
+`storage/schema/agent.py` is the **single source of truth** for the `agent.db` schema — never a
 doc, never a memory file. Migrations must be additive and backwards-compatible: an
 existing database file on a user's machine must keep working after an upgrade.
 
@@ -27,7 +27,7 @@ existing database file on a user's machine must keep working after an upgrade.
 - Read-only queries — no schema change, skip this.
 
 ## Workflow
-1. **Read `storage/db.py`** — the `CREATE TABLE IF NOT EXISTS` block, `AgentDB.open()`,
+1. **Read `storage/schema/agent.py`** — the `CREATE TABLE IF NOT EXISTS` block, `AgentDB.open()`,
    `AgentDB._migrate()`, and the additive-migration list near `_AGENT_DB_SCHEMA_VERSION`.
 2. **New table:** add a `CREATE TABLE IF NOT EXISTS` to the schema block. Idempotent
    create needs no version bump *only* if every reader tolerates its absence; otherwise
@@ -46,7 +46,7 @@ existing database file on a user's machine must keep working after an upgrade.
    `python -m pytest tests/ -k "db or migrat" -q`.
 
 ## Anti-patterns
-- Don't edit a doc's table count and call the schema "changed" — change `db.py`.
+- Don't edit a doc's table count and call the schema "changed" — change `storage/schema/agent.py`.
 - Don't write a destructive migration (DROP/rename that loses data); tombstone a dead
   column instead (existing DBs keep the orphan; see the gaze-removal precedent).
 - Don't bump `user_version` without a matching migration step, or add a migration

@@ -22,6 +22,7 @@ Covered:
 """
 
 from __future__ import annotations
+import inference.step_executor as se
 
 import sys
 import types
@@ -146,40 +147,40 @@ class TestConfirmDestructiveOp:
         agent = _agent()
         agent._plan_authorized = True
         # No TTS/mic touched — returns immediately.
-        assert await agent._confirm_destructive_op("git commit?") is True
+        assert await se.confirm_destructive_op(agent, "git commit?") is True
 
     @pytest.mark.asyncio
     async def test_tts_failure_denies(self):
         agent = _agent()
         with _fake_tts(raises=True):
-            assert await agent._confirm_destructive_op("git commit?") is False
+            assert await se.confirm_destructive_op(agent, "git commit?") is False
 
     @pytest.mark.asyncio
     async def test_silence_denies(self):
         agent = _agent()
         with _fake_tts(), _fake_mic(loud=False):
-            assert await agent._confirm_destructive_op("git commit?") is False
+            assert await se.confirm_destructive_op(agent, "git commit?") is False
 
     @pytest.mark.asyncio
     async def test_explicit_yes_approves(self):
         agent = _agent()
         _seed_whisper(agent, "yes go ahead")
         with _fake_tts(), _fake_mic(loud=True):
-            assert await agent._confirm_destructive_op("git commit?") is True
+            assert await se.confirm_destructive_op(agent, "git commit?") is True
 
     @pytest.mark.asyncio
     async def test_explicit_no_denies(self):
         agent = _agent()
         _seed_whisper(agent, "no stop")
         with _fake_tts(), _fake_mic(loud=True):
-            assert await agent._confirm_destructive_op("git commit?") is False
+            assert await se.confirm_destructive_op(agent, "git commit?") is False
 
     @pytest.mark.asyncio
     async def test_ambiguous_denies(self):
         agent = _agent()
         _seed_whisper(agent, "banana bread recipe")
         with _fake_tts(), _fake_mic(loud=True):
-            assert await agent._confirm_destructive_op("git commit?") is False
+            assert await se.confirm_destructive_op(agent, "git commit?") is False
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +312,8 @@ class TestPerOpGates:
         from unittest.mock import AsyncMock
         agent = _agent()
         agent._plan_authorized = False
-        agent._confirm_destructive_op = AsyncMock(return_value=False)
+        import inference.step_executor as se
+        agent._confirm_destructive_op = se.confirm_destructive_op = AsyncMock(return_value=False)
         target = tmp_path / "out.txt"
         step = AgentStep(action="WRITE_FILE", args=str(target), body="data")
         result = await agent._execute_step(step)
@@ -322,7 +324,8 @@ class TestPerOpGates:
     async def test_write_file_approved_writes(self, tmp_path):
         from unittest.mock import AsyncMock
         agent = _agent()
-        agent._confirm_destructive_op = AsyncMock(return_value=True)
+        import inference.step_executor as se
+        agent._confirm_destructive_op = se.confirm_destructive_op = AsyncMock(return_value=True)
         target = tmp_path / "out.txt"
         step = AgentStep(action="WRITE_FILE", args=str(target), body="data")
         await agent._execute_step(step)
@@ -333,7 +336,8 @@ class TestPerOpGates:
         from unittest.mock import AsyncMock
         agent = _agent()
         agent._plan_authorized = False
-        agent._confirm_destructive_op = AsyncMock(return_value=False)
+        import inference.step_executor as se
+        agent._confirm_destructive_op = se.confirm_destructive_op = AsyncMock(return_value=False)
         step = AgentStep(action="RUN_TERMINAL", args="echo pwned")
         result = await agent._execute_step(step)
         assert result == "RUN_TERMINAL cancelled by user"

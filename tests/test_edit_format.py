@@ -527,7 +527,8 @@ def test_r5_apply_edit_override_forces_search_replace(tmp_path):
 async def test_r5_execute_step_edit_file_writes_and_snapshots(tmp_path):
     """R5: EDIT_FILE through _execute_step edits the file and captures a snapshot."""
     agent = _dev_agent_no_critic()
-    agent._confirm_destructive_op = AsyncMock(return_value=True)
+    import inference.step_executor as se
+    agent._confirm_destructive_op = se.confirm_destructive_op = AsyncMock(return_value=True)
     target = tmp_path / "m.py"
     target.write_text(_SR_SRC, encoding="utf-8")
     step = AgentStep(action="EDIT_FILE", args=str(target),
@@ -545,7 +546,8 @@ async def test_r5_execute_step_edit_file_writes_and_snapshots(tmp_path):
 async def test_r5_execute_step_edit_file_mismatch_leaves_file_untouched(tmp_path):
     """R5: a non-matching EDIT_FILE fails closed — file unchanged, no snapshot."""
     agent = _dev_agent_no_critic()
-    agent._confirm_destructive_op = AsyncMock(return_value=True)
+    import inference.step_executor as se
+    agent._confirm_destructive_op = se.confirm_destructive_op = AsyncMock(return_value=True)
     target = tmp_path / "m.py"
     target.write_text(_SR_SRC, encoding="utf-8")
     step = AgentStep(action="EDIT_FILE", args=str(target),
