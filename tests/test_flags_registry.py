@@ -77,11 +77,10 @@ def test_bad_values_are_flagged_good_values_pass():
 def test_defaults_match_key_call_sites():
     """Spot-pin the defaults most likely to drift (doc table said ON while the
     code said OFF for two of these once already).
-    DA_REPO_CONTEXT and DA_DELEGATE were intentionally flipped to ON on
+    DA_REPO_CONTEXT was intentionally flipped to ON on
     2026-07-09 (Brad approved B3 Path B). Update these pins if you consciously
     change a default; never update them to silence a surprise."""
     assert REGISTRY["DA_REPO_CONTEXT"].default == "1"  # ON — Brad approved 2026-07-09
-    assert REGISTRY["DA_DELEGATE"].default == "1"      # ON — Brad approved 2026-07-09
     assert REGISTRY["DA_CRITIC"].default == "1"
     assert REGISTRY["DA_TESTER"].default == "1"
     assert REGISTRY["DA_CLOUD_PLAN"].default == "0"

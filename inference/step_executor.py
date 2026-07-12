@@ -112,12 +112,6 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         # Return text to the caller; no desktop action
         return step.body or step.args
 
-    if action == "DELEGATE":
-        # Planner-driven read-only investigation sub-agent (Gap D). Always at
-        # depth current+1; the child cannot reach a destructive verb (allowlist).
-        question = (step.args or step.body or "").strip()
-        return await agent._delegate_investigate(question, agent._delegate_depth + 1)
-
     if action == "SEARCH_WEB":
         query = step.args or step.body
         url = f"https://www.google.com/search?q={query.replace(' ', '+')}"

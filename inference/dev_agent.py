@@ -64,9 +64,7 @@ log = logging.getLogger(__name__)
 # Action verbs the planner model is allowed to emit
 
 
-# Planner teaching for the DELEGATE verb — injected into the plan context ONLY when
-# DA_DELEGATE is on (specs/dev-agent-delegate-verb R4.4), so the planner vocabulary
-# is byte-identical to today when the feature is off.
+
 
 # Personal-document query detection lives in storage.personal_kb so the
 # coordinator can share it (forcing such queries local) without importing this
@@ -79,7 +77,7 @@ from inference.plan_parser import AgentStep, AgentResult
 from inference.plan_parser import _PLAN_ACTIONS, _parse_deps, _extract_json_obj, _STEP_PATTERN  # noqa: F401
 from inference.plan_parser import (  # noqa: F401
     _parse_plan, _parse_plan_json, _parse_plan_json_report,
-    _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS,
+    _build_plan_repair_prompt,
 )
 from inference.context_builder import ContextBuilder
 from inference.saga_manager import SagaManager
@@ -154,10 +152,6 @@ class DevAgent:
     _RETRYABLE_VERBS: frozenset[str] = frozenset({
         "READ_FILE", "GREP", "READ_SCREEN", "GIT_STATUS", "GIT_DIFF",
         "FETCH_URL", "SEARCH_WEB", "EXPLAIN",
-        # DELEGATE is read-only (no side effects) → safe to retry. Deliberately NOT
-        # in _PARALLEL_VERBS/_FANOUT_SAFE_VERBS: it spawns a sub-agent, so it runs
-        # SEQUENTIALLY (no nested fan-out over one serialized GPU) — spec R1.3.
-        "DELEGATE",
     })
 
     # Verbs whose execution has side effects (writes files, runs shell, mutates
@@ -293,34 +287,6 @@ class DevAgent:
         # _read_file/_grep/_git_context all assume it). Override in tests.
         self._repo_root: str = os.getcwd()
 
-        # Planner-driven read-only DELEGATE verb (specs/dev-agent-delegate-verb,
-        # Gap D). When ON, the planner can emit [DELEGATE <question>] to spin off a
-        # bounded read-only investigation sub-agent whose finding returns into the
-        # trajectory. Reuses the WorkflowRunner substrate (scheduler sub-agent pool,
-        # flare guard, agent_workflows journaling) — no new model (AGENTS.md #6).
-        # Default ON (DA_DELEGATE). Set DA_DELEGATE=0 to disable; a stray DELEGATE
-        # step with the flag OFF is a safe no-op.
-        self._delegate_enabled: bool = os.environ.get(
-            "DA_DELEGATE", "1").strip().lower() in ("1", "true", "on", "yes")
-        try:
-            self._max_delegate_depth: int = max(
-                1, int(os.environ.get("DA_DELEGATE_MAX_DEPTH", "1")))
-        except ValueError:
-            self._max_delegate_depth = 1
-        try:
-            self._delegate_max_steps: int = max(
-                1, int(os.environ.get("DA_DELEGATE_MAX_STEPS", "4")))
-        except ValueError:
-            self._delegate_max_steps = 4
-        try:
-            self._delegate_finding_chars: int = max(
-                200, int(os.environ.get("DA_DELEGATE_FINDING_CHARS", "1200")))
-        except ValueError:
-            self._delegate_finding_chars = 1200
-        # Current delegation depth (0 = top-level plan); set while investigating so
-        # a nested DELEGATE is refused (R3.1). Optional flare/resource skip check.
-        self._delegate_depth: int = 0
-        self._delegate_skip_check = None   # callable -> bool; True == skip (flare)
 
         # EventBus — set via set_event_bus(); optional (no-op if None)
         self._event_bus = None
@@ -709,12 +675,6 @@ class DevAgent:
 
 
 
-    # ---------------------------------------------------------------------- #
-    # Planner-driven DELEGATE — bounded read-only sub-agent (Gap D)
-    # ---------------------------------------------------------------------- #
-
-
-
 
 
 
@@ -1053,10 +1013,9 @@ class DevAgent:
                     
         # 2. Forward to pure function executors
         import inference.executors.plan_executor as pe
-        import inference.executors.subagent_delegator as sd
         import inference.executors.evaluation_manager as em
         
-        for mod in (pe, sd, em):
+        for mod in (pe, em):
             if hasattr(mod, name):
                 func = getattr(mod, name)
                 # Ensure it's a function defined in that module to prevent leaking imports

@@ -172,13 +172,14 @@ def _run_execution(args):
         print("no cases to run", file=sys.stderr)
         return None
     # Surface the feature flags this end-to-end run exercises (repo-context-ingestion
-    # Gap A, dev-agent-delegate-verb Gap D) so the report records the A/B arm.
+    # Gap A) so the report records the A/B arm.
     import os as _os
     def _on(name):
         return "ON" if _os.environ.get(name, "").strip().lower() in (
             "1", "true", "yes", "on") else "OFF"
     print(f"repo-context: {_on('DA_REPO_CONTEXT')} (DA_REPO_CONTEXT)  |  "
-          f"delegate: {_on('DA_DELEGATE')} (DA_DELEGATE)")
+          f"memory:   {_on('DA_RESUME_MEMORY')} (DA_RESUME_MEMORY), "
+          f"session: {_on('DA_SESSION_MEMORY')} (DA_SESSION_MEMORY)")
     return run_execution_suite(
         cases, lambda: _build_dev_agent(args.model), timeout_s=args.timeout)
 

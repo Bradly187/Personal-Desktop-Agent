@@ -24,11 +24,6 @@ from typing import Callable, Optional
 
 from core.workflow_voice import (
     parse_workflow_request,
-    parse_decomposition,
-    build_decompose_prompt,
-    build_synthesis_prompt,
-    fanout_n_from_config,
-    verify_enabled,
 )
 
 log = logging.getLogger(__name__)
@@ -43,9 +38,7 @@ class WorkflowHandler:
     def __init__(
         self,
         *,
-        workflow_runner: Callable[[], Any],
         dev_agent: Callable[[], Any],
-        wf_cfg: Callable[[], dict],
         twin: Callable[[], Any],
         conv_mode: Callable[[], Any],
         macro_store: Callable[[], Any],
@@ -54,9 +47,7 @@ class WorkflowHandler:
         tts_speak: Callable[[str], Coroutine[Any, Any, None]],
         speak_and_suppress: Callable[[str], Coroutine[Any, Any, None]],
     ) -> None:
-        self._workflow_runner = workflow_runner
         self._dev_agent = dev_agent
-        self._wf_cfg = wf_cfg
         self._twin = twin
         self._conv_mode = conv_mode
         self._macro_store = macro_store
@@ -73,97 +64,43 @@ class WorkflowHandler:
     async def maybe_handle_workflow(self, cmd) -> Optional[dict]:
         """Handle a voice 'think hard about …' / 'research …' request.
 
-        Decomposes the goal into N sub-angles, fans them out as fresh-context
-        sub-agents via ``WorkflowRunner.fan_out``, then synthesizes + speaks one
-        answer. **Pure talk — no desktop actions, no command-pipeline bypass.**
+        Executes the goal as a single synchronous run on the dev agent.
         Returns a handled result dict, or ``None`` to fall through to ordinary
         routing (not a trigger, a flare, or any error — fail-safe, AGENTS.md #4).
         """
-        runner = self._workflow_runner()
-        if runner is None or not runner.enabled:
-            return None
         try:
             req = parse_workflow_request(cmd.text or "")
             if req is None:
                 return None  # not a workflow request — ordinary routing
-            # Skip-on-flare (AGENTS.md #5): a multi-call fan-out is heavy. During a
-            # flare let the request fall through to the ordinary single-model path
-            # so the user still gets an answer with minimal friction.
+            # Skip-on-flare (AGENTS.md #5):
             if await self._workflow_flare_active():
                 log.info("WorkflowHandler: workflow trigger skipped (flare) — "
                          "falling through to ordinary routing")
                 return None
             dev_agent = self._dev_agent()
-            router = getattr(dev_agent, "_router", None) if dev_agent else None
-            if router is None:
+            if dev_agent is None:
                 return None
             log.info("WorkflowHandler: workflow trigger — goal=%r", req.goal)
-            n = fanout_n_from_config(self._wf_cfg())
-            subtasks = await self._decompose_goal(router, req.goal, n)
-            if not subtasks:
+
+            # Route to a plain inference call against the general domain
+            router = getattr(dev_agent, "_router", None)
+            if not router:
                 return None
-            verify_criterion = (
-                f"The answer is a correct, relevant, substantive response to: {req.goal}"
-                if verify_enabled(self._wf_cfg()) else None
-            )
-            result = await runner.fan_out(
-                subtasks, name="voice_workflow", goal=req.goal,
-                verify_criterion=verify_criterion,
-            )
-            # Keep successful (and, if verification ran, verified) sub-answers.
-            texts = [
-                r.text for r in result.results
-                if r.ok and r.text.strip() and (r.verified is None or r.verified)
-            ]
-            if not texts:
+            result = await router.infer(domain="general", user_text=req.goal, context="")
+
+            if not getattr(result, "ok", False) or not getattr(result, "text", ""):
                 msg = "Sorry, I couldn't work that one out just now."
                 await self._speak_and_suppress(msg)
                 return {"status": "ok", "action": "WORKFLOW", "spoken": msg,
                         "source": cmd.source, "trace_id": cmd.trace_id}
-            answer = await self._synthesize_workflow(router, req.goal, texts)
+
+            answer = result.text.strip()
             await self._speak_and_suppress(answer)
             return {"status": "ok", "action": "WORKFLOW", "spoken": answer,
-                    "subtasks": len(subtasks), "verified": result.verified_count,
                     "source": cmd.source, "trace_id": cmd.trace_id}
         except Exception as exc:  # never strand the user — fall through
             log.warning("WorkflowHandler: workflow handling failed (%s)", exc)
             return None
-
-    async def _decompose_goal(self, router, goal: str, n: int) -> list:
-        """Split ``goal`` into ``n`` sub-angles via the resident general model.
-
-        Returns a list of ``SubTask``. Degrades to a single sub-agent on the raw
-        goal if decomposition fails or yields nothing, so the feature always
-        produces an answer rather than going silent."""
-        from inference.workflow import SubTask
-        try:
-            r = await router.infer(
-                domain="general", user_text=build_decompose_prompt(goal, n),
-                context="",
-            )
-            if getattr(r, "ok", True):
-                lines = parse_decomposition(getattr(r, "text", "") or "", n)
-                if lines:
-                    return [SubTask(name=f"angle{i + 1}", prompt=line)
-                            for i, line in enumerate(lines)]
-        except Exception as exc:
-            log.debug("workflow: decomposition failed (%s) — single-angle fallback", exc)
-        return [SubTask(name="angle1", prompt=goal)]
-
-    async def _synthesize_workflow(self, router, goal: str, texts: list[str]) -> str:
-        """Synthesize sub-answers into one concise spoken reply. Degrades to the
-        first sub-answer (truncated) if the synthesis call fails."""
-        try:
-            r = await router.infer(
-                domain="general", user_text=build_synthesis_prompt(goal, texts),
-                context="",
-            )
-            ans = (getattr(r, "text", "") or "").strip()
-            if getattr(r, "ok", True) and ans:
-                return ans
-        except Exception as exc:
-            log.debug("workflow: synthesis failed (%s) — first-angle fallback", exc)
-        return texts[0].strip()[:600]
 
     async def _workflow_flare_active(self) -> bool:
         """True if a pain-day flare is active (AGENTS.md #5). A twin-snapshot

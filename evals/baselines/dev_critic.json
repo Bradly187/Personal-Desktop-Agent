@@ -1,13 +1,15 @@
 {
   "suite": "dev_critic",
-  "mode": "trajectory",
-  "recorded_at": "2026-06-29T11:35:26",
-  "model": "qwen3-coder:30b",
-  "tolerance": 0.1,
+  "mode": "dev_critic",
+  "recorded_at": "2026-07-12T13:13:46",
+  "model": "default",
+  "tolerance": 0.05,
   "n": 8,
+  "catch_rate_critic": 1.0,
+  "catch_rate_lint": 0.0,
+  "lift": 1.0,
+  "mean_confidence": 0.975,
+  "p50_latency_ms": 851.1,
   "exact_acc": 1.0,
-  "mean_score": 1.0,
-  "safe_acc": 1.0,
-  "p50_latency_ms": 2035.4,
   "errors": 0
 }

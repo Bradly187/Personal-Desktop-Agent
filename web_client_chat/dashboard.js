@@ -68,7 +68,7 @@
     const box = $("kpis");
     if (!m) { box.innerHTML = ""; box.appendChild(el("div", "empty", "metrics endpoint unavailable")); return; }
     const g = m.gauges || {}, c = m.counters || {}, h = (m.histograms || {}).latency_ms || {};
-    const live = (sess && sess.total_commands != null) ? sess : null;
+    const live = (sess && sess.total_commands > 0) ? sess : null;
     const win = live ? "this session" : "lifetime";
     const series = m.series || [];
     const color = "var(--text-dim)";

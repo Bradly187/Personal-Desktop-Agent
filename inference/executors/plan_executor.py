@@ -19,7 +19,7 @@ from inference.edit_format import (
 )
 from inference.plan_parser import (
     AgentResult, AgentStep, _parse_plan, _parse_plan_json, 
-    _parse_plan_json_report, _build_plan_repair_prompt, _DELEGATE_PROMPT_INSTRUCTIONS
+    _parse_plan_json_report, _build_plan_repair_prompt
 )
 
 
@@ -194,14 +194,6 @@ async def _plan_and_run_locked(
         if extra_ctx else SEARCH_REPLACE_PROMPT_INSTRUCTIONS
     )
 
-    # DELEGATE verb (Gap D): only teach it when ON and only at top level (a
-    # delegated child must not be told it can delegate — R3.1/R4.4). When off,
-    # the planner vocabulary is byte-identical to today.
-    if agent._delegate_enabled and agent._delegate_depth == 0:
-        extra_ctx = (
-            f"{_DELEGATE_PROMPT_INSTRUCTIONS}\n\n{extra_ctx}"
-            if extra_ctx else _DELEGATE_PROMPT_INSTRUCTIONS
-        )
 
     # Assumptions (Gap 1): Ask the planner to explicitly state its assumptions about repo/system state.
     if os.environ.get("DA_PLAN_ASSUMPTIONS", "0").strip().lower() in ("1", "true", "yes", "on"):

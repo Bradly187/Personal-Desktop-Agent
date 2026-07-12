@@ -68,7 +68,6 @@ from inference.local_inference import (
 )
 from desktop.vision_grounder import VisionGrounder
 from core.conversation_state import ConversationState
-from core.workflow_voice import workflow_voice_config
 from core.conversation_mode import ConversationMode, conversation_mode_config
 from core.slo import SLOConfig
 from monitoring.trace import get_tracer
@@ -358,8 +357,7 @@ class HybridCoordinator:
         # Multi-agent workflow voice trigger ("think hard about …"). Default OFF;
         # the runner is injected by main.py and gates itself on
         # workflow_orchestration.enabled. Spec: specs/workflow-orchestration/.
-        self._workflow_runner = None
-        self._wf_cfg = workflow_voice_config()
+
         # Voice conversation mode (wake/sleep-gated talk-only dialogue). Default
         # OFF; reads conversation_mode.enabled from ~/.claude/ipad_bridge/config.json.
         # Spec: specs/conversation-mode/.
@@ -370,9 +368,7 @@ class HybridCoordinator:
             # coordinator after construction via a set_* method, and tests
             # routinely set attributes like coord._wf_cfg / coord._twin
             # directly.
-            workflow_runner=lambda: self._workflow_runner,
             dev_agent=lambda: self._dev_agent,
-            wf_cfg=lambda: self._wf_cfg,
             twin=lambda: self._twin,
             conv_mode=lambda: self._conv_mode,
             macro_store=lambda: self._macro_store,
@@ -499,11 +495,6 @@ class HybridCoordinator:
             return False
         return await self._dev_agent.revert_last_run(trace_id=trace_id)
 
-    def set_workflow_runner(self, runner) -> None:
-        """Wire the multi-agent WorkflowRunner so the voice 'think hard about …'
-        trigger can fan a goal out to fresh-context sub-agents. The runner gates
-        itself on workflow_orchestration.enabled (default OFF)."""
-        self._workflow_runner = runner
 
     def set_skill_registry(self, registry) -> None:
         """Wire the SkillRegistry so the voice 'help' command can list skills."""

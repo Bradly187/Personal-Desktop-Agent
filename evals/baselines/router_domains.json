@@ -1,7 +1,7 @@
 {
   "suite": "router_domains",
   "mode": "single",
-  "recorded_at": "2026-06-14T18:50:21",
+  "recorded_at": "2026-07-12T13:14:15",
   "model": "default",
   "tolerance": 0.05,
   "n": 16,
