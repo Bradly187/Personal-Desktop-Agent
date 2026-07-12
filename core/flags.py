@@ -58,10 +58,7 @@ REGISTRY: dict[str, FlagSpec] = {f.name: f for f in (
     _S("DA_TESTER", "bool", "1", "auto-pytest after .py writes"),
     _S("DA_TESTER_DOMAIN", "str", "code", "model domain for test generation"),
     _S("DA_REPO_CONTEXT", "bool", "1", "inject stable repo facts ahead of RAG"),
-    _S("DA_DELEGATE", "bool", "1", "planner [DELEGATE q] read-only sub-agent"),
-    _S("DA_DELEGATE_MAX_DEPTH", "int", "1", "delegation nesting bound"),
-    _S("DA_DELEGATE_MAX_STEPS", "int", "4", "steps per delegation"),
-    _S("DA_DELEGATE_FINDING_CHARS", "int", "1200", "delegation finding truncation"),
+
     _S("DA_MATH_CAS_VERIFY", "bool", "1", "sympy CAS check on math answers"),
     _S("DA_SAGA_ANNOUNCE", "bool", "1", "TTS summary after saga rollback"),
     _S("DA_SAGA_GIT_BACKEND", "bool", "0", "git-blob saga snapshots"),
@@ -74,7 +71,7 @@ REGISTRY: dict[str, FlagSpec] = {f.name: f for f in (
     _S("DA_RESUME_MEMORY", "bool", "1", "seed crash-resumed plans"),
     _S("DA_SESSION_MEMORY", "bool", "0", "cross-session plan seeding"),
     # ── cloud routing (inference/, core/cloud_backend.py) ───────────────────
-    _S("DA_WORKFLOW_VERIFY_CLOUD", "bool", "0", "route workflow verify judge through cloud"),
+
     _S("DA_CLOUD_PLAN", "bool", "0", "route plan domain to Bedrock"),
     _S("DA_CLOUD_PLAN_MODEL", "str", "", "override cloud plan model"),
     _S("DA_CLOUD_PLAN_TIMEOUT_S", "int", "60", "cloud plan call timeout"),

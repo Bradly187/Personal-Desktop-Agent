@@ -48,21 +48,9 @@ log = logging.getLogger(__name__)
 __all__ = [
     "WorkflowRequest",
     "parse_workflow_request",
-    "parse_decomposition",
-    "build_decompose_prompt",
-    "build_synthesis_prompt",
-    "workflow_voice_config",
-    "fanout_n_from_config",
-    "verify_enabled",
-    "DEFAULT_FANOUT_N",
 ]
 
-# Number of sub-angles to fan out by default. Kept small: the single RTX-5090
-# serializes inference at the Ollama layer regardless of scheduler concurrency,
-# so each extra angle is roughly additive latency. Config may override within
-# [1, _MAX_FANOUT_N].
-DEFAULT_FANOUT_N = 3
-_MAX_FANOUT_N = 6
+
 
 # Leading politeness/filler stripped before matching, so "hey agent, could you
 # research X" normalises to "research X". Deliberately small and trigger-local.
@@ -139,84 +127,4 @@ def parse_workflow_request(text: str) -> "WorkflowRequest | None":
     return None
 
 
-_DECOMP_PREFIX = re.compile(r"^\s*(?:\d+[.)]\s*|[-*•]\s*)")
 
-
-def parse_decomposition(text: str, n: int) -> list[str]:
-    """Parse a decomposition model reply (one angle per line) into a clean list.
-
-    Strips numbering / bullet prefixes, drops blank lines, de-duplicates while
-    preserving order, and caps the result at ``n``. Pure / deterministic — used
-    so the model's free-form output can never blow up the fan-out width or smuggle
-    empties into the sub-task list.
-    """
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in (text or "").splitlines():
-        line = _DECOMP_PREFIX.sub("", raw).strip()
-        if not line:
-            continue
-        key = line.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(line)
-        if len(out) >= max(1, n):
-            break
-    return out
-
-
-def build_decompose_prompt(goal: str, n: int) -> str:
-    """Prompt the general model to split ``goal`` into ``n`` focused angles."""
-    return (
-        f"Break the following goal into {n} distinct, focused sub-questions or "
-        f"angles that together cover it well. Output exactly {n} lines — one "
-        f"sub-question per line, no numbering, no preamble, no blank lines.\n\n"
-        f"Goal: {goal}"
-    )
-
-
-def build_synthesis_prompt(goal: str, results: list[str]) -> str:
-    """Prompt the general model to synthesize sub-answers into one spoken reply."""
-    joined = "\n\n".join(
-        f"Angle {i + 1}:\n{r.strip()}" for i, r in enumerate(results) if r.strip()
-    )
-    return (
-        "You explored a question from several angles. Synthesize the findings "
-        "into one clear, concise spoken answer — a few sentences at most, no "
-        "markdown, no headings, no bullet lists, no emoji, suitable for being "
-        f"read aloud by text-to-speech.\n\nQuestion: {goal}\n\n{joined}"
-    )
-
-
-def workflow_voice_config() -> dict:
-    """The ``workflow_orchestration`` config block (same flag as the runner).
-
-    Default: disabled (experimental — ship behind a flag, AGENTS.md #9)."""
-    default = {"enabled": False}
-    try:
-        cfg_path = Path(os.path.expanduser("~/.claude/ipad_bridge/config.json"))
-        if not cfg_path.exists():
-            return default
-        block = json.loads(cfg_path.read_text(encoding="utf-8")).get(
-            "workflow_orchestration"
-        )
-        return block if isinstance(block, dict) else default
-    except Exception as exc:  # malformed config must never crash the pipeline
-        log.debug("workflow_orchestration config unreadable (%s)", exc)
-        return default
-
-
-def fanout_n_from_config(cfg: dict | None) -> int:
-    """Fan-out width from config, clamped to [1, _MAX_FANOUT_N]. Default 3."""
-    try:
-        n = int((cfg or {}).get("fanout_n", DEFAULT_FANOUT_N))
-    except (TypeError, ValueError):
-        return DEFAULT_FANOUT_N
-    return max(1, min(_MAX_FANOUT_N, n))
-
-
-def verify_enabled(cfg: dict | None) -> bool:
-    """Whether to run the adversarial verify pass on the voice path (default
-    OFF — verify doubles inference cost and the user just wants an answer)."""
-    return bool((cfg or {}).get("verify", False))

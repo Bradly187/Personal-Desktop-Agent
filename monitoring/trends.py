@@ -59,7 +59,7 @@ def session_trends(db_path: str = "agent.db", limit: int = 30) -> dict:
                     "SELECT session_id, ts, duration_s, total_commands, success_rate, "
                     "cloud_escalation_rate, latency_p50_ms, latency_p95_ms, pain_day_pct, "
                     "corrections_count, gate2_blocks, gate3_blocks, gate4_blocks "
-                    "FROM session_summaries ORDER BY ts DESC LIMIT ?",
+                    "FROM session_summaries WHERE total_commands > 0 ORDER BY ts DESC LIMIT ?",
                     (int(limit),),
                 )
                 sessions = [dict(r) for r in cur.fetchall()]

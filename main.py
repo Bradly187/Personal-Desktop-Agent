@@ -1429,8 +1429,8 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
                 analyzer.close()
                 report = analyzer.format_report(summary)
                 log.info("Session summary:\n%s", report)
-            except Exception:
-                pass
+            except Exception as _sa_exc:
+                log.warning("SessionAnalyzer failed: %s", _sa_exc, exc_info=True)
 
         if indexer is not None:
             try:

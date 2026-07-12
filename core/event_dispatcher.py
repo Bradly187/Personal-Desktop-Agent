@@ -43,8 +43,7 @@ class EventDispatcher:
             if macro_result is not None:
                 return macro_result
 
-        if (self._coordinator._workflow_runner is not None and self._coordinator._workflow_runner.enabled
-                and cmd.source in ("voice", "voice_local")):
+        if cmd.source in ("voice", "voice_local"):
             wf_result = await self._coordinator._workflow.maybe_handle_workflow(cmd)
             if wf_result is not None:
                 return wf_result

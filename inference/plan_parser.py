@@ -21,8 +21,6 @@ _PLAN_ACTIONS = {
     "SKILL_QUERY", "SKILL_CALL",
     # Personal knowledge base — semantic search over the user's own documents.
     "SEARCH_PERSONAL",
-    # Planner-driven read-only investigation sub-agent (specs/dev-agent-delegate-verb).
-    "DELEGATE",
 }
 
 _STEP_PATTERN = re.compile(
@@ -31,23 +29,13 @@ _STEP_PATTERN = re.compile(
     r"(WRITE_FILE|EDIT_FILE|RUN_TERMINAL|CLICK|OPEN|HOTKEY|EXPLAIN|SEARCH_WEB"
     r"|READ_SCREEN|READ_FILE|GREP|SCROLL|TYPE"
     r"|GIT_STATUS|GIT_DIFF|GIT_COMMIT|GIT_CHECKOUT|GITHUB_PR|FETCH_URL"
-    r"|SKILL_QUERY|SKILL_CALL|SEARCH_PERSONAL|DELEGATE)"
+    r"|SKILL_QUERY|SKILL_CALL|SEARCH_PERSONAL)"
     r"(?:\s+([^\]\n]+))?"                   # optional args (up to a closing ] or EOL)
     r"\s*\]?",                              # optional ]
     re.IGNORECASE,
 )
 
-# Planner teaching for the DELEGATE verb — injected into the plan context ONLY when
-# DA_DELEGATE is on (specs/dev-agent-delegate-verb R4.4), so the planner vocabulary
-# is byte-identical to today when the feature is off.
-_DELEGATE_PROMPT_INSTRUCTIONS = (
-    "You may emit [DELEGATE <question>] to hand a scoped, READ-ONLY investigation "
-    "to a bounded sub-agent (it can read files / grep / fetch but cannot write, run "
-    "shell, or take any action). Prefer it when you need to find something out "
-    "before acting — e.g. [DELEGATE which module defines the FooBar class]. The "
-    "sub-agent returns a short finding you can use in later steps. Use it sparingly; "
-    "for a single quick read prefer READ_FILE/GREP directly."
-)
+
 
 # Personal-document query detection lives in storage.personal_kb so the
 # coordinator can share it (forcing such queries local) without importing this
