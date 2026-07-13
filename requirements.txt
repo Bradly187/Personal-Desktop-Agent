@@ -69,7 +69,7 @@ sentence-transformers==5.6.0
 # soundfile: OGG Vorbis decode for audio returned by the Node.js sidecar.
 # The libsndfile wheel for Windows includes OGG/Vorbis support out of the box.
 soundfile==0.14.0
-boto3==1.43.41  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
+boto3==1.43.46  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
 
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1
@@ -94,7 +94,7 @@ sounddevice==0.5.5
 # PATH as the phonemizer backend, plus the model weights (kokoro-v1.0.onnx +
 # voices.bin) downloaded into tts/ via tts/download_kokoro.py. KokoroClient
 # degrades gracefully (raises an actionable RuntimeError) when missing.
-kokoro-onnx==0.4.7
+kokoro-onnx==0.5.0
 #
 # GPU (RTX 5090) — OPT-IN, install separately, do NOT uncomment here.
 # onnxruntime-gpu installs into the SAME `onnxruntime` import namespace as the
@@ -144,7 +144,7 @@ watchdog==6.0.0
 # ── WebSocket client for VS Code bridge (BridgeClient) ────────────────────────
 # Used by bridge_client.py to connect to the desktop-agent-bridge WebSocket server (:8767).
 # Optional — DevAgent degrades gracefully when the bridge extension is not running.
-websockets==16.0
+websockets==16.1
 
 # ── Browser / UI testing (mcp_server/tools/browser.py — preview_* MCP tools) ──
 # Optional — the preview_* tools degrade gracefully when absent (return a
@@ -156,7 +156,7 @@ websockets==16.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.4.0
-hypothesis==6.156.1  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
+hypothesis==6.156.6  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
 numpy
 
 # ── Security pins (Dependabot) ────────────────────────────────────────────────
