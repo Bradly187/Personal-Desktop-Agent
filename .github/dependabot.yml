@@ -10,6 +10,12 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    ignore:
+      # kokoro-onnx 0.5.0 requires Python >=3.10,<3.14 but CI runs 3.14 —
+      # pip install aborts, so every PR carrying it fails in ~1 min (see the
+      # 9eb0af3 revert and PRs on 2026-07-13/2026-07-20). Remove this ignore
+      # once a Py3.14-compatible kokoro-onnx release exists.
+      - dependency-name: "kokoro-onnx"
     groups:
       python-minor-patch:
         update-types: ["minor", "patch"]
