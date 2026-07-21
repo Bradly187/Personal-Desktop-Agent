@@ -807,7 +807,7 @@ class CodebaseIndexer:
 
         ids, documents, metadatas = [], [], []
         for chunk in chunks:
-            chunk_id = _make_id(rel, chunk.name, mtime)
+            chunk_id = _make_id(rel, chunk.name, mtime, chunk.start_line)
             ids.append(chunk_id)
             documents.append(chunk.text)
             metadatas.append({
@@ -846,7 +846,7 @@ class CodebaseIndexer:
         # Add new chunks
         ids, documents, metadatas = [], [], []
         for chunk in chunks:
-            chunk_id = _make_id(rel, chunk.name, mtime)
+            chunk_id = _make_id(rel, chunk.name, mtime, chunk.start_line)
             ids.append(chunk_id)
             documents.append(chunk.text)
             metadatas.append({
@@ -875,7 +875,7 @@ class CodebaseIndexer:
 
         ids, documents, metadatas = [], [], []
         for chunk in chunks:
-            chunk_id = _make_id(rel, chunk.name, mtime)
+            chunk_id = _make_id(rel, chunk.name, mtime, chunk.start_line)
             ids.append(chunk_id)
             documents.append(chunk.text)
             metadatas.append({
@@ -1054,8 +1054,12 @@ def _chunk_swift_standalone(path_str: str, root_str: str) -> list:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_id(file: str, name: str, mtime: float) -> str:
-    key = f"{file}::{name}::{mtime:.3f}"
+def _make_id(file: str, name: str, mtime: float, start_line: int = 0) -> str:
+    # start_line disambiguates same-named chunks in one file (e.g. same method
+    # name across multiple classes in a test file) — without it, distinct
+    # chunks collided into one chroma id and ChromaDB's add() rejected the
+    # whole batch with "Expected IDs to be unique", silently dropping the file.
+    key = f"{file}::{name}::{start_line}::{mtime:.3f}"
     return hashlib.sha256(key.encode()).hexdigest()[:20]
 
 
