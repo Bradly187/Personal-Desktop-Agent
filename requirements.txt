@@ -31,7 +31,7 @@ zeroconf==0.150.0  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing
 
 # ── Desktop control ───────────────────────────────────────────────────────────
 pyautogui==0.9.54
-pywin32==311
+pywin32==312
 
 # ── Screen / OCR ─────────────────────────────────────────────────────────────
 mss==10.2.0
