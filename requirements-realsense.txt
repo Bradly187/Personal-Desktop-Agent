@@ -11,7 +11,7 @@
 # Verify the camera is seen:
 #   .venv-realsense\Scripts\python.exe sensors\realsense_publisher.py --list-devices
 
-pyrealsense2==2.58.2.10647   # last L515-supporting line (2.55.1+ dropped it); 2.54.2.5684 also works
-websockets>=12.0
+pyrealsense2==2.58.3.10794   # last L515-supporting line (2.55.1+ dropped it); 2.54.2.5684 also works
+websockets>=16.1.1
 numpy>=2.2.6,<3.0       # 2.54.1 wheels were built against the numpy 1.x ABI
 opencv-python>=5.0.0.93
