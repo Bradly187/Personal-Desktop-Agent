@@ -28,7 +28,10 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install ruff
-        run: pip install ruff
+        # Pinned so lint results are reproducible — an unpinned install let
+        # ruff 0.16.0 (which widened the default rule selection) break every
+        # open PR on files they didn't touch. Bump deliberately, in its own PR.
+        run: pip install ruff==0.16.0
       - name: Ruff check
         run: ruff check . --output-format github
 

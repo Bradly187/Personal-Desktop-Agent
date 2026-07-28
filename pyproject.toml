@@ -56,7 +56,7 @@ ignore_missing_imports = true
 exclude = ["^scripts/"]
 
 # ── Ruff (IG-2a, 2026-07-05 industry-patterns audit) ─────────────────────────
-# First gate: pyflakes + pycodestyle errors only (ruff defaults). The ignores
+# First gate: pyflakes + pycodestyle errors only (explicit select). The ignores
 # below are a deliberate ratchet — style-only rules with existing violations
 # are parked, not endorsed. Tighten by deleting one ignore at a time and fixing
 # what surfaces. Do NOT add new ignores without a docs/decisions.md entry.
@@ -65,7 +65,13 @@ target-version = "py310"
 extend-exclude = ["_archive", "iPadApp", "desktop_app", "tts_service", "desktop-agent-bridge"]
 
 [tool.ruff.lint]
-# Defaults are E4/E7/E9 + F; parked (pre-existing style debt, ~180 hits):
+# Explicit select — this gate is pyflakes + pycodestyle errors only. This was
+# ruff's default selection through 0.15.x; 0.16.0 widened the defaults (I, UP,
+# BLE, DTZ, S, G, C4, …), which would flip this repo from green to ~hundreds of
+# violations. Keep the selection pinned here so the gate never moves with ruff
+# releases; widen deliberately, one rule family at a time.
+select = ["E4", "E7", "E9", "F"]
+# Parked (pre-existing style debt, ~180 hits):
 #   E402 imports-after-code (deliberate sys.path setup in scripts/tests)
 #   E702 semicolon one-liners (compact viewer/deck scripts)
 #   E731 lambda assignment, E741 ambiguous names, F841 unused locals
