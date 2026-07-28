@@ -1,0 +1,16 @@
+# Deliberately empty lockfile — do not add packages.
+#
+# The real agentcore_fallback/ project was deleted from master on 2026-05-19
+# (bec75dd, dead code removal), but GitHub's dependency graph kept an orphaned
+# snapshot of this manifest: a deleted manifest is never re-parsed, so its
+# last-known dependency list lives on. New security advisories kept matching
+# packages in that dead snapshot (mcp 2026-07-16, bedrock-agentcore 2026-07-28),
+# each spawning a phantom Dependabot alert plus a security-update run that
+# failed with dependency_file_not_found.
+#
+# This zero-package stub overwrites the orphaned snapshot with an empty one.
+# It can be deleted once the dependency graph shows agentcore_fallback/uv.lock
+# with 0 dependencies (the emptied snapshot then persists harmlessly), or left
+# in place at no cost.
+version = 1
+requires-python = ">=3.10"
