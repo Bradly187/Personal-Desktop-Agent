@@ -114,7 +114,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     subgraph ipad["iPad Pro"]
-        app["iPadApp\n(Swift/SwiftUI)\nLiDARStreamer built-in"]
+        app["iPadApp\n(Swift/SwiftUI)\ntilt · keyword · audio · touch"]
     end
 
     subgraph desktop["Desktop PC (192.168.18.2)"]
@@ -139,4 +139,11 @@ flowchart LR
 
 ### Single-Connection Architecture
 
-All sensor data — including LiDAR `depth_frame` and `camera_frame` — streams through a **single WebSocket connection** on port 8765. `LiDARStreamer.swift` uses `ARWorldTrackingConfiguration` + `.smoothedSceneDepth` and serialises depth frames directly in the iPadApp message protocol. Record3D is no longer required.
+All iPad sensor data streams through a **single WebSocket connection** on port 8765.
+
+> **Updated 2026-08-16:** this section previously described `LiDARStreamer.swift`
+> (`ARWorldTrackingConfiguration` + `.smoothedSceneDepth`) as the in-app source of `depth_frame`
+> and `camera_frame`. That file was stripped 2026-05-24 (`64eec10`) — the device has no LiDAR
+> scanner. Those two message types still reach the bridge on the same port, but from
+> `sensors/realsense_publisher.py` (RealSense L515) as a separate WebSocket client. iPad
+> Requirements 7 and 10 struck — see D030.

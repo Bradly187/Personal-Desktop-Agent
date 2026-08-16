@@ -293,8 +293,12 @@ final class OverlayPreservationTests: XCTestCase {
 
     /// For all expression sends from the Write tab, the sendCommand method is callable with DICTATE action.
     ///
+    /// Renamed 2026-08-16: was `testScientificKeypadSendExpression`, which implied coverage of a
+    /// `ScientificKeypadView` that never existed (Requirement 18, struck — see D031). This test
+    /// only ever exercised the DICTATE send path shared by the Pencil canvas.
+    ///
     /// **Validates: Requirements 3.14**
-    func testScientificKeypadSendExpression() {
+    func testWriteTabDictateSendExpression() {
         let ws = makeWSManager()
 
         // Simulate various expressions being sent via the Write tab (HandwritingCanvasView)
@@ -304,7 +308,7 @@ final class OverlayPreservationTests: XCTestCase {
             let id = ws.sendCommand(action: "DICTATE", text: expr)
             XCTAssertTrue(
                 id.hasPrefix("msg-"),
-                "Keypad send for '\(expr)' should produce a valid message ID"
+                "Write-tab DICTATE send for '\(expr)' should produce a valid message ID"
             )
         }
     }

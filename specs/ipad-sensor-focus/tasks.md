@@ -118,14 +118,11 @@
   - Render `PKDrawing` to PNG on Recognise tap → base64 → `handwriting_image` WebSocket message
   - Receive `handwriting_result`; display LaTeX + editable unicode field; send via DICTATE
   - Clear and Undo controls; Recognise button disabled while empty/in-progress
-  - Tab entry in ContentView alongside CommandPad, Trackpad, Keypad, Settings
+  - Tab entry in ContentView alongside CommandPad, Trackpad, Settings
 
-- [x] **2.14 Implement `ScientificKeypadView`**
-  - Scrollable monospace expression display with live NSExpression preview
-  - Basic mode: digits, operators, parentheses
-  - Scientific mode: trig + inverses, log/ln/log₂, √, ^, π, e, abs, !, mod, EE, ±, ANS
-  - All buttons minimum 64×64 pt with `.contentShape(Rectangle())`
-  - Send button emits DICTATE with raw expression string
+- [~] **2.14 Implement `ScientificKeypadView` — STRUCK 2026-08-16, will not be built**
+  - Was marked `[x]` in error: `ScientificKeypadView.swift` was never written. Requirement 18
+    is struck; the Pencil canvas (2.15) covers the same job at a lower joint cost. See D031.
 
 ---
 

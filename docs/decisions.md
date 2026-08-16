@@ -9,6 +9,8 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D031 — 2026-08-16 — Scientific keypad struck; Pencil canvas covers the job at lower joint cost](#d031)
+- [D030 — 2026-08-16 — iPad camera/LiDAR producers struck; L515 keeps the same message types](#d030)
 - [D029 — 2026-07-05 — Full pytest suite gates in CI on windows-latest; ruff gate with parked style ignores](#d029)
 - [D028 — 2026-07-03 — Retrieval quality measured natively in evals/, not via pgvector migration + deepeval](#d028)
 - [D027 — 2026-07-03 — Staleness check on resume seed and replayed reads](#d027)
@@ -37,11 +39,61 @@ See AGENTS.md Rule 12 for when and how to add entries.
 - [D004 — 2026-06-23 — L515 head-pointer: depth_comp=0 (depth compensation disabled)](#d004)
 - [D003 — 2026-06-07 — gemma4:12b fills the general-domain slot (gemma3:27b retired)](#d003)
 - [D002 — 2026-06-19 — Cloud backend is Amazon Bedrock only; direct Anthropic API removed](#d002)
-- [D001 — (foundational) — MOUSEDOWN/MOUSEUP execute synchronously, no asyncio.to_thread](#d001)
+
+*Index holds the 30 most recent. Older entries remain in full in the body below —
+D001 (MOUSEDOWN/MOUSEUP synchronous, no `asyncio.to_thread`) is still live and is
+referenced from CLAUDE.md §Action Vocabulary.*
 
 ---
 
 ## Entries
+
+---
+
+### D031 — Scientific keypad struck; Pencil canvas covers the job at lower joint cost {#d031}
+**Date:** 2026-08-16
+**Chose:** Strike Requirement 18 (`ScientificKeypadView`). The Pencil handwriting canvas
+(Requirement 19) is the sole math-entry surface.
+**Rejected:** Build the keypad as specced in `specs/ipad-sensor-focus/scientific-keypad.md`.
+**Why:** Both surfaces terminate in the identical `touch_command`/`DICTATE` clipboard-paste
+delivery, so they compete for exactly one job. For an RA user the cost that matters is joint
+actuations: `sin(π/4) + √2` is ~14 discrete taps on a keypad versus one continuous Pencil
+stroke sequence on the canvas, which is already shipped and meets R19 in full. A second, more
+painful path to an already-solved outcome is negative value, not optional value. Note this
+strike also corrects a documentation-integrity failure — `tasks.md` 2.14 was marked `[x]` for
+a `ScientificKeypadView.swift` that was never written, and `OverlayPreservationTests.swift`
+carried a `testScientificKeypadSendExpression` that only exercised the shared DICTATE send
+path. Both fixed in the same change. The design doc is retained as a record.
+**Ref:** `specs/ipad-sensor-focus/requirements.md` R18, `specs/ipad-sensor-focus/scientific-keypad.md`, `docs/audits/2026-08-13-ipad-swift-accessibility-gap-analysis.md`
+
+---
+
+### D030 — iPad camera/LiDAR producers struck; L515 keeps the same message types {#d030}
+**Date:** 2026-08-16
+**Chose:** Strike Requirements 7 and 10 (iPad LiDAR depth, iPad camera gesture) — the iPad is
+not a vision producer. **Keep** `sensors/gesture_processor.py`, `sensors/lidar_receiver.py`,
+and the `camera_frame`/`depth_frame` handlers in `core/ipad_bridge.py` untouched.
+**Rejected (primary):** Build the iPad-side capture (`LiDARStreamer.swift` + camera frames).
+**Rejected (secondary):** Delete the PC-side receivers along with the requirements, on the
+belief that they were orphaned.
+**Why:** *The device has no LiDAR scanner and the spec's "iPad Pro (2020+)" premise is false* —
+the unit in use is a standard iPad, the same root cause that killed R3/R4 (no TrueDepth). These
+producers were not merely never built: `LiDARStreamer.swift` (370 lines, emitting **both**
+`depth_frame` at 5 fps and `camera_frame` at 10 fps) shipped 2026-05-16 and was stripped
+2026-05-24 in commit `64eec10` because it was unused *and* because on iOS 26
+`ARWorldTrackingConfiguration.supportsFrameSemantics` crashed the Settings tab on every render
+on non-LiDAR hardware. This decision ratifies that removal at the requirements level rather than
+leaving R7/R10 reading as pending work. Rebuilding a standalone camera path was separately
+rejected on ergonomics: the iPad is the touch surface, so the hand on the screen is the hand the
+camera would be tracking. The secondary rejection is the load-bearing part: the receivers look
+orphaned but are **live**. `sensors/realsense_publisher.py` connects
+to the same bridge as a WebSocket client and emits the **same** `camera_frame` and
+`depth_frame` message types from the RealSense L515, which is the working gesture/hand-pointer
+camera (see D004). `main.py:1036-1037` wires both receivers unconditionally, and
+`tests/test_gesture_*.py`, `test_lidar_receiver.py` cover them. Deleting them to "clean up
+after" this strike would have broken the L515 path and the D7 flick-to-snap gestures. The
+message types stay in the protocol; only their producer changes identity.
+**Ref:** `specs/ipad-sensor-focus/requirements.md` R7/R10, `sensors/realsense_publisher.py`, `docs/websocket-protocol.md`, `docs/audits/2026-08-13-ipad-swift-accessibility-gap-analysis.md`
 
 ---
 
