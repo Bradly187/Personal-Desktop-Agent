@@ -121,9 +121,11 @@ Every pipeline boundary carries a `Command` dataclass. `DomainClassifier` gates 
 
 > Full message-type reference: [docs/websocket-protocol.md](docs/websocket-protocol.md)
 
-iPad → PC (26 types): `tilt` `tilt_position` `tilt_tap` `tilt_ratchet` `keyword` `audio_stream` `camera_frame` `depth_frame` `touch_command` `trackpad` `handwriting_image` `dwell_click` `ping` `set_dwell_action` `set_feature_toggle` `sensor_switch` `cursor_pause` `cursor_resume` `gesture_assessment` `pain_day_override` `flare_profile` `calibration_start` `calibration_cancel` `mic_mute` `a2ui_event` `ipad_log`
+iPad → PC (24 types): `tilt` `tilt_position` `tilt_tap` `tilt_ratchet` `keyword` `audio_stream` `touch_command` `trackpad` `handwriting_image` `dwell_click` `ping` `set_dwell_action` `set_feature_toggle` `sensor_switch` `cursor_pause` `cursor_resume` `gesture_assessment` `pain_day_override` `flare_profile` `calibration_start` `calibration_cancel` `mic_mute` `a2ui_event` `ipad_log`
 
-PC → iPad (12 types): `ack` `pong` `status` `screenshot` `handwriting_result` `recalibration_request` `mic_state` `calibration_result` `calibration_phrase` `calibration_complete` `calibration_error` `a2ui_clear`
+PC → iPad (13 types): `ack` `pong` `status` `screenshot` `handwriting_result` `recalibration_request` `mic_state` `calibration_result` `calibration_phrase` `calibration_complete` `calibration_error` `a2ui_clear` `gesture_assessment`
+
+`camera_frame` + `depth_frame` are bridge-accepted but come from `sensors/realsense_publisher.py` (L515), **not** the iPad — the iPad producers were struck 2026-08-16 (D030).
 
 ## Coding Conventions
 

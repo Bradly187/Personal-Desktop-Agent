@@ -93,15 +93,18 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 4. THE iPadApp SHALL debounce sound actions with a configurable cooldown period (default 500 ms) to prevent accidental double-triggers
 5. WHEN sound action detection is disabled or AVFoundation is unavailable, THE System SHALL continue operating with remaining input modalities
 
-### Requirement 7: iPad LiDAR Depth via Record3D
+### ~~Requirement 7: iPad LiDAR Depth via Record3D~~ *(REMOVED 2026-08-16)*
 
-**User Story:** As a user with RA, I want my iPad's LiDAR sensor to provide depth data, so that gesture recognition can use real 3D distances for more accurate classification.
-
-#### Acceptance Criteria
-
-1. WHEN the iPad is running Record3D and is connected via USB or local network, THE IPadBridge SHALL stream LiDAR depth frames with confidence map filtering
-2. WHEN a LiDAR depth frame has a confidence value below the configured minimum for a region, THE IPadBridge SHALL exclude that region from the depth data provided to the PC_Service gesture processing
-3. WHEN Record3D is not running or the iPad is disconnected, THE IPadBridge SHALL log a warning and the PC_Service gesture processing SHALL fall back to 2D MediaPipe classification without depth
+> **Removed:** *The device has no LiDAR scanner.* This requirement's premise — "iPad Pro (2020+)
+> with LiDAR" — is false for the unit in use, which is a standard iPad. `LiDARStreamer.swift`
+> (370 lines) was in fact built 2026-05-16 and stripped 2026-05-24 in commit `64eec10`: it was
+> unused, and on iOS 26 `ARWorldTrackingConfiguration.supportsFrameSemantics` crashed the
+> Settings tab on every render on non-LiDAR hardware. Same root cause as R3/R4 (no TrueDepth) —
+> the spec was written against iPad Pro hardware the project does not have.
+>
+> The RealSense L515 fills this role instead: `sensors/realsense_publisher.py` emits the **same**
+> `depth_frame` message type into the same bridge, so `sensors/lidar_receiver.py` and its tests
+> remain live and in use. Only the iPad-side producer is struck. See D030.
 
 ### Requirement 8: Native Touch Interface (SwiftUI)
 
@@ -130,17 +133,24 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 6. THE iPadApp settings SHALL allow the user to configure trackpad sensitivity, scroll speed, and tap-to-click enable/disable for full-screen trackpad mode
 7. THE iPadApp SHALL provide a gesture or edge swipe to switch between full-screen trackpad mode and the command pad view without requiring precise taps
 
-### Requirement 10: Gesture Recognition via iPad Camera
+### ~~Requirement 10: Gesture Recognition via iPad Camera~~ *(REMOVED 2026-08-16)*
 
-**User Story:** As a user with RA, I want my iPad's camera to detect hand gestures, so that I can issue commands through simple hand movements when speaking is difficult.
-
-#### Acceptance Criteria
-
-1. WHEN the iPad camera feed is available and the PC_Service detects a hand with gesture confidence at or above 0.65 via MediaPipe, THE PC_Service SHALL map the gesture to the corresponding desktop Command
-2. WHEN a gesture is classified below the confidence threshold, THE PC_Service SHALL discard it silently and not produce a Command
-3. WHEN the same gesture fires within 800 ms of the previous firing, THE PC_Service SHALL debounce it and not re-fire
-4. WHEN iPad LiDAR depth data is available from Record3D, THE PC_Service SHALL use real millimetre distances for pinch and grab classification instead of 2D pixel-space estimation
-5. WHEN the iPad camera feed is unavailable, THE PC_Service SHALL log a warning and the System SHALL continue operating with remaining input modalities
+> **Removed:** The `camera_frame` producer lived inside `LiDARStreamer.swift` (10 fps camera
+> alongside 5 fps depth) and went out with it on 2026-05-24 — see the note on Requirement 7.
+> The app today declares no `NSCameraUsageDescription`.
+>
+> Rebuilding it standalone was rejected on ergonomics as well as hardware: holding the iPad as
+> both the touch surface and the camera watching the hands is self-defeating — the hand on the
+> screen is the hand being tracked. The RealSense L515 is the gesture camera:
+> `sensors/realsense_publisher.py` emits the **same** `camera_frame` message type, so
+> `sensors/gesture_processor.py` (MediaPipe, 13-gesture vocabulary) and the D7 flick-to-snap
+> path remain live and in use. Only the iPad-side producer is struck. See D030.
+>
+> **Still open:** R15.3 QR-code pairing is a *one-shot* camera use, not a sensor stream, and is
+> not resolved by this removal — see the note on Requirement 15.
+>
+> **Still open:** R15.3 QR-code pairing is a *one-shot* camera use, not a sensor stream, and is
+> not resolved by this removal — see the note on Requirement 15.
 
 ### Requirement 11: Voice Command Transcription (PC-side)
 
@@ -160,10 +170,15 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 
 #### Acceptance Criteria
 
-1. THE FusionEngine SHALL evaluate inputs using the following priority order: (1) iPad touch command, (2) sound action, (3) gaze dwell click, (4) gaze plus voice, (5) gaze plus gesture, (6) tilt navigation, (7) head tracking cursor, (8) gesture alone, (9) on-device voice keyword, (10) PC-transcribed voice
+1. THE FusionEngine SHALL evaluate inputs using the following priority order: (1) iPad touch command, (2) voice "click" keyword at the current cursor position, (3) tilt navigation — 3a absolute position, 3b legacy velocity, (4) gesture alone, (5) on-device voice keyword, (6) PC-transcribed voice
 2. WHEN multiple input sources produce Commands within the same tick, THE FusionEngine SHALL emit only the single highest-priority Command
 3. WHEN a higher-priority source is unavailable, THE FusionEngine SHALL fall through to the next available source without error
-4. THE FusionEngine SHALL accept Commands with source tags "touch", "sound_action", "gaze_dwell", "multimodal", "tilt", "head_track", "gesture", "voice_local", and "voice" to distinguish input origins
+4. THE FusionEngine SHALL accept Commands with source tags "touch", "multimodal", "tilt", "gesture", "voice_local", and "voice" to distinguish input origins
+
+> **Updated 2026-08-16:** was a stale 10-level list including gaze dwell, gaze+voice,
+> gaze+gesture, head-tracking cursor, and sound action. Gaze/head were removed 2026-05-30
+> (R3/R4); the sound-action level is not reachable because R6 was never built. Now mirrors the
+> live 6-level order in `core/fusion_engine.py` and CLAUDE.md.
 
 ### Requirement 13: Routing and Execution
 
@@ -200,6 +215,13 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 3. WHERE the qrcode Python package is installed, THE PC_Service SHALL print a QR code to the terminal that the user can scan with the iPad camera to configure the iPadApp connection
 4. WHEN the iPadApp establishes a WebSocket connection, THE PC_Service SHALL log the connection and begin accepting sensor data streams
 
+> **Note (2026-08-16):** 15.3 is **unimplemented** — the iPadApp has no QR scanner, so the only
+> pairing route is hand-typing an IP address and token, which is the highest-friction moment in
+> the product for an arthritic user. The Requirement 7/10 removals do **not** resolve this: a
+> one-shot `AVCaptureMetadataOutput` QR scan is a different capability from a continuous camera
+> sensor stream, and adding it would require `NSCameraUsageDescription`. Left open deliberately
+> pending a decision on whether to scan, or to replace QR with a non-camera handoff.
+
 ### Requirement 16: Resilience and Graceful Degradation
 
 **User Story:** As a user with RA, I want the system to keep working even when some iPad features are unavailable, so that I always have at least one way to control my desktop.
@@ -229,20 +251,16 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 9. THE `HandwritingCanvasView` SHALL provide Clear (reset canvas) and Undo (remove last stroke) controls
 10. WHEN the canvas is empty, THE Recognise button SHALL be disabled
 
-### Requirement 18: Scientific Keypad Input Surface
+### ~~Requirement 18: Scientific Keypad Input Surface~~ *(REMOVED 2026-08-16)*
 
-**User Story:** As a user with RA who works with science and mathematics, I want an iPad keypad with scientific calculator symbols, so that I can enter expressions like `sin(π/4) + √2` into any PC application without needing a physical keyboard.
-
-#### Acceptance Criteria
-
-1. THE iPadApp SHALL include a `ScientificKeypadView` tab accessible from the main navigation
-2. THE `ScientificKeypadView` SHALL display a scrollable monospace expression area showing the current input and an optional live evaluation preview
-3. THE `ScientificKeypadView` SHALL provide a Basic mode (digits, basic operators, parentheses) and a Scientific mode adding: sin, cos, tan, their inverses, log, ln, log₂, √, ^, π, e, abs, factorial, mod, EE, and ±
-4. ALL keypad buttons SHALL have a minimum touch target of 64×64 points with Hit_Box_Expansion applied
-5. WHEN the user taps Send, THE iPadApp SHALL transmit a `touch_command` message with `action: "DICTATE"` and the expression string as `text` to the PC_Service
-6. THE PC_Service SHALL deliver the expression to the focused desktop application via clipboard paste (not individual keystrokes), preserving all unicode mathematical symbols
-7. THE `ScientificKeypadView` SHALL provide ANS recall (inserts the most recent evaluation result), CLR (clears expression), and backspace controls
-8. WHEN the expression cannot be evaluated on-device, THE `ScientificKeypadView` SHALL show no evaluation preview rather than an error
+> **Removed:** Never built, despite `tasks.md` 2.14 having been marked complete in error.
+> Requirement 19's Pencil handwriting canvas covers the same user story by a route that costs
+> the user far fewer joint actuations: writing `sin(π/4) + √2` freehand is one continuous
+> Pencil stroke sequence, versus ~14 discrete taps on a keypad. Both terminate in the same
+> `DICTATE` clipboard-paste delivery, so nothing downstream changes. Building a second, more
+> painful surface for an already-solved job is not a good use of the RA-day budget.
+> `specs/ipad-sensor-focus/scientific-keypad.md` is retained as a design record only.
+> See D031.
 
 ### Requirement 17: Action Vocabulary
 
@@ -250,6 +268,10 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 
 #### Acceptance Criteria
 
-1. THE DesktopAgent SHALL constrain LLM output to exactly these action verbs: CLICK, SCROLL, TYPE, OPEN, CLOSE, HOTKEY, DICTATE, and CLARIFY
+1. THE DesktopAgent SHALL constrain accessibility-pipeline LLM output to exactly these 11 verbs: CLICK, MOUSEDOWN, MOUSEUP, SCROLL, TYPE, OPEN, CLOSE, HOTKEY, DICTATE, CLARIFY, SCREENSHOT
 2. WHEN the LLM produces an action string that does not begin with one of the permitted verbs, THE DesktopAgent SHALL reject it and log a warning instead of executing it
 3. WHEN the action is DICTATE, THE DesktopAgent SHALL paste the text via the clipboard instead of simulating individual keystrokes
+4. THE `CommandExecutor` SHALL additionally dispatch the 5 dev-agent verbs (WRITE_FILE, RUN_TERMINAL, EXPLAIN, SEARCH_WEB, READ_SCREEN) for a total of 16, plus `SNAP_WINDOW` for D7 flick-to-snap
+
+> **Updated 2026-08-16:** was an 8-verb list predating MOUSEDOWN/MOUSEUP/SCREENSHOT and the
+> dev-agent vocabulary. CLAUDE.md §Action Vocabulary is the authority.

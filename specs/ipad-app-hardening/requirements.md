@@ -1,13 +1,22 @@
 # Requirements: iPad App Hardening
 
+> **⚠️ Sensor roster is historical.** This spec was written against a 7-sensor design. Four of
+> those sensors no longer exist: GazeTracker and HeadTracker were removed 2026-05-30 (no
+> TrueDepth), LiDARStreamer was stripped 2026-05-24 (no LiDAR scanner — `64eec10`, ratified as
+> D030), and SoundDetector was never built (Requirement 6 of `ipad-sensor-focus`, still
+> undecided). **`SensorManager` today manages 3: TiltSensor, KeywordListener, AudioStreamer.**
+> The lifecycle *behaviour* specified below — reactive Combine start/stop, availability checks,
+> graceful degradation, background handling — is implemented and remains authoritative; only the
+> roster is stale.
+
 ## Requirement 1: Sensor Lifecycle Management
 
 ### Description
-A centralized `SensorManager` instantiates, starts, stops, and lifecycle-manages all sensors (TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector, AudioStreamer, LiDARStreamer), driven reactively by SettingsStore toggles. GazeTracker and HeadTracker share a single `SharedFaceSession`; the three audio sensors share `SharedAudioSession`.
+A centralized `SensorManager` instantiates, starts, stops, and lifecycle-manages all sensors (TiltSensor, KeywordListener, AudioStreamer), driven reactively by SettingsStore toggles. The audio sensors share `SharedAudioSession`.
 
 ### Acceptance Criteria
 
-1.1 Given the app launches, when SensorManager is initialized, then all 7 sensors (TiltSensor, GazeTracker, HeadTracker, KeywordListener, SoundDetector, AudioStreamer, LiDARStreamer) are instantiated with references to WebSocketManager and SettingsStore.
+1.1 Given the app launches, when SensorManager is initialized, then all 3 sensors (TiltSensor, KeywordListener, AudioStreamer) are instantiated with references to WebSocketManager and SettingsStore.
 
 1.2 Given a sensor's settings toggle changes from false to true, when the Combine publisher fires, then the corresponding sensor's `start()` method is called within the same run loop cycle.
 
