@@ -11,12 +11,38 @@ found the app uses **four** accessibility modifiers (`accessibilityLabel` ×46, 
 ×22, `accessibilityAddTraits` ×10, `accessibilityHidden` ×9) and reads **zero** accessibility
 environment values.
 
-Four assistive technologies — Switch Control, Voice Control, system Eye Tracking, and Full
-Keyboard Access — are blocked by **one shared cause**: the app's custom gesture surfaces expose no
-actionable accessibility elements. Closing that one cause unlocks all four. The scenario this
-serves is concrete and not hypothetical: on a severe flare day when hands are out of play, there
-is currently no way to drive this app at all, and its whole purpose is to be the thing that still
-works on that day.
+Three assistive technologies — Switch Control, Voice Control, and Full Keyboard Access — are held
+back by **one shared cause**: the app's custom gesture surfaces expose no actionable accessibility
+elements. Closing that one cause serves all three. (System Eye Tracking would have been a fourth;
+Brad confirmed 2026-08-16 that it is unavailable on the device.)
+
+**Scoped precisely — corrected 2026-08-16.** An earlier draft of this section, and audit finding
+G13, claimed there is "no way to drive this app at all" under Switch Control and that it is
+"effectively unusable". **Both overstated the gap.** Every button surface in the app is a real
+SwiftUI `Button` carrying an `accessibilityLabel` — `CommandPadView`, the custom tab bar,
+`MicMuteIndicator`, `DwellActionToolbar`, `TrackpadView`'s click/shortcut/scroll rows, the
+`HandwritingCanvasView` controls, and A2UI approval prompts via `DAButton`. All of those are
+scannable and activatable by Switch Control and addressable by Voice Control **today**, with no
+code change.
+
+What is unreachable is **cursor positioning**. `TrackpadGestureView` is a bare `UIView` with raw
+gesture recognizers and no accessibility elements, so an assistive technology can fire a click but
+cannot aim it. The honest one-line statement of this spec's value is therefore:
+
+> **You can already click. You cannot aim.** This spec is about aiming.
+
+That is still the decisive gap — aiming is the app's core function and the reason it exists — but
+it is a narrower and more defensible claim than "the app is undrivable", and it should be judged
+on its real size.
+
+> **This spec is also the successor to Requirement 6** (mouth-sound actions), struck 2026-08-16 as
+> D032. R6 wanted "a zero-hand input method that doesn't require forming words"; the in-app
+> detector was withdrawn 2026-06-04 because the sounds fired incidentally. iPadOS Switch Control
+> **Sound Actions** provide that capability with Apple's tuned detector, system-wide, and with no
+> extra always-on consumer of the shared microphone — but they only reach this app once the work
+> below exposes actionable accessibility elements. With Eye Tracking confirmed unavailable on the
+> device, this is now the **only** route back to a genuinely zero-hand modality, which raises this
+> spec's priority relative to the original draft.
 
 **Status:** Draft → [Brad approves spec] → In Progress → [Brad approves tasks.md] → Building → Shipped (PR #___)
 **Approved:** <!-- set to "Brad, YYYY-MM-DD" when approving this spec; do NOT self-promote -->
