@@ -285,8 +285,17 @@ final class SettingsStore: ObservableObject {
     @Published var flareTiltDegrades: Bool {
         didSet { defaults.set(flareTiltDegrades, forKey: "flareTiltDegrades") }
     }
-    /// Mouth-sound triggers get weaker/slower on flare days → relax the
-    /// sound cooldown. Independent of tilt.
+    /// **Dormant — no live consumer.** Mouth-sound control (R6) was removed
+    /// 2026-06-04 (`54a4f00` iPad, `7b0d7ee` PC) because the sounds fired
+    /// incidentally; struck at the requirements level as D032. This field is
+    /// kept deliberately: it is still synced in the `flare_profile` message and
+    /// read back from persisted profile data by
+    /// `adaptive/behavioral_twin_state.py`, so deleting it would need a
+    /// behavioural-twin schema change for no benefit.
+    ///
+    /// Do not wire a new consumer to it. If mouth-sound input is ever wanted
+    /// again, the successor is iPadOS Switch Control Sound Actions via
+    /// `specs/ipad-assistive-tech-compat/`, not a rebuilt in-app detector.
     @Published var flareSoundDegrades: Bool {
         didSet { defaults.set(flareSoundDegrades, forKey: "flareSoundDegrades") }
     }

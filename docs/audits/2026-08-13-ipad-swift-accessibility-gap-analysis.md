@@ -87,17 +87,32 @@ click**. Loud rejection also carries no queue state, no TTL, and no window in wh
 command can still fire. Ships first of the iPad programme; the AT spec's task B3 consumes its
 rejection path.
 
-#### G1. Sound actions (R6) — the zero-hand modality — do not exist
-No `SoundDetector.swift`. `SettingsStore.flareSoundDegrades` and the PC-side
-`sound_action` source tag survive as vestigial references. R6's user story is *"a zero-hand
-input method that doesn't require forming words"* — the single most valuable modality on a
-severe flare day, when both fine motor control and speech clarity are degraded.
+#### G1. Sound actions (R6) — ~~the zero-hand modality — do not exist~~ **RESOLVED: struck (D032)**
 
-There is no removal note in `requirements.md` (contrast R3/R4, which are properly struck
-through), so it is unclear whether this was dropped deliberately or simply never built.
-**This needs a decision, not silence:** either implement it (`SNAudioStreamAnalyzer` /
-`SoundAnalysis` makes cluck/pop detection tractable on-device) or strike R6 with a D-entry
-in `docs/decisions.md` explaining what replaces it.
+> **Correction to this finding (2026-08-16).** The original text claimed *"it is unclear whether
+> this was dropped deliberately or simply never built"* and rated it the last open build-or-strike
+> call. **Both claims were wrong, and the evidence was in a file this audit had already opened.**
+> `core/fusion_engine.py:17` states in its module docstring: *"Mouth-sound control (cluck/pop/hiss)
+> was removed — the sounds fired incidentally."* This audit read that file to check
+> `on_tilt_position` and did not read the header above it.
+
+R6 was **built, shipped, used, and withdrawn on evidence** — removed end-to-end 2026-06-04 by
+`54a4f00` (iPad: `SoundDetector.swift`, `SoundTrainingSheet.swift`, `soundMappings`, sensor card,
+onboarding step, Settings editor) and `7b0d7ee` (PC: `on_sound_action`, the `_sound` tick slot,
+priority/cooldown, bridge handler, bypass source). The reason given: *"the sounds fired
+incidentally and were not wanted."*
+
+**Its replacement shipped in the same commits** — magnetic click (tilt-tap snaps to the nearest
+clickable within `DA_SNAP_RADIUS_PX`) plus a tap threshold lowered 1.2 g → 0.6 g. The low-effort
+trigger moved from *make a sound* to *tap the table lightly*, which is far harder to fire by
+accident.
+
+**Successor for the user story:** iPadOS Switch Control **Sound Actions**, reached via
+`specs/ipad-assistive-tech-compat/`. See D032. This raises that spec's priority — with Eye Tracking
+unavailable on the device, it is now the only route back to a genuinely zero-hand modality.
+
+`flareSoundDegrades` / `flare_sound_degrades` remain **deliberately dormant** to avoid a
+behavioural-twin schema change; they are not vestigial oversights and should not be deleted.
 
 #### G3. Dwell activation on iPad buttons (R8.4) is missing
 Dwell exists — but only for the **PC cursor** (`TiltSensor.updateDwell` → `dwell_click`).
@@ -142,7 +157,20 @@ Concretely:
   Switch Control path.
 
 Switch Control (head switch, sip-and-puff) is the standard escalation when an RA flare takes
-hands out of play entirely. Right now the app has no story for it.
+hands out of play entirely.
+
+> **Correction (2026-08-16): "the app has no story for it" was overstated.** Every *button*
+> surface is a real SwiftUI `Button` carrying an `accessibilityLabel` — `CommandPadView`, the
+> custom tab bar, `MicMuteIndicator`, `DwellActionToolbar`, `TrackpadView`'s click/shortcut/scroll
+> rows, the handwriting controls, and A2UI approval prompts via `DAButton`. Switch Control can
+> scan and activate all of them **today**, and Voice Control can address them by label, with no
+> code change.
+>
+> What is genuinely unreachable is **cursor positioning** — the three bullets above are all about
+> the gesture surface, and they stand. The accurate framing is **you can already click, you cannot
+> aim**; aiming is the app's core function, so this remains the decisive gap, but it is narrower
+> than the original sentence implied. It is also measurable on-device for free: enable Switch
+> Control, try the command pad, then try to move the cursor.
 
 #### G14. No Reduce Motion support
 Zero references to `accessibilityReduceMotion`. The app ships a `repeatForever` pulsing
