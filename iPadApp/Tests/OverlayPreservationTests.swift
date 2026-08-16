@@ -324,20 +324,20 @@ final class OverlayPreservationTests: XCTestCase {
             let defaults = UserDefaults(suiteName: suiteName)!
             let settings = SettingsStore(defaults: defaults)
 
-            let initialValue = settings.edgeScrollEnabled
+            let initialValue = settings.momentumScrollEnabled
 
             // Toggle (same logic as DwellActionToolbar.toggleEdgeScroll)
-            settings.edgeScrollEnabled.toggle()
+            settings.momentumScrollEnabled.toggle()
 
             XCTAssertNotEqual(
-                settings.edgeScrollEnabled, initialValue,
+                settings.momentumScrollEnabled, initialValue,
                 "Edge scroll should toggle"
             )
 
             // Verify persisted
-            let persisted = defaults.bool(forKey: "edgeScrollEnabled")
+            let persisted = defaults.bool(forKey: "momentumScrollEnabled")
             XCTAssertEqual(
-                persisted, settings.edgeScrollEnabled,
+                persisted, settings.momentumScrollEnabled,
                 "Edge scroll toggle should persist to UserDefaults"
             )
         }

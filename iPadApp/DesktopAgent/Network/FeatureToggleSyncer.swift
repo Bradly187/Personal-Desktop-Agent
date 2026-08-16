@@ -7,16 +7,18 @@ import Foundation
 /// `set_feature_toggle` messages whenever one changes. If the WebSocket is
 /// disconnected, changes are queued locally and flushed on reconnection.
 ///
-/// Requirements: 4.3, 4.7
+/// **Intentionally subscription-free as of 2026-08-16 — do not delete.**
+/// Its only subscriber was `edgeScrollEnabled`, which drove the `edge_scroll`
+/// feature deleted with the gaze removal; the toggle was repurposed as the
+/// purely iPad-side `momentumScrollEnabled` (R7.3). The send / queue / flush
+/// machinery below is kept deliberately, mirroring the PC's own
+/// `FusionEngine.VALID_FEATURES = set()` — which its authors left wired "without
+/// special-casing" so the next real toggle needs no rebuild. Removing this class
+/// would mean re-implementing offline queueing from scratch.
+///
+/// Requirements: 4.3, 4.7; `specs/ipad-trackpad-ergonomics/` R7.4
 @MainActor
 final class FeatureToggleSyncer {
-
-    // MARK: — Wire feature name mapping
-
-    /// Maps Swift property key paths to the wire protocol feature names.
-    private static let featureNameMap: [String: String] = [
-        "edgeScrollEnabled": "edge_scroll",
-    ]
 
     // MARK: — Dependencies
 
@@ -43,13 +45,10 @@ final class FeatureToggleSyncer {
     // MARK: — Toggle observation
 
     private func _subscribeToToggles() {
-        settings.$edgeScrollEnabled
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] enabled in
-                self?._handleToggleChange(feature: "edge_scroll", enabled: enabled)
-            }
-            .store(in: &cancellables)
+        // No feature toggles are currently synced to the PC. Add a subscription
+        // here when one exists, calling `_handleToggleChange(feature:enabled:)`
+        // with the wire name. `momentumScrollEnabled` deliberately does NOT
+        // belong here — momentum is entirely iPad-side (R7.3).
     }
 
     // MARK: — Connection state observation

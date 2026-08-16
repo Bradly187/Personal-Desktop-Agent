@@ -14,11 +14,16 @@ final class TrackpadCorrectnessTests: XCTestCase {
         speed: CGFloat = 1.0
     ) -> (TrackpadGestureView.Coordinator, EventLog) {
         let log = EventLog()
+        // Pointer acceleration and momentum are explicitly off here: these tests
+        // cover B0 correctness, and a coast or a gain curve firing incidentally
+        // would make them test two features at once. The ergonomics features
+        // have their own suite in TrackpadErgonomicsTests.
         let coordinator = TrackpadGestureView(
             palmRadius: 25,
-            speed: speed
+            speed: speed,
+            accelExponent: 1.0,
+            momentumEnabled: false
         ) { log.events.append($0) }.makeCoordinator()
-        // makeCoordinator captures the closure passed above; nothing else needed.
         return (coordinator, log)
     }
 
