@@ -146,9 +146,14 @@ jobs:
           echo "Exported IPA:"
           ls -la $RUNNER_TEMP/export/*.ipa
 
+      # A failed upload MUST fail the job. From 2026-06-17 to 2026-08-16 every
+      # master run reported success while delivering nothing: `continue-on-error`
+      # stopped the step failing, the `if/elif/else` exited 0 on all branches
+      # (including its own "may have failed" path), and `altool | tee` meant the
+      # pipeline status came from tee rather than altool. Three independent
+      # reasons a broken pipeline looked green. Do not reintroduce any of them.
       - name: Upload to TestFlight
         if: ${{ github.ref == 'refs/heads/master' || github.event.inputs.deploy_testflight == 'true' }}
-        continue-on-error: true  # Non-fatal: App Store may reject older SDK builds
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -165,24 +170,54 @@ jobs:
           IPA_PATH=$(find $RUNNER_TEMP/export -name "*.ipa" | head -1)
           echo "Uploading: $IPA_PATH"
 
-          # Upload using xcrun altool (works with API key auth)
-          xcrun altool --upload-app \
+          # No pipe — a pipeline's status is its LAST command's, so `| tee` would
+          # discard altool's exit code. Redirect, capture status, then print.
+          if xcrun altool --upload-app \
             --type ios \
             --file "$IPA_PATH" \
             --apiKey "$ASC_KEY_ID" \
             --apiIssuer "$ASC_ISSUER_ID" \
-            2>&1 | tee upload.log
-
-          if grep -q "No errors uploading" upload.log; then
-            echo "✅ Upload succeeded! Build will appear in TestFlight shortly."
-          elif grep -q "SDK version issue" upload.log; then
-            echo "⚠️ TestFlight rejected the build for SDK reasons. This should not happen on Xcode 26 — investigate."
+            > upload.log 2>&1
+          then
+            ALTOOL_STATUS=0
           else
-            echo "⚠️ Upload may have failed. Check App Store Connect."
-            cat upload.log
+            ALTOOL_STATUS=$?
+          fi
+          cat upload.log
+
+          # Success requires BOTH a zero exit and the explicit confirmation
+          # string — altool has historically exited 0 on partial failures.
+          if [ "$ALTOOL_STATUS" -eq 0 ] && grep -q "No errors uploading" upload.log; then
+            echo "✅ Upload succeeded! Build will appear in TestFlight shortly."
+            exit 0
           fi
 
+          echo "::error::TestFlight upload FAILED (altool exit $ALTOOL_STATUS). No build was delivered."
+
+          if grep -q "Cannot determine the Apple ID from Bundle ID" upload.log; then
+            echo "::error::App Store Connect has no app record this API key can resolve for"
+            echo "::error::PRODUCT_BUNDLE_IDENTIFIER. Registering the Bundle ID in the Developer"
+            echo "::error::portal is NOT sufficient — an app record must also exist in App Store"
+            echo "::error::Connect (My Apps -> +), and the ASC_KEY_ID key needs access to it."
+            echo "--- Apps visible to this API key ---"
+            xcrun altool --list-apps \
+              --apiKey "$ASC_KEY_ID" \
+              --apiIssuer "$ASC_ISSUER_ID" 2>&1 || true
+            echo "--- end ---"
+            echo "An empty or app-less list means the record is missing or the key cannot see it."
+          fi
+
+          if grep -q "SDK version issue" upload.log; then
+            echo "::error::Rejected for SDK reasons. Should not happen on Xcode 26 — investigate."
+          fi
+
+          exit 1
+
+      # always() so the signed IPA survives a failed TestFlight upload — it is the
+      # fallback way to get a build off CI, and it is worth most precisely when
+      # delivery is broken.
       - name: Upload IPA as artifact
+        if: always()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Transient ECONNRESET on macOS runners; IPA still in runner temp
         with:
