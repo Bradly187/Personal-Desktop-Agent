@@ -199,52 +199,35 @@ struct TrackpadView: View {
         .accessibilityHint("Double-tap to scroll \(direction)")
     }
 
-    // MARK: — Fractional accumulator (prevents Int truncation from dropping small moves)
-    @State private var accumX: CGFloat = 0
-    @State private var accumY: CGFloat = 0
-
     // MARK: — Event handling
 
+    /// Thin dispatcher. All accumulation, speed scaling, and rate limiting now
+    /// live in `TrackpadGestureView.Coordinator` (R10.1) — events arrive here
+    /// already reduced to whole units, so this never touches `@State` and the
+    /// view graph is not invalidated on every gesture frame (R10.2).
     private func handle(_ event: TrackpadEvent) {
         switch event {
         case .move(let dx, let dy):
-            let s = settings.trackpadSpeed
-            accumX += dx * s
-            accumY += dy * s
-
-            let ix = Int(accumX)
-            let iy = Int(accumY)
-
-            if ix != 0 || iy != 0 {
-                accumX -= CGFloat(ix)
-                accumY -= CGFloat(iy)
-                wsManager.sendTrackpadMove(dx: ix, dy: iy)
-            }
+            wsManager.sendTrackpadMove(dx: dx, dy: dy)
         case .tap(let fingers):
-            if fingers == 1 {
-                wsManager.sendTrackpadTap(button: "left")
-            } else if fingers == 2 {
-                wsManager.sendTrackpadTap(button: "right")
-            }
-        case .scroll(let dx, let dy):
-            if abs(dy) >= abs(dx) {
-                wsManager.sendTrackpadScroll(direction: dy < 0 ? "up" : "down")
-            } else {
-                wsManager.sendTrackpadScroll(direction: dx < 0 ? "left" : "right")
-            }
+            wsManager.sendTrackpadTap(button: fingers == 2 ? "right" : "left")
+        case .scroll(let direction, let clicks):
+            wsManager.sendTrackpadScroll(direction: direction, clicks: clicks)
         case .ended:
-            accumX = 0
-            accumY = 0
+            break
         }
     }
 }
 
 // MARK: — Event type
 
-enum TrackpadEvent {
-    case move(dx: CGFloat, dy: CGFloat)
+/// Events emitted by the gesture coordinator, already reduced to whole units.
+enum TrackpadEvent: Equatable {
+    /// Whole-pixel cursor delta, speed already applied.
+    case move(dx: Int, dy: Int)
     case tap(fingers: Int)
-    case scroll(dx: CGFloat, dy: CGFloat)
+    /// Compass direction plus a positive magnitude in scroll clicks.
+    case scroll(direction: String, clicks: Int)
     case ended
 }
 
@@ -252,6 +235,9 @@ enum TrackpadEvent {
 
 struct TrackpadGestureView: UIViewRepresentable {
     let palmRadius: CGFloat
+    /// Cursor speed multiplier. Applied inside the Coordinator alongside the
+    /// fractional accumulator (R10.1) — which is why it is a real dependency
+    /// here rather than the dead property it used to be.
     let speed: CGFloat
     let onEvent: (TrackpadEvent) -> Void
 
@@ -287,32 +273,92 @@ struct TrackpadGestureView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        // Push live settings into the coordinator on every update. Without this
+        // the coordinator keeps the palmRadius captured at makeCoordinator()
+        // forever — and because ContentView deliberately keeps the TabView alive
+        // (its "Fix #15"), this view is never recreated, so the Settings
+        // "Palm Reject Radius" slider stayed inert for the whole session.
+        Self.applyLiveSettings(to: context.coordinator,
+                               palmRadius: palmRadius,
+                               speed: speed,
+                               onEvent: onEvent)
+
         // Retry the scroll-view link here too: on the first makeUIView the view
         // may not yet be in a window, so the ancestor page scroll view isn't
         // reachable. updateUIView runs after insertion / on layout.
         context.coordinator.linkAncestorScrollViewsIfNeeded()
     }
 
+    /// Pushes user-tunable settings and the current event sink into a live
+    /// coordinator.
+    ///
+    /// `onEvent` is refreshed here too (R10.3): the coordinator is created once
+    /// and outlives every `body` evaluation, so holding the closure captured at
+    /// `makeCoordinator()` is the same stale-capture defect that made the palm
+    /// radius slider inert. Refreshing every property in one place closes the
+    /// whole class of bug rather than the one instance of it.
+    ///
+    /// `static` so it is testable without a `UIViewRepresentableContext`, which
+    /// cannot be constructed outside SwiftUI — same testability seam as
+    /// `WebSocketManager.frameBinaryAudio` / `appendingToken`.
+    static func applyLiveSettings(to coordinator: Coordinator,
+                                  palmRadius: CGFloat,
+                                  speed: CGFloat? = nil,
+                                  onEvent: ((TrackpadEvent) -> Void)? = nil) {
+        coordinator.palmRadius = palmRadius
+        if let speed { coordinator.speed = speed }
+        if let onEvent { coordinator.onEvent = onEvent }
+    }
+
     func makeCoordinator() -> Coordinator {
-        Coordinator(palmRadius: palmRadius, onEvent: onEvent)
+        Coordinator(palmRadius: palmRadius, speed: speed, onEvent: onEvent)
     }
 
     // MARK: — Coordinator
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var palmRadius: CGFloat
-        let onEvent: (TrackpadEvent) -> Void
+        var speed: CGFloat
+        var onEvent: (TrackpadEvent) -> Void
         weak var view: UIView?
         weak var panRecognizer: UIPanGestureRecognizer?
         private var prevTranslation: CGPoint = .zero
-        /// Timestamp of last 2-finger tap — used to suppress the spurious 1-finger tap
-        /// that fires alongside it when require(toFail:) is removed.
-        private var lastTap2Time: CFTimeInterval = 0
         /// Set once we've made the ancestor page scroll view(s) defer to our pan.
         private var didLinkScrollViews = false
 
-        init(palmRadius: CGFloat, onEvent: @escaping (TrackpadEvent) -> Void) {
+        // MARK: — Tuning (R8.2, R9.3)
+
+        /// How long a 1-finger tap is held back waiting to see whether it is
+        /// really the first half of a 2-finger tap. Well under the ~300 ms that
+        /// `tap1.require(toFail: tap2)` would cost.
+        var tapDisambiguationWindow: TimeInterval = 0.08
+        /// Gesture points of two-finger travel per emitted scroll click.
+        var scrollPointsPerClick: CGFloat = 20
+        /// Ceiling on scroll emissions per second. Excess is coalesced into the
+        /// next emission, never dropped.
+        var maxScrollMessagesPerSecond: Double = 30
+
+        // MARK: — Interaction state (R10.1 — owned here, not in @State)
+
+        /// Fractional cursor accumulator. Prevents `Int` truncation from
+        /// swallowing slow movements.
+        private var accumX: CGFloat = 0
+        private var accumY: CGFloat = 0
+        /// Fractional scroll accumulator — same technique, applied to the scroll
+        /// path so magnitude survives instead of being pinned to a constant.
+        private var scrollAccumX: CGFloat = 0
+        private var scrollAccumY: CGFloat = 0
+        private var lastScrollEmit: CFTimeInterval = 0
+
+        /// Timestamp of the last 2-finger tap, and the deferred 1-finger tap
+        /// awaiting disambiguation. Together these cover *both* recognizer
+        /// orderings (R8.1) — the old code only handled tap2-before-tap1.
+        private var lastTap2Time: CFTimeInterval = 0
+        private var pendingTap1: DispatchWorkItem?
+
+        init(palmRadius: CGFloat, speed: CGFloat, onEvent: @escaping (TrackpadEvent) -> Void) {
             self.palmRadius = palmRadius
+            self.speed = speed
             self.onEvent = onEvent
         }
 
@@ -361,28 +407,133 @@ struct TrackpadGestureView: UIViewRepresentable {
                 prevTranslation = t
 
                 if gr.numberOfTouches == 2 {
-                    onEvent(.scroll(dx: dx, dy: dy))
+                    accumulateScroll(dx: dx, dy: dy)
                 } else {
-                    onEvent(.move(dx: dx, dy: dy))
+                    accumulateMove(dx: dx, dy: dy)
                 }
+            case .ended, .cancelled, .failed:
+                endGesture()
             default:
-                prevTranslation = .zero
-                onEvent(.ended)
+                break
             }
         }
+
+        // MARK: — Move / scroll accumulation
+
+        /// Applies speed, accumulates the fractional remainder, and emits only
+        /// whole pixels. Sub-pixel motion is carried forward rather than lost.
+        func accumulateMove(dx: CGFloat, dy: CGFloat) {
+            accumX += dx * speed
+            accumY += dy * speed
+            let ix = Int(accumX)
+            let iy = Int(accumY)
+            guard ix != 0 || iy != 0 else { return }
+            accumX -= CGFloat(ix)
+            accumY -= CGFloat(iy)
+            onEvent(.move(dx: ix, dy: iy))
+        }
+
+        /// Accumulates two-finger travel and emits rate-limited scroll events
+        /// carrying real magnitude (R9.1–R9.3). Previously every `.changed`
+        /// callback sent a fixed `clicks: 3` — up to 120 messages/second on
+        /// ProMotion, none of them eligible for backpressure dropping.
+        func accumulateScroll(dx: CGFloat, dy: CGFloat,
+                              now: CFTimeInterval = CACurrentMediaTime()) {
+            scrollAccumX += dx
+            scrollAccumY += dy
+            guard now - lastScrollEmit >= 1.0 / maxScrollMessagesPerSecond else { return }
+            emitScrollIfWhole(now: now)
+        }
+
+        /// Converts accumulated travel into whole clicks along the dominant axis
+        /// and emits. Diagonal scroll is deliberately out of scope — the PC's
+        /// `mouse_scroll` takes a compass direction, so two-axis scroll would be
+        /// a protocol change.
+        private func emitScrollIfWhole(now: CFTimeInterval) {
+            let vertical = abs(scrollAccumY) >= abs(scrollAccumX)
+            let travel = vertical ? scrollAccumY : scrollAccumX
+            let clicks = Int(travel / scrollPointsPerClick)
+            // R9.5 — below one whole click, keep accumulating rather than
+            // emitting a zero-magnitude message.
+            guard clicks != 0 else { return }
+
+            let consumed = CGFloat(clicks) * scrollPointsPerClick
+            if vertical {
+                scrollAccumY -= consumed
+                scrollAccumX = 0
+            } else {
+                scrollAccumX -= consumed
+                scrollAccumY = 0
+            }
+            let direction: String = vertical
+                ? (travel < 0 ? "up" : "down")
+                : (travel < 0 ? "left" : "right")
+            lastScrollEmit = now
+            onEvent(.scroll(direction: direction, clicks: abs(clicks)))
+        }
+
+        /// Flushes any remaining whole-click scroll travel, then clears all
+        /// interaction state. Flushing keeps total scrolled distance
+        /// proportional to total gesture displacement (R9.4).
+        func endGesture(now: CFTimeInterval = CACurrentMediaTime()) {
+            emitScrollIfWhole(now: now)
+            prevTranslation = .zero
+            accumX = 0
+            accumY = 0
+            scrollAccumX = 0
+            scrollAccumY = 0
+            onEvent(.ended)
+        }
+
+        // MARK: — Tap disambiguation (R8)
 
         @objc func tap1(_ gr: UITapGestureRecognizer) {
             guard gr.state == .recognized else { return }
-            // Suppress if a 2-finger tap just fired (within 100ms)
-            if CACurrentMediaTime() - lastTap2Time < 0.1 { return }
-            onEvent(.tap(fingers: 1))
+            onSingleTapRecognized()
+        }
+
+        /// A 1-finger tap was recognized. It may be a genuine left click, or it
+        /// may be one half of a 2-finger tap whose second recognizer has not
+        /// reported yet — UIKit guarantees no ordering between them.
+        ///
+        /// Both orderings are handled: if tap2 already fired we drop this
+        /// outright; otherwise we defer briefly so a tap2 still to come can
+        /// cancel us. The old code only did the former, so fingers landing
+        /// slightly apart — likelier with tremor — emitted a stray left click
+        /// before the intended right click.
+        func onSingleTapRecognized(now: CFTimeInterval = CACurrentMediaTime()) {
+            // Ordering A: tap2 already fired — this is its straggler.
+            if now - lastTap2Time < tapDisambiguationWindow { return }
+
+            // Ordering B: tap2 may still be coming. Hold briefly.
+            pendingTap1?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingTap1 = nil
+                self.onEvent(.tap(fingers: 1))
+            }
+            pendingTap1 = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + tapDisambiguationWindow,
+                                          execute: work)
         }
 
         @objc func tap2(_ gr: UITapGestureRecognizer) {
-            if gr.state == .recognized {
-                lastTap2Time = CACurrentMediaTime()
-                onEvent(.tap(fingers: 2))
-            }
+            guard gr.state == .recognized else { return }
+            onDoubleTapRecognized()
+        }
+
+        /// A 2-finger tap was recognized. Cancels any 1-finger tap still being
+        /// held for disambiguation (ordering B) and stamps the clock so a
+        /// straggler 1-finger recognition is dropped (ordering A).
+        func onDoubleTapRecognized(now: CFTimeInterval = CACurrentMediaTime()) {
+            lastTap2Time = now
+            pendingTap1?.cancel()
+            pendingTap1 = nil
+            onEvent(.tap(fingers: 2))
+        }
+
+        deinit {
+            pendingTap1?.cancel()
         }
     }
 }
