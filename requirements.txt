@@ -18,7 +18,7 @@
 
 # ── Core bridge & MCP ────────────────────────────────────────────────────────
 mcp==1.28.1
-aiohttp==3.14.1
+aiohttp==3.14.3
 zeroconf==0.150.0  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
 
 # ── Skills — Google PIM (OPTIONAL; only needed to enable the Gmail/Calendar
@@ -43,7 +43,7 @@ psutil==7.2.2
 
 # ── Handwriting OCR ──────────────────────────────────────────────────────────
 pix2tex==0.1.4
-pylatexenc==2.10
+pylatexenc==2.11
 
 # ── Symbolic math skill (skills/servers/sympy_server.py) ─────────────────────
 # Local, offline ground-truth computation the math planner calls via SKILL_QUERY
@@ -60,7 +60,7 @@ nvidia-ml-py==13.610.43
 aiosqlite==0.22.1
 
 # ── Analytics / ML feature extraction (AnalyticsDB) ──────────────────────────
-duckdb==1.5.4
+duckdb==1.5.5
 
 # ── Semantic few-shot retrieval (MiniLM embeddings in AgentDB) ────────────────
 sentence-transformers==5.6.0
@@ -69,7 +69,7 @@ sentence-transformers==5.6.0
 # soundfile: OGG Vorbis decode for audio returned by the Node.js sidecar.
 # The libsndfile wheel for Windows includes OGG/Vorbis support out of the box.
 soundfile==0.14.0
-boto3==1.43.41  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
+boto3==1.43.77  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
 
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1
@@ -86,7 +86,7 @@ webrtcvad-wheels==2.0.14
 mediapipe==0.10.35
 
 # ── Audio capture (iPad audio_stream + local mic) ────────────────────────────
-sounddevice==0.5.5
+sounddevice==0.5.6
 
 # ── Kokoro local TTS (kokoro_tts.py — ONNX, natural offline voices) ───────────
 # Default tts_backend when "kokoro" is set in approval_config.json. Pulls in
@@ -127,7 +127,7 @@ chromadb==1.5.9
 # pdfplumber is the primary parser (richer layout-aware extraction).
 # pypdf is a lighter fallback if pdfplumber is unavailable.
 pdfplumber==0.11.10
-pypdf==6.14.2  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
+pypdf==6.16.1  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
 
 # ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
 # windows-curses provides the stdlib curses module on Windows.
@@ -156,7 +156,7 @@ websockets==16.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.4.0
-hypothesis==6.156.1  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
+hypothesis==6.165.10  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
 numpy
 
 # ── Security pins (Dependabot) ────────────────────────────────────────────────
