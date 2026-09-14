@@ -266,6 +266,22 @@ final class SettingsStore: ObservableObject {
     @Published var trackpadSpeed: Double {
         didSet { defaults.set(trackpadSpeed, forKey: "trackpadSpeed") }
     }
+    /// Pointer-acceleration exponent for the Power_Curve transfer function
+    /// (`../sensor-refinement/` R5 defines the curve; this reuses it on the
+    /// trackpad). **1.0 is exactly linear and is the off switch** — there is
+    /// deliberately no separate toggle, so there is only one code path.
+    /// Higher values make fast drags cover more screen while leaving slow,
+    /// deliberate positioning untouched. Clamped [1.0, 3.0].
+    @Published var trackpadAccelExponent: Double {
+        didSet {
+            let clamped = min(max(trackpadAccelExponent, 1.0), 3.0)
+            if clamped != trackpadAccelExponent {
+                trackpadAccelExponent = clamped
+                return
+            }
+            defaults.set(trackpadAccelExponent, forKey: "trackpadAccelExponent")
+        }
+    }
     @Published var palmRejectRadius: Double {
         didSet { defaults.set(palmRejectRadius, forKey: "palmRejectRadius") }
     }
@@ -285,8 +301,17 @@ final class SettingsStore: ObservableObject {
     @Published var flareTiltDegrades: Bool {
         didSet { defaults.set(flareTiltDegrades, forKey: "flareTiltDegrades") }
     }
-    /// Mouth-sound triggers get weaker/slower on flare days → relax the
-    /// sound cooldown. Independent of tilt.
+    /// **Dormant — no live consumer.** Mouth-sound control (R6) was removed
+    /// 2026-06-04 (`54a4f00` iPad, `7b0d7ee` PC) because the sounds fired
+    /// incidentally; struck at the requirements level as D032. This field is
+    /// kept deliberately: it is still synced in the `flare_profile` message and
+    /// read back from persisted profile data by
+    /// `adaptive/behavioral_twin_state.py`, so deleting it would need a
+    /// behavioural-twin schema change for no benefit.
+    ///
+    /// Do not wire a new consumer to it. If mouth-sound input is ever wanted
+    /// again, the successor is iPadOS Switch Control Sound Actions via
+    /// `specs/ipad-assistive-tech-compat/`, not a rebuilt in-app detector.
     @Published var flareSoundDegrades: Bool {
         didSet { defaults.set(flareSoundDegrades, forKey: "flareSoundDegrades") }
     }
@@ -322,8 +347,18 @@ final class SettingsStore: ObservableObject {
     }
 
     // MARK: — Feature Toggles
-    @Published var edgeScrollEnabled: Bool {
-        didSet { defaults.set(edgeScrollEnabled, forKey: "edgeScrollEnabled") }
+    /// Two-finger flick coasts after the fingers lift (momentum scrolling).
+    ///
+    /// Replaces `edgeScrollEnabled` (R7.2). That setting drove `edge_scroll`,
+    /// a gaze-era PC feature deleted with the gaze removal — `FusionEngine`
+    /// has `VALID_FEATURES = set()`, so every press logged
+    /// `Unknown feature toggle: edge_scroll` and changed nothing. The old
+    /// `UserDefaults` key is deliberately **not** migrated: it recorded a
+    /// preference for a feature that never functioned.
+    ///
+    /// Purely iPad-side — deliberately NOT synced to the PC.
+    @Published var momentumScrollEnabled: Bool {
+        didSet { defaults.set(momentumScrollEnabled, forKey: "momentumScrollEnabled") }
     }
 
     // MARK: — Voice condition (G5: persist last-declared condition so it survives reconnects)
@@ -403,6 +438,10 @@ final class SettingsStore: ObservableObject {
 
         activeCursorSensor = defaults.string(forKey: "activeCursorSensor") ?? "tilt"
         trackpadSpeed = defaults.double(forKey: "trackpadSpeed").nonZero ?? 2.0
+        // 1.0 == linear == off. Default 1.6 is a starting guess, not a finding —
+        // pointer feel needs an on-device tuning pass.
+        trackpadAccelExponent = min(max(
+            defaults.double(forKey: "trackpadAccelExponent").nonZero ?? 1.6, 1.0), 3.0)
         palmRejectRadius = defaults.double(forKey: "palmRejectRadius").nonZero ?? 25.0
         // Empty default: KeywordListener is off until the user adds words in Settings.
         // WhisperStream handles all voice input more naturally — keywords are opt-in.
@@ -426,7 +465,9 @@ final class SettingsStore: ObservableObject {
             disabledGestures = []
         }
         lastCalibrationDate = defaults.object(forKey: "lastCalibrationDate") as? Date
-        edgeScrollEnabled = defaults.object(forKey: "edgeScrollEnabled") as? Bool ?? true
+        // Deliberately does not fall back to the abandoned "edgeScrollEnabled"
+        // key — see the property doc comment (R7.2).
+        momentumScrollEnabled = defaults.object(forKey: "momentumScrollEnabled") as? Bool ?? true
 
         // Sanitize legacy values (the svt_attack condition was removed) so the
         // Settings picker always has a matching tag.

@@ -9,6 +9,7 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D032 — 2026-08-16 — R6 mouth-sound control struck; magnetic click replaced it, Switch Control succeeds it](#d032)
 - [D031 — 2026-08-16 — Scientific keypad struck; Pencil canvas covers the job at lower joint cost](#d031)
 - [D030 — 2026-08-16 — iPad camera/LiDAR producers struck; L515 keeps the same message types](#d030)
 - [D029 — 2026-07-05 — Full pytest suite gates in CI on windows-latest; ruff gate with parked style ignores](#d029)
@@ -38,15 +39,43 @@ See AGENTS.md Rule 12 for when and how to add entries.
 - [D005 — 2026-06-21 — WSL terminal routing is ON by default](#d005)
 - [D004 — 2026-06-23 — L515 head-pointer: depth_comp=0 (depth compensation disabled)](#d004)
 - [D003 — 2026-06-07 — gemma4:12b fills the general-domain slot (gemma3:27b retired)](#d003)
-- [D002 — 2026-06-19 — Cloud backend is Amazon Bedrock only; direct Anthropic API removed](#d002)
 
-*Index holds the 30 most recent. Older entries remain in full in the body below —
-D001 (MOUSEDOWN/MOUSEUP synchronous, no `asyncio.to_thread`) is still live and is
-referenced from CLAUDE.md §Action Vocabulary.*
+*Index holds the 30 most recent. Older entries remain in full in the body below and their
+anchors still resolve — D002 (Bedrock-only cloud backend) and D001 (MOUSEDOWN/MOUSEUP
+synchronous, no `asyncio.to_thread`) are both still live, and D001 is referenced from
+CLAUDE.md §Action Vocabulary.*
 
 ---
 
 ## Entries
+
+---
+
+### D032 — R6 mouth-sound control struck; magnetic click replaced it, Switch Control succeeds it {#d032}
+**Date:** 2026-08-16 (ratifying a removal made 2026-06-04)
+**Chose:** Strike Requirement 6 (mouth-sound actions). Do **not** rebuild a custom detector.
+Record iPadOS Switch Control **Sound Actions**, reached via `specs/ipad-assistive-tech-compat/`,
+as the successor for R6's user story.
+**Rejected (primary):** Rebuild the detector on `SoundAnalysis` / `SNClassifySoundRequest`
+instead of the original ~139-line threshold-based `SoundDetector`.
+**Rejected (secondary):** Leave R6 live and unbuilt, as it had been for ten weeks.
+**Why:** This is the one struck requirement that was actually *tried*. It shipped, was used, and
+was removed on 2026-06-04 (`54a4f00` iPad, `7b0d7ee` PC) because — quoting the commit — "the
+sounds fired incidentally and were not wanted". On a desktop control plane a false positive is an
+unrequested click, close, or hotkey, so a detector that fires incidentally is not merely annoying,
+it is unsafe. A better classifier might reduce that, but three factors argue against spending the
+effort: the empirical failure came from real use rather than a bench test; the microphone is
+already contended by `SharedAudioSession` (KeywordListener + AudioStreamer) behind a voice
+approval gate that fails safe to DENY, so an always-on command trigger adds risk to a
+deliberately conservative path; and iPadOS ships its own Sound Actions, which assign mouth sounds
+as Switch Control switches using Apple's tuned detector, system-wide, with no extra microphone
+consumer. The replacement for the *ergonomic* goal already shipped in the same commits: magnetic
+click (tilt-tap snaps to the nearest clickable within `DA_SNAP_RADIUS_PX`) plus a tap threshold
+lowered 1.2 g → 0.6 g, so "make a sound" became "tap the table lightly and the PC snaps to what
+you meant". Consequence worth noting: this **raises** the priority of
+`specs/ipad-assistive-tech-compat/`, which after Eye Tracking turned out unavailable on the device
+is now also the only route back to a genuinely zero-hand modality.
+**Ref:** `54a4f00`, `7b0d7ee`, `core/fusion_engine.py` header, `specs/ipad-sensor-focus/requirements.md` R6, `specs/ipad-assistive-tech-compat/`
 
 ---
 

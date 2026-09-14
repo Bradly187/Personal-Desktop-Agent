@@ -208,6 +208,14 @@ struct SettingsView: View {
                     LabeledContent("Palm Reject Radius") {
                         Slider(value: $settings.palmRejectRadius, in: 10...60)
                     }
+                    LabeledContent("Pointer Acceleration") {
+                        Slider(value: $settings.trackpadAccelExponent, in: 1.0...3.0)
+                    }
+                    Text(settings.trackpadAccelExponent <= 1.001
+                         ? "Off — cursor moves the same distance however fast you drag."
+                         : "Fast drags cover more screen; slow, precise moves are unchanged.")
+                        .font(DesignTokens.Typography.caption)
+                        .foregroundStyle(.secondary)
                 } header: {
                     DASectionHeader(title: "Trackpad")
                 }

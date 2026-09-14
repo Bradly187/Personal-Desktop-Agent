@@ -142,16 +142,16 @@ struct DwellActionToolbar: View {
 
     @ViewBuilder
     private func scrollToggleButton() -> some View {
-        let isActive = settings.edgeScrollEnabled
+        let isActive = settings.momentumScrollEnabled
 
         Button {
-            toggleEdgeScroll()
+            toggleMomentumScroll()
         } label: {
             VStack(spacing: DesignTokens.Spacing.xs) {
                 Image(systemName: "scroll")
                     .font(.system(size: DesignTokens.Size.iconSize))
                     .foregroundStyle(isActive ? theme.accent : theme.textSecondary)
-                Text("Scroll")
+                Text("Glide")
                     .font(DesignTokens.Typography.caption)
                     .foregroundStyle(isActive ? theme.textPrimary : theme.textSecondary)
                     .lineLimit(1)
@@ -169,8 +169,8 @@ struct DwellActionToolbar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(isActive ? "Edge scroll enabled" : "Edge scroll disabled")
-        .accessibilityHint("Double-tap to toggle edge scrolling")
+        .accessibilityLabel(isActive ? "Glide scrolling enabled" : "Glide scrolling disabled")
+        .accessibilityHint("Double-tap to toggle whether a two-finger flick keeps scrolling after you lift")
         .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 
@@ -189,9 +189,10 @@ struct DwellActionToolbar: View {
         selectAction(.dragStart)
     }
 
-    private func toggleEdgeScroll() {
-        // Toggling the property triggers FeatureToggleSyncer, which handles
-        // send-or-queue logic based on WebSocket connection state.
-        settings.edgeScrollEnabled.toggle()
+    /// Toggles momentum ("glide") scrolling. Purely local — unlike the dwell
+    /// action and the old edge-scroll toggle this replaced, nothing is sent to
+    /// the PC: momentum is computed entirely on the iPad (R7.3).
+    private func toggleMomentumScroll() {
+        settings.momentumScrollEnabled.toggle()
     }
 }

@@ -81,17 +81,38 @@ All standalone sensor hardware (ReSpeaker, RealSense, Ultraleap, Tobii, OAK-D Li
 4. THE iPadApp settings SHALL allow the user to add, remove, and reorder command keywords
 5. WHEN Speech_Framework is unavailable, THE iPadApp SHALL fall back to streaming all audio to the PC_Service for WhisperStream processing
 
-### Requirement 6: Sound Actions via AVFoundation
+### ~~Requirement 6: Sound Actions via AVFoundation~~ *(REMOVED 2026-06-04, recorded 2026-08-16)*
 
-**User Story:** As a user with RA, I want to trigger commands with simple mouth sounds, so that I have a zero-hand input method that doesn't require forming words.
-
-#### Acceptance Criteria
-
-1. THE iPadApp SHALL use AVFoundation audio analysis to detect configurable mouth sounds including cluck, pop, and hiss patterns
-2. WHEN a recognized sound is detected with confidence above the configured threshold, THE iPadApp SHALL send the mapped command to the PC_Service as a Command with source "sound_action"
-3. THE iPadApp settings SHALL allow the user to map each recognized sound to a specific action (e.g., cluck maps to "click", pop maps to "scroll down")
-4. THE iPadApp SHALL debounce sound actions with a configurable cooldown period (default 500 ms) to prevent accidental double-triggers
-5. WHEN sound action detection is disabled or AVFoundation is unavailable, THE System SHALL continue operating with remaining input modalities
+> **Removed: built, used, and withdrawn on evidence.** Unlike R7/R10/R18 this was fully
+> implemented and shipped, then removed end-to-end on 2026-06-04 across two commits —
+> `54a4f00` (iPad: deleted `SoundDetector.swift` and `SoundTrainingSheet.swift`, stripped
+> `soundMappings`, the sensor card, the onboarding step, and the Settings editor) and
+> `7b0d7ee` (PC: removed `on_sound_action`, the `_sound` tick slot, sound priority/cooldown,
+> the bridge handler, and the `sound_action` bypass source).
+>
+> **Reason, from `54a4f00`: "the sounds fired incidentally and were not wanted."** Cluck/pop/hiss
+> detection produced false positives in ordinary use. On a desktop control plane a false positive
+> is not a nuisance — it is an unrequested click, close, or hotkey.
+>
+> **What replaced it, in the same commits.** The zero-effort trigger did not disappear; it moved.
+> `7b0d7ee` shipped **magnetic click** — a tilt-tap now clicks the nearest clickable element
+> within `DA_SNAP_RADIUS_PX` (200px) rather than the exact pixel — and `54a4f00` lowered the tap
+> threshold from 1.2 g to 0.6 g (floor 0.5 → 0.4 g) so a much lighter tap registers. The 0.4 g
+> floor sits just above the ~0.3 g accelerometer spikes that tilting produces, so cursor motion
+> cannot self-trigger. Net: *make a sound* became *tap the table lightly, and the PC snaps to what
+> you meant* — the same low-effort activation with far fewer false positives.
+>
+> **Successor for the user story.** R6 wanted "a zero-hand input method that doesn't require
+> forming words". That is better served by iPadOS's own **Sound Actions** (Settings → Accessibility
+> → Switch Control → Switches → Add New Switch → Sound), which assigns mouth sounds as Switch
+> Control switches using Apple's tuned detector, system-wide, with no additional always-on
+> consumer of the shared microphone. That capability arrives with
+> `../ipad-assistive-tech-compat/` — see D032.
+>
+> **Do not delete `flareSoundDegrades` / `flare_sound_degrades`.** `54a4f00` kept the field
+> deliberately dormant to avoid a DB/behavioural-twin schema change; it is still read from
+> persisted profile data in `adaptive/behavioral_twin_state.py`. It has no live consumer and
+> should not acquire one.
 
 ### ~~Requirement 7: iPad LiDAR Depth via Record3D~~ *(REMOVED 2026-08-16)*
 

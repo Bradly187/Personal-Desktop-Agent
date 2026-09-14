@@ -38,18 +38,18 @@ final class TogglePersistenceTests: XCTestCase {
     /// UserDefaults suite and verifies each toggle matches.
     func testProperty12_togglePersistenceRoundTrip() {
         for iteration in 0..<100 {
-            let edgeScroll = Bool.random()
+            let momentumOn = Bool.random()
 
             // --- Write phase: set toggles on a SettingsStore instance ---
             let writer = SettingsStore(defaults: suite)
-            writer.edgeScrollEnabled = edgeScroll
+            writer.momentumScrollEnabled = momentumOn
 
             // --- Read phase: create a new SettingsStore from the same suite ---
             let reader = SettingsStore(defaults: suite)
 
             // --- Verify toggle round-trips ---
-            XCTAssertEqual(reader.edgeScrollEnabled, edgeScroll,
-                "Iteration \(iteration): edgeScrollEnabled mismatch — wrote \(edgeScroll), read \(reader.edgeScrollEnabled)")
+            XCTAssertEqual(reader.momentumScrollEnabled, momentumOn,
+                "Iteration \(iteration): momentumScrollEnabled mismatch — wrote \(momentumOn), read \(reader.momentumScrollEnabled)")
 
             // Clean suite between iterations to avoid cross-contamination
             for key in suite.dictionaryRepresentation().keys {
@@ -62,21 +62,21 @@ final class TogglePersistenceTests: XCTestCase {
 
     func testProperty12_toggleTrue() {
         let writer = SettingsStore(defaults: suite)
-        writer.edgeScrollEnabled = true
+        writer.momentumScrollEnabled = true
 
         let reader = SettingsStore(defaults: suite)
 
-        XCTAssertTrue(reader.edgeScrollEnabled)
+        XCTAssertTrue(reader.momentumScrollEnabled)
     }
 
     // MARK: — Edge case: false persists correctly
 
     func testProperty12_toggleFalse() {
         let writer = SettingsStore(defaults: suite)
-        writer.edgeScrollEnabled = false
+        writer.momentumScrollEnabled = false
 
         let reader = SettingsStore(defaults: suite)
 
-        XCTAssertFalse(reader.edgeScrollEnabled)
+        XCTAssertFalse(reader.momentumScrollEnabled)
     }
 }

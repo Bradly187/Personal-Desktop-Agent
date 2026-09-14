@@ -101,7 +101,10 @@ struct TrackpadView: View {
 
     private var trackpadSurface: some View {
         TrackpadGestureView(palmRadius: CGFloat(settings.palmRejectRadius),
-                            speed: CGFloat(settings.trackpadSpeed)) { event in
+                            speed: CGFloat(settings.trackpadSpeed),
+                            accelExponent: settings.trackpadAccelExponent,
+                            momentumEnabled: settings.momentumScrollEnabled,
+                            painDay: settings.manualPainDay) { event in
             handle(event)
         }
         .background(Color(.systemGroupedBackground))
@@ -239,6 +242,12 @@ struct TrackpadGestureView: UIViewRepresentable {
     /// fractional accumulator (R10.1) — which is why it is a real dependency
     /// here rather than the dead property it used to be.
     let speed: CGFloat
+    /// Power_Curve exponent; 1.0 is linear (off).
+    var accelExponent: Double = 1.0
+    /// Whether a two-finger flick coasts after lift.
+    var momentumEnabled: Bool = true
+    /// Flare state — damps acceleration and raises the fling threshold.
+    var painDay: Bool = false
     let onEvent: (TrackpadEvent) -> Void
 
     func makeUIView(context: Context) -> UIView {
@@ -281,6 +290,9 @@ struct TrackpadGestureView: UIViewRepresentable {
         Self.applyLiveSettings(to: context.coordinator,
                                palmRadius: palmRadius,
                                speed: speed,
+                               accelExponent: accelExponent,
+                               momentumEnabled: momentumEnabled,
+                               painDay: painDay,
                                onEvent: onEvent)
 
         // Retry the scroll-view link here too: on the first makeUIView the view
@@ -304,14 +316,41 @@ struct TrackpadGestureView: UIViewRepresentable {
     static func applyLiveSettings(to coordinator: Coordinator,
                                   palmRadius: CGFloat,
                                   speed: CGFloat? = nil,
+                                  accelExponent: Double? = nil,
+                                  momentumEnabled: Bool? = nil,
+                                  painDay: Bool = false,
                                   onEvent: ((TrackpadEvent) -> Void)? = nil) {
         coordinator.palmRadius = palmRadius
         if let speed { coordinator.speed = speed }
         if let onEvent { coordinator.onEvent = onEvent }
+        if let momentumEnabled { coordinator.momentumEnabled = momentumEnabled }
+
+        // Flare adaptation (R5). Routed here rather than read at the use site so
+        // the thresholds are never hardcoded inline (AGENTS.md #5). This is the
+        // first iPad-side pain-day adaptation — audit G7 found the iPad reports
+        // flare state to the PC but never adapts its own behaviour.
+        if let accelExponent {
+            coordinator.accelExponent = painDay
+                ? 1.0 + (accelExponent - 1.0) * (1.0 - Coordinator.flareAccelDamping)
+                : accelExponent
+        }
+        coordinator.momentumMinVelocity = painDay
+            ? Coordinator.baseMomentumMinVelocity * Coordinator.flareMomentumThresholdScale
+            : Coordinator.baseMomentumMinVelocity
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(palmRadius: palmRadius, speed: speed, onEvent: onEvent)
+        let coordinator = Coordinator(palmRadius: palmRadius, speed: speed, onEvent: onEvent)
+        // Construction and update go through the same path, so a coordinator can
+        // never start with tuning values the view did not choose.
+        Self.applyLiveSettings(to: coordinator,
+                               palmRadius: palmRadius,
+                               speed: speed,
+                               accelExponent: accelExponent,
+                               momentumEnabled: momentumEnabled,
+                               painDay: painDay,
+                               onEvent: onEvent)
+        return coordinator
     }
 
     // MARK: — Coordinator
@@ -337,6 +376,71 @@ struct TrackpadGestureView: UIViewRepresentable {
         /// Ceiling on scroll emissions per second. Excess is coalesced into the
         /// next emission, never dropped.
         var maxScrollMessagesPerSecond: Double = 30
+
+        // MARK: — Pointer acceleration (trackpad-ergonomics R1, R2)
+
+        /// Power_Curve exponent. **1.0 is exactly linear and is the off switch.**
+        /// Defaults to linear so an unconfigured coordinator is inert; the real
+        /// value always arrives via `applyLiveSettings`.
+        var accelExponent: Double = 1.0
+        /// Ceiling on the gain multiplier.
+        var accelMaxFactor: CGFloat = 6.0
+        /// Below this pointer speed (pt/s) gain is untouched — the precision zone.
+        var accelLowSpeedThreshold: CGFloat = 120
+        /// Speed (pt/s) that normalizes to 1.0 before the curve is applied.
+        /// Below it the curve yields < 1 and is clamped up, so acceleration only
+        /// ever *adds* gain (R1.3).
+        var accelReferenceSpeed: CGFloat = 900
+        /// Largest plausible gap between move callbacks. A longer gap means a
+        /// stalled callback, not a fast drag, so speed is not inferred (R1.7).
+        var maxPlausibleFrameInterval: CFTimeInterval = 0.1
+
+        /// Adaptive smoothing on the *speed estimate*, applied before the curve.
+        /// This ordering is mandated by `specs/sensor-refinement/` R5.1 and is
+        /// the whole tremor-safety story: acceleration rewards high instantaneous
+        /// speed, and tremor is high speed over tiny distance, so an unfiltered
+        /// estimate would amplify exactly the motion we must not amplify (R2).
+        private var speedFilter = OneEuroFilter(minCutoff: 1.0, beta: 0.007)
+        private var lastMoveTime: CFTimeInterval = 0
+
+        // MARK: — Momentum scroll (trackpad-ergonomics R3, R4)
+
+        /// Master switch, mirrored from `SettingsStore.momentumScrollEnabled`.
+        var momentumEnabled: Bool = true
+        /// Geometric decay applied to coast velocity each tick. 0 disables coasting.
+        var momentumDecayPerTick: Double = 0.94
+        /// Fling speed (pt/s) required at lift to start a coast. Below this a
+        /// slow, deliberate scroll must come to rest immediately (R3.5).
+        var momentumMinVelocity: CGFloat = 350
+        /// Coast ends once velocity decays below this (pt/s).
+        var momentumStopVelocity: CGFloat = 40
+        /// Hard backstop so a mistuned decay cannot scroll indefinitely (R4.4).
+        var momentumMaxDuration: CFTimeInterval = 3.0
+
+        // MARK: — Flare adaptation constants (R5)
+
+        /// Un-adapted fling threshold; `applyLiveSettings` scales it on a flare day.
+        static let baseMomentumMinVelocity: CGFloat = 350
+        /// Fraction of the way the acceleration exponent is pulled toward 1.0
+        /// (linear) on a flare day — a more predictable, less tremor-sensitive
+        /// pointer when the hands are worst.
+        static let flareAccelDamping: Double = 0.5
+        /// A flare-day release is less steady, so demand a firmer flick before
+        /// coasting and reduce unintended scrolls.
+        static let flareMomentumThresholdScale: CGFloat = 1.5
+
+        private var coastTimer: DispatchSourceTimer?
+        private var coastVelocity: CGFloat = 0
+        private var coastVertical: Bool = true
+        private var coastStartedAt: CFTimeInterval = 0
+        /// Smoothed scroll velocity during the gesture; seeds the coast at lift.
+        private var scrollVelocity: CGFloat = 0
+        private var lastScrollSampleTime: CFTimeInterval = 0
+        /// Set when a touch cancels a running coast, so that touch is swallowed
+        /// rather than delivered as a click (R4.1).
+        private var suppressNextTap: Bool = false
+
+        var isCoasting: Bool { coastTimer != nil }
 
         // MARK: — Interaction state (R10.1 — owned here, not in @State)
 
@@ -386,7 +490,12 @@ struct TrackpadGestureView: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ gr: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            return touch.majorRadius < palmRadius
+            // Palm rejection first — a resting palm must not stop a coast.
+            guard touch.majorRadius < palmRadius else { return false }
+            // Earliest reliable signal that a real finger has landed, so this is
+            // where tap-to-stop belongs (R4.1).
+            interruptCoastIfRunning()
+            return true
         }
 
         func gestureRecognizer(_ a: UIGestureRecognizer,
@@ -420,17 +529,56 @@ struct TrackpadGestureView: UIViewRepresentable {
 
         // MARK: — Move / scroll accumulation
 
-        /// Applies speed, accumulates the fractional remainder, and emits only
+        /// Applies gain, accumulates the fractional remainder, and emits only
         /// whole pixels. Sub-pixel motion is carried forward rather than lost.
-        func accumulateMove(dx: CGFloat, dy: CGFloat) {
-            accumX += dx * speed
-            accumY += dy * speed
+        func accumulateMove(dx: CGFloat, dy: CGFloat,
+                            now: CFTimeInterval = CACurrentMediaTime()) {
+            let gain = speed * accelerationFactor(dx: dx, dy: dy, now: now)
+            accumX += dx * gain
+            accumY += dy * gain
             let ix = Int(accumX)
             let iy = Int(accumY)
             guard ix != 0 || iy != 0 else { return }
             accumX -= CGFloat(ix)
             accumY -= CGFloat(iy)
             onEvent(.move(dx: ix, dy: iy))
+        }
+
+        /// Multiplier applied on top of `speed`, derived from smoothed pointer
+        /// speed through the Power_Curve. Always ≥ 1.0, so acceleration can only
+        /// add gain, never take it away (R1.3).
+        ///
+        /// Applied to the *combined* magnitude and returned as a single scalar
+        /// used on both axes, so a diagonal drag stays straight (R1.6).
+        func accelerationFactor(dx: CGFloat, dy: CGFloat,
+                                now: CFTimeInterval) -> CGFloat {
+            // Exponent 1.0 short-circuits to exactly linear — the off switch
+            // (R1.4). Returning before touching the filter keeps the disabled
+            // path free of any floating-point difference.
+            guard accelExponent > 1.0 else {
+                lastMoveTime = now
+                return 1.0
+            }
+
+            let dt = now - lastMoveTime
+            lastMoveTime = now
+
+            // A stalled or nonsensical interval means we cannot infer speed;
+            // fall back to linear for this sample rather than invent one (R1.7).
+            guard dt > 0, dt <= maxPlausibleFrameInterval else { return 1.0 }
+
+            let rawSpeed = hypot(dx, dy) / CGFloat(dt)
+            // Filter the magnitude, not the per-axis deltas, so smoothing cannot
+            // introduce directional bias (R2.2).
+            let smoothed = CGFloat(speedFilter.filter(Double(rawSpeed), timestamp: now))
+
+            guard smoothed > accelLowSpeedThreshold else { return 1.0 }
+
+            let normalized = smoothed / accelReferenceSpeed
+            guard normalized > 0 else { return 1.0 }
+
+            let factor = CGFloat(pow(Double(normalized), accelExponent - 1.0))
+            return min(max(factor, 1.0), accelMaxFactor)
         }
 
         /// Accumulates two-finger travel and emits rate-limited scroll events
@@ -441,8 +589,26 @@ struct TrackpadGestureView: UIViewRepresentable {
                               now: CFTimeInterval = CACurrentMediaTime()) {
             scrollAccumX += dx
             scrollAccumY += dy
+            trackScrollVelocity(dx: dx, dy: dy, now: now)
             guard now - lastScrollEmit >= 1.0 / maxScrollMessagesPerSecond else { return }
             emitScrollIfWhole(now: now)
+        }
+
+        /// Maintains a smoothed scroll speed along the dominant axis. Read once
+        /// at lift to seed a coast; an EMA rather than the last raw sample so a
+        /// single jittery frame at release cannot fling the page (R3.1).
+        private func trackScrollVelocity(dx: CGFloat, dy: CGFloat, now: CFTimeInterval) {
+            defer { lastScrollSampleTime = now }
+            let dt = now - lastScrollSampleTime
+            guard lastScrollSampleTime > 0,
+                  dt > 0, dt <= maxPlausibleFrameInterval else { return }
+
+            let vertical = abs(scrollAccumY) >= abs(scrollAccumX)
+            let travel = vertical ? dy : dx
+            let sample = travel / CGFloat(dt)
+            // 0.3 favours recent samples while still rejecting a lone spike.
+            scrollVelocity = scrollVelocity * 0.7 + sample * 0.3
+            coastVertical = vertical
         }
 
         /// Converts accumulated travel into whole clicks along the dominant axis
@@ -477,12 +643,83 @@ struct TrackpadGestureView: UIViewRepresentable {
         /// proportional to total gesture displacement (R9.4).
         func endGesture(now: CFTimeInterval = CACurrentMediaTime()) {
             emitScrollIfWhole(now: now)
+
+            let fling = scrollVelocity
             prevTranslation = .zero
             accumX = 0
             accumY = 0
             scrollAccumX = 0
             scrollAccumY = 0
+            scrollVelocity = 0
+            lastScrollSampleTime = 0
+            lastMoveTime = 0
+            // A new drag must not inherit the previous drag's speed (R2.3).
+            speedFilter.reset()
+            suppressNextTap = false
+
             onEvent(.ended)
+            startCoastIfWarranted(fling: fling, now: now)
+        }
+
+        // MARK: — Momentum coast (R3, R4)
+
+        /// Begins a coast when the gesture was released fast enough. A slow,
+        /// deliberate scroll must come to rest immediately (R3.5).
+        private func startCoastIfWarranted(fling: CGFloat, now: CFTimeInterval) {
+            guard momentumEnabled,
+                  momentumDecayPerTick > 0,
+                  abs(fling) >= momentumMinVelocity else { return }
+
+            coastVelocity = fling
+            coastStartedAt = now
+            let interval = 1.0 / maxScrollMessagesPerSecond
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + interval, repeating: interval)
+            timer.setEventHandler { [weak self] in self?.coastTick() }
+            coastTimer = timer
+            timer.resume()
+        }
+
+        /// One decay step. Emission goes through the same accumulator and rate
+        /// limiter as a live gesture, so momentum cannot bypass flood protection
+        /// or emit fractional clicks (R3.4).
+        private func coastTick(now: CFTimeInterval = CACurrentMediaTime()) {
+            let dt = 1.0 / maxScrollMessagesPerSecond
+            coastVelocity *= CGFloat(momentumDecayPerTick)
+
+            guard abs(coastVelocity) >= momentumStopVelocity,
+                  now - coastStartedAt < momentumMaxDuration else {
+                stopCoast()
+                return
+            }
+
+            // Axis is fixed at gesture end and never changes mid-coast (R3.7).
+            if coastVertical {
+                scrollAccumY += coastVelocity * CGFloat(dt)
+            } else {
+                scrollAccumX += coastVelocity * CGFloat(dt)
+            }
+            emitScrollIfWhole(now: now)
+        }
+
+        /// Ends any running coast and clears its residue. Idempotent.
+        func stopCoast() {
+            coastTimer?.cancel()
+            coastTimer = nil
+            coastVelocity = 0
+            scrollAccumX = 0
+            scrollAccumY = 0
+        }
+
+        /// Called on first touch. Returns true when a coast was interrupted, in
+        /// which case the touch is consumed as a stop gesture and must not also
+        /// be delivered as a click (R4.1).
+        @discardableResult
+        func interruptCoastIfRunning() -> Bool {
+            guard isCoasting else { return false }
+            stopCoast()
+            suppressNextTap = true
+            return true
         }
 
         // MARK: — Tap disambiguation (R8)
@@ -502,6 +739,13 @@ struct TrackpadGestureView: UIViewRepresentable {
         /// slightly apart — likelier with tremor — emitted a stray left click
         /// before the intended right click.
         func onSingleTapRecognized(now: CFTimeInterval = CACurrentMediaTime()) {
+            // This touch was the user reaching to halt a coast. Consume it —
+            // clicking whatever the runaway scroll landed on is the exact harm
+            // tap-to-stop exists to prevent (R4.1).
+            if suppressNextTap {
+                suppressNextTap = false
+                return
+            }
             // Ordering A: tap2 already fired — this is its straggler.
             if now - lastTap2Time < tapDisambiguationWindow { return }
 
@@ -529,11 +773,20 @@ struct TrackpadGestureView: UIViewRepresentable {
             lastTap2Time = now
             pendingTap1?.cancel()
             pendingTap1 = nil
+            if suppressNextTap {
+                // Two fingers landing to halt a coast — same rule as R4.1.
+                suppressNextTap = false
+                return
+            }
             onEvent(.tap(fingers: 2))
         }
 
         deinit {
             pendingTap1?.cancel()
+            // A live DispatchSourceTimer would otherwise outlive its coordinator
+            // and keep firing into a deallocated closure context (R4.3).
+            coastTimer?.cancel()
+            coastTimer = nil
         }
     }
 }
