@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",
-    "electron": "^43.1.0"
+    "electron": "^44.4.2"
   },
   "overrides": {
     "dompurify": "^3.4.15"
