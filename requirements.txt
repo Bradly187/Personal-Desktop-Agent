@@ -63,7 +63,7 @@ aiosqlite==0.22.1
 duckdb==1.5.5
 
 # ── Semantic few-shot retrieval (MiniLM embeddings in AgentDB) ────────────────
-sentence-transformers==5.6.0
+sentence-transformers==6.0.1
 
 # ── Polly Bidirectional Streaming TTS (polly_stream.py) ──────────────────────
 # soundfile: OGG Vorbis decode for audio returned by the Node.js sidecar.
