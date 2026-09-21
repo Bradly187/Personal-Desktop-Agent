@@ -69,7 +69,7 @@ sentence-transformers==5.6.0
 # soundfile: OGG Vorbis decode for audio returned by the Node.js sidecar.
 # The libsndfile wheel for Windows includes OGG/Vorbis support out of the box.
 soundfile==0.14.0
-boto3==1.43.88  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
+boto3==1.43.97  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
 
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1
@@ -127,7 +127,7 @@ chromadb==1.5.9
 # pdfplumber is the primary parser (richer layout-aware extraction).
 # pypdf is a lighter fallback if pdfplumber is unavailable.
 pdfplumber==0.11.10
-pypdf==6.16.2  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
+pypdf==6.19.0  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
 
 # ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
 # windows-curses provides the stdlib curses module on Windows.
@@ -156,7 +156,7 @@ websockets==16.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.4.0
-hypothesis==6.167.1  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
+hypothesis==6.168.0  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
 numpy
 
 # ── Security pins (Dependabot) ────────────────────────────────────────────────
