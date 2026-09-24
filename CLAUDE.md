@@ -17,11 +17,11 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - Open tasks: `specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status (2026-07-03)
+## Current Status (2026-09-14)
 
 > **Schema:** `agent.db` at `PRAGMA user_version = 9`. Do not rely on table counts in this file — `storage/db.py` is the authoritative source per AGENTS.md #1.
 
-Phases 1–6 + Sprints A–C / 5–7 / G1–G5 / N–Q + cloud plan routing (PR #150) + chat attachments (PR #149) shipped and merged. Full dated history → [`docs/CHANGELOG.md`](docs/CHANGELOG.md). Day-by-day notes → `docs/daily/`.
+Phases 1–6 + Sprints A–C / 5–7 / G1–G5 / N–Q + cloud plan routing (PR #150) + chat attachments (PR #149) + industry-gap quick wins / CI full suite (PR #163) + god-object refactor (PR #164) + workflow-subsystem removal (PR #178) + ruff pin (PR #195) + iPad trackpad fixes & R7/R10/R18 strike (PR #203) + TestFlight fail-loud CI (PR #204) shipped and merged. Open: PR #205 (R6 strike + trackpad ergonomics); 3 iPad accessibility specs at `Status: Draft` await Gate 1. Full dated history → [`docs/CHANGELOG.md`](docs/CHANGELOG.md). Day-by-day notes → `docs/daily/`.
 
 ## Run Commands
 
