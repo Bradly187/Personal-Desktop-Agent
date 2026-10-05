@@ -19,7 +19,7 @@
 # ── Core bridge & MCP ────────────────────────────────────────────────────────
 mcp==1.28.1
 aiohttp==3.14.3
-zeroconf==0.151.3  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
+zeroconf==0.151.5  # >=0.149.7 fixes GHSA-9pgc/-phvx/-rfg2 (mDNS, network-facing)
 
 # ── Skills — Google PIM (OPTIONAL; only needed to enable the Gmail/Calendar
 # skill). Install + run `python -m skills.servers.google_pim_auth` once, then
@@ -54,13 +54,13 @@ sympy==1.14.0
 
 # ── GPU monitoring (Gate 3 VRAM check, --measure-vram) ───────────────────────
 # pynvml is now deprecated; nvidia-ml-py is the maintained package (same API)
-nvidia-ml-py==13.610.43
+nvidia-ml-py==13.615.71
 
 # ── Continuous learning (ContinuousTrainer) ───────────────────────────────────
 aiosqlite==0.22.1
 
 # ── Analytics / ML feature extraction (AnalyticsDB) ──────────────────────────
-duckdb==1.5.5
+duckdb==1.5.6
 
 # ── Semantic few-shot retrieval (MiniLM embeddings in AgentDB) ────────────────
 sentence-transformers==5.6.0
@@ -69,7 +69,7 @@ sentence-transformers==5.6.0
 # soundfile: OGG Vorbis decode for audio returned by the Node.js sidecar.
 # The libsndfile wheel for Windows includes OGG/Vorbis support out of the box.
 soundfile==0.14.0
-boto3==1.43.88  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
+boto3==1.43.107  # Amazon Polly TTS (approval_hook consent prompts + polly backend); was venv-only drift
 
 # ── Whisper GPU transcription (WhisperStream — Phase 3+) ─────────────────────
 faster-whisper==1.2.1
@@ -127,7 +127,7 @@ chromadb==1.5.9
 # pdfplumber is the primary parser (richer layout-aware extraction).
 # pypdf is a lighter fallback if pdfplumber is unavailable.
 pdfplumber==0.11.10
-pypdf==6.16.2  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
+pypdf==6.19.0  # >=6.10.2 clears 22 malicious-PDF advisories; stable PdfReader API
 
 # ── Terminal TUI dashboard (dashboard.py curses renderer) ─────────────────────
 # windows-curses provides the stdlib curses module on Windows.
@@ -156,7 +156,7 @@ websockets==16.0
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 pytest-asyncio==1.4.0
-hypothesis==6.167.1  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
+hypothesis==6.168.3  # property-based tests (test_prop_*, twin/semantic-memory); was venv-only drift
 numpy
 
 # ── Security pins (Dependabot) ────────────────────────────────────────────────
