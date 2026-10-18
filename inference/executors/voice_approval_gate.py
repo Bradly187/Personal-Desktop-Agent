@@ -1,77 +1,121 @@
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import Optional
+
+from core.approval_authority import ApprovalRequest, ApprovalResponse
 from core.approval_keywords import classify_confirmation
 from core.events import TOPIC_DAG_APPROVAL
 
 log = logging.getLogger(__name__)
 
-async def confirm_destructive_op_locked(agent, description: str, card: Optional[dict] = None) -> bool:
+
+async def _publish_response(agent, request: ApprovalRequest, decision: str) -> None:
+    """Publish one exact responder verdict; the authority remains the validator."""
+    response = ApprovalResponse(
+        request_id=request.request_id,
+        action_digest=request.action_digest,
+        decision="approve" if decision == "approve" else "deny",
+        responded_at=time.time(),
+    )
+    try:
+        await asyncio.to_thread(agent._approval_authority.write_response, response)
+    except Exception as exc:
+        # A second responder makes the request ambiguous inside ApprovalAuthority.
+        log.info("DevAgent._confirm: response publication rejected (%s)", exc)
+
+
+async def confirm_destructive_op_locked(
+    agent,
+    request: ApprovalRequest,
+    description: str,
+    card: Optional[dict] = None,
+) -> None:
+    """Collect a response for one exact operation without granting execution."""
     import numpy as np
 
     log.info("DevAgent: confirmation required — %s", description)
 
     chat_live = agent._event_bus is not None and bool(agent._active_trace_id)
+    response_window_open = False
     if chat_live:
-        payload = {"message": description, "destructive": True}
+        try:
+            await asyncio.to_thread(
+                agent._approval_authority.open_response_window, request
+            )
+            response_window_open = True
+        except Exception as exc:
+            log.info("DevAgent._confirm: responder window unavailable (%s) — DENY", exc)
+            return
+        payload = {
+            "message": description,
+            "destructive": True,
+            "request_id": request.request_id,
+            "action_digest": request.action_digest,
+        }
         if card:
             payload.update({k: v for k, v in card.items() if v})
         await agent._publish_live(TOPIC_DAG_APPROVAL, payload)
-    
-    # StepExecutor proxy works for `_chat_confirm_window_s`
+
     chat_window_s = getattr(agent, "_chat_confirm_window_s", 7.0)
 
-    # --- 1. Speak via TTS ------------------------------------------------
+    # Speak before opening the streaming-mic responder window so the question's
+    # own audio cannot become a response. Whisper adds a second echo guard.
     tts_ok = True
     try:
         from tts.polly_stream import get_client as _get_tts
-        _tts = _get_tts()
-        await asyncio.to_thread(_tts.speak_sync, description)
+        await asyncio.to_thread(_get_tts().speak_sync, description)
     except Exception as exc:
         if not chat_live:
-            log.info("DevAgent._confirm: TTS unavailable (%s) — DENY (fail-safe)", exc)
-            return False
+            log.info("DevAgent._confirm: TTS unavailable (%s) — DENY", exc)
+            await _publish_response(agent, request, "deny")
+            return
         log.info("DevAgent._confirm: TTS unavailable (%s) — chat card only", exc)
         tts_ok = False
 
-    # --- 1b. Chat/signal-file window --------------------------------------
+    # Chat, streamed voice, and iPad A2UI all publish the same exact response.
     if chat_live:
-        _appr_dir = Path.home() / ".claude" / "approval"
-        _pending = _appr_dir / "pending"
-        _response = _appr_dir / "response"
+        opened = False
+        response_window_sealed = False
         try:
-            _appr_dir.mkdir(parents=True, exist_ok=True)
-            _response.unlink(missing_ok=True)
-            _pending.write_text(str(time.monotonic()), encoding="utf-8")
+            await asyncio.to_thread(
+                agent._approval_authority.publish_pending_request, request
+            )
+            opened = True
             deadline = time.monotonic() + chat_window_s
-            transcript: Optional[str] = None
             while time.monotonic() < deadline:
-                if _response.exists():
-                    transcript = _response.read_text(encoding="utf-8-sig").strip()
-                    break
+                if agent._approval_authority.response_path(request.request_id).exists():
+                    return
                 await asyncio.sleep(0.1)
         except OSError as exc:
-            log.debug("DevAgent._confirm: signal-file window failed: %s", exc)
-            transcript = None
+            log.debug("DevAgent._confirm: structured responder window failed: %s", exc)
         finally:
-            _pending.unlink(missing_ok=True)
-            _response.unlink(missing_ok=True)
-            
-        if transcript is not None:
-            verdict = classify_confirmation(transcript)
-            if verdict == "deny":
-                log.info("DevAgent._confirm: REJECTED via signal file — %r", transcript)
-                return False
-            if verdict == "approve":
-                log.info("DevAgent._confirm: approved via signal file — %r", transcript)
-                return True
+            if response_window_open:
+                try:
+                    await asyncio.to_thread(
+                        agent._approval_authority.close_response_window, request
+                    )
+                    response_window_sealed = True
+                except Exception as exc:
+                    log.info("DevAgent._confirm: could not seal responders (%s)", exc)
+            if opened:
+                await asyncio.to_thread(
+                    agent._approval_authority.close_pending_request, request
+                )
+            await agent._publish_live("dag.approval_closed", {
+                "request_id": request.request_id,
+            })
+        if agent._approval_authority.response_path(request.request_id).exists():
+            return
+        if not response_window_sealed:
+            log.info("DevAgent._confirm: responder closure unverified — DENY")
+            return
         if not tts_ok:
-            log.info("DevAgent._confirm: no TTS and no chat answer → DENY (fail-safe)")
-            return False
+            log.info("DevAgent._confirm: no TTS and no exact answer → DENY")
+            await _publish_response(agent, request, "deny")
+            return
 
-    # --- 2. Record 4 s of mic audio --------------------------------------
+    # Direct PC microphone fallback is also born as a structured response.
     try:
         import sounddevice as sd
         audio = await asyncio.to_thread(
@@ -82,23 +126,26 @@ async def confirm_destructive_op_locked(agent, description: str, card: Optional[
         )
         await asyncio.to_thread(sd.wait)
     except Exception as exc:
-        log.info("DevAgent._confirm: mic unavailable (%s) — DENY (fail-safe)", exc)
-        return False
+        log.info("DevAgent._confirm: mic unavailable (%s) — DENY", exc)
+        await _publish_response(agent, request, "deny")
+        return
 
-    # --- 3. Check for voice activity; silence → DENY (fail-safe) ---------
     rms = float(np.sqrt(np.mean(audio ** 2)))
     if rms < 0.005:
-        log.info("DevAgent._confirm: silence → DENY (fail-safe)")
-        return False
+        log.info("DevAgent._confirm: silence → DENY")
+        await _publish_response(agent, request, "deny")
+        return
 
-    # --- 4. Transcribe with tiny Whisper on CPU --------------------------
     try:
         if getattr(agent, "_confirm_whisper", None) is None:
             from faster_whisper import WhisperModel
             import typing
-            agent._confirm_whisper = typing.cast(typing.Any, await asyncio.to_thread(
-                WhisperModel, "tiny", device="cpu", compute_type="int8"
-            ))
+            agent._confirm_whisper = typing.cast(
+                typing.Any,
+                await asyncio.to_thread(
+                    WhisperModel, "tiny", device="cpu", compute_type="int8"
+                ),
+            )
         import typing
         model: typing.Any = agent._confirm_whisper
 
@@ -111,17 +158,11 @@ async def confirm_destructive_op_locked(agent, description: str, card: Optional[
         text = await asyncio.to_thread(_transcribe)
         log.info("DevAgent._confirm: heard %r", text)
     except Exception as exc:
-        log.info("DevAgent._confirm: transcription failed (%s) — DENY (fail-safe)", exc)
-        return False
+        log.info("DevAgent._confirm: transcription failed (%s) — DENY", exc)
+        await _publish_response(agent, request, "deny")
+        return
 
-    # --- 5. Keyword detection --------------------------------------------
     verdict = classify_confirmation(text)
-    if verdict == "deny":
-        log.info("DevAgent._confirm: REJECTED — %r", text)
-        return False
-    if verdict == "approve":
-        log.info("DevAgent._confirm: approved — %r", text)
-        return True
-
-    log.info("DevAgent._confirm: ambiguous response %r → DENY (fail-safe)", text)
-    return False
+    if verdict is None:
+        log.info("DevAgent._confirm: ambiguous response %r → DENY", text)
+    await _publish_response(agent, request, verdict or "deny")

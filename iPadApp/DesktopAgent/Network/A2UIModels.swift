@@ -50,6 +50,9 @@ struct A2UIOption: Codable {
 struct A2UISurface: Codable {
     let surfaceId: String
     let version: String?
+    /// Present together only for approval surfaces; absent on clarify/canvas UI.
+    let requestId: String?
+    let actionDigest: String?
     let root: String
     let dismissible: Bool
     let timeoutS: Double
@@ -57,6 +60,8 @@ struct A2UISurface: Codable {
 
     enum CodingKeys: String, CodingKey {
         case surfaceId = "surface_id"
+        case requestId = "request_id"
+        case actionDigest = "action_digest"
         case version, root, dismissible, components
         case timeoutS = "timeout_s"
     }
@@ -65,6 +70,8 @@ struct A2UISurface: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         surfaceId = try c.decode(String.self, forKey: .surfaceId)
         version = try c.decodeIfPresent(String.self, forKey: .version)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+        actionDigest = try c.decodeIfPresent(String.self, forKey: .actionDigest)
         root = try c.decode(String.self, forKey: .root)
         // Transient-only fields — absent on a canvas payload.
         dismissible = try c.decodeIfPresent(Bool.self, forKey: .dismissible) ?? false
@@ -73,10 +80,13 @@ struct A2UISurface: Codable {
     }
 
     /// Memberwise init for building a patched copy in the canvas store.
-    init(surfaceId: String, version: String?, root: String,
-         dismissible: Bool, timeoutS: Double, components: [A2UINode]) {
+    init(surfaceId: String, version: String?, requestId: String? = nil,
+         actionDigest: String? = nil, root: String, dismissible: Bool,
+         timeoutS: Double, components: [A2UINode]) {
         self.surfaceId = surfaceId
         self.version = version
+        self.requestId = requestId
+        self.actionDigest = actionDigest
         self.root = root
         self.dismissible = dismissible
         self.timeoutS = timeoutS
@@ -97,7 +107,9 @@ struct A2UISurface: Codable {
         var ordered: [A2UINode] = components.map { byId[$0.id] ?? $0 }
         let existing = Set(components.map { $0.id })
         for node in patch where !existing.contains(node.id) { ordered.append(node) }
-        return A2UISurface(surfaceId: surfaceId, version: version, root: root,
-                           dismissible: dismissible, timeoutS: timeoutS, components: ordered)
+        return A2UISurface(surfaceId: surfaceId, version: version,
+                           requestId: requestId, actionDigest: actionDigest,
+                           root: root, dismissible: dismissible,
+                           timeoutS: timeoutS, components: ordered)
     }
 }

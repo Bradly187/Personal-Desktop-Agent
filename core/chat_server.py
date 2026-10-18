@@ -19,9 +19,8 @@ pipeline objects and:
     rides the EventBus keyed by trace_id; this server just maps envelopes to
     client frames. It never changes coordinator.route()'s return contract.
   * approval — destructive steps surface an in-chat Approve/Deny card. The card
-    is *displayed* from a dag.approval_requested event; the yes/no answer is
-    written back through the EXISTING ~/.claude/approval signal-file protocol —
-    no new approval authority, fail-safe-DENY preserved (AGENTS.md #4).
+    echoes its request nonce and action digest, and the browser publishes the
+    exact structured response consumed only by ApprovalAuthority.
 
 The chat request itself runs as a background task (NOT awaited inside the socket
 read loop) so the loop stays free to receive the approval click while a plan is
@@ -42,6 +41,7 @@ from typing import Optional
 
 from aiohttp import web, WSMsgType
 
+from core.approval_authority import ApprovalAuthority, ApprovalResponse
 from core.command_executor import Command
 from core.scheduler import Priority
 
@@ -781,7 +781,18 @@ class ChatServer:
             if text or attachment_ids:
                 await self._start_request(client, text, attachment_ids)
         elif mtype == "approval_response":
-            await self._write_approval(bool(msg.get("approve")))
+            accepted = await self._write_approval(
+                msg.get("request_id"),
+                msg.get("action_digest"),
+                msg.get("decision"),
+                msg.get("responded_at"),
+            )
+            client.push({
+                "type": "approval_ack",
+                "trace_id": msg.get("trace_id"),
+                "request_id": msg.get("request_id"),
+                "status": "ok" if accepted else "error",
+            })
         elif mtype == "cancel":
             self._cancel_request(msg.get("trace_id") or "")
         elif mtype == "rewind":
@@ -974,22 +985,39 @@ class ChatServer:
             return {}
         return await asyncio.to_thread(_trace_usage, path, trace_id)
 
-    async def _write_approval(self, approve: bool) -> None:
-        """Answer the agent's approval gate via the shared signal-file protocol.
-
-        Writes "yes"/"no" to ~/.claude/approval/response — the same file the
-        voice/iPad responders use. DevAgent reads it and runs it through
-        core.approval_keywords.classify_confirmation; first writer wins.
-        """
-        def _write() -> None:
-            _APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
-            (_APPROVAL_DIR / "response").write_text(
-                "yes" if approve else "no", encoding="utf-8"
-            )
+    async def _write_approval(
+        self,
+        request_id,
+        action_digest,
+        decision,
+        responded_at,
+    ) -> bool:
+        """Publish one exact browser response; malformed/legacy input is ignored."""
+        if (
+            not isinstance(request_id, str)
+            or not isinstance(action_digest, str)
+            or not isinstance(decision, str)
+            or decision not in ("approve", "deny")
+            or isinstance(responded_at, bool)
+            or not isinstance(responded_at, (int, float))
+        ):
+            return False
+        response = ApprovalResponse(
+            request_id=request_id,
+            action_digest=action_digest,
+            decision=decision,
+            responded_at=float(responded_at),
+        )
         try:
-            await asyncio.to_thread(_write)
+            await asyncio.to_thread(
+                ApprovalAuthority(_APPROVAL_DIR).write_response,
+                response,
+                require_open_window=True,
+            )
+            return True
         except Exception as exc:  # noqa: BLE001
-            log.debug("ChatServer: approval write failed: %s", exc)
+            log.debug("ChatServer: approval response rejected: %s", exc)
+            return False
 
     # ── EventBus pump → client frames ─────────────────────────────────────────
     async def _event_pump(self) -> None:
@@ -1049,8 +1077,22 @@ class ChatServer:
                     "result": p.get("result_snippet"),
                     "args": p.get("args_snippet")}
         if topic == "dag.approval_requested":
-            frame = {"type": "approval", "message": p.get("message"),
-                     "destructive": bool(p.get("destructive"))}
+            request_id = p.get("request_id")
+            action_digest = p.get("action_digest")
+            destructive = p.get("destructive")
+            if (
+                not isinstance(request_id, str)
+                or not isinstance(action_digest, str)
+                or not isinstance(destructive, bool)
+            ):
+                return None
+            frame = {
+                "type": "approval",
+                "message": p.get("message"),
+                "destructive": destructive,
+                "request_id": request_id,
+                "action_digest": action_digest,
+            }
             # Informed-approval context (specs/chat-workbench-parity R5/R6):
             # pending diff / exact command / proposed plan steps, when the
             # publisher supplied them. Absent keys → the card renders as today.
@@ -1058,6 +1100,11 @@ class ChatServer:
                 if p.get(key):
                     frame[key] = p[key]
             return frame
+        if topic == "dag.approval_closed":
+            request_id = p.get("request_id")
+            if not isinstance(request_id, str):
+                return None
+            return {"type": "approval_closed", "request_id": request_id}
         if topic == "dag.walkthrough":
             return {"type": "walkthrough", "markdown": p.get("markdown", "")}
         if topic == "dag.run_finalized":

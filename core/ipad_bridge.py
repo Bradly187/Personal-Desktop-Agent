@@ -58,6 +58,7 @@ from aiohttp import web
 # Make mcp_server/tools importable without install
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent / "mcp_server"))
 
+from core.approval_authority import ApprovalAuthority, ApprovalResponse
 from core.command_executor import Command, CommandExecutor
 from core.execution_policy import ExecutionScope
 
@@ -210,8 +211,7 @@ class IPadBridge:
         self._connect_handlers: list = []
 
         # A2UI: surfaces awaiting a tap reply, keyed by surface_id → Future.
-        # Phase 1 (approval) writes the response file directly; Phase 2+ awaits
-        # these futures for enumerable CLARIFY answers.
+        # Approval taps publish exact per-request responses through the authority.
         self._a2ui_pending: dict[str, "asyncio.Future"] = {}
         self._approval_dir = Path.home() / ".claude" / "approval"
 
@@ -1186,31 +1186,50 @@ class IPadBridge:
         return fut
 
     async def _handle_a2ui_event(self, ws: web.WebSocketResponse, msg: dict) -> None:
-        """iPad → PC: the user tapped a control on an A2UI surface.
+        """iPad → PC: route one declarative control event.
 
-        Two resolution paths, both reusing EXISTING decision plumbing:
-          * event == "approval"  → write the canonical token to the shared
-            ``~/.claude/approval/response`` file (identical to a voice verdict).
-          * otherwise            → resolve a pending surface Future if one is
-            registered (enumerable CLARIFY).
+        Approval events contain an exact ``ApprovalResponse`` envelope. This
+        bridge only publishes it; ``ApprovalAuthority.consume_response`` remains
+        the sole decision point. Other A2UI event shapes are unchanged.
         """
         surface_id = msg.get("surface_id", "")
         event = msg.get("event", "")
         value = msg.get("value")
         values = msg.get("values") or {}
-        log.info("a2ui_event: surface=%s event=%s value=%r", surface_id, event, value)
+        log.info("a2ui_event: surface=%s event=%s", surface_id, event)
 
         if event == "approval":
-            # Parallel input to the voice approval gate. Deny on anything that
-            # isn't an explicit "approve" — fail safe, matching the voice path.
-            verdict = "approve" if value == "approve" else "deny"
+            request_id = msg.get("request_id")
+            action_digest = msg.get("action_digest")
+            decision = msg.get("decision")
+            responded_at = msg.get("responded_at")
+            if (
+                not isinstance(request_id, str)
+                or not isinstance(action_digest, str)
+                or not isinstance(decision, str)
+                or decision not in ("approve", "deny")
+                or isinstance(responded_at, bool)
+                or not isinstance(responded_at, (int, float))
+            ):
+                await self._ack(ws, msg.get("id"), "error", "malformed approval response")
+                return
             try:
-                self._approval_dir.mkdir(parents=True, exist_ok=True)
-                (self._approval_dir / "response").write_text(verdict, encoding="utf-8")
-                log.info("a2ui_event: approval response %s ← tap", verdict)
+                response = ApprovalResponse(
+                    request_id=request_id,
+                    action_digest=action_digest,
+                    decision=decision,
+                    responded_at=float(responded_at),
+                )
+                await asyncio.to_thread(
+                    ApprovalAuthority(self._approval_dir).write_response,
+                    response,
+                    require_open_window=True,
+                )
+                log.info("a2ui_event: exact approval response %s", decision)
+                await self._ack(ws, msg.get("id"), "ok")
             except Exception as exc:
-                log.warning("a2ui_event: could not write approval response: %s", exc)
-            await self._ack(ws, msg.get("id"), "ok")
+                log.info("a2ui_event: approval response rejected: %s", exc)
+                await self._ack(ws, msg.get("id"), "error", "approval response rejected")
             return
 
         if event == "click_target" and value and self._coordinator is not None:

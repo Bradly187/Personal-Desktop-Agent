@@ -35,8 +35,14 @@ def test_to_frame_topic_mapping():
     failed = f(_env("dag.step_completed", {"n": 3, "action": "RUN_TERMINAL", "success": False}, "t"))
     assert failed["status"] == "failed"
 
-    appr = f(_env("dag.approval_requested", {"message": "Approve all?", "destructive": True}, "t"))
-    assert appr == {"type": "approval", "message": "Approve all?", "destructive": True}
+    appr = f(_env("dag.approval_requested", {
+        "message": "Approve all?", "destructive": True,
+        "request_id": "r" * 32, "action_digest": "d" * 64,
+    }, "t"))
+    assert appr == {
+        "type": "approval", "message": "Approve all?", "destructive": True,
+        "request_id": "r" * 32, "action_digest": "d" * 64,
+    }
 
     assert f(_env("chat.token", {"text": "hi"}, "t"))["type"] == "token"
     assert f(_env("step.failed", {"step_num": 1, "action": "X", "error": "boom"}, "t"))["type"] == "activity"

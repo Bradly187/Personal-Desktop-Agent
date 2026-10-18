@@ -712,9 +712,24 @@ def run_sandbox_suite(cases: list, build_dev_agent, *, timeout_s: float = 120.0)
                         
                 dev = build_dev_agent(temp_dir)
 
-                async def _auto_approve(goal: str, steps, **kwargs) -> str:
-                    return "auto"
-                dev._approve_plan_upfront = _auto_approve   # type: ignore[attr-defined]
+                async def _approve_exact_temp_actions(
+                    goal: str, steps, **kwargs
+                ) -> str:
+                    from core.approval_authority import ApprovalGrant
+                    from inference.executors.plan_executor import (
+                        _destructive_plan_digests,
+                    )
+
+                    digests = await _destructive_plan_digests(dev, goal, steps)
+                    dev._approval_grant = ApprovalGrant(
+                        request_id=f"sandbox-eval:{case.id}",
+                        trace_id=dev._active_trace_id,
+                        approved_digests=digests,
+                        expires_at=time.time() + timeout_s,
+                    )
+                    return "approved"
+
+                dev._approve_plan_upfront = _approve_exact_temp_actions
                 dev.set_repo_root(temp_dir)
 
                 try:

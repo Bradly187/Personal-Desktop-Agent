@@ -633,8 +633,13 @@ class SagaManager:
             log.debug("VoiceRewindHandler: checkpoint listing failed: %s", exc)
         card = {"command": "restore: " + ", ".join(files[:20])} if files else None
 
-        if not await self._confirm_destructive_op(f"Undo the run: {goal[:60]}?",
-                                                  card=card):
+        if not await self._confirm_destructive_op(
+            f"Undo the run: {goal[:60]}?",
+            card=card,
+            approval_action="REWIND_RUN",
+            security_args={"run_id": run_id, "files": files},
+            content=goal,
+        ):
             log.info("VoiceRewindHandler: user declined revert of run %s", run_id)
             return False
             

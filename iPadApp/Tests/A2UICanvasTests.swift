@@ -91,4 +91,65 @@ final class A2UICanvasTests: XCTestCase {
         XCTAssertEqual(restored.components.count, original.components.count)
         XCTAssertEqual(restored.nodesById["t"]?.text, "Agent")
     }
+
+    func testApprovalSurfaceDecodesAndPreservesCorrelation() throws {
+        let digest = String(repeating: "d", count: 64)
+        let requestId = String(repeating: "r", count: 32)
+        let surface = try decode("""
+        {"type":"a2ui_surface","surface_id":"approval-1","request_id":"\(requestId)",
+         "action_digest":"\(digest)","root":"b","dismissible":false,"timeout_s":30,
+         "components":[{"id":"b","component":"Button","label":"Approve",
+         "action":{"event":"approval","value":"approve"}}]}
+        """)
+        XCTAssertEqual(surface.requestId, requestId)
+        XCTAssertEqual(surface.actionDigest, digest)
+        XCTAssertEqual(surface.merging([]).requestId, requestId)
+        XCTAssertEqual(surface.merging([]).actionDigest, digest)
+    }
+
+    func testApprovalEventPayloadEchoesExactResponseContract() throws {
+        let digest = String(repeating: "d", count: 64)
+        let requestId = String(repeating: "r", count: 32)
+        let payload = try XCTUnwrap(WebSocketManager.a2UIEventPayload(
+            surfaceId: "approval-1",
+            event: "approval",
+            value: "approve",
+            values: [:],
+            requestId: requestId,
+            actionDigest: digest,
+            messageId: "a2ui-7",
+            respondedAt: 123.5
+        ))
+        XCTAssertEqual(payload["request_id"] as? String, requestId)
+        XCTAssertEqual(payload["id"] as? String, "a2ui-7")
+        XCTAssertEqual(payload["action_digest"] as? String, digest)
+        XCTAssertEqual(payload["decision"] as? String, "approve")
+        XCTAssertEqual(payload["responded_at"] as? Double, 123.5)
+        XCTAssertNil(payload["value"])
+    }
+
+    func testApprovalEventPayloadRejectsMissingBindingOrInvalidDecision() {
+        XCTAssertNil(WebSocketManager.a2UIEventPayload(
+            surfaceId: "approval-1", event: "approval", value: "approve", values: [:]
+        ))
+        XCTAssertNil(WebSocketManager.a2UIEventPayload(
+            surfaceId: "approval-1", event: "approval", value: "yes", values: [:],
+            requestId: String(repeating: "r", count: 32),
+            actionDigest: String(repeating: "d", count: 64)
+        ))
+    }
+
+    func testApprovalAckRequiresExactMessageCorrelationAndStatus() throws {
+        let ok = try XCTUnwrap(WebSocketManager.a2UIApprovalAck(from: [
+            "type": "ack", "id": "a2ui-7", "status": "ok"
+        ]))
+        XCTAssertEqual(ok.id, "a2ui-7")
+        XCTAssertTrue(ok.accepted)
+        XCTAssertNil(WebSocketManager.a2UIApprovalAck(from: [
+            "type": "ack", "id": "msg-7", "status": "ok"
+        ]))
+        XCTAssertNil(WebSocketManager.a2UIApprovalAck(from: [
+            "type": "ack", "id": "a2ui-7", "status": true
+        ]))
+    }
 }

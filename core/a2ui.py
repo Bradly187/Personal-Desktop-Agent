@@ -20,15 +20,20 @@ Two construction patterns from the whitepaper:
 Usage::
 
     from core import a2ui
-    surface = a2ui.approval_surface("Write to config.json")
+    surface = a2ui.approval_surface(
+        "Write to config.json", request_id=request.request_id,
+        action_digest=request.action_digest,
+    )
     await bridge.send_a2ui_surface(surface)
 
-The matching iPad → PC reply is an ``a2ui_event`` message
-(``{surface_id, event, value, values}``) handled in ``core/ipad_bridge.py``.
+The matching approval reply echoes ``request_id`` and ``action_digest`` plus
+``decision`` and ``responded_at`` in the ``a2ui_event`` envelope handled by
+``core/ipad_bridge.py``.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -162,14 +167,15 @@ class A2UIBuilder:
 # --------------------------------------------------------------------------- #
 
 
-def approval_surface(action_desc: str, *, surface_id: Optional[str] = None, timeout_s: float = 30.0) -> dict:
-    """Approve / Deny card for the approval gate (Phase 1).
-
-    A tap on either button produces an ``a2ui_event`` with ``event="approval"``
-    and ``value="approve"|"deny"`` — the bridge writes the SAME canonical token
-    to ``~/.claude/approval/response`` that a voice confirmation would, so this
-    is a parallel input, not a new decision path. Timeout fails safe to deny.
-    """
+def approval_surface(
+    action_desc: str,
+    *,
+    request_id: str,
+    action_digest: str,
+    surface_id: Optional[str] = None,
+    timeout_s: float = 30.0,
+) -> dict:
+    """Non-dismissible Approve/Deny card bound to one exact authority request."""
     sid = surface_id or _gen_surface_id("approval")
     b = A2UIBuilder()
     b.text("q", action_desc, "headline")
@@ -178,8 +184,10 @@ def approval_surface(action_desc: str, *, surface_id: Optional[str] = None, time
     b.button("deny", "Deny", "deny", event="approval", icon="xmark.circle.fill")
     b.row("buttons", ["approve", "deny"])
     b.card("root", ["q", "hint", "buttons"])
-    # Not dismissible: a stray tap-away must not silently resolve a security gate.
-    return b.surface("root", surface_id=sid, dismissible=False, timeout_s=timeout_s)
+    surface = b.surface("root", surface_id=sid, dismissible=False, timeout_s=timeout_s)
+    surface["request_id"] = request_id
+    surface["action_digest"] = action_digest
+    return surface
 
 
 def choice_surface(
@@ -220,7 +228,6 @@ def choice_surface(
 # which the existing pending-clarification context resolves exactly like speech.
 # --------------------------------------------------------------------------- #
 
-import re
 
 _DIRECTION_OPTS = [("Up", "up"), ("Down", "down"), ("Left", "left"), ("Right", "right")]
 _OPEN_TYPE_OPTS = [("Application", "application"), ("File", "file"), ("Something else", "other")]
@@ -434,4 +441,22 @@ def validate_surface(payload: dict) -> list[str]:
         for child in c.get("children", []) or []:
             if child not in ids:
                 errs.append(f"{c.get('id')!r} references missing child {child!r}")
+
+    is_approval = any(
+        isinstance(c, dict)
+        and isinstance(c.get("action"), dict)
+        and c["action"].get("event") == "approval"
+        for c in comps
+    )
+    if is_approval:
+        request_id = payload.get("request_id")
+        action_digest = payload.get("action_digest")
+        if not isinstance(request_id, str) or re.fullmatch(
+            r"[A-Za-z0-9_-]{32,128}", request_id
+        ) is None:
+            errs.append("approval surface has invalid request_id")
+        if not isinstance(action_digest, str) or re.fullmatch(
+            r"[0-9a-f]{64}", action_digest
+        ) is None:
+            errs.append("approval surface has invalid action_digest")
     return errs

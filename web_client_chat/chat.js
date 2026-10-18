@@ -289,13 +289,39 @@
     no.className = "no"; no.textContent = "Deny";
     row.appendChild(yes); row.appendChild(no);
     card.appendChild(row);
-    function answer(approve) {
-      send({ type: "approval_response", approve: approve });
-      card.classList.add("answered");
-      activityLine(t, approve ? "approved" : "denied", approve ? "ok" : "fail");
+    let pendingDecision = null;
+    card.dataset.requestId = f.request_id;
+    function answer(decision) {
+      pendingDecision = decision;
+      send({
+        type: "approval_response",
+        trace_id: f.trace_id,
+        request_id: f.request_id,
+        action_digest: f.action_digest,
+        decision: decision,
+        responded_at: Date.now() / 1000,
+      });
+      yes.disabled = true;
+      no.disabled = true;
+      card.classList.add("pending");
     }
-    yes.onclick = () => answer(true);
-    no.onclick = () => answer(false);
+    card.resolveApproval = function (accepted) {
+      card.classList.remove("pending");
+      card.classList.add("answered");
+      if (accepted) {
+        const approved = pendingDecision === "approve";
+        activityLine(t, approved ? "approved" : "denied", approved ? "ok" : "fail");
+      } else {
+        activityLine(t, "approval expired", "fail");
+      }
+    };
+    card.closeApproval = function () {
+      yes.disabled = true;
+      no.disabled = true;
+      card.classList.add("answered");
+    };
+    yes.onclick = () => answer("approve");
+    no.onclick = () => answer("deny");
     (t ? t.activity : transcript).appendChild(card);
     if (t) t.approvalCards.push(card);
     if (stick) scroll();
@@ -372,6 +398,20 @@
       case "approval":
         approvalCard(t, f);
         break;
+      case "approval_ack": {
+        const card = t.approvalCards.find(
+          (candidate) => candidate.dataset.requestId === f.request_id
+        );
+        if (card && card.resolveApproval) card.resolveApproval(f.status === "ok");
+        break;
+      }
+      case "approval_closed": {
+        const card = t.approvalCards.find(
+          (candidate) => candidate.dataset.requestId === f.request_id
+        );
+        if (card && card.closeApproval) card.closeApproval();
+        break;
+      }
       case "walkthrough":
         walkthroughCard(t, f.markdown || "");
         t.walkthrough = f.markdown || "";

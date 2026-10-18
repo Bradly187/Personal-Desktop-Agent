@@ -31,8 +31,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-# Shared approval gate directory — approval_hook.py writes "pending",
-# WhisperStream responds with the canonical verdict in "response".
+# Approval requests are exposed through per-request structured markers.  Voice
+# emits the same exact ApprovalResponse as chat and A2UI; bare global yes/no is
+# never read or written.
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
 
 # Seconds to flush+suppress the mic when the approval gate first opens, so the
@@ -42,6 +43,7 @@ _APPROVAL_ECHO_GUARD_S: float = 1.0
 
 # Shared confirmation vocabulary — kept in core/ so approval_hook.py and this
 # module parse identical yes/no language and can never drift out of sync.
+from core.approval_authority import ApprovalAuthority, ApprovalRequest, ApprovalResponse
 from core.approval_keywords import classify_confirmation
 
 log = logging.getLogger(__name__)
@@ -386,9 +388,9 @@ class WhisperStream:
         self._suppress_until: float = 0.0
         self._awaiting_clarification: bool = False
         self._clarification_deadline: float = 0.0
-        # Tracks whether the approval gate is currently open so the TTS echo of
-        # the spoken question is flushed exactly once when the gate first opens.
-        self._approval_pending_active: bool = False
+        # Exact active request IDs already echo-guarded. A changed set opens a
+        # new gate; overlapping requests are consumed as audio but never resolved.
+        self._approval_pending_ids: frozenset[str] = frozenset()
         # Wake-arming: a bare "hey agent" (VAD split it off from the command)
         # arms this window; the next segment is taken as the command.
         self._wake_armed_until: float = 0.0
@@ -406,10 +408,9 @@ class WhisperStream:
         # Fired whenever the mute state changes (voice- or iPad-initiated) so the
         # bridge can push a `mic_state` message and keep the iPad indicator in sync.
         self.on_mute_change: Optional[Callable[[bool], None]] = None
-        # Fired once when the approval gate opens (not-open → open), carrying the
-        # spoken action description. main.py wires this to push an A2UI Approve/
-        # Deny surface to the iPad — a parallel input to the voice gate.
-        self.on_approval_gate_open: Optional[Callable[[str], None]] = None
+        # Fired once for each unambiguous exact approval request. main.py maps
+        # it to an A2UI surface carrying the same nonce and digest.
+        self.on_approval_gate_open: Optional[Callable[[ApprovalRequest], None]] = None
         # D8: correction detection state — tracks last command outcome
         self._last_command_status: str = ""   # "ok" | "CLARIFY" | "failed"
         self._last_command_text: str = ""     # text of previous command
@@ -691,65 +692,57 @@ class WhisperStream:
             except Exception as exc:
                 log.error("WhisperStream loop error: %s", exc)
 
-    def _check_approval_echo_guard(self) -> None:
-        """Drop the TTS echo of the approval question when the gate first opens.
-
-        approval_hook.py speaks "Approve …?" through the PC speakers, then writes
-        the ``pending`` signal file. The iPad mic captures that spoken question;
-        if transcribed it would be mistaken for the user's answer — and the
-        question text itself contains the word "approve". When the gate first
-        opens we flush whatever the mic captured during playback and briefly
-        suppress incoming audio so only the user's actual reply is transcribed.
-        Idempotent per gate: fires once on the not-open → open transition.
-        """
+    def _active_approval_requests(self) -> tuple[ApprovalRequest, ...]:
         try:
-            pending = (_APPROVAL_DIR / "pending").exists()
-        except OSError:
-            pending = False
-        if pending and not self._approval_pending_active:
-            self._approval_pending_active = True
-            self.suppress(_APPROVAL_ECHO_GUARD_S)   # flush buffer + drop echo tail
-            log.debug("WhisperStream: approval gate opened — TTS echo guard %.1fs",
-                      _APPROVAL_ECHO_GUARD_S)
-            # Push an A2UI Approve/Deny surface to the iPad in parallel with the
-            # spoken question. Best-effort: a failure here never blocks the voice
-            # gate, which remains the authoritative path.
-            if self.on_approval_gate_open is not None:
+            return ApprovalAuthority(_APPROVAL_DIR).active_pending_requests()
+        except Exception:
+            return ()
+
+    def _check_approval_echo_guard(self) -> None:
+        """Flush TTS echo once for each exact responder-request set."""
+        requests = self._active_approval_requests()
+        request_ids = frozenset(request.request_id for request in requests)
+        if request_ids and request_ids != self._approval_pending_ids:
+            self._approval_pending_ids = request_ids
+            self.suppress(_APPROVAL_ECHO_GUARD_S)
+            log.debug(
+                "WhisperStream: approval gate opened — TTS echo guard %.1fs",
+                _APPROVAL_ECHO_GUARD_S,
+            )
+            if len(requests) == 1 and self.on_approval_gate_open is not None:
                 try:
-                    prompt = (_APPROVAL_DIR / "prompt").read_text(encoding="utf-8").strip()
-                except Exception:
-                    prompt = ""
-                try:
-                    self.on_approval_gate_open(prompt or "Approve this action?")
+                    self.on_approval_gate_open(requests[0])
                 except Exception as exc:
                     log.debug("on_approval_gate_open callback failed: %s", exc)
-        elif not pending and self._approval_pending_active:
-            self._approval_pending_active = False
+        elif not request_ids:
+            self._approval_pending_ids = frozenset()
 
     def _handle_approval_gate(self, text: str) -> bool:
-        """Treat ``text`` as a candidate yes/no answer when the gate is open.
-
-        Returns True if the transcript was consumed by the gate (caller must NOT
-        forward it to FusionEngine). Only a *deliberate* confirmation word is
-        written to the response file — ambient speech, the TTS echo, or garbage
-        is discarded and the gate keeps waiting (approval_hook.py then times out,
-        failing safe to DENY). This is the core fix: random speech can no longer
-        silently approve or deny a destructive tool call.
-        """
-        if not (_APPROVAL_DIR / "pending").exists():
+        """Consume gate-time speech and publish one exact structured response."""
+        requests = self._active_approval_requests()
+        if not requests:
             return False
+        if len(requests) != 1:
+            log.info("WhisperStream: overlapping approval requests — ignoring speech")
+            return True
         verdict = classify_confirmation(text)
         if verdict is None:
-            log.info("WhisperStream: ignoring non-confirmation during approval "
-                     "gate (still waiting): %r", text)
-            return True  # consume — never forward ambient audio downstream
+            log.info(
+                "WhisperStream: ignoring non-confirmation during approval gate: %r",
+                text,
+            )
+            return True
+        request = requests[0]
         try:
-            # Write the canonical token ("approve"/"deny") so approval_hook.py
-            # parses the verdict unambiguously regardless of the exact phrasing.
-            (_APPROVAL_DIR / "response").write_text(verdict, encoding="utf-8")
-            log.info("WhisperStream: approval response %s ← %r", verdict, text)
+            ApprovalAuthority(_APPROVAL_DIR).write_response(ApprovalResponse(
+                request_id=request.request_id,
+                action_digest=request.action_digest,
+                decision=verdict,
+                responded_at=time.time(),
+            ), require_open_window=True)
+            log.info("WhisperStream: exact approval response %s", verdict)
         except Exception as exc:
-            log.warning("WhisperStream: could not write approval response: %s", exc)
+            log.info("WhisperStream: approval response rejected: %s", exc)
         return True
 
     def _trailing_silence_from_chunks(self) -> bool:

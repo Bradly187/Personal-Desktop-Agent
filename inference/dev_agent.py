@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from core.action_lifecycle import TrackedWorkRegistry
+from core.approval_authority import ApprovalAuthority, ApprovalGrant
 from core.domain_classifier import DomainClassifier
 from core.execution_policy import ExecutionScope
 from core.events import (
@@ -167,7 +168,7 @@ class DevAgent:
     # keep their convenient auto-approve-on-silence.
     _DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
         "WRITE_FILE", "EDIT_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT",
-        "GITHUB_PR",
+        "GITHUB_PR", "SKILL_CALL",
     })
 
     # Plan verbs delegated through CommandExecutor. That executor owns their
@@ -187,14 +188,11 @@ class DevAgent:
         "SEARCH_PERSONAL",
     })
 
-    # Verbs safe to run CONCURRENTLY within one DAG wave (gap A). Reads (above)
-    # plus WRITE_FILE (distinct paths — independence is guaranteed by the absence
-    # of a declared dependency) and EXPLAIN (pure narration). Everything else —
-    # RUN_TERMINAL, GIT_COMMIT/CHECKOUT, GITHUB_PR, CLICK/OPEN/HOTKEY/TYPE/SCROLL,
-    # SEARCH_WEB(browser) — is a BARRIER: it has shared-resource / ordering side
-    # effects, so it runs SOLO even when its dependencies are satisfied.
+    # Verbs safe to run CONCURRENTLY within one DAG wave. Destructive verbs are
+    # deliberately excluded: ordered one-use approval claims must be resolved in
+    # approved plan order before any side effect begins.
     _FANOUT_SAFE_VERBS: frozenset[str] = _PARALLEL_VERBS | frozenset({
-        "WRITE_FILE", "EDIT_FILE", "EXPLAIN",
+        "EXPLAIN",
     })
 
     def __init__(
@@ -205,12 +203,14 @@ class DevAgent:
         session_context: Optional[list[str]] = None,
         agent_db: Optional["AgentDB"] = None,
         execution_scope: ExecutionScope | None = None,
+        approval_authority: ApprovalAuthority | None = None,
     ) -> None:
         self._router = router
         self._coordinator = coordinator
         self._trainer = trainer
         self._agent_db = agent_db
         self._execution_scope = execution_scope or ExecutionScope()
+        self._approval_authority = approval_authority or ApprovalAuthority()
         self._action_registry = TrackedWorkRegistry(
             limit=self.UNKNOWN_REGISTRY_LIMIT,
             ttl_s=self.UNKNOWN_REGISTRY_TTL_S,
@@ -328,7 +328,10 @@ class DevAgent:
         # safe because _plan_lock serializes plans. "" → whole_file default.
         self._active_plan_model: str = ""
 
-        # Goal-level authorization state (reset after each plan)
+        # Goal-level authorization state (reset after each plan).  The typed
+        # grant is the sole execution authority; the bool/set remain status and
+        # Phase-5 caller compatibility only and must never authorize a step.
+        self._approval_grant: ApprovalGrant | None = None
         self._plan_authorized: bool = False
         self._approved_verbs: frozenset[str] = frozenset()
         self._escalated_this_run: bool = False  # halted plan landed in review queue
@@ -990,9 +993,20 @@ class DevAgent:
         from inference.step_executor import execute_step
         return await execute_step(self, step)
 
-    async def _confirm_destructive_op(self, description: str, *, force: bool = False, card=None) -> bool:
+    async def _confirm_destructive_op(
+        self, description: str, *, force: bool = False, card=None,
+        step=None, canonical_path: str | None = None,
+        canonical_cwd: str | None = None, content=None,
+        approval_action: str | None = None, security_args=None,
+        exact_digest: str | None = None,
+    ) -> bool:
         from inference.step_executor import confirm_destructive_op
-        return await confirm_destructive_op(self, description, force=force, card=card)
+        return await confirm_destructive_op(
+            self, description, force=force, card=card, step=step,
+            canonical_path=canonical_path, canonical_cwd=canonical_cwd,
+            content=content, approval_action=approval_action,
+            security_args=security_args, exact_digest=exact_digest,
+        )
 
     def _apply_edit(self, path_str: str, body: str, edit_format: str | None = None) -> str:
         from inference.step_executor import apply_edit

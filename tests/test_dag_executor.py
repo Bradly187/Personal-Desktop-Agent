@@ -72,7 +72,7 @@ def _agent():
 
 
 async def test_independent_safe_steps_run_concurrently():
-    """Two independent WRITE_FILE steps execute in the same wave, concurrently."""
+    """Independent read-only steps still execute in the same concurrent wave."""
     agent = _agent()
     order = []
     peak = {"now": 0, "max": 0}
@@ -86,15 +86,40 @@ async def test_independent_safe_steps_run_concurrently():
         return "ok"
 
     agent._execute_step = _exec
-    remaining = [AgentStep("WRITE_FILE", args="a"), AgentStep("WRITE_FILE", args="b")]
+    remaining = [AgentStep("READ_FILE", args="a"), AgentStep("GREP", args="b")]
     executed: list[AgentStep] = []
     cancelled, failed = await agent._run_dag_waves(remaining, executed, run_id=1)
 
     assert cancelled is False
     assert failed is None
-    assert peak["max"] == 2            # both ran at once
+    assert peak["max"] == 2
     assert {s.args for s in executed} == {"a", "b"}
-    assert remaining == []             # all completed, nothing deferred
+    assert remaining == []
+
+
+async def test_destructive_steps_are_serialized_in_plan_order():
+    agent = _agent()
+    order = []
+    peak = {"now": 0, "max": 0}
+
+    async def _exec(step):
+        peak["now"] += 1
+        peak["max"] = max(peak["max"], peak["now"])
+        await asyncio.sleep(0.01)
+        order.append(step.args)
+        peak["now"] -= 1
+        return "ok"
+
+    agent._execute_step = _exec
+    steps = [AgentStep("WRITE_FILE", args="a"), AgentStep("WRITE_FILE", args="b")]
+    for step in steps:
+        step._approval_destructive = True
+    remaining = list(steps)
+    executed: list[AgentStep] = []
+    await agent._run_dag_waves(remaining, executed, run_id=1)
+
+    assert peak["max"] == 1
+    assert order == ["a", "b"]
 
 
 async def test_dependent_step_waits_for_its_dependency():
@@ -312,6 +337,40 @@ async def test_dag_destructive_unknown_stops_dependents_without_replan_or_compen
     agent._halt_and_compensate.assert_not_awaited()
     agent._run_compensations.assert_not_awaited()
     agent._speak_plan_completion.assert_not_awaited()
+
+    release.set()
+    await asyncio.sleep(0.02)
+
+
+async def test_mixed_dag_destructive_failure_stops_before_later_unknown():
+    agent = _agent_with_plan(
+        "Step 1: [WRITE_FILE fail]\n"
+        "Step 2: [WRITE_FILE hang]\n"
+        "Step 3: [EXPLAIN must-not-run] (after: 1, 2)"
+    )
+    agent.STEP_TIMEOUT_S = 0.01
+    agent.RECONCILIATION_GRACE_S = 0.01
+    release = asyncio.Event()
+    agent._halt_and_compensate = AsyncMock()
+    agent._run_compensations = AsyncMock()
+    ran = []
+
+    async def _exec(step):
+        ran.append(step.args)
+        if step.args == "fail":
+            raise RuntimeError("proven failure")
+        if step.args == "hang":
+            await release.wait()
+        return "ok"
+
+    agent._execute_step = _exec
+    result = await agent.plan_and_run("mixed outcomes")
+
+    assert result.success is False
+    assert "hang" not in ran
+    assert "must-not-run" not in ran
+    agent._halt_and_compensate.assert_awaited_once()
+    agent._run_compensations.assert_not_awaited()
 
     release.set()
     await asyncio.sleep(0.02)

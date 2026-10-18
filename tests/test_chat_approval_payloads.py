@@ -18,6 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.approval_authority import ApprovalAuthority, ApprovalResponse
 from core.chat_server import ChatServer, _ChatClient
 from inference.dev_agent import DevAgent
 
@@ -33,21 +34,24 @@ def _env(topic, payload, trace_id="t"):
 def test_approval_frame_passes_through_extras():
     f = ChatServer._to_frame(_env("dag.approval_requested", {
         "message": "Approve writing file f.py?", "destructive": True,
+        "request_id": "r" * 32, "action_digest": "d" * 64,
         "file_path": "f.py", "diff": "--- a/f.py\n+++ b/f.py\n+x\n",
     }))
     assert f["file_path"] == "f.py" and f["diff"].startswith("---")
 
     g = ChatServer._to_frame(_env("dag.approval_requested", {
         "message": "Approve all?", "destructive": True,
+        "request_id": "r" * 32, "action_digest": "d" * 64,
         "goal": "do it", "steps": [{"n": 1, "action": "WRITE_FILE", "args": "f.py"}],
     }))
     assert g["goal"] == "do it" and g["steps"][0]["action"] == "WRITE_FILE"
 
 
-def test_approval_frame_message_only_when_extras_absent():
-    f = ChatServer._to_frame(_env("dag.approval_requested",
-                                  {"message": "Approve all?", "destructive": False}))
-    assert f == {"type": "approval", "message": "Approve all?", "destructive": False}
+def test_approval_frame_without_correlation_is_rejected():
+    assert ChatServer._to_frame(_env(
+        "dag.approval_requested",
+        {"message": "Approve all?", "destructive": False},
+    )) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -76,17 +80,30 @@ def chat_agent(tmp_path, monkeypatch):
     return agent
 
 
-def _answer_later(tmp_path, text, delay=0.2):
+def _answer_later(tmp_path, decision, delay=0.2):
     async def _write():
         await asyncio.sleep(delay)
-        d = tmp_path / ".claude" / "approval"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "response").write_text(text, encoding="utf-8")
+        authority = ApprovalAuthority(tmp_path / ".claude" / "approval")
+        deadline = asyncio.get_running_loop().time() + 2.0
+        requests = ()
+        while asyncio.get_running_loop().time() < deadline:
+            requests = authority.active_pending_requests()
+            if len(requests) == 1:
+                break
+            await asyncio.sleep(0.02)
+        assert len(requests) == 1
+        request = requests[0]
+        authority.write_response(ApprovalResponse(
+            request_id=request.request_id,
+            action_digest=request.action_digest,
+            decision=decision,
+            responded_at=__import__("time").time(),
+        ), require_open_window=True)
     return asyncio.ensure_future(_write())
 
 
 async def test_chat_click_approves_per_op_confirm(tmp_path, chat_agent):
-    writer = _answer_later(tmp_path, "yes")
+    writer = _answer_later(tmp_path, "approve")
     ok = await chat_agent._confirm_destructive_op(
         "Approve writing file f.py?", card={"file_path": "f.py", "diff": "+x"})
     await writer
@@ -98,7 +115,7 @@ async def test_chat_click_approves_per_op_confirm(tmp_path, chat_agent):
 
 
 async def test_chat_click_deny_blocks(tmp_path, chat_agent):
-    writer = _answer_later(tmp_path, "no")
+    writer = _answer_later(tmp_path, "deny")
     ok = await chat_agent._confirm_destructive_op("Approve running command: rm?",
                                                   card={"command": "rm -rf x"})
     await writer
@@ -116,6 +133,23 @@ async def test_non_chat_tts_failure_still_denies(tmp_path, monkeypatch):
     ok = await agent._confirm_destructive_op("Approve?")
     assert ok is False
     assert not (tmp_path / ".claude" / "approval" / "pending").exists()
+
+
+async def test_unverified_per_op_close_denies_without_pc_mic(
+    chat_agent, monkeypatch
+):
+    import sounddevice as sd
+
+    chat_agent._approval_authority.publish_pending_request = MagicMock(
+        side_effect=OSError("pending unavailable")
+    )
+    chat_agent._approval_authority.close_response_window = MagicMock(
+        side_effect=OSError("close unavailable")
+    )
+    recorder = MagicMock(side_effect=AssertionError("PC mic must not start"))
+    monkeypatch.setattr(sd, "rec", recorder)
+    assert await chat_agent._confirm_destructive_op("Approve?") is False
+    recorder.assert_not_called()
 
 
 async def test_chat_tts_failure_without_answer_denies(tmp_path, chat_agent, monkeypatch):
@@ -160,6 +194,10 @@ async def test_rewind_deny_rolls_back_nothing():
     # The confirm saw the file list (card context).
     card = agent._confirm_destructive_op.call_args.kwargs.get("card")
     assert card and "f.py" in card["command"]
+    approval = agent._confirm_destructive_op.await_args.kwargs
+    assert approval["approval_action"] == "REWIND_RUN"
+    assert approval["security_args"] == {"run_id": 7, "files": ["f.py"]}
+    assert approval["content"] == "the goal"
 
 
 async def test_chat_server_rewind_flow():
