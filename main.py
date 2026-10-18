@@ -396,7 +396,19 @@ class _ShutdownController:
 # Watchdog — periodic health checks for soak testing
 # ---------------------------------------------------------------------------
 
-async def _watchdog(fusion, whisper, session_id: int) -> None:
+def _watchdog_route_load(fusion, scheduler) -> tuple[int, int, int]:
+    """Return authoritative queued/running load plus degraded fallback tasks."""
+    fallback = len(getattr(fusion, "_route_tasks", set()))
+    if scheduler is None:
+        return 0, 0, fallback
+    try:
+        snapshot = scheduler.load_snapshot()
+        return snapshot.queued_total, snapshot.running_total, fallback
+    except Exception:
+        return 0, 0, fallback
+
+
+async def _watchdog(fusion, whisper, session_id: int, scheduler=None) -> None:
     """Log periodic health metrics every 60 s to make soak runs interpretable.
 
     Checks:
@@ -418,21 +430,28 @@ async def _watchdog(fusion, whisper, session_id: int) -> None:
         await asyncio.sleep(_WATCHDOG_PERIOD_S)
         _cycle += 1
 
-        # --- Tick rate ---
+        # --- Tick rate + authoritative route load ---
+        queued, running, fallback = _watchdog_route_load(fusion, scheduler)
         current_ticks = getattr(fusion, "_tick_count", 0)
         if _last_tick_count is not None:
             hz = (current_ticks - _last_tick_count) / _WATCHDOG_PERIOD_S
             if hz < 50.0:
                 log.warning("WATCHDOG: FusionEngine tick rate LOW: %.1f Hz (expected 60)", hz)
             else:
-                log.info("WATCHDOG: FusionEngine %.1f Hz  route_tasks_inflight=%d",
-                         hz, len(getattr(fusion, "_route_tasks", set())))
+                log.info(
+                    "WATCHDOG: FusionEngine %.1f Hz  scheduler_queued=%d "
+                    "scheduler_running=%d fallback_route_tasks=%d",
+                    hz, queued, running, fallback,
+                )
         _last_tick_count = current_ticks
 
-        # --- Route task queue depth ---
-        inflight = len(getattr(fusion, "_route_tasks", set()))
-        if inflight > 10:
-            log.warning("WATCHDOG: %d route tasks in-flight — possible coordinator stall", inflight)
+        total_route_load = queued + running + fallback
+        if total_route_load > 10:
+            log.warning(
+                "WATCHDOG: %d route tasks active (queued=%d running=%d fallback=%d) "
+                "— possible coordinator stall",
+                total_route_load, queued, running, fallback,
+            )
 
         # --- WhisperStream thread ---
         if whisper is not None:
@@ -1353,7 +1372,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         # --- Run bridge + fusion + watchdog + metric watcher concurrently ---
         bridge_task = asyncio.create_task(bridge.run(no_mdns=args.no_mdns))
         fusion_task = asyncio.create_task(fusion.run())
-        watchdog_task = asyncio.create_task(_watchdog(fusion, whisper, session_id))
+        watchdog_task = asyncio.create_task(
+            _watchdog(fusion, whisper, session_id, scheduler=scheduler)
+        )
         from monitoring.metric_watcher import MetricWatcher
         metric_watcher = MetricWatcher(event_bus=event_bus)
         metric_watcher_task = asyncio.create_task(metric_watcher.run())

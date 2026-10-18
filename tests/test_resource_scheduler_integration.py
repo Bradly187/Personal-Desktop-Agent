@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.scheduler import AccessibilityScheduler, Priority
+from core.scheduler import AccessibilityScheduler, Priority, SchedulerConfig
 from core.resource_governor import ResourceGovernor
 
 
@@ -124,3 +124,42 @@ async def test_governor_status_includes_vram_and_pause():
     st = gov.get_status()
     assert "vram_free_gb" in st
     assert st["dev_paused"] is False   # scheduler wired, not paused
+
+
+async def test_pain_day_pause_never_reduces_accessibility_reserve():
+    config = SchedulerConfig(
+        hard_limit=4,
+        accessibility_reserve=2,
+        non_accessibility_limit=2,
+        dev_agent_limit=2,
+        background_limit=1,
+        max_parked_dev=2,
+    )
+    sched = AccessibilityScheduler(config)
+    sched.pause_dev()
+    await sched.start()
+    release = asyncio.Event()
+
+    async def _blocked():
+        await release.wait()
+        return "done"
+
+    try:
+        heavy = [sched.submit(_blocked(), Priority.DEV_AGENT) for _ in range(2)]
+        for _ in range(20):
+            if sched.load_snapshot().parked_dev == 2:
+                break
+            await asyncio.sleep(0)
+
+        direct = [sched.submit(_blocked(), Priority.ACCESSIBILITY) for _ in range(2)]
+        assert config.accessibility_reserve == 2
+        assert sched.load_snapshot().queued_total + sched.load_snapshot().running_total == 4
+        assert all(not future.done() for future in direct)
+
+        release.set()
+        sched.resume_dev()
+        assert await asyncio.gather(*heavy, *direct) == ["done"] * 4
+    finally:
+        release.set()
+        sched.resume_dev()
+        await sched.stop()

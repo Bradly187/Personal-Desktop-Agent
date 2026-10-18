@@ -296,25 +296,49 @@ class TestFix4PainDayFusionConfig:
 # ===========================================================================
 
 class TestVoiceSingleFlight:
-    """One spoken phrase must produce one action, even though the iPad on-device
-    recognizer (voice_local) and the PC Whisper stream (voice) both transcribe
-    the same audio and the Whisper wake-armed window can re-fire it.
+    """Only exact same-source behavioral identity may collapse in the old window."""
 
-    Regression for the 'one "open chrome" opened three Chrome windows' bug.
-    """
-
-    def test_parallel_recognizers_collapse_to_one(self, engine):
-        """voice_local + voice for the same utterance → a single route()."""
+    def test_parallel_recognizers_do_not_merge_inadequate_identity(self, engine):
+        """A partial local keyword and full Whisper command are distinct work."""
         fe, _ = engine
         from core.command_executor import Command
 
         run(fe._emit(Command(text="open", action="DICTATE", source="voice_local")))
-        # PC Whisper lands a moment later with the full command.
         run(fe._emit(Command(text="open chrome", action="OPEN", source="voice")))
 
+        assert fe._coordinator.route.call_count == 2
+
+    def test_exact_cross_recognizer_duplicate_collapses(self, engine):
+        """Same resolved behavior from both recognizers is one voice action."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        common = {
+            "text": "open chrome",
+            "action": "OPEN",
+            "params": {"app": "chrome"},
+            "session_context": ["desktop"],
+        }
+        run(fe._emit(Command(source="voice_local", **common)))
+        run(fe._emit(Command(source="voice", **common)))
+
         assert fe._coordinator.route.call_count == 1
-        first = fe._coordinator.route.call_args_list[0][0][0]
-        assert first.source == "voice_local"
+
+    def test_distinct_open_then_close_inside_old_window(self, engine):
+        """Distinct quick commands must never be merged by voice single-flight."""
+        fe, _ = engine
+        from core.command_executor import Command
+
+        run(fe._emit(Command(
+            text="open chrome", action="OPEN", source="voice",
+            params={"app": "chrome"}, session_context=["desktop"],
+        )))
+        run(fe._emit(Command(
+            text="close chrome", action="CLOSE", source="voice",
+            params={"app": "chrome"}, session_context=["desktop"],
+        )))
+
+        assert fe._coordinator.route.call_count == 2
 
     def test_wake_armed_refire_suppressed(self, engine):
         """A VAD-split utterance re-firing the same voice command is dropped."""

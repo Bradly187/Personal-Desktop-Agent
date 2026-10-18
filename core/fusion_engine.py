@@ -21,6 +21,7 @@ incidentally. See diagrams/06-fusion-routing.md for the decision flowchart.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import sys
@@ -207,10 +208,10 @@ class FusionEngine:
         self._gesture: Optional[Command] = None
         self._voice_local: Optional[str] = None                  # keyword text
         self._voice: Optional[Command] = None
-        # Cross-source voice single-flight: monotonic ts of the last voice-family
-        # command dispatched through _emit(). Suppresses the parallel-recognizer
-        # double-fire (voice_local + voice) and the wake-armed re-fire.
+        # Exact identity of the last voice-family command.  Unlike the old
+        # source-blind timestamp, this never merges distinct quick commands.
         self._last_voice_emit_mono: float = 0.0
+        self._last_voice_emit_identity: tuple | None = None
         self._tilt: Optional[tuple[float, float]] = None          # (rx, ry) rad/s
         # D2: last-known sensor values for throttled DB sampling (~1 Hz)
         self._last_tilt_sample: Optional[tuple[float, float]] = None
@@ -295,10 +296,26 @@ class FusionEngine:
         self._running = False
         # Tracked set prevents fire-and-forget tasks from being GC'd before completion
         # and surfaces unhandled exceptions via the done-callback log.
-        self._route_tasks: set = set()
+        self._route_tasks: set[asyncio.Task] = set()
         self._scheduler = None  # AccessibilityScheduler — wired via set_scheduler()
-        # Circuit breaker for route-task overflow (Gap F — acoustic storms, cloud latency spikes)
-        self._route_breaker_open = False  # True when shedding commands due to queue depth
+        from core.scheduler import Priority, SchedulerConfig
+        self._scheduler_config = SchedulerConfig()
+        self._degraded_by_priority = {priority: 0 for priority in Priority}
+        self._degraded_task_metadata: dict[asyncio.Task, tuple] = {}
+        self._degraded_active_coalesced: dict[tuple, asyncio.Task] = {}
+        self._degraded_reason_counts = {
+            "denied_background_limit": 0,
+            "denied_dev_agent_limit": 0,
+            "denied_accessibility_reserve": 0,
+            "denied_hard_limit": 0,
+            "coalesced_exact_key": 0,
+        }
+        self._degraded_denied_total = 0
+        self._degraded_coalesced_total = 0
+        self._voice_exact_coalesced_total = 0
+        # Kept as a compatibility status bit for callers/tests; bounded admission
+        # now makes decisions directly from the shared SchedulerConfig.
+        self._route_breaker_open = False
         self._metrics = None  # Metrics singleton — wired by main.py
 
     # ---------------------------------------------------------------------- #
@@ -309,21 +326,99 @@ class FusionEngine:
         self._coordinator = coordinator
 
     def set_scheduler(self, scheduler) -> None:
-        """Wire AccessibilityScheduler so _emit() submits at the correct priority."""
+        """Wire scheduler and retain its limits for degraded fallback."""
         self._scheduler = scheduler
+        if scheduler is not None:
+            self._scheduler_config = scheduler.config
+
+    def _degraded_route_task_gauges(self) -> dict[str, float]:
+        """Return current degraded-only load/counters without awaiting or I/O."""
+        values = {
+            "fusion_degraded_route_tasks_inflight": float(len(self._route_tasks)),
+            "fusion_degraded_denied_total": float(self._degraded_denied_total),
+            "fusion_degraded_coalesced_total": float(self._degraded_coalesced_total),
+            "fusion_voice_exact_coalesced_total": float(
+                self._voice_exact_coalesced_total
+            ),
+        }
+        for reason, count in self._degraded_reason_counts.items():
+            values[f"fusion_degraded_reason_{reason}"] = float(count)
+        return values
+
+    def _publish_degraded_route_tasks_inflight(self) -> None:
+        """Publish degraded-only task count without waiting on the metrics lock."""
+        if self._metrics is None:
+            return
+        try:
+            self._metrics.set_many(
+                self._degraded_route_task_gauges(),
+                blocking=False,
+            )
+        except Exception:
+            pass
+
+    def _route_task_done(self, task: asyncio.Task) -> None:
+        """Release degraded admission state and observe exceptions exactly once."""
+        self._route_tasks.discard(task)
+        metadata = self._degraded_task_metadata.pop(task, None)
+        if metadata is not None:
+            priority, registry_key = metadata
+            self._degraded_by_priority[priority] -= 1
+            if (
+                registry_key is not None
+                and self._degraded_active_coalesced.get(registry_key) is task
+            ):
+                self._degraded_active_coalesced.pop(registry_key, None)
+        self._publish_degraded_route_tasks_inflight()
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except (asyncio.CancelledError, Exception):
+            return
+        if exc is not None:
+            log.error("FusionEngine route task failed: %s", exc)
 
     @staticmethod
     def _source_to_priority(source: str):
         """Map a Command source string to its scheduler Priority tier."""
         from core.scheduler import Priority
         _MAP = {
-            "touch":        Priority.ACCESSIBILITY,
-            "multimodal":   Priority.ACCESSIBILITY,  # voice-click bypass
-            "voice":        Priority.VOICE,
-            "voice_local":  Priority.VOICE,
-            "gesture":      Priority.GESTURE,
+            "touch":             Priority.ACCESSIBILITY,
+            "multimodal":        Priority.ACCESSIBILITY,  # voice-click bypass
+            "voice":             Priority.VOICE,
+            "voice_local":       Priority.VOICE,
+            "voice_correction":  Priority.VOICE,
+            "gesture":           Priority.GESTURE,
         }
-        return _MAP.get(source, Priority.ACCESSIBILITY)
+        return _MAP.get(source, Priority.GESTURE)
+
+    @classmethod
+    def _command_coalesce_key(cls, cmd: Command) -> tuple | None:
+        """Return exact behavior identity, or None when identity is inadequate."""
+        if cmd.source not in cls._COALESCE_SOURCES:
+            return None
+        try:
+            params = json.dumps(
+                cmd.params,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            context = tuple(cmd.session_context)
+            hash(context)
+            coords = tuple(cmd.gaze_coords) if cmd.gaze_coords is not None else None
+        except (TypeError, ValueError):
+            return None
+        return (cmd.action, cmd.text, params, coords, context)
+
+    def _degraded_record(self, reason: str, *, coalesced: bool = False) -> None:
+        self._degraded_reason_counts[reason] += 1
+        if coalesced:
+            self._degraded_coalesced_total += 1
+        else:
+            self._degraded_denied_total += 1
+        self._publish_degraded_route_tasks_inflight()
 
     def refresh_screen_geometry(self) -> bool:
         """Re-query the virtual desktop bounds; update them if they changed.
@@ -351,8 +446,18 @@ class FusionEngine:
         self._db = db
 
     def set_metrics(self, metrics) -> None:
-        """Wire Metrics singleton for real-time counter/gauge updates."""
+        """Wire Metrics for real-time updates and live degraded-load reads."""
         self._metrics = metrics
+        register_provider = getattr(metrics, "register_gauge_provider", None)
+        if callable(register_provider):
+            try:
+                register_provider(
+                    "fusion_engine_degraded_routes",
+                    self._degraded_route_task_gauges,
+                )
+            except Exception:
+                pass
+        self._publish_degraded_route_tasks_inflight()
 
     def set_session_id(self, session_id: int) -> None:
         """Set current session ID for telemetry rows."""
@@ -882,56 +987,64 @@ class FusionEngine:
     # single-flight purposes. Deliberately EXCLUDES "multimodal" (the voice-click
     # bypass, Rule 2): clicks must stay instant and may legitimately repeat in
     # quick succession, so they are never throttled here.
-    _VOICE_SOURCES = frozenset({"voice", "voice_local"})
+    _VOICE_SOURCES = frozenset({"voice", "voice_local", "voice_correction"})
+    _COALESCE_SOURCES = _VOICE_SOURCES | frozenset({"gesture"})
 
     async def _emit(self, cmd: Command) -> None:
-        # Cross-source voice single-flight. The iPad on-device recognizer and the
-        # PC Whisper stream both transcribe the same utterance and dispatch
-        # independently; the Whisper wake-armed window can also re-fire a
-        # VAD-split phrase. Without this, one spoken "open chrome" launched three
-        # Chrome windows. Collapse redundant voice dispatches inside a short
-        # window to one action. Scoped strictly to voice sources so touch, tilt,
-        # and gesture are never throttled.
+        priority = self._source_to_priority(cmd.source)
+        coalesce_key = self._command_coalesce_key(cmd)
+
+        # Retain the historical short voice duplicate guard, but key it by exact
+        # behavior identity.  Distinct action/text/params/coords/context commands
+        # always pass, even when spoken back-to-back inside the old window.
         window = self._effective_cfg.voice_single_flight_s
-        if window > 0 and cmd.source in self._VOICE_SOURCES:
+        voice_identity = None
+        if coalesce_key is not None and cmd.source in self._VOICE_SOURCES:
+            # Parallel recognizers are one logical voice channel. Source remains
+            # explicit at the scheduler boundary, but the legacy short-window
+            # guard compares exact resolved behavior across that family.
+            voice_identity = coalesce_key
+        if window > 0 and voice_identity is not None:
             now_mono = time.monotonic()
-            if now_mono - self._last_voice_emit_mono < window:
+            if (
+                voice_identity == self._last_voice_emit_identity
+                and now_mono - self._last_voice_emit_mono < window
+            ):
                 log.info(
-                    "FusionEngine: suppressing duplicate voice command "
-                    "(source=%s, within %.1fs single-flight): %r",
+                    "FusionEngine: coalescing exact duplicate voice command "
+                    "(source=%s, within %.1fs): %r",
                     cmd.source, window, cmd.text,
                 )
+                self._voice_exact_coalesced_total += 1
+                self._publish_degraded_route_tasks_inflight()
                 return
+            self._last_voice_emit_identity = voice_identity
             self._last_voice_emit_mono = now_mono
 
-        # Circuit breaker for route-task overflow (Gap F):
-        # During acoustic storms (continuous VAD false-positives) or cloud latency spikes,
-        # in-flight route tasks can accumulate. When they exceed a threshold, shed new
-        # commands (fail-safe to DENY) and log to alerting. Hysteresis prevents chatter.
-        inflight = len(self._route_tasks)
-        if self._metrics:
-            self._metrics.set("coordinator_route_tasks_inflight", float(inflight))
+        if self._scheduler is None:
+            from core.scheduler import decide_admission
 
-        # State machine: closed (accepting) → open (shedding) → closed
-        if not self._route_breaker_open:
-            if inflight > 20:  # Open when queue grows too deep
+            registry_key = None
+            if coalesce_key is not None and priority.name in ("VOICE", "GESTURE"):
+                registry_key = (priority, cmd.source, coalesce_key)
+                if registry_key in self._degraded_active_coalesced:
+                    self._degraded_record("coalesced_exact_key", coalesced=True)
+                    return
+
+            decision = decide_admission(
+                self._scheduler_config,
+                self._degraded_by_priority,
+                priority,
+            )
+            if not decision.accepted:
                 self._route_breaker_open = True
-                log.error(
-                    "FusionEngine: route-task breaker OPENED (inflight=%d) — "
-                    "shedding commands until queue drains below 5",
-                    inflight
+                self._degraded_record(decision.reason or "denied_hard_limit")
+                log.warning(
+                    "FusionEngine: degraded admission denied source=%s reason=%s",
+                    cmd.source, decision.reason,
                 )
-        else:
-            if inflight < 5:  # Close when queue drains (hysteresis)
-                self._route_breaker_open = False
-                log.warning("FusionEngine: route-task breaker CLOSED (inflight=%d)", inflight)
-
-        if self._route_breaker_open:
-            # Shed: drop the command and increment the counter
-            log.warning("FusionEngine: shedding command due to route-task overflow (inflight=%d)", inflight)
-            if self._metrics:
-                self._metrics.inc("route_task_breaker_sheds")
-            return
+                return
+            self._route_breaker_open = False
 
         # Track last active source for telemetry and metrics
         self._last_active_source = cmd.source
@@ -954,31 +1067,36 @@ class FusionEngine:
                 self._active_trace_id = cmd.trace_id
                 self._active_trace_ts = time.time()
             if self._scheduler is not None:
-                # Priority-aware dispatch: DEV_AGENT/BACKGROUND tasks are gated
-                # so they cannot starve accessibility commands during a flare.
-                priority = self._source_to_priority(cmd.source)
+                stale_after_s = None
+                if priority.name == "VOICE":
+                    stale_after_s = self._scheduler_config.voice_stale_after_s
+                elif priority.name == "GESTURE":
+                    stale_after_s = self._scheduler_config.gesture_stale_after_s
                 self._scheduler.submit(
                     self._coordinator.route(cmd),
                     priority=priority,
                     label=cmd.source,
                     trace_id=cmd.trace_id,
+                    source=cmd.source,
+                    coalesce_key=coalesce_key,
+                    stale_after_s=stale_after_s,
                 )
             else:
                 # Intentional graceful-degradation path (NOT unfinished): direct
                 # fire-and-forget when no scheduler is wired. Reached only (a) in
                 # the brief startup window before main.py calls set_scheduler, or
                 # (b) when the watchdog deliberately set_scheduler(None) because the
-                # scheduler wedged — so accessibility keeps flowing. It loses only
-                # the scheduler's PRIORITY ordering; the route-task circuit breaker
-                # above still bounds it (tracked tasks → inflight → shed), so this
-                # never becomes unbounded. AGENTS.md #2: no blocking work here.
+                # scheduler wedged — so accessibility keeps flowing. The same
+                # injected limits/reserve are enforced locally against the
+                # degraded task set, without blocking the 60 Hz loop.
                 task = asyncio.create_task(self._coordinator.route(cmd))
                 self._route_tasks.add(task)
-                task.add_done_callback(self._route_tasks.discard)
-                task.add_done_callback(
-                    lambda t: log.error("FusionEngine route task failed: %s", t.exception())
-                    if not t.cancelled() and t.exception() else None
-                )
+                self._degraded_by_priority[priority] += 1
+                self._degraded_task_metadata[task] = (priority, registry_key)
+                if registry_key is not None:
+                    self._degraded_active_coalesced[registry_key] = task
+                self._publish_degraded_route_tasks_inflight()
+                task.add_done_callback(self._route_task_done)
         else:
             log.warning("FusionEngine: no coordinator set — dropping %r", cmd)
 
