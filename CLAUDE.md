@@ -17,7 +17,7 @@ The user controls a Windows desktop through voice, hand gesture, iPad tilt, and 
 - Open tasks: `specs/ipad-sensor-focus/tasks.md`
 - Daily reviews: `docs/daily/`
 
-## Current Status (2026-07-03)
+## Current Status (2026-10-18)
 
 > **Schema:** `agent.db` at `PRAGMA user_version = 9`. Do not rely on table counts in this file — `storage/db.py` is the authoritative source per AGENTS.md #1.
 
@@ -177,7 +177,7 @@ by `tests/test_flags_registry.py`.
 
 - **DevAgent saga: per-step compensation, not whole-tree git stash (D009).** `_snapshot_for_write` backs up individual files pre-write; `_halt_and_compensate` unwinds in reverse. Successful runs persist checkpoints which can be rolled back via VoiceRewindHandler ("undo that run"). Two preserved non-goals: Critic REVISE doesn't snapshot (pre-disk, D007); Tester failure never rolls back a good write (D008). Spec: `specs/dev-agent-sagas/`.
 
-- **WSL terminal routing is ON by default.** Without it, bwrap/firejail never applies on a Windows host — `RUN_TERMINAL` falls through to allowlist-only silently. Windows-only commands (PowerShell/cmd/`*.exe`) stay native; `enabled: false` to opt out. Spec: `specs/wsl-terminal-routing/`.
+- **WSL terminal routing is ON by default, and harness containment depends on it.** Without it there is no namespace jail on Windows, so autonomous/untrusted `RUN_TERMINAL` and Tester runs are *denied* before process creation (D034/D039). Only trusted manual sources (`chat`, `voice`, `touch`, …) fall back to native, with one quiet notice; unknown sources count as untrusted. Windows-only commands stay native; set `enabled: false` to opt out. Specs: `specs/wsl-terminal-routing/`, `specs/harness-boundary-hardening/`.
 
 - **Conversation mode uses anchored equality for wake/sleep detection (D012).** Fuzzy match rejected — "how do you say goodbye in French" must not exit sleep mode. `_speak_and_suppress` mutes mic before + after TTS to prevent self-transcription. Spec: `specs/conversation-mode/`.
 
