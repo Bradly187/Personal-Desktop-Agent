@@ -1,10 +1,15 @@
 import asyncio
 import logging
 import os
+import re
+import secrets
 import time
 from pathlib import Path
 from typing import Optional
 
+from core.action_lifecycle import (
+    ActionIdentity, ActionOutcome, ActionStatus, RegistryFullError,
+)
 from core.approval_keywords import classify_confirmation
 from core.events import (
     TOPIC_PLAN_GENERATED, TOPIC_DAG_APPROVAL,
@@ -309,6 +314,7 @@ async def _plan_and_run_locked(
     replans = 0
     cancelled = False
     halted_reason: Optional[str] = None
+    interrupted_unknown = False
     compensated = False   # ensure rollback runs exactly once per terminal path
 
     # Execution strategy:
@@ -327,28 +333,39 @@ async def _plan_and_run_locked(
         # has the failed step's dependents already pruned, so we never run a
         # step whose precondition failed.
         if dag_failed_step is not None and not cancelled:
-            recovered = False
-            if replans < agent.MAX_REPLANS and not agent._cancel_event.is_set():
-                replans += 1
-                new_remaining = await _try_replan(agent, goal, executed, remaining)
-                if new_remaining is not None:
-                    remaining = new_remaining
-                    agent._total_steps = len(executed) + len(remaining)
-                    recovered = True
-                    log.info("DevAgent: replanned after DAG failure %s — "
-                             "%d new step(s) (replan %d/%d)",
-                             dag_failed_step.action, len(remaining),
-                             replans, agent.MAX_REPLANS)
-            if not recovered:
+            if dag_failed_step.lifecycle_status is ActionStatus.OUTCOME_UNKNOWN:
+                interrupted_unknown = True
                 halted_reason = (
-                    f"halted after failed {dag_failed_step.action} (no recovery plan)"
+                    f"interrupted: {dag_failed_step.action} outcome remains unknown "
+                    f"(action_id={dag_failed_step.action_id})"
                 )
                 log.warning("DevAgent: %s", halted_reason)
-                await agent._halt_and_compensate(
-                    run_id, goal, replans, dag_failed_step.action
-                )
-                compensated = True
+                # Never compensate or replan while the original destructive
+                # worker may still commit its side effect.
                 remaining = []
+            else:
+                recovered = False
+                if replans < agent.MAX_REPLANS and not agent._cancel_event.is_set():
+                    replans += 1
+                    new_remaining = await _try_replan(agent, goal, executed, remaining)
+                    if new_remaining is not None:
+                        remaining = new_remaining
+                        agent._total_steps = len(executed) + len(remaining)
+                        recovered = True
+                        log.info("DevAgent: replanned after DAG failure %s — "
+                                 "%d new step(s) (replan %d/%d)",
+                                 dag_failed_step.action, len(remaining),
+                                 replans, agent.MAX_REPLANS)
+                if not recovered:
+                    halted_reason = (
+                        f"halted after failed {dag_failed_step.action} (no recovery plan)"
+                    )
+                    log.warning("DevAgent: %s", halted_reason)
+                    await agent._halt_and_compensate(
+                        run_id, goal, replans, dag_failed_step.action
+                    )
+                    compensated = True
+                    remaining = []
     else:
         await _gather_readonly_prefix(agent, remaining, executed, run_id)
 
@@ -370,6 +387,8 @@ async def _plan_and_run_locked(
 
         step = remaining.pop(0)
         agent._current_step = len(executed) + 1
+        step.run_id = run_id
+        step.step_num = agent._current_step
         agent._total_steps = len(executed) + 1 + len(remaining)
         log.info("DevAgent: step %d  action=%s  args=%r",
                  agent._current_step, step.action, step.args[:60])
@@ -382,7 +401,19 @@ async def _plan_and_run_locked(
         if ok:
             continue
 
-        # Step failed — try a bounded recovery replan; otherwise halt.
+        if step.lifecycle_status is ActionStatus.OUTCOME_UNKNOWN:
+            interrupted_unknown = True
+            halted_reason = (
+                f"interrupted: {step.action} outcome remains unknown "
+                f"(action_id={step.action_id})"
+            )
+            log.warning("DevAgent: %s", halted_reason)
+            # No retry, recovery replan, or saga compensation can safely run
+            # while the original destructive worker remains unresolved.
+            remaining = []
+            break
+
+        # Proven failure — try a bounded recovery replan; otherwise halt.
         if replans < agent.MAX_REPLANS and not agent._cancel_event.is_set():
             replans += 1
             new_steps = await _try_replan(agent, goal, executed, remaining)
@@ -415,12 +446,23 @@ async def _plan_and_run_locked(
         await agent._run_compensations(run_id, triggered_by="user_cancel")
         compensated = True
 
-    # Step 3: Reflect — summarise outcomes for the user.
-    reflect_text = await agent._reflect(goal, executed, plan_result.model)
+    # Step 3: unknown outcomes get a fixed quiet message; asking the planner to
+    # improvise a completion summary could imply success or suggest a retry.
+    if interrupted_unknown:
+        reflect_text = (
+            "The last action may still be finishing. I stopped the remaining "
+            "destructive work and preserved its action ID for reconciliation."
+        )
+    else:
+        reflect_text = await agent._reflect(goal, executed, plan_result.model)
 
     agent._push_context(
-        f"Completed plan: {goal}\n"
-        + "\n".join(f"  {s.action} → {'ok' if s.success else 'failed'}" for s in executed)
+        f"{'Interrupted/unknown' if interrupted_unknown else 'Completed'} plan: {goal}\n"
+        + "\n".join(
+            f"  {step.action} → "
+            f"{step.lifecycle_status.value if step.lifecycle_status else ('ok' if step.success else 'failed')}"
+            for step in executed
+        )
     )
 
     succeeded = (not cancelled) and (halted_reason is None)
@@ -431,14 +473,22 @@ async def _plan_and_run_locked(
         steps=executed,
         response_text=reflect_text or plan_result.text,
         success=succeeded,
+        error=halted_reason if interrupted_unknown else None,
         total_latency_ms=(time.monotonic() - t0) * 1000,
     )
     agent._results_log.append(result)
-    status = "cancelled" if cancelled else ("completed" if succeeded else "failed")
+    status = (
+        "interrupted" if interrupted_unknown
+        else "cancelled" if cancelled
+        else "completed" if succeeded
+        else "failed"
+    )
     await agent._finalize_run(run_id, result, status)
 
-    # Speak completion summary and clean up goal-session state
-    await agent._speak_plan_completion(result, cancelled)
+    # Unknown work stays quiet and resumable; no completion speech or automatic
+    # compensating activity races the retained worker.
+    if not interrupted_unknown:
+        await agent._speak_plan_completion(result, cancelled)
     _reset_plan_state(agent)
 
     _tracer.record_span("plan_done", trace_id=trace_id,
@@ -447,40 +497,97 @@ async def _plan_and_run_locked(
     return result
 
 async def _run_step_with_retry(agent, step: AgentStep) -> bool:
-    """Execute one step, retrying once for retryable (read-only) verbs.
-
-    Records result/success/latency on `step` and returns its success bool.
-    Destructive verbs are attempted exactly once (no retry).
-    """
-    attempts = 2 if step.action.upper() in agent._RETRYABLE_VERBS else 1
+    """Execute one step with honest unknown handling and read-only retry only."""
+    action = step.action.upper()
+    retryable = action in agent._RETRYABLE_VERBS
+    attempts = 2 if retryable else 1
     for attempt in range(attempts):
         step_t0 = time.monotonic()
         try:
-            # Wall-clock backstop: a step with no internal timeout (vision,
-            # stalled I/O) can't hold the dev permit until the 300s plan
-            # ceiling — it fails here and the loop replans (CancelledError
-            # from a real plan cancel is BaseException and propagates).
-            step.result = await asyncio.wait_for(
-                agent._execute_step(step), timeout=agent.STEP_TIMEOUT_S
+            if retryable:
+                # Read-only work may be cancelled at the caller boundary and
+                # retried because no externally visible effect is possible.
+                step.result = await asyncio.wait_for(
+                    agent._execute_step(step), timeout=agent.STEP_TIMEOUT_S
+                )
+                step.lifecycle_status = ActionStatus.COMPLETED
+                step.success = True
+                step.latency_ms = (time.monotonic() - step_t0) * 1000
+                return True
+
+            if not step.action_id:
+                step.action_id = secrets.token_urlsafe(32)
+            identity = ActionIdentity(
+                action_id=step.action_id,
+                action=action,
+                trace_id=agent._active_trace_id,
+                run_id=step.run_id,
+                step_num=step.step_num,
             )
-            step.success = True
+            if action in agent._COMMAND_DELEGATED_VERBS:
+                delegated = await agent._execute_step(step)
+                outcome = (
+                    delegated
+                    if isinstance(delegated, ActionOutcome)
+                    else ActionOutcome(
+                        ActionStatus.COMPLETED,
+                        action,
+                        agent._active_trace_id,
+                        step.run_id,
+                        step.step_num,
+                        step.action_id,
+                        result=delegated,
+                    )
+                )
+            else:
+                outcome = await agent._action_registry.execute(
+                    identity,
+                    lambda: agent._execute_step(step),
+                    timeout_s=agent.STEP_TIMEOUT_S,
+                    destructive=True,
+                    reconciliation_grace_s=agent.RECONCILIATION_GRACE_S,
+                )
+            step.lifecycle_status = outcome.status
             step.latency_ms = (time.monotonic() - step_t0) * 1000
-            return True
+            if outcome.status is ActionStatus.COMPLETED:
+                step.result = str(outcome.result or "")
+                step.success = True
+                return True
+            step.result = outcome.error or outcome.status.value
+            if outcome.status is ActionStatus.OUTCOME_UNKNOWN:
+                step.result = f"{step.result} (action_id={step.action_id})"
+            step.success = None if outcome.status is ActionStatus.OUTCOME_UNKNOWN else False
+            if outcome.status is ActionStatus.OUTCOME_UNKNOWN:
+                log.warning(
+                    "DevAgent: step %s outcome unknown; destructive branch stopped (action_id=%s)",
+                    action, step.action_id,
+                )
+                return False
+            log.error("DevAgent: step %s failed: %s", action, step.result)
+        except RegistryFullError as exc:
+            # Capacity is checked before the work factory starts.
+            step.lifecycle_status = ActionStatus.FAILED
+            step.result = f"ERROR: action denied before execution: {exc}"
+            step.success = False
+            step.latency_ms = (time.monotonic() - step_t0) * 1000
+            return False
         except asyncio.TimeoutError:
+            step.lifecycle_status = ActionStatus.FAILED
             step.result = f"ERROR: step timed out after {agent.STEP_TIMEOUT_S}s"
             step.success = False
             step.latency_ms = (time.monotonic() - step_t0) * 1000
             log.error(
-                "DevAgent: step %s timed out after %ds (attempt %d/%d)",
-                step.action, agent.STEP_TIMEOUT_S, attempt + 1, attempts,
+                "DevAgent: read-only step %s timed out after %ss (attempt %d/%d)",
+                action, agent.STEP_TIMEOUT_S, attempt + 1, attempts,
             )
         except Exception as exc:
+            step.lifecycle_status = ActionStatus.FAILED
             step.result = f"ERROR: {exc}"
             step.success = False
             step.latency_ms = (time.monotonic() - step_t0) * 1000
             log.error(
                 "DevAgent: step %s failed (attempt %d/%d): %s",
-                step.action, attempt + 1, attempts, exc,
+                action, attempt + 1, attempts, exc,
             )
     return False
 
@@ -572,10 +679,9 @@ async def _run_dag_waves(
     """Execute a dependency-ordered plan in waves, fanning out independent steps.
 
     Each wave runs every step whose declared deps are already satisfied:
-    fan-out-safe steps (reads / WRITE_FILE / EXPLAIN) run CONCURRENTLY via the
-    scheduler's sub-agent pool; barrier steps (RUN_TERMINAL, git, UI, …) run
-    SOLO. Steps are 1-based by their original plan position (what `deps`
-    reference).
+    read-only fan-out-safe steps run CONCURRENTLY via the scheduler's sub-agent
+    pool; destructive steps and other barriers run SOLO. Destructive steps are
+    additionally held to their approved plan order.
 
     Stops on the first failure, on a dependency cycle / dep-on-failed-step
     (no ready steps), or on cancellation. On a failure it DROPS the failed
@@ -631,8 +737,10 @@ async def _run_dag_waves(
             deduped_safe.append(i)
         safe = deduped_safe
 
-        # Live DAG: every step in this concurrent batch lights up together.
+        # Bind durable identity before any task in the wave can start.
         for i in safe:
+            pending[i].run_id = run_id
+            pending[i].step_num = agent._step_seq.get(id(pending[i]), i)
             await agent._emit_step_started(pending[i])
         # Fan-out-safe ready steps run concurrently (or inline if just one).
         if len(safe) >= 2 and agent._scheduler is not None:
@@ -649,6 +757,10 @@ async def _run_dag_waves(
             await agent._persist_step(run_id, len(executed), step)
             if ok is True:
                 completed.add(idx)
+            elif step.lifecycle_status is ActionStatus.OUTCOME_UNKNOWN:
+                # Unknown dominates a proven failure in the same concurrent
+                # wave: any live destructive worker forbids recovery activity.
+                failed_step, failed_idx = step, idx
             elif failed_step is None:
                 failed_step, failed_idx = step, idx
         if failed_step is not None:
@@ -659,6 +771,8 @@ async def _run_dag_waves(
             if agent._cancel_event.is_set():
                 cancelled = True
                 break
+            pending[idx].run_id = run_id
+            pending[idx].step_num = agent._step_seq.get(id(pending[idx]), idx)
             await agent._emit_step_started(pending[idx])
             ok = await agent._run_step_with_retry( pending[idx])
             step = pending.pop(idx)
@@ -836,6 +950,32 @@ async def _try_replan(
     budget = max(0, agent.MAX_STEPS - len(executed))
     return new_steps[:budget]
 
+async def _reconcile_interrupted_unknowns(agent, run_id: int) -> tuple[bool, list[str]]:
+    """Return (blocked, terminal evidence) for persisted unknown action IDs."""
+    db = agent._db()
+    if not db or not getattr(db, "available", False):
+        return False, []
+    steps = await db.runs.get_steps_for_run(run_id)
+    unknown_ids: list[str] = []
+    for step in steps:
+        match = re.search(r"action_id=([^\s)]+)", str(step.get("result") or ""))
+        if match:
+            unknown_ids.append(match.group(1))
+    if not unknown_ids:
+        return False, []
+
+    observations = {item.action_id: item for item in await agent._action_registry.snapshot()}
+    summaries: list[str] = []
+    for action_id in unknown_ids:
+        outcome = observations.get(action_id)
+        if outcome is None or outcome.status is ActionStatus.OUTCOME_UNKNOWN:
+            return True, []
+        summaries.append(
+            f"action_id={action_id} {outcome.action} reconciled {outcome.status.value}"
+        )
+    return False, summaries
+
+
 async def resume_pending_plan(agent) -> Optional[dict]:
     """Offer to resume the most recent interrupted plan, gated on voice confirm.
 
@@ -853,6 +993,20 @@ async def resume_pending_plan(agent) -> Optional[dict]:
         return None
     run = runs[0]
     goal = run.get("goal", "")
+    run_id = run.get("id")
+    blocked_unknown = False
+    reconciled: list[str] = []
+    if run_id is not None:
+        blocked_unknown, reconciled = await _reconcile_interrupted_unknowns(
+            agent, int(run_id)
+        )
+    if blocked_unknown:
+        log.warning(
+            "DevAgent.resume_pending_plan: run %s still has unresolved action work; "
+            "resume and compensation remain blocked",
+            run_id,
+        )
+        return None
     if not await agent._confirm_destructive_op(f"Resume the interrupted task: {goal[:60]}?"):
         log.info("DevAgent.resume_pending_plan: user declined resume of run %s", run.get("id"))
         # Declining a resume rolls back the crashed run's completed side
@@ -868,7 +1022,13 @@ async def resume_pending_plan(agent) -> Optional[dict]:
     # recovers instead of restarting blind. Flag-gated (DA_RESUME_MEMORY) and
     # degrades to an empty seed (today's behavior) on any failure (R2, R3.2).
     seed = await _resume_seed_context(agent, run.get("id"), goal, run=run)
-    await agent.plan_and_run( goal, seed_context=seed)
+    if reconciled:
+        evidence = "Reconciled prior action outcomes:\n" + "\n".join(reconciled)
+        seed = f"{evidence}\n\n{seed}" if seed else evidence
+    await agent.plan_and_run(
+        goal,
+        seed_context=seed,
+    )
     return run
 
 async def _resume_seed_context(agent, run_id, goal: str, run: dict = None) -> str:
@@ -951,7 +1111,7 @@ async def drain_goal_queue(agent, max_goals: int = 0) -> int:
                 })
                 _g_status, _g_ok = "failed", False
                 try:
-                    result = await agent.plan_and_run( goal["goal"])
+                    result = await agent.plan_and_run(goal["goal"])
                     _g_ok = bool(result.success)
                     _g_status = "done" if _g_ok else "failed"
                     await db.goals.complete_goal(gid, _g_status, error=result.error)

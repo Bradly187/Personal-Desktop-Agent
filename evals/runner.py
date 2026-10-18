@@ -687,20 +687,9 @@ def run_sandbox_suite(cases: list, build_dev_agent, *, timeout_s: float = 120.0)
     import subprocess
 
     async def _run_all():
-        dev = build_dev_agent()
-
-        async def _auto_approve(goal: str, steps, **kwargs) -> str:
-            return "auto"
-        dev._approve_plan_upfront = _auto_approve   # type: ignore[attr-defined]
-
         results = []
         for case in cases:
             t0 = time.monotonic()
-            try:
-                dev._context.clear()
-            except Exception:
-                pass
-                
             with tempfile.TemporaryDirectory() as temp_dir:
                 if case.setup_script:
                     try:
@@ -721,8 +710,13 @@ def run_sandbox_suite(cases: list, build_dev_agent, *, timeout_s: float = 120.0)
                         results.append(score_sandbox(case, passed=False, error="setup timeout", latency_ms=lat))
                         continue
                         
+                dev = build_dev_agent(temp_dir)
+
+                async def _auto_approve(goal: str, steps, **kwargs) -> str:
+                    return "auto"
+                dev._approve_plan_upfront = _auto_approve   # type: ignore[attr-defined]
                 dev.set_repo_root(temp_dir)
-                
+
                 try:
                     res = await asyncio.wait_for(dev.plan_and_run(case.goal), timeout_s)
                 except Exception as exc:

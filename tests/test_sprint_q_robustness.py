@@ -165,7 +165,7 @@ def test_git_commit_staging_failure_raises_runtimeerror(monkeypatch):
     # it is actually called.
     monkeypatch.setattr(git_executor.subprocess, "run", lambda *a, **k: _Res())
     with pytest.raises(RuntimeError, match="git add failed"):
-        dev_agent.DevAgent._git_commit("msg")
+        dev_agent.DevAgent._git_commit("msg", cwd=str(Path.cwd()))
 
 
 # ---------------------------------------------------------------------------

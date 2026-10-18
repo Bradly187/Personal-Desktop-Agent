@@ -238,3 +238,44 @@ def test_run_sandboxed_stdin_closed_fails_fast(monkeypatch):
     )
     assert r.returncode == 0
     assert "''" in r.stdout        # read() saw EOF immediately, no hang
+
+
+def test_noninteractive_env_strips_proxy_auth_but_preserves_other_credentials():
+    env = sb.noninteractive_env({
+        "WSL_ACTION_PROXY_TOKEN": "secret-token",
+        "WSL_ACTION_PROXY_INSTANCE": "instance-id",
+        "WSL_PROXY_CHALLENGE": "challenge",
+        "WSL_PROXY_PROOF": "proof",
+        "GH_TOKEN": "github-token",
+        "CUSTOM_VALUE": "keep-me",
+    })
+
+    assert "WSL_ACTION_PROXY_TOKEN" not in env
+    assert "WSL_ACTION_PROXY_INSTANCE" not in env
+    assert "WSL_PROXY_CHALLENGE" not in env
+    assert "WSL_PROXY_PROOF" not in env
+    assert env["GH_TOKEN"] == "github-token"
+    assert env["CUSTOM_VALUE"] == "keep-me"
+
+
+def test_run_sandboxed_child_env_cannot_see_proxy_auth(monkeypatch):
+    import subprocess as _sp
+
+    captured = {}
+
+    def _fake_run(args, **kwargs):
+        captured.update(kwargs["env"])
+        return _sp.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setenv("WSL_ACTION_PROXY_TOKEN", "secret-token")
+    monkeypatch.setenv("WSL_ACTION_PROXY_INSTANCE", "instance-id")
+    monkeypatch.setenv("GH_TOKEN", "github-token")
+    monkeypatch.setattr(sb, "run_capped", _fake_run)
+    monkeypatch.setattr(sb, "sandbox_tool", lambda: None)
+
+    result = run_sandboxed("echo safe", timeout=5)
+
+    assert result.returncode == 0
+    assert "WSL_ACTION_PROXY_TOKEN" not in captured
+    assert "WSL_ACTION_PROXY_INSTANCE" not in captured
+    assert captured["GH_TOKEN"] == "github-token"

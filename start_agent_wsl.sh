@@ -76,26 +76,62 @@ export PATH="$HOME/.local/bin:$PATH"
 # internal version symbol. Prefer CUDA 13.0 which satisfies vllm._C.abi3.so.
 export LD_LIBRARY_PATH="/usr/local/cuda-13.0/targets/x86_64-linux/lib:/usr/lib/wsl/lib:${LD_LIBRARY_PATH}"
 
+verify_proxy_ready() {
+    local ready_file ready_instance
+    ready_file="$(mktemp)"
+    if curl -fsS "${PROXY_URL}/ready?challenge=${WSL_PROXY_CHALLENGE}" \
+        > "$ready_file" 2>/dev/null; then
+        ready_instance="$(python "${PROJ_ROOT}/scripts/verify_proxy_ready.py" "$ready_file" || true)"
+    fi
+    rm -f "$ready_file"
+    printf '%s' "${ready_instance:-}"
+}
+
 # ── 4. Windows action proxy ───────────────────────────────────────────────────
-# Desktop control (pyautogui, win32gui, clipboard) is proxied to Windows Python.
-# Run start_windows_proxy.bat on the Windows side before this script.
-info "Checking Windows action proxy on :${PROXY_PORT} ..."
-if curl -sf "${PROXY_URL}/health" >/dev/null 2>&1; then
-    info "Proxy ready."
+# The bootstrap token is outside PROJ_ROOT and therefore outside its writable
+# sandbox bind. It is exposed only to readiness verification and Python startup.
+TOKEN_FILE="${MOUNT_POINT}/Personal_Desktop_Agent-secrets/windows_proxy.token"
+PROXY_READY=0
+PROXY_BOOTSTRAP_TOKEN=""
+PROXY_BOOTSTRAP_INSTANCE=""
+if [[ -r "$TOKEN_FILE" ]]; then
+    export WSL_ACTION_PROXY_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+    if [[ -n "$WSL_ACTION_PROXY_TOKEN" ]]; then
+        export WSL_PROXY_CHALLENGE="$(python -c 'import secrets; print(secrets.token_hex(16))')"
+        READY_INSTANCE="$(verify_proxy_ready)"
+        if [[ -n "$READY_INSTANCE" ]]; then
+            PROXY_READY=1
+            PROXY_BOOTSTRAP_TOKEN="$WSL_ACTION_PROXY_TOKEN"
+            PROXY_BOOTSTRAP_INSTANCE="$READY_INSTANCE"
+        fi
+        unset WSL_PROXY_CHALLENGE READY_INSTANCE
+    fi
 else
-    warn "Proxy not responding on :${PROXY_PORT}."
+    warn "Proxy authentication token missing; restart start_windows_proxy.bat."
+fi
+# Do not let shell helpers or the tee process inherit bootstrap authentication.
+unset WSL_ACTION_PROXY_TOKEN WSL_ACTION_PROXY_INSTANCE WSL_PROXY_PROOF
+
+info "Checking Windows action proxy on :${PROXY_PORT} ..."
+if [[ "$PROXY_READY" -eq 1 ]]; then
+    export WSL_ACTION_PROXY="${PROXY_URL}"
+    info "Proxy ready (current process instance verified)."
+else
+    unset WSL_ACTION_PROXY
+    PROXY_BOOTSTRAP_TOKEN=""
+    PROXY_BOOTSTRAP_INSTANCE=""
+    warn "Proxy missing, unready, or using a different token on :${PROXY_PORT}."
     warn "Run start_windows_proxy.bat in Windows PowerShell, then re-run this script."
     warn "Desktop control (CLICK, TYPE, SCROLL, etc.) will fail without the proxy."
     warn "Continuing anyway — voice/gaze/tilt commands that don't require desktop"
     warn "actions (CLARIFY, EXPLAIN, READ_SCREEN, etc.) will still work."
 fi
-export WSL_ACTION_PROXY="${PROXY_URL}"
 
 # ── 5. Python path ────────────────────────────────────────────────────────────
 export PYTHONPATH="${PROJ_ROOT}:${PROJ_ROOT}/mcp_server"
 
 # ── 6. HuggingFace cache (keep in WSL home, not on E drive) ──────────────────
-# Models are cached in ~/.cache/huggingface/ inside WSL — faster than DrvFs.
+# Models are cached in ~/.cache/huggingface/ inside WSL — faster than DrvFS.
 # Override here only if you want models on E drive (slower but persists across
 # WSL resets):
 # export HF_HOME="/mnt/e/hf_cache"
@@ -111,7 +147,11 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] WSL agent starting" > "$LOG"
 info "Starting Personal Desktop Agent (vLLM pool + Gemma 4) ..."
 info "Log: $LOG"
 cd "$PROJ_ROOT"
-exec python main.py \
+# Only the Python process receives these two one-time values. command_executor
+# captures and removes them during module import before any child can be spawned.
+WSL_ACTION_PROXY_TOKEN="$PROXY_BOOTSTRAP_TOKEN" \
+WSL_ACTION_PROXY_INSTANCE="$PROXY_BOOTSTRAP_INSTANCE" \
+python main.py \
     --backend vllm \
     --vllm-pool \
     "$@" \

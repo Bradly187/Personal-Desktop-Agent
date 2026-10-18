@@ -115,3 +115,39 @@ async def test_skill_call_times_out():
 
     assert "timed out" in out.lower()
     assert elapsed < 5.0
+
+
+async def test_destructive_timeout_is_unknown_and_late_worker_is_retained():
+    agent = _agent()
+    agent.STEP_TIMEOUT_S = 0.01
+    agent.RECONCILIATION_GRACE_S = 0.01
+    agent._active_trace_id = "trace-late"
+    release = asyncio.Event()
+    attempts = 0
+
+    async def _late(step):
+        nonlocal attempts
+        attempts += 1
+        await release.wait()
+        return "late success"
+
+    agent._execute_step = _late
+    step = AgentStep(action="WRITE_FILE", args="x.py", run_id=8, step_num=2)
+    ok = await agent._run_step_with_retry(step)
+
+    assert ok is False
+    assert step.success is None
+    assert step.lifecycle_status.value == "outcome_unknown"
+    assert attempts == 1
+    release.set()
+    await asyncio.sleep(0.02)
+    observed = await agent._action_registry.query(
+        __import__("core.action_lifecycle", fromlist=["ActionIdentity"]).ActionIdentity(
+            step.action_id, "WRITE_FILE", "trace-late", 8, 2
+        )
+    )
+    assert observed is not None and observed.status.value == "completed"
+
+
+def test_search_web_is_not_retryable():
+    assert "SEARCH_WEB" not in DevAgent._RETRYABLE_VERBS

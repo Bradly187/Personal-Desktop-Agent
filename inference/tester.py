@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from core.execution_policy import ExecutionScope
+
 log = logging.getLogger(__name__)
 
 _MAX_CODE_CHARS = 6000      # cap the code we show the generator
@@ -103,15 +105,16 @@ class Tester:
 
     __test__ = False  # not a pytest test class
 
-    def __init__(self, router, code_domain: str = "code",
+    def __init__(self, router, *, execution_scope: ExecutionScope,
+                 code_domain: str = "code",
                  scratch_root: Optional[str] = None,
-                 project_dir: Optional[str] = None,
                  sandbox_timeout: float = 60.0) -> None:
         self._router = router
+        self._execution_scope = execution_scope
         self._code_domain = code_domain
         self._scratch_root = Path(scratch_root) if scratch_root else (
-            Path(tempfile.gettempdir()) / "pda_dev_tests")
-        self._project_dir = project_dir or str(Path(__file__).resolve().parents[1])
+            Path(tempfile.gettempdir()) / "pda_dev_tests"
+        )
         self._timeout = sandbox_timeout
 
     async def generate_and_run(self, goal: str, path: str, code: str) -> TestOutcome:
@@ -129,8 +132,35 @@ class Tester:
             test_src = _extract_code_block(getattr(result, "text", "") or "")
             if not test_src:
                 return TestOutcome(skipped=True, reason="no test generated")
-            artifact = self._write_artifact(path, test_src)
-            sb = await asyncio.to_thread(self._run_pytest, artifact.path)
+
+            # Resolve the active project before execution while keeping the
+            # generated artifact in the configured temp scratch directory.
+            cwd_decision = await asyncio.to_thread(
+                self._execution_scope.authorize_cwd, None
+            )
+            if not cwd_decision.allowed or cwd_decision.canonical_path is None:
+                raise PermissionError(cwd_decision.reason or "tester cwd denied")
+            project_dir = str(cwd_decision.canonical_path)
+            artifact_path = self._artifact_path(path, project_dir)
+            artifact_decision = await asyncio.to_thread(
+                self._execution_scope.authorize_path,
+                str(artifact_path),
+                operation="autonomous tester artifact",
+            )
+            if not artifact_decision.allowed or artifact_decision.canonical_path is None:
+                raise PermissionError(
+                    artifact_decision.reason or "autonomous tester artifact denied"
+                )
+            artifact = await asyncio.to_thread(
+                self._write_artifact,
+                artifact_decision.canonical_path,
+                path,
+                test_src,
+            )
+
+            sb = await asyncio.to_thread(
+                self._run_pytest, artifact.path, project_dir
+            )
             passed = sb.returncode == 0
             output = ((sb.stdout or "") + (sb.stderr or ""))[:_MAX_OUTPUT_CHARS]
             note = ("[tester] generated test PASSED" if passed
@@ -141,15 +171,18 @@ class Tester:
             log.warning("Tester: degraded (%s) — skipping", exc)
             return TestOutcome(skipped=True, reason=str(exc))
 
-    def _write_artifact(self, target: str, body: str) -> TestArtifact:
-        self._scratch_root.mkdir(parents=True, exist_ok=True)
+    def _artifact_path(self, target: str, project_dir: str) -> Path:
         stem = Path(target.strip().strip("'\"")).stem or "module"
-        out = self._scratch_root / f"test_gen_{stem}.py"
+        return self._scratch_root / f"test_gen_{stem}.py"
+
+    @staticmethod
+    def _write_artifact(out: Path, target: str, body: str) -> TestArtifact:
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(body, encoding="utf-8")
         return TestArtifact(path=str(out), body=body, target=target)
 
-    def _run_pytest(self, test_path: str):
+    def _run_pytest(self, test_path: str, project_dir: str):
         """One-shot sandboxed `pytest <file>` (R3.7 — no cross-step state)."""
         from inference.sandbox import run_sandboxed
         cmd = f'"{sys.executable}" -m pytest -q "{test_path}"'
-        return run_sandboxed(cmd, project_dir=self._project_dir, timeout=self._timeout)
+        return run_sandboxed(cmd, project_dir=project_dir, timeout=self._timeout)

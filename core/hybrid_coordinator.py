@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from core.command_executor import Command, CommandExecutor
+from core.execution_policy import ExecutionScope
 from core.gate_evaluator import GateEvaluator
 from core.inference_runner import InferenceRunner, _CloudInference
 from core.action_executor import ActionExecutor
@@ -296,11 +297,13 @@ class HybridCoordinator:
         audit_log: Optional["AuditLog"] = None,
         twin_state: Optional["BehavioralTwinState"] = None,
         whisper_stream=None,
+        execution_scope: ExecutionScope | None = None,
     ) -> None:
         self._local = local or OllamaInference()
         self._cfg = config or CoordinatorConfig()
         self._cloud = _CloudInference(self._cfg.anthropic_model)
-        self._executor = CommandExecutor()
+        self._execution_scope = execution_scope or ExecutionScope()
+        self._executor = CommandExecutor(self._execution_scope)
         self._trainer = trainer
         self._dev_agent = dev_agent
         self._skill_registry = None     # SkillRegistry | None — voice 'help' listing
@@ -459,18 +462,23 @@ class HybridCoordinator:
           - ``"activated"``        — the root is now active (appended to the
             allowlist if it was new) and the DevAgent re-points to it.
         """
-        import os as _os
-        from core.goal_session import _path_in_scope
-        rp = _os.path.realpath(_os.path.expanduser(path or ""))
-        if not _os.path.isdir(rp):
+        decision = self._execution_scope.contains(path)
+        rp = str(decision.canonical_path) if decision.canonical_path is not None else path
+        try:
+            valid_dir = decision.canonical_path is not None and decision.canonical_path.is_dir()
+        except OSError:
+            valid_dir = False
+        if not valid_dir:
             return {"status": "invalid", "path": path}
-        already = _path_in_scope(rp, self._executor.writable_roots)
-        if not already and not confirm:
+        if not decision.allowed and not confirm:
             return {"status": "confirm_required", "path": rp}
-        # Already in scope, or an explicit confirm → activate (appends if new).
-        self._executor.set_active_root(rp)
+        activated = self._execution_scope.set_active_root(
+            rp, human_confirmed=bool(confirm or decision.allowed)
+        )
+        if not activated.allowed or activated.canonical_path is None:
+            return {"status": "invalid", "path": path}
         if self._dev_agent is not None:
-            self._dev_agent.set_repo_root(rp)
+            self._dev_agent.set_repo_root(str(activated.canonical_path))
         log.info("HybridCoordinator: active directory → %s (confirm=%s)", rp, confirm)
         return {"status": "activated", "path": rp,
                 "active_root": self._executor.active_root,

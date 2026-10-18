@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 from core.events import TOPIC_STEP_FAILED, TOPIC_REPLAN_EXHAUSTED, TOPIC_DAG_RUN_FINALIZED
+from core.execution_policy import ExecutionScope
 from inference.plan_parser import AgentResult, AgentStep
 
 if TYPE_CHECKING:
@@ -18,13 +19,19 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 class SagaManager:
-    def __init__(self, agent: "DevAgent", agent_db: Optional['AgentDB'] = None):
+    def __init__(
+        self,
+        agent: "DevAgent",
+        agent_db: Optional['AgentDB'] = None,
+        execution_scope: ExecutionScope | None = None,
+    ):
         # Shared run state (_escalated_this_run, _rollback_summary,
         # _active_trace_id, _saga_announce, _escalation_sidecar_path) lives on
         # the agent — reads delegate via __getattr__, writes go through
         # self._agent.X so DevAgent stays the single source of truth.
         self._agent = agent
         self._agent_db = agent_db
+        self._execution_scope = execution_scope or ExecutionScope()
 
     async def _start_run(self, goal: str, model_used: Optional[str]) -> int:
         db = self._db()
@@ -39,6 +46,15 @@ class SagaManager:
     # Max file size we snapshot for a WRITE_FILE rollback. Above this, we record
     # that the file existed (so rollback won't delete it) but keep no backup.
     _SAGA_SNAPSHOT_MAX_BYTES = 256 * 1024
+
+    def snapshot_for_write(self, path_str: Optional[str]) -> dict:
+        """Authorize and snapshot the canonical forward-write target."""
+        decision = self._execution_scope.authorize_path(
+            path_str or "", operation="saga snapshot"
+        )
+        if not decision.allowed or decision.canonical_path is None:
+            raise PermissionError(decision.reason or "saga snapshot denied")
+        return type(self)._snapshot_for_write(str(decision.canonical_path))
 
     @staticmethod
     def _saga_dir() -> Path:
@@ -389,6 +405,24 @@ class SagaManager:
         except Exception as exc:
             log.debug("DevAgent: escalation sidecar rewrite failed: %s", exc)
 
+    def _authorize_compensation_path(self, raw_path: str, operation: str) -> Path:
+        """Canonicalize one compensation target in a filesystem worker."""
+        decision = self._execution_scope.authorize_path(
+            raw_path, operation=operation
+        )
+        if not decision.allowed or decision.canonical_path is None:
+            raise PermissionError(decision.reason or f"{operation} denied")
+        return decision.canonical_path
+
+    def _delete_compensation_file(self, raw_path: str) -> bool:
+        """Authorize and delete a legacy compensation target off the event loop."""
+        path = self._authorize_compensation_path(raw_path, "saga delete")
+        if not path.exists():
+            return False
+        path.unlink()
+        log.info("DevAgent: saga compensation DELETE_FILE %s", path)
+        return True
+
     async def _run_compensations(
         self, run_id: int, triggered_by: str = "step_failure"
     ) -> int:
@@ -422,7 +456,16 @@ class SagaManager:
             await db.sagas.update_saga_compensation(cid, "running", triggered_by=triggered_by)
             try:
                 if caction == "RESTORE_FILE" and cargs:
-                    restored = await asyncio.to_thread(self._restore_file, cargs)
+                    info = json.loads(cargs)
+                    canonical_path = await asyncio.to_thread(
+                        self._authorize_compensation_path,
+                        info.get("path", ""),
+                        "saga restore",
+                    )
+                    info["path"] = str(canonical_path)
+                    restored = await asyncio.to_thread(
+                        self._restore_file, json.dumps(info)
+                    )
                     if restored is False:
                         # An overwritten file with no backup was left in place —
                         # record the truth (E5), not a misleading "done".
@@ -439,11 +482,10 @@ class SagaManager:
                     reverted += 1
                 elif caction == "DELETE_FILE" and cargs:
                     # Legacy/back-compat (no pre-write snapshot was captured).
-                    path = Path(cargs.strip())
-                    if path.exists():
-                        path.unlink()
+                    if await asyncio.to_thread(
+                        self._delete_compensation_file, cargs.strip()
+                    ):
                         reverted += 1
-                        log.info("DevAgent: saga compensation DELETE_FILE %s", path)
                 elif caction == "REVERT_TERMINAL":
                     manual += 1
                     log.warning(
@@ -527,12 +569,16 @@ class SagaManager:
                 success=result.success, total_latency_ms=result.total_latency_ms,
                 error=result.error,
             )
-            # Any compensation still 'pending' here was never triggered (the run
-            # succeeded, or a path that didn't roll back). For successful runs,
-            # we promote them to 'checkpoint' so VoiceRewindHandler can restore them.
-            # For failed/cancelled runs (already rolled back), any leftovers are skipped.
-            new_status = 'checkpoint' if result.success else 'skipped'
-            promoted = await db.sagas.skip_pending_compensations(run_id, new_status=new_status)
+            # Unknown/interrupted work must remain resumable and cannot have its
+            # rollback record consumed or skipped while the original action may
+            # still finish. Proven terminal paths keep the existing behavior.
+            if status == "interrupted":
+                promoted = 0
+            else:
+                new_status = 'checkpoint' if result.success else 'skipped'
+                promoted = await db.sagas.skip_pending_compensations(
+                    run_id, new_status=new_status
+                )
             # Chat undo affordance (specs/chat-workbench-parity R8.2): a run that
             # persisted checkpoints can be rolled back ("undo this run"), so tell
             # the originating chat turn. No-op for non-chat runs.

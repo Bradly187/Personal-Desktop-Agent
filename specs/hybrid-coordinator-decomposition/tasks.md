@@ -1,6 +1,6 @@
 # Tasks: HybridCoordinator Decomposition
 
-**Status:** Complete on `feat/dev-agent-plan-fidelity` — pending PR/merge to master.
+**Status:** Complete on `master` — explicitly confirmed by Brad, 2026-09-27.
 
 ## Phase 1 — GateEvaluator
 

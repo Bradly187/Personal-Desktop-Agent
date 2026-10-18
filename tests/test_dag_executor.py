@@ -281,3 +281,37 @@ async def test_dag_failure_triggers_replan_not_blind_continue():
     assert "recovered" in ran                       # replan executed
     assert agent._router.infer.await_count == 2     # initial plan + exactly 1 replan
     assert result.success is True
+
+
+async def test_dag_destructive_unknown_stops_dependents_without_replan_or_compensation():
+    agent = _agent_with_plan(
+        "Step 1: [EXPLAIN ready]\n"
+        "Step 2: [RUN_TERMINAL hang] (after: 1)\n"
+        "Step 3: [WRITE_FILE must-not-run] (after: 2)"
+    )
+    agent.STEP_TIMEOUT_S = 0.01
+    agent.RECONCILIATION_GRACE_S = 0.01
+    release = asyncio.Event()
+    agent._halt_and_compensate = AsyncMock()
+    agent._run_compensations = AsyncMock()
+    ran = []
+
+    async def _exec(step):
+        ran.append(step.args)
+        if step.action == "RUN_TERMINAL":
+            await release.wait()
+        return "ok"
+
+    agent._execute_step = _exec
+    result = await agent.plan_and_run("unknown dag")
+
+    assert result.success is False
+    assert result.error and "outcome remains unknown" in result.error
+    assert "must-not-run" not in ran
+    assert agent._router.infer.await_count == 1
+    agent._halt_and_compensate.assert_not_awaited()
+    agent._run_compensations.assert_not_awaited()
+    agent._speak_plan_completion.assert_not_awaited()
+
+    release.set()
+    await asyncio.sleep(0.02)
