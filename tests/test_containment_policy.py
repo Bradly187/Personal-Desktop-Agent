@@ -320,13 +320,16 @@ def test_tester_command_can_route_through_windows_wsl_jail(monkeypatch, tmp_path
         return subprocess.CompletedProcess(argv, 0, "1 passed", "")
 
     monkeypatch.setattr(sb, "run_capped", fake_run)
+    # A real directory on whatever drive the host has (CI runners have no E:).
+    project = tmp_path / "project"
+    project.mkdir()
     tester = Tester(
         MagicMock(),
-        execution_scope=ExecutionScope("E:\\project", ["E:\\project"]),
+        execution_scope=ExecutionScope(project, [project]),
     )
     test_path = tmp_path / "test_gen_x.py"
     test_path.write_text("def test_x():\n    assert True\n", encoding="utf-8")
-    result = tester._run_pytest(str(test_path), "E:\\project")
+    result = tester._run_pytest(str(test_path), str(project))
     assert result.returncode == 0
     assert result.containment.level is sb.ContainmentLevel.NAMESPACE_JAIL
     command = captured["argv"][-1]
