@@ -54,6 +54,18 @@ async def prepare_file_candidate(agent: "DevAgent", step: AgentStep) -> tuple[st
     return target, new_text
 
 
+def _taint_terminal_work(agent) -> None:
+    """Monotonically downgrade the active plan after retrieved/external data."""
+    from inference.sandbox import WorkTrust, combine_work_trust
+
+    current = getattr(
+        agent, "_active_work_trust", WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+    )
+    agent._active_work_trust = combine_work_trust(
+        current, WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+    )
+
+
 async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
     action = step.action.upper()
 
@@ -127,6 +139,8 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
             run_terminal,
             cmd,
             cwd=cwd,
+            work_trust=getattr(agent, "_active_work_trust", None),
+            containment_policy=getattr(agent, "_containment_policy", None),
         )
 
     if action == "EXPLAIN":
@@ -232,10 +246,14 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         url = (step.args or step.body or "").strip()
         if not url:
             raise ValueError("FETCH_URL requires a URL")
-        return await fetch_url(url)
+        result = await fetch_url(url)
+        _taint_terminal_work(agent)
+        return result
 
     if action in ("SKILL_QUERY", "SKILL_CALL"):
-        return await execute_skill_step(agent, step)
+        result = await execute_skill_step(agent, step)
+        _taint_terminal_work(agent)
+        return result
 
     if action == "SEARCH_PERSONAL":
         # Read-only semantic search over the user's own documents. Results
@@ -264,6 +282,7 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
                 return "[personal search result withheld — flagged as potentially unsafe]"
         except Exception as exc:
             log.debug("SEARCH_PERSONAL taint check failed: %s", exc)
+        _taint_terminal_work(agent)
         return f"{_RAG_OPEN_FENCE}\n{body}\n{_RAG_CLOSE_FENCE}"
 
     # Fall through: accessibility verbs → CommandExecutor

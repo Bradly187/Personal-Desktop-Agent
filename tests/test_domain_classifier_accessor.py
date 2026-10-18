@@ -54,5 +54,6 @@ def test_dev_pregate_uses_real_classifier_without_error():
     ))
 
     coord._dev_agent.handle.assert_awaited_once()
+    assert coord._dev_agent.handle.await_args.kwargs["source"] == "voice"
     assert result["action"] == "dev_agent"
     assert result["backend"] == "local"

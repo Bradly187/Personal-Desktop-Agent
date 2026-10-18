@@ -250,7 +250,14 @@ class Metrics:
             "fusion_degraded_reason_denied_accessibility_reserve": 0.0,
             "fusion_degraded_reason_denied_hard_limit": 0.0,
             "fusion_degraded_reason_coalesced_exact_key": 0.0,
+            # Last effective terminal containment; detailed strings live in
+            # component_status so numeric gauge consumers stay compatible.
+            "containment_level": 0.0,
         }
+
+        # Cached structured component state. Writers replace whole JSON-safe
+        # records under the same lock; readers never trigger probes or I/O.
+        self._component_status: dict[str, dict] = {}
 
         # Dynamic providers are process-lifetime records that replace by name.
         # Identity, key ownership, and initial values commit atomically.
@@ -311,6 +318,11 @@ class Metrics:
         finally:
             self._lock.release()
         return True
+
+    def set_component_status(self, name: str, status: Mapping[str, object]) -> None:
+        """Replace one cached JSON-safe component status record."""
+        with self._lock:
+            self._component_status[name] = dict(status)
 
     def register_gauge_provider(
         self,
@@ -538,6 +550,10 @@ class Metrics:
                     "source_counts": dict(self._source_counts),
                     "domain_counts": dict(self._domain_counts),
                     "recent_commands": list(self._recent_commands),
+                    "component_status": {
+                        name: dict(status)
+                        for name, status in self._component_status.items()
+                    },
                     "ts": time.time(),
                 }
 

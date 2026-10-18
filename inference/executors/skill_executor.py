@@ -176,11 +176,11 @@ async def audit_skill(executor, skill_id: str, tool: str, is_send: bool,
     except Exception as exc:
         log.debug("Skill audit write failed: %s", exc)
 
-async def handle_skill(executor, text: str) -> AgentResult:
+async def handle_skill(executor, text: str, *, work_trust=None) -> AgentResult:
     t0 = time.monotonic()
     match = executor._skill_registry.match_intent(text)
     if match.get("plan"):
-        return await executor.plan_and_run(text)
+        return await executor.plan_and_run(text, work_trust=work_trust)
     schema = executor._skill_registry.tool_schema(match["skill_id"], match["tool"])
     args = build_skill_args(text, match, schema)
     step = AgentStep(

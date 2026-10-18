@@ -66,7 +66,7 @@ def test_run_terminal_cwd_outside_scope_denied(tmp_path):
 
 def test_run_terminal_cwd_inside_scope_not_denied(tmp_path):
     ex = _executor(tmp_path)
-    cmd = Command(text="echo hi", action="RUN_TERMINAL", source="test",
+    cmd = Command(text="echo hi", action="RUN_TERMINAL", source="voice",
                   params={"command": "echo hi", "cwd": str(tmp_path)})
     res = ex._dispatch("RUN_TERMINAL", cmd)
     # The allowlist must not block an in-scope cwd; the command runs normally.

@@ -31,7 +31,8 @@ def _params(fn) -> list[str]:
 def test_dev_agent_plan_and_run_signature():
     from inference.executors import plan_executor
     assert _params(plan_executor.plan_and_run) == [
-        "agent", "goal", "trace_id", "seed_context", "extra_context"], _HOWTO
+        "agent", "goal", "trace_id", "seed_context", "extra_context",
+        "work_trust"], _HOWTO
     assert _params(plan_executor._plan_and_run_locked) == [
         "agent", "goal", "cmd_trace_id", "seed_context", "turn_context"], _HOWTO
 
@@ -39,7 +40,8 @@ def test_dev_agent_plan_and_run_signature():
 def test_dev_agent_handle_signature():
     from inference.dev_agent import DevAgent
     assert _params(DevAgent.handle) == [
-        "self", "text", "screenshot_b64", "trace_id", "attachment_context"], _HOWTO
+        "self", "text", "screenshot_b64", "trace_id", "attachment_context",
+        "source"], _HOWTO
 
 
 def test_model_router_infer_signature():

@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.action_lifecycle import ActionIdentity, ActionStatus
 from core.command_executor import CommandExecutor
 from inference.dev_agent import DevAgent
+from inference.sandbox import WorkTrust
 from core.goal_session import GoalSessionStore
 
 
@@ -278,3 +279,77 @@ async def test_delegated_proxy_unknown_remains_locally_reconcilable(monkeypatch)
     assert result_queries >= 1
     assert observed is not None and observed.status is ActionStatus.COMPLETED
     assert observed.result == {"clicked": True}
+
+
+@pytest.mark.asyncio
+async def test_initial_rag_context_taints_later_terminal_work():
+    agent = _agent_with_plan(_RR("Step 1: [RUN_TERMINAL pytest -q]"))
+    agent._rag_context = AsyncMock(return_value="retrieved code context")
+    observed = []
+
+    async def exec_step(step):
+        observed.append(agent._active_work_trust)
+        return "ok"
+
+    agent._execute_step = exec_step
+    result = await agent.plan_and_run(
+        "test the change", work_trust=WorkTrust.TRUSTED_MANUAL
+    )
+    assert result.success is True
+    assert observed == [WorkTrust.AUTONOMOUS_OR_UNTRUSTED]
+
+
+@pytest.mark.asyncio
+async def test_attachment_context_taints_initial_terminal_plan():
+    agent = _agent_with_plan(_RR("Step 1: [RUN_TERMINAL pytest -q]"))
+    observed = []
+
+    async def exec_step(step):
+        observed.append(agent._active_work_trust)
+        return "ok"
+
+    agent._execute_step = exec_step
+    result = await agent.plan_and_run(
+        "follow the attachment",
+        extra_context="untrusted uploaded document text",
+        work_trust=WorkTrust.TRUSTED_MANUAL,
+    )
+    assert result.success is True
+    assert observed == [WorkTrust.AUTONOMOUS_OR_UNTRUSTED]
+
+
+@pytest.mark.asyncio
+async def test_workspace_context_taints_initial_terminal_plan():
+    agent = _agent_with_plan(_RR("Step 1: [RUN_TERMINAL pytest -q]"))
+    agent._workspace_context = MagicMock(return_value="repository instructions")
+    observed = []
+
+    async def exec_step(step):
+        observed.append(agent._active_work_trust)
+        return "ok"
+
+    agent._execute_step = exec_step
+    result = await agent.plan_and_run(
+        "test the project", work_trust=WorkTrust.TRUSTED_MANUAL
+    )
+    assert result.success is True
+    assert observed == [WorkTrust.AUTONOMOUS_OR_UNTRUSTED]
+
+
+@pytest.mark.asyncio
+async def test_resume_seed_context_taints_initial_terminal_plan():
+    agent = _agent_with_plan(_RR("Step 1: [RUN_TERMINAL pytest -q]"))
+    observed = []
+
+    async def exec_step(step):
+        observed.append(agent._active_work_trust)
+        return "ok"
+
+    agent._execute_step = exec_step
+    result = await agent.plan_and_run(
+        "resume work",
+        seed_context="prior persisted step output",
+        work_trust=WorkTrust.TRUSTED_MANUAL,
+    )
+    assert result.success is True
+    assert observed == [WorkTrust.AUTONOMOUS_OR_UNTRUSTED]

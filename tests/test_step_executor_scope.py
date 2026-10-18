@@ -137,6 +137,8 @@ async def test_terminal_uses_active_root_as_authorized_default_cwd(tmp_path, mon
     run.assert_called_once_with(
         "echo ok",
         cwd=str(active),
+        work_trust=agent._active_work_trust,
+        containment_policy=agent._containment_policy,
     )
 
 

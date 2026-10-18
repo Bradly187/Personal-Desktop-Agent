@@ -151,8 +151,12 @@ class EventDispatcher:
                 _att_ctx = cmd.params.get("attachment_context", "") if cmd.params else ""
                 _att_img = cmd.params.get("attachment_image_b64") if cmd.params else None
                 agent_result = await self._coordinator._dev_agent.handle(
-                    cmd.text, screenshot_b64=_att_img, trace_id=cmd.trace_id,
-                    attachment_context=_att_ctx)
+                    cmd.text,
+                    screenshot_b64=_att_img,
+                    trace_id=cmd.trace_id,
+                    attachment_context=_att_ctx,
+                    source=cmd.source,
+                )
                 # Personal-document queries are NOT recorded in the rolling dev
                 # context: _recent_dev_commands is sent verbatim to the cloud
                 # dev agent on later queries, which would leak the very text the

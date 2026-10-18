@@ -22,8 +22,11 @@ without a GPU.
 
 from __future__ import annotations
 
+import base64
 import logging
+import os
 import re
+import shlex
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -31,6 +34,11 @@ from pathlib import Path
 from typing import Optional
 
 from core.execution_policy import ExecutionScope
+from inference.sandbox import (
+    ContainmentPolicy,
+    WorkTrust,
+    get_containment_policy,
+)
 
 log = logging.getLogger(__name__)
 
@@ -108,9 +116,11 @@ class Tester:
     def __init__(self, router, *, execution_scope: ExecutionScope,
                  code_domain: str = "code",
                  scratch_root: Optional[str] = None,
-                 sandbox_timeout: float = 60.0) -> None:
+                 sandbox_timeout: float = 60.0,
+                 containment_policy: ContainmentPolicy | None = None) -> None:
         self._router = router
         self._execution_scope = execution_scope
+        self._containment_policy = containment_policy or get_containment_policy()
         self._code_domain = code_domain
         self._scratch_root = Path(scratch_root) if scratch_root else (
             Path(tempfile.gettempdir()) / "pda_dev_tests"
@@ -184,5 +194,24 @@ class Tester:
     def _run_pytest(self, test_path: str, project_dir: str):
         """One-shot sandboxed `pytest <file>` (R3.7 — no cross-step state)."""
         from inference.sandbox import run_sandboxed
-        cmd = f'"{sys.executable}" -m pytest -q "{test_path}"'
-        return run_sandboxed(cmd, project_dir=project_dir, timeout=self._timeout)
+        source_b64 = base64.b64encode(Path(test_path).read_bytes()).decode("ascii")
+        inner = (
+            "import base64, os, pathlib, pytest\n"
+            "path = pathlib.Path('/tmp/pda_generated_test.py')\n"
+            "path.write_bytes(base64.b64decode(os.environ['PDA_TEST_SOURCE_B64']))\n"
+            "raise SystemExit(pytest.main(['-q', str(path)]))"
+        )
+        python = (
+            '"$HOME/.venv-wsl/bin/python"'
+            if os.name == "nt"
+            else shlex.quote(sys.executable)
+        )
+        cmd = f"{python} -c {shlex.quote(f'exec({inner!r})')}"
+        return run_sandboxed(
+            cmd,
+            project_dir=project_dir,
+            timeout=self._timeout,
+            work_trust=WorkTrust.AUTONOMOUS_OR_UNTRUSTED,
+            containment_policy=self._containment_policy,
+            extra_env={"PDA_TEST_SOURCE_B64": source_b64},
+        )

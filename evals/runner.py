@@ -733,7 +733,14 @@ def run_sandbox_suite(cases: list, build_dev_agent, *, timeout_s: float = 120.0)
                 dev.set_repo_root(temp_dir)
 
                 try:
-                    res = await asyncio.wait_for(dev.plan_and_run(case.goal), timeout_s)
+                    from inference.sandbox import WorkTrust
+                    res = await asyncio.wait_for(
+                        dev.plan_and_run(
+                            case.goal,
+                            work_trust=WorkTrust.AUTONOMOUS_OR_UNTRUSTED,
+                        ),
+                        timeout_s,
+                    )
                 except Exception as exc:
                     lat = (time.monotonic() - t0) * 1000
                     results.append(score_sandbox(case, passed=False, error=f"agent exception: {type(exc).__name__}: {exc}", latency_ms=lat))

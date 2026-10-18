@@ -15,10 +15,10 @@ Mechanism (Linux/WSL2, where the pipeline already runs):
     flood memory/logs.
   - timeout: unchanged (60 s default).
 
-Graceful fallback: if no sandbox tool is installed (or DA_SANDBOX=0, or on
-Windows-native), it runs the command unsandboxed with a clear one-time WARNING +
-the cwd + rlimits where possible — never blocks execution, just logs that the
-boundary is absent.
+Trust-sensitive fallback: trusted manual work may run below namespace isolation
+after the existing scope/approval controls. Autonomous, scheduled, unknown, or
+retrieval-tainted work requires a namespace jail and is denied before its requested
+workload process is created when that boundary is unavailable.
 """
 
 from __future__ import annotations
@@ -31,8 +31,10 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
+from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Optional
+from threading import Lock
+from typing import Callable, Optional
 
 from core.proc_utils import run_capped
 from core.proxy_auth import sanitized_child_env
@@ -45,6 +47,189 @@ _MEM_BYTES = 2 * 1024 ** 3  # 2 GB address space
 _OUTPUT_CAP = 200_000       # bytes of stdout/stderr retained
 
 _POSIX = os.name == "posix"
+
+
+class ContainmentLevel(IntEnum):
+    """Effective isolation strength for one terminal workload."""
+
+    NATIVE_UNCONFINED = 0
+    CWD_AND_RESOURCE_LIMITS = 1
+    NAMESPACE_JAIL = 2
+
+
+class WorkTrust(str, Enum):
+    """Conservative provenance class used for terminal admission."""
+
+    TRUSTED_MANUAL = "trusted_manual"
+    AUTONOMOUS_OR_UNTRUSTED = "autonomous_or_untrusted"
+
+
+@dataclass(frozen=True)
+class ContainmentReport:
+    level: ContainmentLevel
+    mechanism: str
+    reason: Optional[str] = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "level": self.level.name.lower(),
+            "level_value": int(self.level),
+            "mechanism": self.mechanism,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> "ContainmentReport":
+        if not isinstance(payload, dict):
+            raise ValueError("containment report must be an object")
+        level_name = payload.get("level")
+        if not isinstance(level_name, str):
+            raise ValueError("containment level is missing")
+        try:
+            level = ContainmentLevel[level_name.strip().upper()]
+        except KeyError as exc:
+            raise ValueError("containment level is invalid") from exc
+        level_value = payload.get("level_value")
+        if level_value is not None and level_value != int(level):
+            raise ValueError("containment level value mismatch")
+        mechanism = payload.get("mechanism")
+        if not isinstance(mechanism, str) or not mechanism.strip():
+            raise ValueError("containment mechanism is invalid")
+        reason = payload.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("containment reason is invalid")
+        return cls(level, mechanism, reason)
+
+
+class ContainmentDeniedError(PermissionError):
+    """The effective containment is below the minimum for this work."""
+
+    def __init__(self, report: ContainmentReport, work_trust: WorkTrust) -> None:
+        self.report = report
+        self.work_trust = work_trust
+        super().__init__(
+            "RUN_TERMINAL denied: "
+            f"{work_trust.value} work requires namespace_jail; "
+            f"effective containment is {report.level.name.lower()} "
+            f"({report.mechanism}: {report.reason or 'no reason reported'})"
+        )
+
+
+_MANUAL_SOURCES = frozenset({
+    "chat", "voice", "voice_local", "voice_correction", "touch",
+    "trackpad", "gesture", "multimodal", "sound_action", "manual",
+})
+
+
+def work_trust_from_source(source: Optional[str]) -> WorkTrust:
+    """Map existing provenance to trust; unknown/malformed values fail closed."""
+    normalized = str(source or "").strip().lower()
+    return (
+        WorkTrust.TRUSTED_MANUAL
+        if normalized in _MANUAL_SOURCES
+        else WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+    )
+
+
+def combine_work_trust(*values: WorkTrust) -> WorkTrust:
+    """Trust is monotonic: one autonomous/untrusted input taints the run."""
+    if any(v is WorkTrust.AUTONOMOUS_OR_UNTRUSTED for v in values):
+        return WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+    return WorkTrust.TRUSTED_MANUAL
+
+
+class ContainmentPolicy:
+    """Thread-safe owner of admission, cached status, and transition notices."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._report = ContainmentReport(
+            ContainmentLevel.NATIVE_UNCONFINED,
+            "not_assessed",
+            "no terminal workload has been assessed in this process",
+        )
+        self._last_state: tuple[int, str, Optional[str]] | None = None
+        self._notice_sink: Optional[Callable[[str, str], None]] = None
+        self._publish_metrics(self._report)
+
+    def set_notice_sink(
+        self, sink: Optional[Callable[[str, str], None]]
+    ) -> None:
+        with self._lock:
+            self._notice_sink = sink
+            # The next observed state is the first state visible to this sink.
+            self._last_state = None
+
+    def cached_report(self) -> ContainmentReport:
+        with self._lock:
+            return self._report
+
+    def status(self) -> dict[str, object]:
+        return self.cached_report().to_dict()
+
+    def metrics(self) -> dict[str, float]:
+        report = self.cached_report()
+        return {
+            "containment_level": float(report.level),
+            "containment_namespace_jail": float(
+                report.level is ContainmentLevel.NAMESPACE_JAIL
+            ),
+        }
+
+    def observe(self, report: ContainmentReport, work_trust: WorkTrust) -> None:
+        state = (int(report.level), report.mechanism, report.reason)
+        sink: Optional[Callable[[str, str], None]] = None
+        title = ""
+        body = ""
+        with self._lock:
+            self._report = report
+            changed = state != self._last_state
+            self._last_state = state
+            if changed and report.level < ContainmentLevel.NAMESPACE_JAIL:
+                sink = self._notice_sink
+                title = "Terminal isolation reduced"
+                body = (
+                    "Approved manual terminal work may continue with the current "
+                    "fallback; automated terminal work is blocked until namespace "
+                    "isolation is available."
+                )
+        self._publish_metrics(report)
+        if sink is not None:
+            try:
+                sink(title, body)
+            except Exception as exc:
+                log.debug("containment notice sink failed: %s", exc)
+
+    @staticmethod
+    def _publish_metrics(report: ContainmentReport) -> None:
+        try:
+            from monitoring.metrics import get_metrics
+            metrics = get_metrics()
+            metrics.set("containment_level", float(report.level))
+            metrics.set_component_status("containment", report.to_dict())
+        except Exception as exc:
+            log.debug("containment metrics publication failed: %s", exc)
+
+    def require(self, report: ContainmentReport, work_trust: WorkTrust) -> None:
+        self.observe(report, work_trust)
+        if (
+            work_trust is WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+            and report.level < ContainmentLevel.NAMESPACE_JAIL
+        ):
+            raise ContainmentDeniedError(report, work_trust)
+
+
+_CONTAINMENT_POLICY: Optional[ContainmentPolicy] = None
+_CONTAINMENT_POLICY_LOCK = Lock()
+
+
+def get_containment_policy() -> ContainmentPolicy:
+    global _CONTAINMENT_POLICY
+    if _CONTAINMENT_POLICY is None:
+        with _CONTAINMENT_POLICY_LOCK:
+            if _CONTAINMENT_POLICY is None:
+                _CONTAINMENT_POLICY = ContainmentPolicy()
+    return _CONTAINMENT_POLICY
 
 
 def _enabled() -> bool:
@@ -226,9 +411,9 @@ def build_sandbox_argv(
 # --------------------------------------------------------------------------- #
 # WSL terminal routing (specs/wsl-terminal-routing) — make the bwrap/firejail
 # jail apply on a WINDOWS host by running a WSL-safe command inside WSL2 via
-# wsl.exe. Flag-gated (default OFF), scope-preserving (the Windows writable-roots
-# check runs upstream; translation can only narrow), and degrade-gracefully
-# (unavailable / Windows-only command / untranslatable path → native fallback).
+# wsl.exe. Routing defaults ON, remains scope-preserving (the Windows writable-
+# roots check runs upstream; translation can only narrow), and reports the
+# effective fallback when a command/path/tool cannot use the jail.
 # --------------------------------------------------------------------------- #
 
 # Executables that must ALWAYS run on the native Windows path (never WSL).
@@ -348,38 +533,115 @@ def build_wsl_argv(jail_argv: list, distro: str = "") -> list:
     return base + ["-e"] + list(jail_argv)
 
 
-def _maybe_run_wsl(command: str, project_dir: str, timeout: float,
-                   allow_network: bool, output_cap: int) -> "Optional[SandboxResult]":
-    """Try to run `command` inside the WSL jail; return None to fall back to native.
+@dataclass(frozen=True)
+class _ContainmentRoute:
+    report: ContainmentReport
+    kind: str
+    project_dir: str
+    tool: Optional[str] = None
+    distro: str = ""
 
-    Decision order (each falling back to native, never blocking — R3.1):
-    disabled / non-Windows → not WSL-safe → untranslatable project dir → WSL/jail
-    unavailable. On success, builds the SAME `build_sandbox_argv` jail and launches
-    it via wsl.exe, binding only the translated project dir.
-    """
-    cfg = _wsl_routing_config()
-    if not cfg.get("enabled") or _POSIX:
-        return None
-    if not command_is_wsl_safe(command, cfg):
-        log.info("WSL routing: command not WSL-safe → native: %.60s", command)
-        return None
-    wsl_proj = to_wsl_path(project_dir)
-    if wsl_proj is None:
-        log.info("WSL routing: project dir not translatable (%s) → native", project_dir)
-        return None
-    distro = str(cfg.get("distro", "") or "")
-    if not wsl_available(distro):
-        return None                                    # _probe_wsl logged once
-    jail = build_sandbox_argv("bwrap", command, wsl_proj, allow_network)
-    argv = build_wsl_argv(jail, distro)
-    log.info("WSL routing: %.60s → wsl+bwrap (%s)", command, wsl_proj)
-    proc = run_capped(argv, capture_output=True, text=True, timeout=timeout,
-                      env=noninteractive_env(), stdin=subprocess.DEVNULL)
-    return SandboxResult(
-        stdout=(proc.stdout or "")[:output_cap],
-        stderr=(proc.stderr or "")[:output_cap],
-        returncode=proc.returncode,
-        sandboxed=True,
+
+def _select_containment(command: str, project_dir: str) -> _ContainmentRoute:
+    """Resolve the effective route without launching the requested workload."""
+    enabled = _enabled()
+    if enabled and not _POSIX:
+        cfg = _wsl_routing_config()
+        if not cfg.get("enabled"):
+            wsl_reason = "WSL terminal routing is disabled"
+        elif not command_is_wsl_safe(command, cfg):
+            wsl_reason = "command is not WSL-compatible"
+        else:
+            wsl_project = to_wsl_path(project_dir)
+            if wsl_project is None:
+                wsl_reason = "project path cannot be translated to WSL"
+            else:
+                distro = str(cfg.get("distro", "") or "")
+                if wsl_available(distro):
+                    return _ContainmentRoute(
+                        ContainmentReport(
+                            ContainmentLevel.NAMESPACE_JAIL,
+                            "wsl+bwrap",
+                            None,
+                        ),
+                        "wsl",
+                        wsl_project,
+                        tool="bwrap",
+                        distro=distro,
+                    )
+                wsl_reason = "WSL or bwrap is unavailable"
+    elif not enabled:
+        wsl_reason = "disabled by DA_SANDBOX"
+    elif _POSIX:
+        wsl_reason = "native POSIX containment selected"
+    else:  # pragma: no cover - defensive for patched platforms
+        wsl_reason = "namespace routing unavailable"
+
+    if enabled and _POSIX:
+        tool = sandbox_tool()
+        if tool:
+            return _ContainmentRoute(
+                ContainmentReport(
+                    ContainmentLevel.NAMESPACE_JAIL,
+                    tool,
+                    None,
+                ),
+                "native_jail",
+                project_dir,
+                tool=tool,
+            )
+
+    if _POSIX:
+        reason = (
+            "disabled by DA_SANDBOX"
+            if not enabled
+            else "no bwrap or firejail executable is available"
+        )
+        return _ContainmentRoute(
+            ContainmentReport(
+                ContainmentLevel.CWD_AND_RESOURCE_LIMITS,
+                "posix+rlimits",
+                reason,
+            ),
+            "native_fallback",
+            project_dir,
+        )
+
+    return _ContainmentRoute(
+        ContainmentReport(
+            ContainmentLevel.NATIVE_UNCONFINED,
+            "windows_native",
+            wsl_reason,
+        ),
+        "native_fallback",
+        project_dir,
+    )
+
+
+def detect_containment(command: str, project_dir: Optional[str] = None) -> ContainmentReport:
+    """Return the effective containment report for this command and cwd."""
+    return _select_containment(command, _project_dir(project_dir)).report
+
+
+def _run_wsl_route(
+    route: _ContainmentRoute,
+    command: str,
+    timeout: float,
+    allow_network: bool,
+    env: dict,
+):
+    jail = build_sandbox_argv(
+        route.tool or "bwrap", command, route.project_dir, allow_network
+    )
+    argv = build_wsl_argv(jail, route.distro)
+    log.info("WSL routing: %.60s → wsl+bwrap (%s)", command, route.project_dir)
+    return run_capped(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        stdin=subprocess.DEVNULL,
     )
 
 
@@ -399,10 +661,7 @@ class SandboxResult:
     stderr: str
     returncode: int
     sandboxed: bool
-
-
-# Log the "unsandboxed" warning once per process, not per command.
-_warned_unsandboxed = False
+    containment: Optional[ContainmentReport] = None
 
 
 def run_sandboxed(
@@ -411,63 +670,72 @@ def run_sandboxed(
     timeout: float = 60.0,
     allow_network: bool = False,
     output_cap: int = _OUTPUT_CAP,
+    *,
+    work_trust: WorkTrust = WorkTrust.AUTONOMOUS_OR_UNTRUSTED,
+    containment_policy: Optional[ContainmentPolicy] = None,
+    extra_env: Optional[dict[str, str]] = None,
 ) -> SandboxResult:
-    """Run a shell `command` inside the jail when possible, else fall back.
+    """Run a command only when its effective containment meets its trust policy.
 
-    Always returns a SandboxResult (never raises on a non-zero exit — the caller
-    decides how to treat returncode). `sandboxed` reports whether the jail applied.
+    Unknown provenance defaults to autonomous/untrusted. Detection and status
+    publication happen before admission; a denied target never reaches its
+    workload ``run_capped`` call. ``sandboxed`` remains the compatibility view
+    of whether a namespace jail applied.
     """
     proj = _project_dir(project_dir)
+    try:
+        trust = WorkTrust(work_trust)
+    except (TypeError, ValueError):
+        trust = WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+    policy = containment_policy or get_containment_policy()
+    route = _select_containment(command, proj)
+    policy.require(route.report, trust)
 
-    # WSL terminal routing (specs/wsl-terminal-routing): on a Windows host, route a
-    # WSL-safe command through wsl.exe so the namespace jail actually applies.
-    # Returns None (→ native path below) when disabled / unavailable / unsafe /
-    # untranslatable, so this is purely additive and never blocks (R3.1, R3.3).
-    if _enabled():
-        wsl_result = _maybe_run_wsl(command, proj, timeout, allow_network, output_cap)
-        if wsl_result is not None:
-            return wsl_result
-
-    tool = sandbox_tool() if _enabled() else None
+    command = inject_noninteractive_flags(command)
+    child_env = dict(os.environ)
+    if extra_env:
+        child_env.update(extra_env)
+    env = noninteractive_env(child_env)
     preexec = _rlimits if _POSIX else None
 
-    # Interactive-hang hardening: rewrite apt → -y where safe, run with a
-    # non-interactive env, and (via run_capped's DEVNULL default) close stdin so
-    # any prompt gets immediate EOF and fails fast instead of blocking to the
-    # wall timeout. Additive — a command already written non-interactively is
-    # unchanged.
-    command = inject_noninteractive_flags(command)
-    env = noninteractive_env()
-
-    # run_capped (not subprocess.run): on a wall-clock timeout it kills the WHOLE
-    # process tree, not just the direct child, so a runaway command that forked
-    # grandchildren (a shell loop, npm → node) can't leave orphans burning CPU —
-    # the real gap on the Windows-native path, which has no namespace jail to
-    # --die-with-parent the tree for us.
-    if tool:
-        argv = build_sandbox_argv(tool, command, proj, allow_network)
-        proc = run_capped(
-            argv, capture_output=True, text=True, timeout=timeout, preexec_fn=preexec,
-            env=env, stdin=subprocess.DEVNULL,
+    if route.kind == "wsl":
+        proc = _run_wsl_route(route, command, timeout, allow_network, env)
+    elif route.kind == "native_jail":
+        argv = build_sandbox_argv(
+            route.tool or "", command, route.project_dir, allow_network
         )
-        sandboxed = True
+        proc = run_capped(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            preexec_fn=preexec,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
     else:
-        global _warned_unsandboxed
-        if not _warned_unsandboxed:
-            reason = "disabled (DA_SANDBOX=0)" if not _enabled() else (
-                "no bwrap/firejail" if _POSIX else "Windows-native (no namespace jail)")
-            log.warning("RUN_TERMINAL sandbox unavailable — %s; running unsandboxed "
-                        "(allowlist still gates auto-approval)", reason)
-            _warned_unsandboxed = True
-        proc = run_capped(
-            command, shell=True, capture_output=True, text=True, timeout=timeout,
-            cwd=proj, preexec_fn=preexec, env=env, stdin=subprocess.DEVNULL,
+        log.warning(
+            "RUN_TERMINAL namespace jail unavailable — %s; trusted manual "
+            "fallback admitted with %s",
+            route.report.reason,
+            route.report.level.name.lower(),
         )
-        sandboxed = False
+        proc = run_capped(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=proj,
+            preexec_fn=preexec,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
 
     return SandboxResult(
         stdout=(proc.stdout or "")[:output_cap],
         stderr=(proc.stderr or "")[:output_cap],
         returncode=proc.returncode,
-        sandboxed=sandboxed,
+        sandboxed=route.report.level is ContainmentLevel.NAMESPACE_JAIL,
+        containment=route.report,
     )
