@@ -38,24 +38,22 @@ Set-Acl -LiteralPath $resolved -AclObject $acl
 
 # Fail closed unless the effective DACL is protected and every remaining ACE
 # belongs to the current SID. Never print the ACL or credential path contents.
+# Read owner and ACEs as SIDs directly: translating a host-qualified account
+# name back to a SID can fail on hosts whose account name does not resolve.
+$sidType = [System.Security.Principal.SecurityIdentifier]
 $actual = Get-Acl -LiteralPath $resolved
-$ownerSid = $actual.Owner | ForEach-Object {
-    (New-Object System.Security.Principal.NTAccount($_)).Translate(
-        [System.Security.Principal.SecurityIdentifier]
-    )
-}
-if (-not $actual.AreAccessRulesProtected -or $ownerSid.Value -ne $currentSid.Value) {
+$ownerSid = $actual.GetOwner($sidType)
+if (-not $actual.AreAccessRulesProtected -or $null -eq $ownerSid -or
+    $ownerSid.Value -ne $currentSid.Value) {
     throw 'Proxy secret ACL ownership/protection verification failed.'
 }
-foreach ($entry in $actual.Access) {
-    $entrySid = $entry.IdentityReference.Translate(
-        [System.Security.Principal.SecurityIdentifier]
-    )
-    if ($entrySid.Value -ne $currentSid.Value -or
+$entries = @($actual.GetAccessRules($true, $true, $sidType))
+foreach ($entry in $entries) {
+    if ($entry.IdentityReference.Value -ne $currentSid.Value -or
         $entry.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
         throw 'Proxy secret ACL contains an unexpected principal or deny rule.'
     }
 }
-if (@($actual.Access).Count -eq 0) {
+if ($entries.Count -eq 0) {
     throw 'Proxy secret ACL contains no current-user grant.'
 }

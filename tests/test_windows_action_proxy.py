@@ -651,33 +651,27 @@ def test_secret_acl_helper_replaces_preexisting_explicit_grants(tmp_path):
         )
 
     acl_script = Path(__file__).parents[1] / "scripts" / "Set-ProxySecretAcl.ps1"
-    subprocess.run(
-        [
-            "powershell.exe", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(acl_script),
-            "-Path", str(secret_dir), "-Directory",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-    )
-    subprocess.run(
-        [
-            "powershell.exe", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(acl_script),
-            "-Path", str(token_file),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-    )
+    for path, extra in ((secret_dir, ["-Directory"]), (token_file, [])):
+        applied = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", str(acl_script),
+                "-Path", str(path), *extra,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert applied.returncode == 0, (
+            f"Set-ProxySecretAcl.ps1 failed ({applied.returncode}): "
+            f"{applied.stderr.strip() or applied.stdout.strip()}"
+        )
 
     query = (
         "$acl=Get-Acl -LiteralPath $env:ACL_TEST_PATH;"
-        "$sids=@($acl.Access | ForEach-Object {"
-        "$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value});"
+        "$sids=@($acl.GetAccessRules($true,$true,"
+        "[System.Security.Principal.SecurityIdentifier]) | ForEach-Object {"
+        "$_.IdentityReference.Value});"
         "[pscustomobject]@{Protected=$acl.AreAccessRulesProtected;Sids=$sids} | "
         "ConvertTo-Json -Compress"
     )
