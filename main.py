@@ -1095,13 +1095,16 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             )
         profiler.add_drift_callback(_on_drift)
 
-        # A2UI: push an Approve/Deny surface to the iPad when the approval gate opens
-        # (parallel input to the voice gate; a tap writes the same response file).
-        # The callback fires from the WhisperStream audio thread → hop to the bridge
-        # loop with run_coroutine_threadsafe, mirroring _on_drift above.
-        def _on_approval_gate_open(description: str) -> None:
+        # A2UI: mirror the exact voice request on the iPad. The callback fires
+        # from the WhisperStream audio thread, so hop to the bridge loop.
+        def _on_approval_gate_open(request) -> None:
             from core import a2ui
-            surface = a2ui.approval_surface(description)
+            surface = a2ui.approval_surface(
+                request.description,
+                request_id=request.request_id,
+                action_digest=request.action_digest,
+                timeout_s=7.0,
+            )
             asyncio.run_coroutine_threadsafe(bridge.send_a2ui_surface(surface), _loop)
         whisper.on_approval_gate_open = _on_approval_gate_open
 

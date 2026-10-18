@@ -3,10 +3,13 @@ import json
 import logging
 import re
 import webbrowser
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Mapping, Optional, TYPE_CHECKING
 from pathlib import Path
 
 from core.action_lifecycle import ActionIdentity, ActionOutcome
+from core.approval_authority import (
+    action_digest, content_digest, step_action_digest,
+)
 from core.atomic_file import atomic_write_text
 from inference.executors.git_executor import git_status, git_diff, git_commit, git_checkout, github_pr
 from inference.executors.terminal_executor import run_terminal
@@ -62,8 +65,10 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         # regardless of the model's per-model WRITE_FILE knob; WRITE_FILE
         # uses the configured format (whole_file / hashline). Both share the
         # same lint gate, Critic, snapshot, and tester path below.
-        # Resolve the scope-authorized, lint-gated candidate before any approval
-        # or write. This candidate is the only text written.
+        # Resolve the exact candidate before any authority check. Upfront plan
+        # approval computed the same material without writing; execution repeats
+        # it against current target state, so drift changes the digest and forces
+        # a fresh per-operation approval. This candidate is the only text written.
         target, new_text = await prepare_file_candidate(agent, step)
 
         if agent._critic is None or not agent._critic_enabled:
@@ -71,6 +76,9 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
                 agent,
                 f"Approve writing file {target[:60]}?",
                 card={"file_path": target},
+                step=step,
+                canonical_path=target,
+                content=new_text,
             ):
                 return f"{action} cancelled by user"
             step.comp_args = json.dumps(await asyncio.to_thread(
@@ -89,6 +97,9 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
             card={"file_path": target,
                   "diff": await asyncio.to_thread(
                       diff_for_confirm, target, new_text)},
+            step=step,
+            canonical_path=target,
+            content=new_text,
         ):
             return f"{action} cancelled by user"
         step.comp_args = json.dumps(await asyncio.to_thread(
@@ -108,6 +119,8 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         if not await confirm_destructive_op(
             agent, f"Approve running command: {cmd.strip()[:60]}?",
             card={"command": cmd.strip()[:500]},
+            step=step,
+            canonical_cwd=cwd,
         ):
             return "RUN_TERMINAL cancelled by user"
         return await asyncio.to_thread(
@@ -180,6 +193,7 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         if not await confirm_destructive_op(
             agent, f"Approve git commit: {msg[:60]}?",
             card={"command": f"git commit -m {msg[:200]!r}"},
+            step=step, canonical_cwd=cwd,
         ):
             return "GIT_COMMIT cancelled by user"
         return await asyncio.to_thread(git_commit, msg, cwd=cwd)
@@ -191,6 +205,7 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         if not await confirm_destructive_op(
             agent, f"Approve git checkout {branch_args[:40]}?",
             card={"command": f"git checkout {branch_args[:200]}"},
+            step=step, canonical_cwd=cwd,
         ):
             return "GIT_CHECKOUT cancelled by user"
         return await asyncio.to_thread(git_checkout, branch_args, cwd=cwd)
@@ -206,6 +221,7 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         cwd = await authorized_git_cwd()
         if not await confirm_destructive_op(
             agent, f"Approve opening pull request: {title[:60]}?",
+            step=step, canonical_cwd=cwd,
         ):
             return "GITHUB_PR cancelled by user"
         return await asyncio.to_thread(github_pr, title, body, cwd=cwd)
@@ -361,35 +377,86 @@ def grep(pattern: str, search_path: str, max_lines: int = 100) -> str:
     result = _search.search_text(pattern, search_path, max_lines, scopes=None)
     return _search.format_grep_result(result, pattern, search_path, max_lines)
 
-async def confirm_destructive_op(agent, description: str, *, force: bool = False,
-                                  card: Optional[dict] = None) -> bool:
-    """Speak the action description and wait for voice confirmation.
+async def confirm_destructive_op(
+    agent,
+    description: str,
+    *,
+    force: bool = False,
+    card: Optional[dict] = None,
+    step: AgentStep | None = None,
+    canonical_path: str | None = None,
+    canonical_cwd: str | None = None,
+    content: str | bytes | None = None,
+    approval_action: str | None = None,
+    security_args: Mapping[str, Any] | None = None,
+    exact_digest: str | None = None,
+) -> bool:
+    """Authorize one exact destructive action through the typed authority.
 
-    This op is destructive by definition, so it fails SAFE to DENY: only an
-    explicit spoken "yes" (or a prior whole-plan authorization) proceeds.
-    Silence, an ambiguous reply, or unavailable TTS/microphone all return
-    False — the op is skipped rather than run without clear consent. Mirrors
-    the hardened voice approval gate (approval_hook.py, timeout→reject).
-
-    ``force`` bypasses the upfront-plan-authorization short-circuit so the
-    Critic can ESCALATE a risky edit to an explicit confirm (specs/dev-agent-
-    critic R2.2). It only ever ADDS friction — it can never weaken a gate.
-
-    ``card`` (specs/chat-workbench-parity R5) is optional extra context for
-    the in-chat approval card — {file_path, diff} for a pending write or
-    {command} for a terminal/git op. Only used when a chat request is in
-    flight; the yes/no authority is unchanged (signal file / voice).
+    Every responder receives the request nonce and digest and publishes an exact
+    ``ApprovalResponse``.  Only ``ApprovalAuthority`` consumes that response and
+    issues the one-use grant. Critic force keeps its distinct digest and request.
     """
-    # If the user already approved the entire plan upfront, skip per-op
-    # confirmation — unless a caller (the Critic) forces an explicit confirm.
-    if agent._plan_authorized and not force:
-        log.info("DevAgent._confirm: skipping (plan authorized) — %s", description)
+    trace_id = agent._active_trace_id or ""
+    goal = agent._current_goal or ""
+    approval_context = "critic_force" if force else "operation"
+    if exact_digest is not None:
+        digest = exact_digest
+    elif step is not None:
+        digest = step_action_digest(
+            step,
+            trace_id=trace_id,
+            goal=goal,
+            canonical_path=canonical_path,
+            canonical_cwd=canonical_cwd,
+            content=content,
+            approval_context=approval_context if force else "plan",
+        )
+    else:
+        digest = action_digest(
+            action=approval_action or "DESTRUCTIVE_OP",
+            trace_id=trace_id,
+            goal=goal,
+            canonical_path=canonical_path,
+            canonical_cwd=canonical_cwd,
+            security_args=dict(security_args or {}),
+            body_hash=content_digest(content or ""),
+            step_identity={},
+            approval_context=approval_context,
+        )
+
+    if not force and agent._approval_authority.claim_grant(
+        agent._approval_grant, digest
+    ):
+        log.info("DevAgent._confirm: exact plan grant claimed — %s", description)
         return True
 
-    # Serialize: DAG waves may run two destructive steps concurrently;
-    # overlapping TTS prompts + mic captures would garble both answers.
     async with agent._confirm_lock:
-        return await confirm_destructive_op_locked(agent, description, card=card)
+        try:
+            request = agent._approval_authority.create_request(
+                trace_id=trace_id,
+                action_digest=digest,
+                description=description,
+            )
+        except Exception as exc:
+            log.info("DevAgent._confirm: authority unavailable (%s) — DENY", exc)
+            return False
+        try:
+            await confirm_destructive_op_locked(
+                agent, request, description, card=card
+            )
+        except Exception as exc:
+            log.info("DevAgent._confirm: responder failed (%s) — DENY", exc)
+        try:
+            grant = agent._approval_authority.consume_response(
+                request, approved_digests=(digest,)
+            )
+        except Exception as exc:
+            log.info("DevAgent._confirm: authority failed (%s) — DENY", exc)
+            return False
+        if grant is None:
+            return False
+        return agent._approval_authority.claim_grant(grant, digest)
 
 
 

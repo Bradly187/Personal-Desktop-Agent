@@ -7,6 +7,8 @@ byte-identical. The model is stubbed so everything runs in CI.
 """
 
 from __future__ import annotations
+import json
+import time
 import inference.step_executor as se
 
 import sys
@@ -21,6 +23,11 @@ from inference.critic import (
     BLOCK, PASS, REVISE, Critic, CriticVerdict, Finding, parse_verdict,
 )
 from inference.dev_agent import AgentStep, DevAgent
+from core.approval_authority import (
+    ApprovalGrant, ApprovalResponse, step_action_digest,
+)
+
+_REAL_CONFIRM = se.confirm_destructive_op
 
 
 # --------------------------------------------------------------------------- #
@@ -139,8 +146,10 @@ async def test_pass_high_confidence_writes_without_escalation():
     out = await agent._execute_step(step)
     assert "Written" in out
     agent._write_file.assert_called_once()
-    # confirm called WITHOUT force (no escalation on a confident pass).
-    assert agent._confirm_destructive_op.call_args.kwargs.get("force") is False
+    # confirm binds the exact candidate without forced escalation.
+    kwargs = agent._confirm_destructive_op.call_args.kwargs
+    assert kwargs.get("force") is False
+    assert kwargs.get("content") == "NEW CONTENT"
 
 
 async def test_revise_blocks_write_and_returns_diagnostic():
@@ -169,6 +178,55 @@ async def test_low_confidence_pass_escalates_confirm():
     # R2.2 — low-confidence pass forces an explicit confirm even on an authorized plan.
     assert agent._confirm_destructive_op.call_args.kwargs.get("force") is True
     agent._write_file.assert_called_once()
+
+
+async def test_critic_force_uses_distinct_request_and_digest(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    agent = DevAgent(router=MagicMock())
+    agent._current_goal = "review risky edit"
+    agent._active_trace_id = "trace-critic"
+    step = AgentStep(
+        action="WRITE_FILE", args=str(tmp_path / "f.py"),
+        body="old proposal", step_num=1,
+    )
+    normal_digest = step_action_digest(
+        step,
+        trace_id="trace-critic",
+        goal="review risky edit",
+        canonical_path=step.args,
+        approval_context="plan",
+    )
+    agent._approval_grant = ApprovalGrant(
+        request_id="whole-plan-request",
+        trace_id="trace-critic",
+        approved_digests=frozenset({normal_digest}),
+        expires_at=time.time() + 60,
+    )
+    async def answer_exact(bound_agent, request, description, card=None):
+        bound_agent._approval_authority.write_response(ApprovalResponse(
+            request_id=request.request_id,
+            action_digest=request.action_digest,
+            decision="approve",
+            responded_at=time.time(),
+        ))
+
+    gate = AsyncMock(side_effect=answer_exact)
+    monkeypatch.setattr(se, "confirm_destructive_op_locked", gate)
+
+    assert await _REAL_CONFIRM(
+        agent,
+        "Approve risky edit?",
+        force=True,
+        step=step,
+        canonical_path=step.args,
+        content="critic-reviewed content",
+    )
+    gate.assert_awaited_once()
+    consumed = list((tmp_path / ".claude" / "approval" / "consumed").glob("*.json"))
+    assert len(consumed) == 1
+    record = json.loads(consumed[0].read_text(encoding="utf-8"))
+    assert record["request_id"] != "whole-plan-request"
+    assert record["action_digest"] != normal_digest
 
 
 async def test_critic_error_fails_safe_to_escalated_confirm():
@@ -209,9 +267,9 @@ def test_critic_default_on_when_env_unset(monkeypatch):
     assert agent._critic_enabled is True and agent._critic is not None
 
 
-async def test_disabled_critic_is_byte_identical_legacy_path(monkeypatch):
-    # R4.1 — with the Critic explicitly OFF, the WRITE_FILE path is the legacy
-    # flow: confirm → apply → snapshot → write, and the critic is never consulted.
+async def test_disabled_critic_resolves_candidate_before_authority(monkeypatch):
+    # Exact-action authority requires candidate resolution before confirm even
+    # when the optional Critic is disabled; denial still precedes any write.
     monkeypatch.setenv("DA_CRITIC", "0")
     agent = DevAgent(router=MagicMock())
     assert agent._critic is None and agent._critic_enabled is False
@@ -223,4 +281,5 @@ async def test_disabled_critic_is_byte_identical_legacy_path(monkeypatch):
     agent._critic_review = review_spy
     out = await agent._execute_step(_wf_step())
     assert "Written" in out
-    review_spy.assert_not_called()                   # critic path not taken
+    review_spy.assert_not_called()
+    assert agent._confirm_destructive_op.call_args.kwargs["content"] == "NEW"

@@ -140,6 +140,10 @@ async def test_resume_approved_runs_plan(tmp_path):
 
         out = await agent.resume_pending_plan()
         assert out is not None and out["goal"] == "old goal"
+        approval = agent._confirm_destructive_op.await_args.kwargs
+        assert approval["approval_action"] == "RESUME_PLAN"
+        assert approval["security_args"] == {"run_id": run_id}
+        assert approval["content"] == "old goal"
         agent.plan_and_run.assert_awaited_once()
     finally:
         await db.close()

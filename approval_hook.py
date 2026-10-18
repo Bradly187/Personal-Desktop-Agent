@@ -7,12 +7,11 @@ in approval_config.json.  The script:
   2. Checks approval_config.json — if the tool is "silent", exits 0 immediately.
   3. Builds a short spoken description of the action.
   4. Calls Amazon Polly (Danielle neural) to speak it aloud.
-  5. Records up to `record_s` seconds of audio from the default mic.
-  6. Detects voice activity — if silence the whole time, auto-approves.
-  7. Transcribes with faster-whisper "tiny" (CPU, loads in ~1s).
-  8. Parses yes/no keywords and exits:
-       0 → approved (or silence with timeout_action="approve")
-       2 → rejected  (user said no/cancel/stop)
+  5. Creates an exact request bound to tool name/input and opens the voice/A2UI
+     responder window.
+  6. Falls back to the PC mic only when no exact remote response arrives.
+  7. Publishes ``{request_id, action_digest, decision, responded_at}``.
+  8. Allows only when ApprovalAuthority consumes the matching one-use grant.
 
 Configuration: approval_config.json (same directory as this file).
 
@@ -29,13 +28,9 @@ import sys
 import time
 from pathlib import Path
 
-# Must match _APPROVAL_DIR in whisper_stream.py
+# Shared strict approval store. Responders use per-request markers and response
+# files; the legacy global pending/response/prompt files are intentionally absent.
 _APPROVAL_DIR = Path.home() / ".claude" / "approval"
-_PENDING_FILE  = _APPROVAL_DIR / "pending"
-_RESPONSE_FILE = _APPROVAL_DIR / "response"
-# Spoken action description, persisted alongside "pending" so the running agent
-# can render an A2UI Approve/Deny surface on the iPad (parallel to voice).
-_PROMPT_FILE   = _APPROVAL_DIR / "prompt"
 
 import logging
 import numpy as np
@@ -55,8 +50,16 @@ _DIR = Path(__file__).parent
 # import), defaulting unknown text to None so the gate fails safe to DENY.
 try:
     sys.path.insert(0, str(_DIR))
+    from core.approval_authority import (
+        ApprovalAuthority,
+        ApprovalRequest,
+        ApprovalResponse,
+        action_digest,
+    )
     from core.approval_keywords import classify_confirmation
 except Exception:  # pragma: no cover - defensive import guard
+    ApprovalAuthority = ApprovalRequest = ApprovalResponse = None  # type: ignore[assignment]
+    action_digest = None  # type: ignore[assignment]
     _APPROVE = {"yes", "yeah", "yep", "ok", "okay", "approve", "confirm", "sure"}
     _REJECT = {"no", "nope", "stop", "cancel", "deny", "reject", "abort", "dont"}
 
@@ -275,55 +278,21 @@ def _transcribe(audio: "np.ndarray") -> str:
         return ""
 
 
-def _request_ipad_approval(timeout_s: float = 7.0, prompt: str = "") -> str | None:
-    """Signal WhisperStream to intercept the next iPad utterance for approval.
-
-    Writes a pending marker so _transcribe() reroutes the next voice segment
-    here instead of to FusionEngine.  Returns the transcript or None on timeout
-    (bridge not running or user stayed silent).
-    """
-    _APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
-    _RESPONSE_FILE.unlink(missing_ok=True)          # clear any stale response
-    # Write the prompt BEFORE pending, so the agent sees a complete description
-    # the instant it detects the not-open → open transition.
+def _request_ipad_approval(authority, request, timeout_s: float = 7.0) -> bool:
+    """Expose one exact request to Whisper/A2UI and await its response file."""
+    opened = False
     try:
-        _PROMPT_FILE.write_text(prompt or "", encoding="utf-8")
-    except Exception:
-        pass
-    _PENDING_FILE.write_text(str(time.time()), encoding="utf-8")
-
-    deadline = time.monotonic() + timeout_s
-    try:
+        authority.publish_pending_request(request)
+        opened = True
+        deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if _RESPONSE_FILE.exists():
-                # utf-8-sig silently strips BOM (safe for both WhisperStream
-                # plain-UTF-8 writes and PowerShell BOM-UTF-8 test writes)
-                transcript = _RESPONSE_FILE.read_text(encoding="utf-8-sig").strip()
-                return transcript
+            if authority.response_path(request.request_id).exists():
+                return True
             time.sleep(0.1)
-        return None  # timeout — bridge not running or no speech detected
-    finally:
-        # Always clean up so a stale pending file doesn't block future commands
-        _PENDING_FILE.unlink(missing_ok=True)
-        _RESPONSE_FILE.unlink(missing_ok=True)
-        _PROMPT_FILE.unlink(missing_ok=True)
-
-
-def _parse_response(transcript: str, default: str = "reject") -> bool:
-    """Return True (approved) or False (rejected) from the transcript.
-
-    Only a deliberate confirmation word approves. Ambiguous or unrecognised text
-    fails safe to the configured default — which is "reject" (deny) so that
-    ambient audio / garbage / silence can never grant consent.
-    """
-    verdict = classify_confirmation(transcript)
-    if verdict == "approve":
-        return True
-    if verdict == "deny":
         return False
-    # Nothing recognised → fall back to configured default (deny unless the
-    # operator has explicitly opted into approve-on-ambiguity).
-    return default == "approve"
+    finally:
+        if opened:
+            authority.close_pending_request(request)
 
 
 # ---------------------------------------------------------------------------
@@ -369,52 +338,81 @@ def main() -> None:
     except Exception as _gs_exc:
         log.debug("approval_hook: goal session check failed: %s", _gs_exc)
 
-    # --- Speak the action description ----------------------------------------
-    # GAP-2 "Vibe Diff": for high-impact tools, prefer a plain-English summary of
-    # what the action DOES over the raw command. Falls back to the static
-    # description when the local LLM is unavailable.
+    # Build the immutable authority material before exposing any responder UI.
     message = _build_message(tool_name, tool_input)
     vibe = _vibe_summary(tool_name, tool_input, config)
     if vibe:
-        # Prepend the plain-English effect to the static identity prompt so the
-        # user hears BOTH ("This deletes your build folder. Approve running rm?")
-        # — the summary never replaces the exe/target identity it describes.
         message = f"{vibe} {message}"
+    if ApprovalAuthority is None or ApprovalResponse is None or action_digest is None:
+        sys.exit(2)
+    trace_id = data.get("tool_use_id")
+    if not isinstance(trace_id, str):
+        trace_id = ""
+    try:
+        digest = action_digest(
+            action=tool_name,
+            trace_id=trace_id,
+            goal="local approval hook",
+            security_args=tool_input,
+            approval_context="local_hook",
+        )
+        authority = ApprovalAuthority(_APPROVAL_DIR)
+        request = authority.create_request(
+            trace_id=trace_id,
+            action_digest=digest,
+            description=message,
+        )
+        authority.open_response_window(request)
+    except Exception as exc:
+        log.info("approval_hook: could not create exact request (%s) — DENY", exc)
+        sys.exit(2)
+
     voice = config.get("voice_id", "Danielle")
     _polly_speak(message, voice)
 
-    # Fail safe: ambiguity, silence, and timeout default to DENY. Background
-    # audio / the TTS echo / a stray word must never silently approve.
-    timeout_action: str = config.get("timeout_action", "reject")
-
-    # --- Prefer iPad mic via WhisperStream (bridge must be running) -----------
-    # Signal the bridge; if it responds within 7s the iPad utterance is used
-    # and not forwarded to FusionEngine (so "yes"/"no" won't trigger a command).
-    transcript = _request_ipad_approval(timeout_s=7.0, prompt=message)
-
-    if transcript is None:
-        # Bridge not running or no speech — fall back to PC microphone
+    responded = _request_ipad_approval(authority, request, timeout_s=7.0)
+    response_window_sealed = False
+    try:
+        authority.close_response_window(request)
+        response_window_sealed = True
+    except Exception as exc:
+        log.info("approval_hook: could not seal responders (%s) — DENY", exc)
+    responded = responded or authority.response_path(request.request_id).exists()
+    transcript = ""
+    if not responded and response_window_sealed:
         log.debug("approval_hook: iPad path timed out, falling back to PC mic")
         record_s: float = float(config.get("record_s", 4.0))
         device = config.get("device")
         try:
             audio = _record(record_s, device=device)
+            if _has_voice(audio):
+                transcript = _transcribe(audio)
         except Exception:
-            sys.exit(0 if timeout_action == "approve" else 2)
+            transcript = ""
+        verdict = classify_confirmation(transcript)
+        if verdict in ("approve", "deny"):
+            try:
+                authority.write_response(ApprovalResponse(
+                    request_id=request.request_id,
+                    action_digest=request.action_digest,
+                    decision=verdict,
+                    responded_at=time.time(),
+                ))
+            except Exception as exc:
+                log.info("approval_hook: exact response rejected (%s)", exc)
 
-        if not _has_voice(audio):
-            sys.exit(0 if timeout_action == "approve" else 2)
-
-        transcript = _transcribe(audio)
-
-    approved = _parse_response(transcript, timeout_action)
+    try:
+        grant = authority.consume_response(request, approved_digests=(digest,))
+        approved = authority.claim_grant(grant, digest)
+    except Exception as exc:
+        log.info("approval_hook: authority failed (%s) — DENY", exc)
+        approved = False
 
     if approved:
         sys.exit(0)
-    else:
-        reason = f"Voice rejected: '{transcript}'" if transcript else "No clear approval heard"
-        sys.stdout.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
-        sys.exit(2)
+    reason = f"Voice rejected: '{transcript}'" if transcript else "No clear approval heard"
+    sys.stdout.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
+    sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -4,11 +4,13 @@ a2ui_event resolution paths (approval response file + pending-surface Future).""
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
 
 from core import a2ui
+from core.approval_authority import ApprovalAuthority
 
 
 # --------------------------------------------------------------------------- #
@@ -17,11 +19,17 @@ from core import a2ui
 
 
 def test_approval_surface_is_valid_and_not_dismissible():
-    s = a2ui.approval_surface("Write to config.json")
+    s = a2ui.approval_surface(
+        "Write to config.json",
+        request_id="r" * 32,
+        action_digest="d" * 64,
+    )
     assert a2ui.validate_surface(s) == []
     assert s["type"] == "a2ui_surface"
     assert s["dismissible"] is False  # a security gate must not tap-away resolve
     assert s["surface_id"].startswith("approval-")
+    assert s["request_id"] == "r" * 32
+    assert s["action_digest"] == "d" * 64
     # both Approve and Deny carry an approval action
     actions = {c["action"]["value"] for c in s["components"] if c.get("action")}
     assert actions == {"approve", "deny"}
@@ -48,7 +56,10 @@ def test_choice_surface_requires_options():
 
 
 def test_explicit_surface_id_is_preserved():
-    s = a2ui.approval_surface("x", surface_id="approval-fixed")
+    s = a2ui.approval_surface(
+        "x", request_id="r" * 32, action_digest="d" * 64,
+        surface_id="approval-fixed",
+    )
     assert s["surface_id"] == "approval-fixed"
 
 
@@ -305,26 +316,44 @@ def _make_bridge(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_a2ui_approval_event_writes_response_file(tmp_path):
+async def test_a2ui_approval_event_publishes_exact_response(tmp_path):
     bridge = _make_bridge(tmp_path)
-    ws = _FakeWS()
-    await bridge._handle_a2ui_event(
-        ws, {"type": "a2ui_event", "surface_id": "approval-1",
-             "event": "approval", "value": "approve"}
+    authority = ApprovalAuthority(tmp_path / "approval")
+    request = authority.create_request(
+        trace_id="t", action_digest="d" * 64, description="approve"
     )
-    resp = (tmp_path / "approval" / "response").read_text(encoding="utf-8")
-    assert resp == "approve"
+    authority.open_response_window(request)
+    ws = _FakeWS()
+    await bridge._handle_a2ui_event(ws, {
+        "type": "a2ui_event",
+        "id": "a2ui-1",
+        "surface_id": "approval-1",
+        "event": "approval",
+        "request_id": request.request_id,
+        "action_digest": request.action_digest,
+        "decision": "approve",
+        "responded_at": time.time(),
+    })
+    grant = authority.consume_response(
+        request, approved_digests=(request.action_digest,)
+    )
+    assert grant is not None
+    assert ws.sent[-1]["status"] == "ok"
+    assert ws.sent[-1]["id"] == "a2ui-1"
 
 
 @pytest.mark.asyncio
-async def test_a2ui_approval_unknown_value_fails_safe_to_deny(tmp_path):
+async def test_a2ui_malformed_or_missing_binding_writes_nothing(tmp_path):
     bridge = _make_bridge(tmp_path)
     ws = _FakeWS()
-    await bridge._handle_a2ui_event(
-        ws, {"surface_id": "approval-2", "event": "approval", "value": "garbage"}
-    )
-    resp = (tmp_path / "approval" / "response").read_text(encoding="utf-8")
-    assert resp == "deny"
+    await bridge._handle_a2ui_event(ws, {
+        "surface_id": "approval-2",
+        "event": "approval",
+        "decision": True,
+        "responded_at": time.time(),
+    })
+    assert ws.sent[-1]["status"] == "error"
+    assert not list((tmp_path / "approval").glob("responses/*.json"))
 
 
 @pytest.mark.asyncio
@@ -563,3 +592,56 @@ async def test_push_status_dashboard_broadcasts(tmp_path):
     bridge.broadcast_json = _capture
     await bridge.push_status_dashboard()
     assert sent and sent[-1]["type"] == "a2ui_canvas"
+
+
+def test_approval_surface_requires_exact_correlation_fields():
+    surface = a2ui.approval_surface(
+        "Approve?", request_id="r" * 32, action_digest="d" * 64
+    )
+    surface.pop("request_id")
+    assert "approval surface has invalid request_id" in a2ui.validate_surface(surface)
+    surface["request_id"] = "r" * 32
+    surface["action_digest"] = "not-a-digest"
+    assert "approval surface has invalid action_digest" in a2ui.validate_surface(surface)
+
+
+@pytest.mark.asyncio
+async def test_a2ui_mismatch_and_replay_cannot_authorize(tmp_path):
+    bridge = _make_bridge(tmp_path)
+    authority = ApprovalAuthority(tmp_path / "approval")
+    request = authority.create_request(
+        trace_id="t", action_digest="d" * 64, description="approve"
+    )
+    authority.open_response_window(request)
+    ws = _FakeWS()
+    crossed = {
+        "surface_id": "approval-x",
+        "event": "approval",
+        "request_id": request.request_id,
+        "action_digest": "e" * 64,
+        "decision": "approve",
+        "responded_at": time.time(),
+    }
+    await bridge._handle_a2ui_event(ws, crossed)
+    assert authority.consume_response(
+        request, approved_digests=(request.action_digest,)
+    ) is None
+
+    replay = authority.create_request(
+        trace_id="t2", action_digest="f" * 64, description="approve"
+    )
+    authority.open_response_window(replay)
+    payload = {
+        "surface_id": "approval-y",
+        "event": "approval",
+        "request_id": replay.request_id,
+        "action_digest": replay.action_digest,
+        "decision": "approve",
+        "responded_at": time.time(),
+    }
+    await bridge._handle_a2ui_event(ws, payload)
+    assert authority.consume_response(
+        replay, approved_digests=(replay.action_digest,)
+    ) is not None
+    await bridge._handle_a2ui_event(ws, payload)
+    assert ws.sent[-1]["status"] == "error"

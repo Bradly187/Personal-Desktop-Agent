@@ -17,6 +17,7 @@ struct A2UIOverlay: ViewModifier {
     @State private var current: A2UISurface?
     @State private var state: A2UIState?
     @State private var timeoutTask: Task<Void, Never>?
+    @State private var pendingApprovalMessageId: String?
 
     func body(content: Content) -> some View {
         content
@@ -28,21 +29,37 @@ struct A2UIOverlay: ViewModifier {
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.lg))
                         .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
                         .transition(.scale.combined(with: .opacity))
-                        .allowsHitTesting(true)
+                        .allowsHitTesting(pendingApprovalMessageId == nil)
                 }
             }
             .onReceive(wsManager.a2uiFeed) { surface in present(surface) }
+            .onReceive(wsManager.a2uiApprovalAckFeed) { ack in
+                guard ack.id == pendingApprovalMessageId else { return }
+                // Both accepted and rejected publications retire this exact card;
+                // the bridge's quiet error feed explains rejection when needed.
+                dismiss()
+            }
             .onReceive(wsManager.a2uiClearFeed) { surfaceId in
                 if current?.surfaceId == surfaceId { dismiss() }
             }
     }
 
     private func present(_ surface: A2UISurface) {
+        pendingApprovalMessageId = nil
         let st = A2UIState { event, value, values in
-            wsManager.sendA2UIEvent(surfaceId: surface.surfaceId,
-                                    event: event, value: value, values: values)
-            // A tap resolves the surface; the PC decides what to show next.
-            dismiss()
+            let messageId = wsManager.sendA2UIEvent(
+                surfaceId: surface.surfaceId,
+                event: event, value: value, values: values,
+                requestId: surface.requestId,
+                actionDigest: surface.actionDigest
+            )
+            if event == "approval" {
+                // Keep the card visible and inert until the bridge ACKs exact
+                // publication. A disconnected/unsent response remains retryable.
+                pendingApprovalMessageId = messageId
+            } else {
+                dismiss()
+            }
         }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
             current = surface
@@ -55,14 +72,24 @@ struct A2UIOverlay: ViewModifier {
         timeoutTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard !Task.isCancelled, current?.surfaceId == surface.surfaceId else { return }
-            wsManager.sendA2UIEvent(surfaceId: surface.surfaceId,
-                                    event: "timeout", value: nil, values: [:])
+            if let requestId = surface.requestId,
+               let actionDigest = surface.actionDigest {
+                // Approval timeout is an exact deny, never an unbound timeout.
+                wsManager.sendA2UIEvent(surfaceId: surface.surfaceId,
+                                        event: "approval", value: "deny", values: [:],
+                                        requestId: requestId,
+                                        actionDigest: actionDigest)
+            } else {
+                wsManager.sendA2UIEvent(surfaceId: surface.surfaceId,
+                                        event: "timeout", value: nil, values: [:])
+            }
             dismiss()
         }
     }
 
     private func dismiss() {
         timeoutTask?.cancel()
+        pendingApprovalMessageId = nil
         withAnimation(.easeInOut(duration: 0.25)) {
             current = nil
             state = nil

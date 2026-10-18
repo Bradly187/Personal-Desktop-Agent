@@ -34,6 +34,7 @@ Metrics catalogue:
     corrections             — user corrections recorded
     whisper_hallucinations  — transcripts filtered by hallucination check
     gesture_rejections      — gestures below velocity/confidence floor
+    approval_legacy_acceptances — migration-only unbound responses accepted
 
   Gauges (current value, can go up or down):
     pain_day_score          — PainDayEngine score [0.0, 1.0]
@@ -193,6 +194,7 @@ class Metrics:
             "whisper_hallucinations": 0,
             "gesture_rejections": 0,
             # Phase 6 migration telemetry; strict production mode keeps this zero.
+            "approval_legacy_acceptances": 0,
             # FusionEngine circuit breaker (commands shed during acoustic storms/latency spikes)
             "route_task_breaker_sheds": 0,
             # Ollama hang-timeout (FINDING 4): incremented when DA_OLLAMA_TIMEOUT_S fires

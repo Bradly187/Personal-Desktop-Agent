@@ -2,8 +2,11 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from core.approval_authority import action_digest, canonical_json, content_digest
 from inference.dev_common import _get_content_filter, _get_trust_classifier, _RAG_OPEN_FENCE, _RAG_CLOSE_FENCE
 from inference.plan_parser import AgentStep, AgentResult
 
@@ -24,6 +27,69 @@ def parse_skill_args(raw: str, body: str = "") -> tuple[str, str, dict]:
             args = {}
     return skill_id, tool, args
 
+
+@dataclass(frozen=True)
+class SkillActionMaterial:
+    skill_id: str
+    tool: str
+    arguments: dict[str, Any]
+    is_send: bool
+
+    @property
+    def security_args(self) -> dict[str, Any]:
+        return {
+            "skill_id": self.skill_id,
+            "tool": self.tool,
+            "arguments": self.arguments,
+        }
+
+
+def prepare_skill_action(executor, step: AgentStep) -> SkillActionMaterial:
+    """Parse, classify, and scrub the exact skill material used for authority/egress."""
+    registry = getattr(executor, "_skill_registry", None)
+    skill_id, tool, args = parse_skill_args(step.args, step.body)
+    is_send = bool(
+        step.action.upper() == "SKILL_CALL"
+        or (registry is not None and skill_id and tool
+            and registry.is_send_tool(skill_id, tool))
+    )
+    if is_send:
+        try:
+            clean_blob, findings = _get_content_filter().scrub_sync(json.dumps(args))
+            scrubbed = json.loads(clean_blob)
+            if isinstance(scrubbed, dict):
+                args = scrubbed
+            if findings:
+                log.info(
+                    "Skill send: scrubbed %d secret(s) from %s.%s payload",
+                    len(findings), skill_id, tool,
+                )
+        except Exception as exc:
+            log.debug("Skill send scrub failed (%s) — proceeding with raw args", exc)
+    return SkillActionMaterial(skill_id, tool, args, is_send)
+
+
+def skill_action_digest(
+    material: SkillActionMaterial,
+    step: AgentStep,
+    *,
+    trace_id: str,
+    goal: str,
+) -> str:
+    """Bind one outbound skill send to its parsed, scrubbed execution material."""
+    return action_digest(
+        action="SKILL_CALL",
+        trace_id=trace_id,
+        goal=goal,
+        security_args=material.security_args,
+        body_hash=content_digest(canonical_json(material.arguments)),
+        step_identity={
+            "step_num": getattr(step, "step_num", None),
+            "deps": list(getattr(step, "deps", []) or []),
+        },
+        approval_context="plan",
+    )
+
 def build_skill_args(text: str, match: dict, schema: dict) -> dict:
     props = (schema or {}).get("properties", {})
     required = (schema or {}).get("required", [])
@@ -39,35 +105,34 @@ def build_skill_args(text: str, match: dict, schema: dict) -> dict:
     return {}
 
 async def execute_skill_step(executor, step: AgentStep) -> str:
-    if getattr(executor, "_skill_registry", None) is None:
+    registry = getattr(executor, "_skill_registry", None)
+    if registry is None:
         return "No skills available (registry not wired)"
 
-    skill_id, tool, args = parse_skill_args(step.args, step.body)
+    material = await asyncio.to_thread(prepare_skill_action, executor, step)
+    skill_id, tool, args = material.skill_id, material.tool, material.arguments
     if not skill_id or not tool:
         return "SKILL step needs '<skill_id> <tool> {json args}'"
 
-    is_send = (step.action.upper() == "SKILL_CALL"
-               or executor._skill_registry.is_send_tool(skill_id, tool))
-
-    if is_send:
-        try:
-            clean_blob, findings = _get_content_filter().scrub_sync(json.dumps(args))
-            scrubbed = json.loads(clean_blob)
-            if isinstance(scrubbed, dict):
-                args = scrubbed
-            if findings:
-                log.info("Skill send: scrubbed %d secret(s) from %s.%s payload",
-                         len(findings), skill_id, tool)
-        except Exception as exc:
-            log.debug("Skill send scrub failed (%s) — proceeding with raw args", exc)
-        if not await executor._agent._confirm_destructive_op(
-            f"Approve sending via skill {skill_id}.{tool}?"
+    if material.is_send:
+        agent = getattr(executor, "_agent", executor)
+        digest = skill_action_digest(
+            material,
+            step,
+            trace_id=getattr(agent, "_active_trace_id", "") or "",
+            goal=getattr(agent, "_current_goal", "") or "",
+        )
+        if not await agent._confirm_destructive_op(
+            f"Approve sending via skill {skill_id}.{tool}?",
+            approval_action="SKILL_CALL",
+            security_args=material.security_args,
+            exact_digest=digest,
         ):
             return f"SKILL_CALL {skill_id}.{tool} cancelled by user"
 
     try:
         result = await asyncio.wait_for(
-            executor._skill_registry.call(skill_id, tool, args),
+            registry.call(skill_id, tool, args),
             timeout=getattr(executor, "SKILL_CALL_TIMEOUT_S", 60.0),
         )
     except asyncio.TimeoutError:
@@ -77,7 +142,7 @@ async def execute_skill_step(executor, step: AgentStep) -> str:
         return f"Skill {skill_id}.{tool} timed out after {timeout_s}s"
     text = result.get("text", "") if isinstance(result, dict) else str(result)
 
-    if not is_send and text:
+    if not material.is_send and text:
         try:
             verdict = _get_trust_classifier().classify_sync(
                 f"skill:{skill_id}.{tool}", text
@@ -85,12 +150,12 @@ async def execute_skill_step(executor, step: AgentStep) -> str:
             if verdict.should_block:
                 log.warning("Skill %s.%s result quarantined (trust=HIGH)",
                             skill_id, tool)
-                await audit_skill(executor, skill_id, tool, is_send, result, blocked=True)
+                await audit_skill(executor, skill_id, tool, material.is_send, result, blocked=True)
                 return "[skill result withheld — flagged as potentially unsafe]"
         except Exception as exc:
             log.debug("Skill taint check failed: %s", exc)
 
-    await audit_skill(executor, skill_id, tool, is_send, result, blocked=False)
+    await audit_skill(executor, skill_id, tool, material.is_send, result, blocked=False)
     if isinstance(result, dict) and result.get("status") == "error":
         return f"SKILL error: {result.get('error', 'unknown')}"
     return text or "(no output)"

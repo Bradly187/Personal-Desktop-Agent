@@ -4,12 +4,16 @@ import os
 import re
 import secrets
 import time
-from pathlib import Path
 from typing import Optional
 
 from core.action_lifecycle import (
     ActionIdentity, ActionOutcome, ActionStatus, RegistryFullError,
 )
+from core.approval_authority import (
+    ApprovalResponse, plan_digest, sha256_digest, step_action_digest,
+)
+from inference.executors.skill_executor import prepare_skill_action, skill_action_digest
+from inference.step_executor import prepare_file_candidate
 from core.approval_keywords import classify_confirmation
 from core.events import (
     TOPIC_PLAN_GENERATED, TOPIC_DAG_APPROVAL,
@@ -105,8 +109,15 @@ async def plan_and_run(
     other context. Empty → byte-identical to today.
     """
     async with agent._plan_lock:
-        return await agent._plan_and_run_locked( 
-            goal, trace_id, seed_context, extra_context)
+        try:
+            return await agent._plan_and_run_locked(
+                goal, trace_id, seed_context, extra_context
+            )
+        finally:
+            # External task cancellation can arrive at any await after upfront
+            # approval. Always revoke any unconsumed cursor before releasing the
+            # per-plan lock; normal paths already reset and this is idempotent.
+            _reset_plan_state(agent)
 
 async def _plan_and_run_locked(
     agent, goal: str, cmd_trace_id: str = "", seed_context: str = "",
@@ -254,6 +265,12 @@ async def _plan_and_run_locked(
         except Exception:
             pass
 
+    # Stable plan ordinals are part of each destructive action digest.  Runtime
+    # execution preserves these for the ordinary plan; replans get their own
+    # identities when admitted into the remaining queue.
+    for ordinal, planned_step in enumerate(steps[: agent.MAX_STEPS], 1):
+        planned_step.step_num = ordinal
+
     # Upfront plan approval gate: speak summary → voice yes/no.
     # "denied" ABORTS the plan — an explicit "no" (or fail-safe DENY on a
     # destructive plan) must stop every step, not just the three git verbs.
@@ -277,10 +294,15 @@ async def _plan_and_run_locked(
             error="Plan rejected by user",
             total_latency_ms=(time.monotonic() - t0) * 1000,
         )
-    agent._plan_authorized = verdict == "approved"
+    # Compatibility fields remain observable in Phase 5, but only the typed
+    # grant can authorize execution.  A mocked/legacy string verdict without a
+    # grant therefore cannot silently become blanket authority.
+    agent._plan_authorized = (
+        verdict == "approved" and agent._approval_grant is not None
+    )
     agent._approved_verbs = frozenset(
         s.action.upper() for s in steps[: agent.MAX_STEPS]
-    )
+    ) if agent._plan_authorized else frozenset()
     agent._cancel_event.clear()
     agent._current_goal = goal
     agent._total_steps = min(len(steps), agent.MAX_STEPS)
@@ -718,24 +740,27 @@ async def _run_dag_waves(
         safe = [i for i in ready if pending[i].action.upper() in agent._FANOUT_SAFE_VERBS]
         barriers = [i for i in ready if i not in safe]
 
-        # De-collide same-path WRITE_FILE/EDIT_FILE within the concurrent
-        # batch (#14). The planner's "distinct paths" independence claim is
-        # unverified; two concurrent writes to one path race (nondeterministic
-        # last-writer + racing saga snapshots). Keep the lowest-indexed writer
-        # per path in the fan-out; demote later same-path writers to serial
-        # barriers so they run one-at-a-time in plan order.
-        seen_write_paths: set[str] = set()
-        deduped_safe: list[int] = []
-        for i in sorted(safe):
-            s = pending[i]
-            if s.action.upper() in ("WRITE_FILE", "EDIT_FILE"):
-                p = os.path.normcase(os.path.normpath((s.args or "").strip()))
-                if p in seen_write_paths:
-                    barriers.append(i)
-                    continue
-                seen_write_paths.add(p)
-            deduped_safe.append(i)
-        safe = deduped_safe
+        # Destructive actions are claimed and executed in the exact approved
+        # sequence. Even if a later destructive node is dependency-ready, hold
+        # it until every earlier destructive node has completed.
+        first_destructive = next(
+            (i for i in sorted(pending)
+             if getattr(pending[i], "_approval_destructive", False)),
+            None,
+        )
+        if first_destructive is not None:
+            barriers = [
+                i for i in barriers
+                if not getattr(pending[i], "_approval_destructive", False)
+                or i == first_destructive
+            ]
+
+        if not safe and not barriers:
+            log.warning(
+                "DevAgent[dag]: later destructive step ready before approved order; "
+                "deferring remaining steps to sequential execution"
+            )
+            break
 
         # Bind durable identity before any task in the wave can start.
         for i in safe:
@@ -938,15 +963,11 @@ async def _try_replan(
     real_steps = [s for s in new_steps if s.action != "EXPLAIN"]
     if not real_steps:
         return None
-    injected = {
-        s.action.upper() for s in new_steps
-    } & agent._DESTRUCTIVE_VERBS - agent._approved_verbs
-    if injected and agent._plan_authorized:
-        log.warning(
-            "DevAgent: replan injected unapproved destructive verb(s) %s — "
-            "revoking blanket plan authorization", sorted(injected),
-        )
-        agent._plan_authorized = False
+    # Verb-level blanket revocation is intentionally gone.  StepExecutor
+    # recomputes the exact action digest after canonicalization and reuses the
+    # whole-plan grant only on exact membership.  Changed args/path/body,
+    # identity, dependencies, or a new destructive step therefore receives a
+    # per-operation request even when its verb is unchanged.
     budget = max(0, agent.MAX_STEPS - len(executed))
     return new_steps[:budget]
 
@@ -1007,7 +1028,12 @@ async def resume_pending_plan(agent) -> Optional[dict]:
             run_id,
         )
         return None
-    if not await agent._confirm_destructive_op(f"Resume the interrupted task: {goal[:60]}?"):
+    if not await agent._confirm_destructive_op(
+        f"Resume the interrupted task: {goal[:60]}?",
+        approval_action="RESUME_PLAN",
+        security_args={"run_id": run_id},
+        content=goal,
+    ):
         log.info("DevAgent.resume_pending_plan: user declined resume of run %s", run.get("id"))
         # Declining a resume rolls back the crashed run's completed side
         # effects — the user chose not to finish it, so partial destructive
@@ -1131,18 +1157,58 @@ async def drain_goal_queue(agent, max_goals: int = 0) -> int:
             log.info("DevAgent.drain_goal_queue: processed %d goal(s)", processed)
         return processed
 
-async def _approve_plan_upfront(agent, goal: str, steps: list[AgentStep], assumptions: list[str] = None) -> str:
-    """Speak plan summary, capture voice yes/no, write GoalSession on approval.
+async def _destructive_plan_digests(
+    agent, goal: str, steps: list[AgentStep]
+) -> tuple[str, ...]:
+    """Resolve and digest each exact destructive action in approved plan order."""
+    digests: list[str] = []
+    trace_id = agent._active_trace_id or ""
+    for ordinal, step in enumerate(steps[: agent.MAX_STEPS], 1):
+        step.step_num = step.step_num or ordinal
+        action = step.action.upper()
+        step._approval_destructive = False
 
-    Returns a verdict string consumed by plan_and_run:
-      - "approved" — explicit spoken yes; all steps (incl. destructive) run
-        without per-op confirmation.
-      - "denied"   — explicit spoken no, or fail-safe DENY on a destructive
-        plan (silence / ambiguity / hardware failure). The plan must ABORT.
-      - "auto"     — read-only plan with no clear consent (hardware failure /
-        silence): runs for convenience, but WITHOUT blanket authorization,
-        so any destructive step a replan later injects still confirms per-op.
-    """
+        if action in ("SKILL_CALL", "SKILL_QUERY"):
+            material = await asyncio.to_thread(prepare_skill_action, agent, step)
+            if not material.is_send:
+                continue
+            if not material.skill_id or not material.tool:
+                raise ValueError("destructive skill step is missing skill or tool")
+            step._approval_destructive = True
+            digests.append(skill_action_digest(
+                material, step, trace_id=trace_id, goal=goal
+            ))
+            continue
+
+        if action not in agent._DESTRUCTIVE_VERBS:
+            continue
+        step._approval_destructive = True
+        canonical_path: str | None = None
+        canonical_cwd: str | None = None
+        content: str | None = None
+        if action in ("WRITE_FILE", "EDIT_FILE"):
+            canonical_path, content = await prepare_file_candidate(agent, step)
+        elif action in ("RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT", "GITHUB_PR"):
+            decision = await asyncio.to_thread(
+                agent._execution_scope.authorize_cwd, None
+            )
+            if not decision.allowed or decision.canonical_path is None:
+                raise PermissionError(decision.reason or f"{action} cwd denied")
+            canonical_cwd = str(decision.canonical_path)
+        digests.append(step_action_digest(
+            step,
+            trace_id=trace_id,
+            goal=goal,
+            canonical_path=canonical_path,
+            canonical_cwd=canonical_cwd,
+            content=content,
+            approval_context="plan",
+        ))
+    return tuple(digests)
+
+
+async def _approve_plan_upfront(agent, goal: str, steps: list[AgentStep], assumptions: list[str] = None) -> str:
+    """Collect one exact whole-plan response while preserving fail-safe denial."""
     from core.goal_session import GoalSessionStore
 
     verbs = [s.action for s in steps[: agent.MAX_STEPS]]
@@ -1186,19 +1252,52 @@ async def _approve_plan_upfront(agent, goal: str, steps: list[AgentStep], assump
 
     log.info("DevAgent: requesting plan approval — %s", message)
 
-    plan_is_destructive = any(
-        s.action.upper() in agent._DESTRUCTIVE_VERBS for s in steps[: agent.MAX_STEPS]
-    )
+    try:
+        plan_step_digests = await _destructive_plan_digests(agent, goal, steps)
+        plan_is_destructive = bool(plan_step_digests)
+        if plan_is_destructive:
+            request_digest = plan_digest(
+                plan_step_digests,
+                goal=goal,
+                trace_id=agent._active_trace_id or "",
+            )
+        else:
+            # Read-only consent is correlated too, but this synthetic digest is
+            # never retained as execution authority.
+            request_digest = sha256_digest({
+                "version": 1,
+                "kind": "read_only_plan_consent",
+                "trace_id": agent._active_trace_id or "",
+                "goal": goal,
+                "steps": [
+                    {"n": s.step_num or i, "action": s.action, "args": s.args, "body": s.body}
+                    for i, s in enumerate(steps[: agent.MAX_STEPS], 1)
+                ],
+            })
+    except (OSError, PermissionError, TypeError, ValueError) as exc:
+        log.info("DevAgent._approve_plan_upfront: approval material invalid (%s) → DENY", exc)
+        return "denied"
 
-    # Live UI: surface an approval card in the chat (the spoken question +
-    # whether it's destructive). The actual yes/no still flows through the
-    # shared ~/.claude/approval signal files below — the chat just becomes
-    # another responder. No-op when no chat request is in flight.
-    # The proposed steps ride along so the chat renders a reviewable plan-
-    # preview card instead of a bare question (specs/chat-workbench-parity
-    # R5/R6) — additive payload; old clients ignore the extra keys.
+    try:
+        request = agent._approval_authority.create_request(
+            trace_id=agent._active_trace_id or "",
+            action_digest=request_digest,
+            description=message,
+        )
+        agent._approval_authority.open_response_window(request)
+    except Exception as exc:
+        if plan_is_destructive:
+            log.info("DevAgent._approve_plan_upfront: authority unavailable (%s) → DENY", exc)
+            return "denied"
+        log.info("DevAgent._approve_plan_upfront: read-only authority unavailable (%s) → auto-run", exc)
+        GoalSessionStore.create(goal=goal, domain="plan")
+        return "auto"
+
     await agent._publish_live(TOPIC_DAG_APPROVAL, {
-        "message": message, "destructive": plan_is_destructive,
+        "message": message,
+        "destructive": plan_is_destructive,
+        "request_id": request.request_id,
+        "action_digest": request.action_digest,
         "goal": goal[:200],
         "steps": [
             {"n": s.step_num or i, "action": s.action,
@@ -1207,101 +1306,138 @@ async def _approve_plan_upfront(agent, goal: str, steps: list[AgentStep], assump
         ],
     })
 
-    def _grant(verdict: str) -> str:
-        GoalSessionStore.create(goal=goal, domain="plan")
+    async def _close_remote_window() -> bool:
+        sealed = False
+        try:
+            await asyncio.to_thread(
+                agent._approval_authority.close_response_window, request
+            )
+            sealed = True
+        except Exception as exc:
+            log.info(
+                "DevAgent._approve_plan_upfront: could not seal responders (%s)",
+                exc,
+            )
+        await asyncio.to_thread(agent._approval_authority.close_pending_request, request)
+        await agent._publish_live("dag.approval_closed", {
+            "request_id": request.request_id,
+        })
+        return sealed
+
+    def _finish(verdict: str) -> str:
+        approved_digests = plan_step_digests if plan_is_destructive else (request.action_digest,)
+        plan_goal = goal if plan_is_destructive else None
+        try:
+            grant = agent._approval_authority.consume_response(
+                request, approved_digests=approved_digests, plan_goal=plan_goal
+            )
+        except Exception as exc:
+            log.info("DevAgent._approve_plan_upfront: authority failed (%s) → DENY", exc)
+            grant = None
+        if plan_is_destructive:
+            agent._approval_grant = grant
+            if verdict != "approved" or grant is None:
+                return "denied"
+        elif verdict == "approved" and grant is None:
+            return "denied"
+        if verdict in ("approved", "auto"):
+            GoalSessionStore.create(goal=goal, domain="plan")
         return verdict
 
     def _fallback(reason: str) -> str:
-        """No clear consent obtained (hardware failure / silence / ambiguity).
-
-        Read-only plans auto-run for convenience (but WITHOUT blanket
-        authorization — see "auto" in the docstring); destructive plans
-        fail-safe to DENY — never run side effects without an explicit yes.
-        """
         if plan_is_destructive:
-            log.info(
-                "DevAgent._approve_plan_upfront: %s + destructive plan → DENY", reason
-            )
-            return "denied"
-        log.info(
-            "DevAgent._approve_plan_upfront: %s + read-only plan → auto-run", reason
-        )
-        return _grant("auto")
+            log.info("DevAgent._approve_plan_upfront: %s + destructive plan → DENY", reason)
+            return _finish("denied")
+        log.info("DevAgent._approve_plan_upfront: %s + read-only plan → auto-run", reason)
+        return _finish("auto")
 
-    # Speak via TTS
+    async def _publish(decision: str) -> None:
+        response = ApprovalResponse(
+            request_id=request.request_id,
+            action_digest=request.action_digest,
+            decision="approve" if decision == "approve" else "deny",
+            responded_at=time.time(),
+        )
+        try:
+            await asyncio.to_thread(agent._approval_authority.write_response, response)
+        except Exception as exc:
+            log.info("DevAgent._approve_plan_upfront: response publication rejected (%s)", exc)
+
     try:
         from tts.polly_stream import get_client as _get_tts
         await asyncio.to_thread(_get_tts().speak_sync, message)
     except Exception as exc:
+        await _close_remote_window()
         return _fallback(f"TTS unavailable ({exc})")
 
-    # Wait for iPad approval signal (7 s window, same as approval_hook.py)
-    _APPROVAL_DIR = Path.home() / ".claude" / "approval"
-    _PENDING_FILE  = _APPROVAL_DIR / "pending"
-    _RESPONSE_FILE = _APPROVAL_DIR / "response"
-
-    _APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
-    _RESPONSE_FILE.unlink(missing_ok=True)
-    _PENDING_FILE.write_text(str(time.monotonic()), encoding="utf-8")
-
-    transcript: Optional[str] = None
-    deadline = time.monotonic() + 7.0
+    remote_sealed = False
     try:
+        await asyncio.to_thread(agent._approval_authority.publish_pending_request, request)
+        deadline = time.monotonic() + 7.0
         while time.monotonic() < deadline:
-            if _RESPONSE_FILE.exists():
-                transcript = _RESPONSE_FILE.read_text(encoding="utf-8-sig").strip()
-                break
+            if agent._approval_authority.response_path(request.request_id).exists():
+                return _finish("approved")
             await asyncio.sleep(0.1)
+    except OSError as exc:
+        log.info("DevAgent._approve_plan_upfront: responder window failed (%s)", exc)
     finally:
-        _PENDING_FILE.unlink(missing_ok=True)
-        _RESPONSE_FILE.unlink(missing_ok=True)
+        remote_sealed = await _close_remote_window()
 
-    if transcript is None:
-        # Silence or bridge not running → fallback: 4 s PC mic recording
-        try:
-            import numpy as np
-            import sounddevice as sd
-            audio = await asyncio.to_thread(
-                lambda: sd.rec(int(4.0 * 16_000), samplerate=16_000,
-                               channels=1, dtype="float32").flatten()
+    # A responder that won the close boundary is fully published before the
+    # response window lock releases; consume it instead of starting fallback.
+    if agent._approval_authority.response_path(request.request_id).exists():
+        return _finish("approved")
+    if not remote_sealed:
+        return _fallback("responder window closure unverified")
+
+    try:
+        import numpy as np
+        import sounddevice as sd
+        audio = await asyncio.to_thread(
+            lambda: sd.rec(int(4.0 * 16_000), samplerate=16_000,
+                           channels=1, dtype="float32").flatten()
+        )
+        await asyncio.to_thread(sd.wait)
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.005:
+            return _fallback("silence")
+        if agent._confirm_whisper is None:
+            from faster_whisper import WhisperModel
+            agent._confirm_whisper = await asyncio.to_thread(
+                WhisperModel, "tiny", device="cpu", compute_type="int8"
             )
-            await asyncio.to_thread(sd.wait)
-            rms = float(np.sqrt(np.mean(audio ** 2)))
-            if rms < 0.005:
-                return _fallback("silence")
-            if agent._confirm_whisper is None:
-                from faster_whisper import WhisperModel
-                agent._confirm_whisper = await asyncio.to_thread(
-                    WhisperModel, "tiny", device="cpu", compute_type="int8"
-                )
 
-            def _transcribe() -> str:
-                segs, _ = agent._confirm_whisper.transcribe(
-                    audio, language="en", beam_size=1, vad_filter=False
-                )
-                return " ".join(s.text for s in segs).lower().strip()
+        def _transcribe() -> str:
+            segs, _ = agent._confirm_whisper.transcribe(
+                audio, language="en", beam_size=1, vad_filter=False
+            )
+            return " ".join(s.text for s in segs).lower().strip()
 
-            transcript = await asyncio.to_thread(_transcribe)
-        except Exception as exc:
-            return _fallback(f"mic fallback failed ({exc})")
+        transcript = await asyncio.to_thread(_transcribe)
+    except Exception as exc:
+        return _fallback(f"mic fallback failed ({exc})")
 
-    # Shared confirmation vocabulary (core/approval_keywords). An explicit
-    # deny always blocks. An explicit yes grants. Anything else (ambiguous /
-    # unrecognised) defers to _fallback: auto-approve for read-only plans,
-    # fail-safe DENY for destructive ones.
     verdict = classify_confirmation(transcript)
     if verdict == "deny":
         log.info("DevAgent._approve_plan_upfront: REJECTED — %r", transcript)
-        return "denied"
+        await _publish("deny")
+        return _finish("denied")
     if verdict == "approve":
         log.info("DevAgent._approve_plan_upfront: approved — %r", transcript)
-        return _grant("approved")
+        await _publish("approve")
+        return _finish("approved")
     return _fallback(f"ambiguous reply {transcript!r}")
+
 
 def _reset_plan_state(agent) -> None:
     """Clean up goal-session and status fields after a plan run."""
     from core.goal_session import GoalSessionStore
     GoalSessionStore.cancel()
+    try:
+        agent._approval_authority.revoke_grant(agent._approval_grant)
+    except Exception:
+        pass
+    agent._approval_grant = None
     agent._plan_authorized = False
     agent._approved_verbs = frozenset()
     agent._escalated_this_run = False

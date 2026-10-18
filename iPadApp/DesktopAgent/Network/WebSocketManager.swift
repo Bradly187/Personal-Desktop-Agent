@@ -19,6 +19,11 @@ struct ProactiveNotification {
     let body: String
 }
 
+struct A2UIApprovalAck {
+    let id: String
+    let accepted: Bool
+}
+
 // MARK: — Connection state
 
 enum ConnectionState: Equatable {
@@ -103,6 +108,9 @@ final class WebSocketManager: ObservableObject {
 
     /// Feed of canvas clear requests (reset the dashboard to empty).
     let a2uiCanvasClearFeed = PassthroughSubject<Void, Never>()
+
+    /// Correlated publication result for an A2UI approval response.
+    let a2uiApprovalAckFeed = PassthroughSubject<A2UIApprovalAck, Never>()
 
     // Injected at runtime from SettingsStore
     var settings: SettingsStore?
@@ -271,21 +279,75 @@ final class WebSocketManager: ObservableObject {
         return id
     }
 
-    /// Reply to an agent-pushed A2UI surface. `value` is the activated control's
-    /// value; `values` carries form-field state keyed by field_id.
-    func sendA2UIEvent(surfaceId: String,
-                       event: String,
-                       value: String?,
-                       values: [String: String]) {
+    /// Build the wire payload for an A2UI event. Approval events are emitted
+    /// only when both correlation fields are present and carry the exact
+    /// ApprovalResponse fields expected by the Python bridge.
+    nonisolated static func a2UIEventPayload(
+        surfaceId: String,
+        event: String,
+        value: String?,
+        values: [String: String],
+        requestId: String? = nil,
+        actionDigest: String? = nil,
+        messageId: String? = nil,
+        respondedAt: Double = Date().timeIntervalSince1970
+    ) -> [String: Any]? {
         var payload: [String: Any] = [
             "type": "a2ui_event",
             "surface_id": surfaceId,
             "event": event,
             "ts": CACurrentMediaTime(),
         ]
-        if let value { payload["value"] = value }
-        if !values.isEmpty { payload["values"] = values }
+        if let messageId { payload["id"] = messageId }
+        if event == "approval" {
+            guard let requestId, let actionDigest,
+                  value == "approve" || value == "deny" else { return nil }
+            payload["request_id"] = requestId
+            payload["action_digest"] = actionDigest
+            payload["decision"] = value
+            payload["responded_at"] = respondedAt
+        } else {
+            if let value { payload["value"] = value }
+            if !values.isEmpty { payload["values"] = values }
+        }
+        return payload
+    }
+
+    nonisolated static func a2UIApprovalAck(
+        from json: [String: Any]
+    ) -> A2UIApprovalAck? {
+        guard json["type"] as? String == "ack",
+              let id = json["id"] as? String,
+              id.hasPrefix("a2ui-"),
+              let status = json["status"] as? String,
+              status == "ok" || status == "error" else { return nil }
+        return A2UIApprovalAck(id: id, accepted: status == "ok")
+    }
+
+    @discardableResult
+    func sendA2UIEvent(surfaceId: String,
+                       event: String,
+                       value: String?,
+                       values: [String: String],
+                       requestId: String? = nil,
+                       actionDigest: String? = nil) -> String? {
+        guard state == .connected else { return nil }
+        msgCounter += 1
+        let messageId = "a2ui-\(msgCounter)"
+        guard let payload = Self.a2UIEventPayload(
+            surfaceId: surfaceId,
+            event: event,
+            value: value,
+            values: values,
+            requestId: requestId,
+            actionDigest: actionDigest,
+            messageId: messageId
+        ) else {
+            AppLogger.shared.warning("a2ui", "refusing unbound approval event")
+            return nil
+        }
         send(payload)
+        return messageId
     }
 
     // MARK: — Connection internals
@@ -432,11 +494,15 @@ final class WebSocketManager: ObservableObject {
         let parsed: BridgeMessage
         switch type {
         case "ack":
+            let ackStatus = json["status"] as? String ?? "ok"
             parsed = .ack(
                 id: id,
-                status: json["status"] as? String ?? "ok",
+                status: ackStatus,
                 error: json["error"] as? String
             )
+            if let approvalAck = Self.a2UIApprovalAck(from: json) {
+                a2uiApprovalAckFeed.send(approvalAck)
+            }
             // Surface inference/execution errors to the UI via errorFeed
             if let errMsg = json["error"] as? String, !errMsg.isEmpty {
                 errorFeed.send(errMsg)
