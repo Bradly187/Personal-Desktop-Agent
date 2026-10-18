@@ -651,6 +651,9 @@ def test_secret_acl_helper_replaces_preexisting_explicit_grants(tmp_path):
         )
 
     acl_script = Path(__file__).parents[1] / "scripts" / "Set-ProxySecretAcl.ps1"
+    # Windows PowerShell 5.1 must not inherit a PowerShell 7 PSModulePath (as on
+    # GitHub runners), or its built-in modules fail to autoload.
+    ps_env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
     for path, extra in ((secret_dir, ["-Directory"]), (token_file, [])):
         applied = subprocess.run(
             [
@@ -661,6 +664,7 @@ def test_secret_acl_helper_replaces_preexisting_explicit_grants(tmp_path):
             capture_output=True,
             text=True,
             timeout=30,
+            env=ps_env,
         )
         assert applied.returncode == 0, (
             f"Set-ProxySecretAcl.ps1 failed ({applied.returncode}): "
@@ -680,12 +684,12 @@ def test_secret_acl_helper_replaces_preexisting_explicit_grants(tmp_path):
             "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
             "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
         ],
-        capture_output=True, text=True, timeout=15, check=True,
+        capture_output=True, text=True, timeout=15, check=True, env=ps_env,
     ).stdout.strip()
     for path in (secret_dir, token_file):
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
-            env={**os.environ, "ACL_TEST_PATH": str(path)},
+            env={**ps_env, "ACL_TEST_PATH": str(path)},
             capture_output=True, text=True, timeout=15, check=True,
         )
         acl = json.loads(result.stdout)
