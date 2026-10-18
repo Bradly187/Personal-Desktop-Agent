@@ -35,7 +35,7 @@ def _clear_registry():
     ce._launched_procs.clear()
 
 
-def test_launch_detached_uses_new_group(monkeypatch):
+def test_launch_detached_uses_new_group_and_sanitized_env(monkeypatch):
     captured = {}
 
     def _fake_popen(argv, **kwargs):
@@ -43,10 +43,16 @@ def test_launch_detached_uses_new_group(monkeypatch):
         captured["kwargs"] = kwargs
         return _FakeProc(alive=True)
 
+    monkeypatch.setenv("WSL_ACTION_PROXY_TOKEN", "secret-token")
+    monkeypatch.setenv("WSL_ACTION_PROXY_INSTANCE", "instance-id")
+    monkeypatch.setenv("CUSTOM_VALUE", "keep-me")
     monkeypatch.setattr(ce.subprocess, "Popen", _fake_popen)
     ce._launch_detached(["C:/x/app.exe"])
 
     assert captured["argv"] == ["C:/x/app.exe"]
+    assert "WSL_ACTION_PROXY_TOKEN" not in captured["kwargs"]["env"]
+    assert "WSL_ACTION_PROXY_INSTANCE" not in captured["kwargs"]["env"]
+    assert captured["kwargs"]["env"]["CUSTOM_VALUE"] == "keep-me"
     if os.name == "nt":
         assert captured["kwargs"].get("creationflags", 0) & ce.subprocess.CREATE_NEW_PROCESS_GROUP
     else:

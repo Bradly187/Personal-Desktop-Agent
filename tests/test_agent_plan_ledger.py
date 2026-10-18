@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.action_lifecycle import ActionIdentity
 from storage.db import AgentDB
 from inference.dev_agent import DevAgent
 from core.goal_session import GoalSessionStore
@@ -111,7 +113,7 @@ async def test_plan_and_run_finalizes_status(tmp_path):
 async def test_resume_declined_does_not_run(tmp_path):
     db = await _open_db(tmp_path)
     try:
-        await db.runs.start_agent_run("old goal", "plan", "m")
+        run_id = await db.runs.start_agent_run("old goal", "plan", "m")
         await db.runs.mark_interrupted_runs()
 
         agent = DevAgent(router=MagicMock(), agent_db=db)
@@ -129,7 +131,7 @@ async def test_resume_declined_does_not_run(tmp_path):
 async def test_resume_approved_runs_plan(tmp_path):
     db = await _open_db(tmp_path)
     try:
-        await db.runs.start_agent_run("old goal", "plan", "m")
+        run_id = await db.runs.start_agent_run("old goal", "plan", "m")
         await db.runs.mark_interrupted_runs()
 
         agent = DevAgent(router=MagicMock(), agent_db=db)
@@ -154,5 +156,78 @@ async def test_resume_noop_when_nothing_interrupted(tmp_path):
         assert await agent.resume_pending_plan() is None
         agent._confirm_destructive_op.assert_not_awaited()  # nothing to confirm
         agent.plan_and_run.assert_not_awaited()
+    finally:
+        await db.close()
+
+
+@pytest.mark.parametrize("would_approve", [False, True])
+async def test_resume_and_decline_are_blocked_while_unknown_action_is_live(
+    tmp_path, would_approve
+):
+    db = await _open_db(tmp_path)
+    release = asyncio.Event()
+    try:
+        run_id = await db.runs.start_agent_run("old goal", "plan", "m")
+        action_id = "resume-live-" + "9" * 32
+        await db.runs.insert_agent_step(
+            run_id, 1, "WRITE_FILE", "x.py", "body",
+            f"caller wait elapsed; outcome is unknown (action_id={action_id})",
+            False, 1.0,
+        )
+        await db.runs.mark_interrupted_runs()
+
+        agent = DevAgent(router=MagicMock(), agent_db=db)
+        identity = ActionIdentity(action_id, "WRITE_FILE", "trace", run_id, 1)
+        await agent._action_registry.start_or_get(
+            identity, lambda: release.wait(), destructive=True
+        )
+        agent._confirm_destructive_op = AsyncMock(return_value=would_approve)
+        agent.plan_and_run = AsyncMock()
+        agent._run_compensations = AsyncMock()
+
+        assert await agent.resume_pending_plan() is None
+        agent._confirm_destructive_op.assert_not_awaited()
+        agent.plan_and_run.assert_not_awaited()
+        agent._run_compensations.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+        await db.close()
+
+
+@pytest.mark.parametrize("approve", [False, True])
+async def test_resume_or_decline_unlocks_only_after_terminal_reconciliation(tmp_path, approve):
+    db = await _open_db(tmp_path)
+    try:
+        run_id = await db.runs.start_agent_run("old goal", "plan", "m")
+        action_id = "resume-done-" + "a" * 32
+        await db.runs.insert_agent_step(
+            run_id, 1, "WRITE_FILE", "x.py", "body",
+            f"caller wait elapsed; outcome is unknown (action_id={action_id})",
+            False, 1.0,
+        )
+        await db.runs.mark_interrupted_runs()
+
+        agent = DevAgent(router=MagicMock(), agent_db=db)
+        identity = ActionIdentity(action_id, "WRITE_FILE", "trace", run_id, 1)
+        await agent._action_registry.execute(
+            identity, lambda: asyncio.sleep(0, result="done"),
+            timeout_s=1, destructive=True,
+        )
+        agent._confirm_destructive_op = AsyncMock(return_value=approve)
+        agent.plan_and_run = AsyncMock()
+        agent._run_compensations = AsyncMock()
+
+        result = await agent.resume_pending_plan()
+        agent._confirm_destructive_op.assert_awaited_once()
+        if approve:
+            assert result is not None
+            seed = agent.plan_and_run.await_args.kwargs["seed_context"]
+            assert action_id in seed and "reconciled completed" in seed
+            agent._run_compensations.assert_not_awaited()
+        else:
+            assert result is None
+            agent.plan_and_run.assert_not_awaited()
+            agent._run_compensations.assert_awaited_once()
     finally:
         await db.close()

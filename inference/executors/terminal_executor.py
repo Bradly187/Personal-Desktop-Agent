@@ -2,7 +2,11 @@ import logging
 
 log = logging.getLogger(__name__)
 
-def run_terminal(cmd: str) -> str:
+def run_terminal(
+    cmd: str,
+    *,
+    cwd: str,
+) -> str:
     cmd = cmd.strip()
     log.info("DevAgent: running terminal command: %s", cmd)
     # Sandbox (mistake-containment): cwd-jail + resource/output caps. Network
@@ -19,7 +23,12 @@ def run_terminal(cmd: str) -> str:
         log.warning("DevAgent: blocked pip install — %s", reason)
         raise RuntimeError(reason)
     net = command_needs_network(cmd)
-    result = run_sandboxed(cmd, timeout=60, allow_network=net)
+    result = run_sandboxed(
+        cmd,
+        project_dir=cwd,
+        timeout=60,
+        allow_network=net,
+    )
     output = (result.stdout + result.stderr).strip()
     status = "ok" if result.returncode == 0 else f"exit {result.returncode}"
     log.info("DevAgent: terminal %s%s%s → %s",

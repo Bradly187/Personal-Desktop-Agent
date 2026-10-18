@@ -366,6 +366,16 @@ def _print_report(report, mode: str, *, show_failures: int = 12) -> None:
             print(f"  [{r.case_id}] {why}")
 
 
+def _build_sandbox_dev_agent(model: str | None, project_root: str):
+    """Build one eval-only agent with authority limited to its temp project."""
+    from core.execution_policy import ExecutionScope
+    from inference.dev_agent import DevAgent
+    from inference.model_router import ModelRouter
+
+    scope = ExecutionScope(project_root, [project_root])
+    return DevAgent(router=ModelRouter(), execution_scope=scope)
+
+
 def _run_sandbox(args):
     from evals.sandbox import load_sandbox_suite
     from evals.runner import run_sandbox_suite
@@ -374,7 +384,10 @@ def _run_sandbox(args):
         print("no cases to run", file=sys.stderr)
         return None
     return run_sandbox_suite(
-        cases, lambda: _build_dev_agent(args.model), timeout_s=args.timeout)
+        cases,
+        lambda project_root: _build_sandbox_dev_agent(args.model, project_root),
+        timeout_s=args.timeout,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -17,16 +17,35 @@ import concurrent.futures
 import io
 import logging
 import os
+import secrets
 import subprocess
 import sys
-import tempfile
 import time
 import webbrowser
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
-from core.goal_session import _path_in_scope
+from core.action_lifecycle import (
+    ActionIdentity,
+    ActionOutcome,
+    ActionStatus,
+    RegistryFullError,
+    TrackedWorkRegistry,
+)
+from core.atomic_file import atomic_write_text
+from core.execution_policy import ExecutionScope, load_writable_roots
+from core.proxy_auth import (
+    HEADER_INSTANCE,
+    HEADER_NONCE,
+    HEADER_SIGNATURE,
+    HEADER_TIMESTAMP,
+    body_sha256,
+    canonical_json_bytes,
+    capture_proxy_credentials,
+    request_signature,
+    sanitized_child_env,
+)
 
 if TYPE_CHECKING:
     from desktop.action_verifier import ActionVerifier
@@ -34,38 +53,107 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# If set, all desktop actions are forwarded to the Windows action proxy via HTTP.
-# Set by start_agent_wsl.sh: WSL_ACTION_PROXY=http://127.0.0.1:8768
+# start_agent_wsl.sh supplies these only for module initialization. Capture the
+# credential once, then remove it and the instance binding from os.environ so
+# terminal commands, git hooks, and other descendants cannot inherit either.
 _PROXY_URL: str | None = os.environ.get("WSL_ACTION_PROXY")
+_PROXY_TOKEN, _PROXY_INSTANCE_ID = capture_proxy_credentials()
+
+
+def _translate_wsl_path_for_windows_proxy(path: Path) -> str | None:
+    """Pure syntax translation; callers must establish DrvFs provenance first."""
+    parts = path.parts
+    if (len(parts) < 3 or parts[0] not in ("/", "\\") or parts[1] != "mnt"
+            or len(parts[2]) != 1 or not parts[2].isalpha()):
+        return None
+    tail = "\\".join(parts[3:])
+    return f"{parts[2].upper()}:\\{tail}" if tail else f"{parts[2].upper()}:\\"
+
+
+def _unescape_mountinfo_field(value: str) -> str:
+    for escaped, plain in (("\\040", " "), ("\\011", "\t"),
+                           ("\\012", "\n"), ("\\134", "\\")):
+        value = value.replace(escaped, plain)
+    return value
+
+
+def _mountinfo_proves_drvfs(path: Path, mountinfo: str) -> bool:
+    """Prove that path's /mnt/<drive> mount maps to that Windows drive."""
+    parts = path.parts
+    if (len(parts) < 3 or parts[0] != "/" or parts[1] != "mnt"
+            or len(parts[2]) != 1 or not parts[2].isalpha()):
+        return False
+    mountpoint = f"/mnt/{parts[2].lower()}"
+    drive = f"{parts[2].lower()}:"
+    for line in mountinfo.splitlines():
+        left, separator, right = line.partition(" - ")
+        if not separator:
+            continue
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) < 6 or len(right_fields) < 3:
+            continue
+        actual_mountpoint = _unescape_mountinfo_field(left_fields[4]).lower()
+        if actual_mountpoint != mountpoint:
+            continue
+        fs_type = right_fields[0].lower()
+        source = _unescape_mountinfo_field(right_fields[1]).lower()
+        options = ",".join((*left_fields[5:], *right_fields[2:])).lower()
+        option_tokens = {
+            token.strip()
+            for token in options.replace(";", ",").split(",")
+            if token.strip()
+        }
+        is_drvfs = fs_type == "drvfs" or (
+            fs_type == "9p" and "aname=drvfs" in option_tokens
+        )
+        source_drive = source.rstrip("\\/") == drive
+        option_drive = any(
+            token.startswith("path=")
+            and token.removeprefix("path=").rstrip("\\/") == drive
+            for token in option_tokens
+        )
+        return is_drvfs and (source_drive or option_drive)
+    return False
+
+
+def _is_verified_wsl_drvfs_path(path: Path) -> bool:
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _mountinfo_proves_drvfs(path, mountinfo)
+
+
+def _path_for_windows_proxy(
+    path: Path,
+    *,
+    platform: str | None = None,
+    mount_verifier: Callable[[Path], bool] | None = None,
+) -> str | None:
+    """Translate only native Windows paths or proven WSL DrvFs paths."""
+    current = platform or os.name
+    if current == "nt":
+        return str(path)
+    verifier = mount_verifier or _is_verified_wsl_drvfs_path
+    if not verifier(path):
+        return None
+    return _translate_wsl_path_for_windows_proxy(path)
 
 
 # ---------------------------------------------------------------------------
 # Writable-root allowlist (M2) — bound WRITE_FILE / RUN_TERMINAL cwd
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BRIDGE_CONFIG_PATH = Path.home() / ".claude" / "ipad_bridge" / "config.json"
 
 
 def _load_writable_roots() -> list[str]:
-    """Return the writable-root allowlist for WRITE_FILE / RUN_TERMINAL cwd.
+    """Compatibility adapter for existing MCP/search callers.
 
-    Read from ``~/.claude/ipad_bridge/config.json`` key ``writable_roots``;
-    otherwise defaults to ``[repo root, system temp]``. Deny-by-default — never
-    "everything". A replanned or injected step targeting a path outside these
-    roots is rejected at the executor, independent of the goal-session layer
-    (whose ``cwd_scope`` only governs Claude Code's Write/Edit tools).
+    Root ownership now lives in :class:`ExecutionScope`; the loader keeps the
+    exact historical config and default-root contract.
     """
-    default = [str(_REPO_ROOT), tempfile.gettempdir()]
-    try:
-        if _BRIDGE_CONFIG_PATH.exists():
-            import json as _cfg_json
-            cfg = _cfg_json.loads(_BRIDGE_CONFIG_PATH.read_text(encoding="utf-8"))
-            roots = cfg.get("writable_roots")
-            if isinstance(roots, list) and roots:
-                return [os.path.expanduser(str(r)) for r in roots]
-    except (OSError, ValueError):
-        pass
-    return default
+    return load_writable_roots()
 
 # Only import pyautogui / win32gui tools when NOT running under the WSL proxy.
 # In proxy mode these libraries are never called and importing them in WSL
@@ -300,7 +388,7 @@ def _launch_detached(argv: list[str]) -> "subprocess.Popen":
     New process group on Windows / new session on POSIX so an agent shutdown
     signal does not propagate to the user's freshly-opened app. Never auto-killed.
     """
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"env": sanitized_child_env()}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -483,6 +571,9 @@ class Command:
     gaze_coords: tuple[int, int] | None = None  # explicit click pixel coords (vision grounder, touch)
     params: dict[str, Any] = field(default_factory=dict)
     trace_id: str = ""                   # cross-layer trace id (set when DA_TRACE on); see monitoring/trace.py
+    action_id: str = ""                  # unguessable idempotent lifecycle identity
+    run_id: int | None = None
+    step_num: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +592,13 @@ _IDEMPOTENT_VERBS: frozenset[str] = frozenset({"WRITE_FILE"})
 # end of a page legitimately produces no change and must not nag the user.
 _VERIFY_FAIL_VERBS: frozenset[str] = frozenset({"CLICK", "OPEN", "CLOSE"})
 
+# Operations proven to have no externally visible side effect. SEARCH_WEB is
+# intentionally absent: opening a browser is an action, not a read.
+_SIDE_EFFECT_FREE_VERBS: frozenset[str] = frozenset({"READ_SCREEN", "EXPLAIN"})
+_RECONCILIATION_GRACE_S = 2.0
+_UNKNOWN_REGISTRY_LIMIT = 32
+_UNKNOWN_REGISTRY_TTL_S = 300.0
+
 
 class TargetResolutionError(Exception):
     """A named click target could not be resolved by any locator tier.
@@ -515,44 +613,48 @@ class TargetResolutionError(Exception):
 class CommandExecutor:
     """Translates a Command into one or more desktop tool calls."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        execution_scope: ExecutionScope | None = None,
+        *,
+        action_registry: TrackedWorkRegistry | None = None,
+    ) -> None:
         self._agent_db = None  # AgentDB — set via set_agent_db(); optional
         self._audit_log = None  # AuditLog — set via set_audit_log(); optional
-        self._writable_roots = _load_writable_roots()  # M2: WRITE_FILE/RUN_TERMINAL scope
-        self._active_root: str | None = None  # chat-selected active dir (cwd base)
+        self._execution_scope = execution_scope or ExecutionScope()
+        self._action_registry = action_registry or TrackedWorkRegistry(
+            limit=_UNKNOWN_REGISTRY_LIMIT, ttl_s=_UNKNOWN_REGISTRY_TTL_S
+        )
+
+    # Private compatibility adapter: older tests and a few callers assigned this
+    # list directly.  Keep the surface, but never restore duplicate ownership.
+    @property
+    def _writable_roots(self) -> list[str]:
+        return [str(root) for root in self._execution_scope.roots()]
+
+    @_writable_roots.setter
+    def _writable_roots(self, roots: list[str]) -> None:
+        self._execution_scope._replace_roots_for_compat(roots)
 
     def add_writable_root(self, path: str) -> bool:
-        """Append ``path`` to the writable-root allowlist if absent (browse+confirm,
-        specs/chat-context-attachments R1.3 / AGENTS.md #7). Returns True when the
-        root is now allowed. Rejects a non-existent / non-directory path — never
-        widens scope to a path that isn't really there."""
-        try:
-            rp = os.path.realpath(os.path.expanduser(path))
-        except Exception:
-            return False
-        if not os.path.isdir(rp):
-            return False
-        if rp not in self._writable_roots:
-            self._writable_roots.append(rp)
-        return True
+        """Human-confirmed compatibility entry point for adding a real root."""
+        return self._execution_scope.add_root(path, human_confirmed=True).allowed
 
     def set_active_root(self, path: str) -> bool:
-        """Activate ``path`` as the session's working dir — appends it to the
-        allowlist (R1.2) and records it as the relative-path base. Returns False
-        (and changes nothing) if the path isn't a real directory."""
-        if not self.add_writable_root(path):
-            return False
-        self._active_root = os.path.realpath(os.path.expanduser(path))
-        return True
+        """Human-confirmed compatibility entry point for activating a root."""
+        return self._execution_scope.set_active_root(
+            path, human_confirmed=True
+        ).allowed
 
     @property
     def active_root(self) -> str | None:
-        return self._active_root
+        active = self._execution_scope.active_root()
+        return str(active) if active is not None else None
 
     @property
     def writable_roots(self) -> list[str]:
         """Read-only view of the current allowlist (for the chat picker, R1.5)."""
-        return list(self._writable_roots)
+        return [str(root) for root in self._execution_scope.roots()]
 
     def set_agent_db(self, db) -> None:
         """Wire AgentDB for per-call idempotency tracking and timeout config."""
@@ -582,65 +684,317 @@ class CommandExecutor:
                             sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canon.encode()).hexdigest()
 
-    async def _proxy_execute(self, cmd: Command) -> dict:
-        """Forward the command to the Windows action proxy (WSL mode).
-
-        The proxy (windows_action_proxy.py) runs under Windows Python with
-        full pyautogui/win32gui access.  Called when WSL_ACTION_PROXY is set.
-        """
+    async def _signed_proxy_post(
+        self, session, path: str, payload: dict[str, Any], *, timeout_s: float
+    ) -> tuple[int, dict]:
+        """POST canonical JSON authenticated for this proxy instance."""
         import aiohttp
+
+        body = canonical_json_bytes(payload)
+        timestamp = str(int(time.time()))
+        nonce = secrets.token_hex(16)
+        signature = request_signature(
+            _PROXY_TOKEN,
+            method="POST",
+            path=path,
+            body_hash=body_sha256(body),
+            timestamp=timestamp,
+            nonce=nonce,
+            instance_id=_PROXY_INSTANCE_ID,
+        )
+        headers = {
+            "Content-Type": "application/json",
+            HEADER_INSTANCE: _PROXY_INSTANCE_ID,
+            HEADER_TIMESTAMP: timestamp,
+            HEADER_NONCE: nonce,
+            HEADER_SIGNATURE: signature,
+        }
+        async with session.post(
+            f"{_PROXY_URL}{path}",
+            data=body,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as response:
+            return response.status, await response.json()
+
+    @staticmethod
+    def _proxy_identity_payload(cmd: Command) -> dict[str, Any]:
+        return {
+            "version": 2,
+            "action_id": cmd.action_id,
+            "trace_id": cmd.trace_id,
+            "run_id": cmd.run_id,
+            "step_num": cmd.step_num,
+            "action": cmd.action.upper(),
+        }
+
+    @staticmethod
+    def _validate_proxy_outcome(
+        data: dict[str, Any], identity: ActionIdentity
+    ) -> ActionOutcome:
+        if data.get("version") != 2:
+            raise ValueError("proxy response has unsupported lifecycle version")
+        for key, expected in (
+            ("action_id", identity.action_id),
+            ("action", identity.action),
+            ("trace_id", identity.trace_id),
+            ("run_id", identity.run_id),
+            ("step_num", identity.step_num),
+        ):
+            if data.get(key) != expected:
+                raise ValueError(f"proxy response identity mismatch: {key}")
+        if data.get("lifecycle_status") not in {
+            status.value for status in ActionStatus
+        }:
+            raise ValueError("proxy response has invalid lifecycle status")
+        return ActionOutcome.from_dict(data, identity=identity)
+
+    async def _proxy_execute(
+        self,
+        cmd: Command,
+        preauthorization: dict[str, str | int] | None,
+        *,
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """Execute once through the signed proxy and reconcile transport loss."""
+        import aiohttp
+
+        if not _PROXY_TOKEN or not _PROXY_INSTANCE_ID:
+            return ActionOutcome(
+                ActionStatus.FAILED, cmd.action.upper(), cmd.trace_id,
+                cmd.run_id, cmd.step_num, cmd.action_id,
+                error="proxy authentication unavailable",
+            ).to_dict()
+        identity_obj = ActionIdentity(
+            cmd.action_id, cmd.action.upper(), cmd.trace_id, cmd.run_id, cmd.step_num
+        )
+        identity_payload = self._proxy_identity_payload(cmd)
         payload = {
+            **identity_payload,
             "text": cmd.text,
-            "action": cmd.action,
             "source": cmd.source,
             "params": cmd.params,
             "whisper_logprob": cmd.whisper_logprob,
             "gesture_confidence": cmd.gesture_confidence,
             "gaze_coords": list(cmd.gaze_coords) if cmd.gaze_coords else None,
             "session_context": cmd.session_context,
+            "wait_timeout_s": timeout_s,
         }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{_PROXY_URL}/execute",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30.0),
-                ) as resp:
-                    return await resp.json()
-        except Exception as exc:
-            log.error("Windows action proxy unreachable (%s): %s — is start_windows_proxy.bat running?",
-                      _PROXY_URL, exc)
-            return {"status": "error", "action": cmd.action,
-                    "error": f"proxy unreachable: {exc}"}
+        if preauthorization is not None:
+            payload["_execution_scope"] = preauthorization
+
+        transport_error: Exception | None = None
+        async with aiohttp.ClientSession() as session:
+            try:
+                status, result = await self._signed_proxy_post(
+                    session, "/execute", payload, timeout_s=timeout_s
+                )
+                if status in {400, 401, 403, 409, 422, 503}:
+                    return ActionOutcome(
+                        ActionStatus.FAILED,
+                        identity_obj.action,
+                        identity_obj.trace_id,
+                        identity_obj.run_id,
+                        identity_obj.step_num,
+                        identity_obj.action_id,
+                        error=str(result.get("error") or f"proxy rejected action ({status})"),
+                        reconciliation=f"signed execute rejected with HTTP {status}",
+                    ).to_dict()
+                if 200 <= status < 300:
+                    observed = self._validate_proxy_outcome(result, identity_obj)
+                    if observed.status is not ActionStatus.OUTCOME_UNKNOWN:
+                        return observed.to_dict()
+                else:
+                    transport_error = RuntimeError(f"proxy execute returned HTTP {status}")
+            except Exception as exc:
+                # Once a signed body may have left this process, execution is
+                # ambiguous. Never collapse a disconnect/timeout into failure.
+                transport_error = exc
+                log.warning(
+                    "Windows action proxy execute response unavailable for %s: %s",
+                    cmd.action_id, exc,
+                )
+
+            # Continue signed reconciliation for the registry TTL, not only the
+            # caller's grace. The owning local registry remains the durable
+            # in-process bridge used by interrupted-run resume checks.
+            deadline = time.monotonic() + _UNKNOWN_REGISTRY_TTL_S
+            while time.monotonic() < deadline:
+                try:
+                    status, result = await self._signed_proxy_post(
+                        session,
+                        "/result",
+                        identity_payload,
+                        timeout_s=min(2.0, max(0.1, deadline - time.monotonic())),
+                    )
+                    # 404 is not terminal evidence: a separately connected
+                    # execute request may still be in transit. Only a matching,
+                    # versioned success envelope can settle the action.
+                    if 200 <= status < 300:
+                        observed = self._validate_proxy_outcome(result, identity_obj)
+                        if observed.status is not ActionStatus.OUTCOME_UNKNOWN:
+                            return observed.to_dict()
+                except Exception as exc:
+                    transport_error = exc
+                await asyncio.sleep(0.1)
+
+        return ActionOutcome(
+            ActionStatus.OUTCOME_UNKNOWN,
+            cmd.action.upper(),
+            cmd.trace_id,
+            cmd.run_id,
+            cmd.step_num,
+            cmd.action_id,
+            error=f"proxy response unavailable; outcome is unknown: {transport_error}",
+            reconciliation="signed result query did not produce terminal evidence",
+        ).to_dict()
+
+    def _proxy_scope_preflight(
+        self, cmd: Command
+    ) -> tuple[Command | None, dict[str, str | int] | None, dict | None]:
+        """Authorize paths and create a narrowing receiver authorization."""
+        action = cmd.action.upper()
+        params = dict(cmd.params)
+        decision = None
+        field = ""
+        raw_value = None
+        if action == "WRITE_FILE":
+            field = "path"
+            raw_value = params.get(field, "")
+            decision = self._execution_scope.authorize_path(
+                raw_value, operation="WRITE_FILE"
+            )
+        elif action == "RUN_TERMINAL":
+            field = "cwd"
+            raw_value = params.get(field) or None
+            decision = self._execution_scope.authorize_cwd(raw_value)
+
+        if decision is None:
+            return replace(cmd, params=params), None, None
+        if (not decision.allowed or decision.canonical_path is None
+                or decision.root is None):
+            return None, None, {
+                "status": "error",
+                "error": f"{action} denied: {field} {raw_value} is outside the writable-root allowlist",
+            }
+
+        proxy_path = _path_for_windows_proxy(decision.canonical_path)
+        proxy_root = _path_for_windows_proxy(decision.root)
+        if proxy_path is None or proxy_root is None:
+            return None, None, {
+                "status": "error",
+                "error": f"{action} denied: {field} {raw_value} has no safe Windows proxy path",
+            }
+        params[field] = proxy_path
+        preauthorization: dict[str, str | int] = {
+            "version": 1,
+            "action": action,
+            "root": proxy_root,
+            "canonical_path": proxy_path,
+        }
+        return replace(cmd, params=params), preauthorization, None
 
     async def execute(self, cmd: Command) -> dict:
-        """Execute a command and return a result dict."""
-        # WSL mode: delegate all desktop actions to the Windows proxy process.
-        if _PROXY_URL:
-            return await self._proxy_execute(cmd)
+        return await self._execute_impl(cmd, registry_managed=False)
 
+    async def execute_with_registry(
+        self, cmd: Command, registry: TrackedWorkRegistry
+    ) -> dict:
+        """Execute using a caller-owned registry (plan composition boundary)."""
+        return await self._execute_impl(
+            cmd, registry_managed=False, registry_override=registry
+        )
+
+    async def execute_registry_managed(self, cmd: Command) -> dict:
+        """Receiver-only entry point when an outer registry owns ``cmd``."""
+        return await self._execute_impl(cmd, registry_managed=True)
+
+    async def _execute_impl(
+        self,
+        cmd: Command,
+        *,
+        registry_managed: bool,
+        registry_override: TrackedWorkRegistry | None = None,
+    ) -> dict:
+        """Execute through the typed lifecycle and adapt at the dict boundary."""
         action = cmd.action.upper()
+        if not cmd.action_id:
+            cmd = replace(cmd, action_id=secrets.token_urlsafe(32))
+        identity = ActionIdentity(
+            cmd.action_id, action, cmd.trace_id, cmd.run_id, cmd.step_num
+        )
+        timeout_ms = await self._tool_timeout_ms(action)
+        timeout_s = timeout_ms / 1000
 
-        # MOUSEDOWN/MOUSEUP must be synchronous — they're timing-critical
-        # for drag-select and must not compete with trackpad moves for threading
+        # WSL mode is a private, instance-bound action proxy contract. The
+        # receiver owns the retained task and idempotency record.
+        if _PROXY_URL:
+            proxied_cmd, preauthorization, denial = await asyncio.to_thread(
+                self._proxy_scope_preflight, cmd
+            )
+            if denial is not None:
+                # Preserve the established Phase 1-3 boundary shape: transport
+                # succeeded, while the nested action result records denial.
+                return {
+                    "status": "ok",
+                    "lifecycle_status": ActionStatus.FAILED.value,
+                    "action": action,
+                    "action_id": cmd.action_id,
+                    "trace_id": cmd.trace_id,
+                    "run_id": cmd.run_id,
+                    "step_num": cmd.step_num,
+                    "result": denial,
+                }
+            assert proxied_cmd is not None
+            registry = (
+                registry_override
+                if registry_override is not None
+                else self._action_registry
+            )
+            try:
+                outcome = await registry.execute(
+                    identity,
+                    lambda: self._proxy_execute(
+                        proxied_cmd, preauthorization, timeout_s=timeout_s
+                    ),
+                    timeout_s=timeout_s,
+                    destructive=action not in _SIDE_EFFECT_FREE_VERBS,
+                    reconciliation_grace_s=_RECONCILIATION_GRACE_S,
+                )
+            except RegistryFullError as exc:
+                outcome = ActionOutcome(
+                    ActionStatus.FAILED,
+                    action,
+                    cmd.trace_id,
+                    cmd.run_id,
+                    cmd.step_num,
+                    cmd.action_id,
+                    error=f"action denied before proxy execution: {exc}",
+                )
+            return outcome.to_dict()
+
+        # MOUSEDOWN/MOUSEUP stay synchronous because drag timing must not compete
+        # with trackpad worker threads. They have no abandoned-worker boundary.
         if action in ("MOUSEDOWN", "MOUSEUP"):
             try:
                 import pyautogui
                 x, y = pyautogui.position()
                 if action == "MOUSEDOWN":
-                    pyautogui.mouseDown(x, y, button='left', _pause=False)
+                    pyautogui.mouseDown(x, y, button="left", _pause=False)
                     result = {"mousedown": True, "x": x, "y": y}
                 else:
-                    pyautogui.mouseUp(x, y, button='left', _pause=False)
+                    pyautogui.mouseUp(x, y, button="left", _pause=False)
                     result = {"mouseup": True, "x": x, "y": y}
-                log.info("Executed %s [source=%s]: %s", action, cmd.source, result)
-                return {"status": "ok", "action": action, "result": result}
+                return ActionOutcome(
+                    ActionStatus.COMPLETED, action, cmd.trace_id, cmd.run_id,
+                    cmd.step_num, cmd.action_id, result=result,
+                ).to_dict()
             except Exception as exc:
-                log.error("Failed to execute %s: %s", action, exc)
-                return {"status": "error", "action": action, "error": str(exc)}
+                return ActionOutcome(
+                    ActionStatus.FAILED, action, cmd.trace_id, cmd.run_id,
+                    cmd.step_num, cmd.action_id, error=str(exc),
+                ).to_dict()
 
-        # Per-call idempotency: skip re-executing a verb if we already have a
-        # successful result for the exact same (action, params) in this session.
         idem_key: str | None = None
         if action in _IDEMPOTENT_VERBS:
             idem_key = self._make_idempotency_key(action, cmd.params)
@@ -648,82 +1002,168 @@ class CommandExecutor:
                 try:
                     cached = await self._agent_db.logs.get_tool_call_by_idempotency(idem_key)
                     if cached:
-                        log.info("CommandExecutor: idempotency hit for %s — skipping", action)
                         import json as _j
-                        return {"status": "ok", "action": action,
-                                "result": _j.loads(cached.get("result_json") or "{}"),
-                                "idempotent": True}
-                except Exception as _ie:
-                    log.debug("CommandExecutor: idempotency check failed: %s", _ie)
+                        return {
+                            **ActionOutcome(
+                                ActionStatus.COMPLETED, action, cmd.trace_id,
+                                cmd.run_id, cmd.step_num, cmd.action_id,
+                                result=_j.loads(cached.get("result_json") or "{}"),
+                            ).to_dict(),
+                            "idempotent": True,
+                        }
+                except Exception as exc:
+                    log.debug("CommandExecutor: idempotency check failed: %s", exc)
 
-        # Take a pre-action snapshot for verifiable verbs
         from desktop.action_verifier import VERIFIABLE_VERBS
         verifier = _get_action_verifier()
         pre_b64 = ""
         if verifier and action in VERIFIABLE_VERBS:
             pre_b64 = await asyncio.to_thread(verifier.snapshot)
 
-        timeout_ms = await self._tool_timeout_ms(action)
+        # Ensure the process owner's timeout fires early enough to terminate and
+        # verify the tree before this caller budget expires.
+        dispatch_cmd = cmd
+        if action == "RUN_TERMINAL":
+            params = dict(cmd.params)
+            params["_process_timeout_s"] = max(0.1, timeout_s - 7.5)
+            dispatch_cmd = replace(cmd, params=params)
+
+        async def work():
+            try:
+                return await asyncio.to_thread(self._dispatch, action, dispatch_cmd)
+            except TargetResolutionError as exc:
+                return {"_resolve_miss": str(exc)}
+
+        async def reconcile(outcome: ActionOutcome) -> str | None:
+            if action == "WRITE_FILE":
+                raw_path = dispatch_cmd.params.get("path", "")
+                decision = self._execution_scope.authorize_path(
+                    raw_path, operation="WRITE_FILE"
+                )
+                if not decision.allowed or decision.canonical_path is None:
+                    return "file evidence unavailable: path no longer authorized"
+                expected = str(dispatch_cmd.params.get("content", dispatch_cmd.text))
+
+                def observe_file() -> str:
+                    path = decision.canonical_path
+                    if not path.exists():
+                        return "file evidence: target absent"
+                    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+                    expected_hash = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+                    return (
+                        "file evidence: intended hash present"
+                        if actual_hash == expected_hash
+                        else "file evidence: intended hash not present"
+                    )
+
+                return await asyncio.to_thread(observe_file)
+            if action == "RUN_TERMINAL":
+                if outcome.status is ActionStatus.COMPLETED:
+                    rc = (outcome.result or {}).get("returncode")
+                    return f"process evidence: exited with returncode {rc}"
+                return outcome.reconciliation
+            if verifier and pre_b64 and action in VERIFIABLE_VERBS:
+                observed = await asyncio.to_thread(verifier.verify, pre_b64, action)
+                if observed.success:
+                    return f"desktop evidence: visible change ({observed.diff_pct:.1f}%)"
+                if action == "OPEN":
+                    target = dispatch_cmd.params.get("target", dispatch_cmd.text)
+                    if await asyncio.to_thread(_open_target_window_present, target):
+                        return "desktop evidence: target window present"
+                return "desktop evidence unavailable"
+            return None
+
         t_start = time.monotonic()
         try:
-            async with asyncio.timeout(timeout_ms / 1000):
-                result = await asyncio.to_thread(self._dispatch, action, cmd)
-            log.info("Executed %s [source=%s]: %s", action, cmd.source, result)
-        except TargetResolutionError as exc:
-            # A named click target nothing could locate (E2). Report it distinctly
-            # so the coordinator emits an honest CLARIFY instead of treating a
-            # cursor-position click as a success.
-            log.info("CommandExecutor: %s could not resolve target %r", action, str(exc))
-            return {"status": "resolve_miss", "action": action, "target": str(exc)}
-        except TimeoutError:
-            elapsed_ms = (time.monotonic() - t_start) * 1000
-            log.error("CommandExecutor: %s timed out after %d ms (limit=%d ms)",
-                      action, round(elapsed_ms), timeout_ms)
-            if self._audit_log and self._audit_log.available:
-                try:
-                    await self._audit_log.log(
-                        "command_execution_failed",
-                        severity="warning",
-                        tool=action,
-                        detail=f"timeout after {timeout_ms} ms (elapsed {round(elapsed_ms)} ms)",
-                        params={"action": action, "source": cmd.source, "trace_id": cmd.trace_id},
-                        outcome="timeout",
-                    )
-                except Exception as _ae:
-                    log.debug("CommandExecutor: audit log write failed: %s", _ae)
-            return {"status": "error", "action": action,
-                    "error": f"timeout after {timeout_ms} ms"}
-        except Exception as exc:
-            log.error("Failed to execute %s: %s", action, exc)
-            if self._audit_log and self._audit_log.available:
-                try:
-                    await self._audit_log.log(
-                        "command_execution_failed",
-                        severity="warning",
-                        tool=action,
-                        detail=str(exc)[:400],
-                        params={"action": action, "source": cmd.source, "trace_id": cmd.trace_id},
-                        outcome="exception",
-                    )
-                except Exception as _ae:
-                    log.debug("CommandExecutor: audit log write failed: %s", _ae)
-            return {"status": "error", "action": action, "error": str(exc)}
-        finally:
-            latency_ms = (time.monotonic() - t_start) * 1000
+            if registry_managed:
+                # The authenticated proxy registry owns this exact action ID and
+                # shields this coroutine; do not recursively register it.
+                raw_result = await work()
+                outcome = ActionOutcome(
+                    ActionStatus.COMPLETED, action, cmd.trace_id, cmd.run_id,
+                    cmd.step_num, cmd.action_id, result=raw_result,
+                )
+            else:
+                registry = (
+                    registry_override
+                    if registry_override is not None
+                    else self._action_registry
+                )
+                outcome = await registry.execute(
+                    identity,
+                    work,
+                    timeout_s=timeout_s,
+                    destructive=action not in _SIDE_EFFECT_FREE_VERBS,
+                    reconciliation_grace_s=_RECONCILIATION_GRACE_S,
+                    reconciler=reconcile,
+                )
+        except RegistryFullError as exc:
+            outcome = ActionOutcome(
+                ActionStatus.FAILED, action, cmd.trace_id, cmd.run_id,
+                cmd.step_num, cmd.action_id,
+                error=f"action denied before execution: {exc}",
+            )
+        latency_ms = (time.monotonic() - t_start) * 1000
 
-        # Post-action verification — perceptual diff confirms screen changed
+        if outcome.status is not ActionStatus.COMPLETED:
+            event = (
+                "command_execution_unknown"
+                if outcome.status is ActionStatus.OUTCOME_UNKNOWN
+                else "command_execution_failed"
+            )
+            log.warning("CommandExecutor: %s %s: %s", action, outcome.status.value, outcome.error)
+            if self._audit_log and self._audit_log.available:
+                try:
+                    await self._audit_log.log(
+                        event,
+                        severity="warning",
+                        tool=action,
+                        detail=(outcome.error or outcome.status.value)[:400],
+                        params={
+                            "action": action,
+                            "source": cmd.source,
+                            "trace_id": cmd.trace_id,
+                            "action_id": cmd.action_id,
+                        },
+                        outcome=(
+                            ActionStatus.OUTCOME_UNKNOWN.value
+                            if outcome.status is ActionStatus.OUTCOME_UNKNOWN
+                            else "timeout"
+                            if "timeout" in (outcome.error or "").lower()
+                            else "exception"
+                        ),
+                    )
+                except Exception as exc:
+                    log.debug("CommandExecutor: audit log write failed: %s", exc)
+            return outcome.to_dict()
+
+        result = outcome.result
+        if isinstance(result, dict) and "_resolve_miss" in result:
+            return {
+                "status": "resolve_miss",
+                "lifecycle_status": ActionStatus.FAILED.value,
+                "action": action,
+                "action_id": cmd.action_id,
+                "trace_id": cmd.trace_id,
+                "target": result["_resolve_miss"],
+            }
+        log.info("Executed %s [source=%s]: %s", action, cmd.source, result)
+
         verify_result = None
         if verifier and pre_b64:
             vr = await asyncio.to_thread(verifier.verify, pre_b64, action)
-            verify_result = {"success": vr.success, "diff_pct": vr.diff_pct,
-                             "reason": vr.reason, "elapsed_ms": vr.elapsed_ms}
+            verify_result = {
+                "success": vr.success,
+                "diff_pct": vr.diff_pct,
+                "reason": vr.reason,
+                "elapsed_ms": vr.elapsed_ms,
+            }
             if not vr.success:
                 log.warning(
                     "ActionVerifier: %s — no visible change (diff=%.1f%%, %dms)",
                     action, vr.diff_pct, vr.elapsed_ms,
                 )
 
-        # Record call in tool_calls for idempotency and observability.
         if self._agent_db and getattr(self._agent_db, "available", False):
             try:
                 import json as _j
@@ -737,38 +1177,26 @@ class CommandExecutor:
                     timeout_ms=timeout_ms,
                     status="completed",
                 )
-            except Exception as _db_exc:
-                log.debug("CommandExecutor: insert_tool_call failed: %s", _db_exc)
+            except Exception as exc:
+                log.debug("CommandExecutor: insert_tool_call failed: %s", exc)
 
-        # A verifiable action that produced no visible change is a real failure
-        # for click-like verbs (EH-1 / E1) — surface it so the coordinator can
-        # retry the resolution once and/or emit a corrective CLARIFY instead of
-        # silently recording the no-op as a success.
         verify_failed = bool(
             verify_result
             and not verify_result["success"]
             and verify_result["reason"] == "no_change"
             and action in _VERIFY_FAIL_VERBS
         )
-        # F3: an OPEN with no pixel delta is NOT a failure if the target window is
-        # actually present (app already running / focus-only change). Corroborate
-        # via the window list before nagging, so EH-1 doesn't CLARIFY a real launch
-        # and command-domain success isn't dinged below its SLO floor.
         if verify_failed and action == "OPEN":
             target_text = (result or {}).get("opened") or cmd.text or ""
             if await asyncio.to_thread(_open_target_window_present, target_text):
                 verify_failed = False
                 verify_result["success"] = True
                 verify_result["reason"] = "window_present"
-                log.info(
-                    "ActionVerifier: OPEN %r corroborated by window presence — "
-                    "treating diff=0%% as success", target_text,
-                )
-        resp = {"status": "verify_failed" if verify_failed else "ok",
-                "action": action, "result": result}
+        response = outcome.to_dict()
+        response["status"] = "verify_failed" if verify_failed else "ok"
         if verify_result:
-            resp["verification"] = verify_result
-        return resp
+            response["verification"] = verify_result
+        return response
 
     def _dispatch(self, action: str, cmd: Command) -> dict:
         p = cmd.params
@@ -914,17 +1342,18 @@ class CommandExecutor:
         # params: {path: str, content: str}
         # ------------------------------------------------------------------ #
         if action == "WRITE_FILE":
-            path = Path(p.get("path", "").strip())
+            raw_path = p.get("path", "")
             content = p.get("content", cmd.text)
-            # M2: deny writes outside the writable-root allowlist. Fail-closed —
-            # independent of goal_session, so a replan/injection can't escape it.
-            if not _path_in_scope(str(path), self._writable_roots):
-                log.warning("WRITE_FILE denied: %s is outside writable roots", path)
+            decision = self._execution_scope.authorize_path(
+                raw_path, operation="WRITE_FILE"
+            )
+            if not decision.allowed or decision.canonical_path is None:
+                log.warning("WRITE_FILE denied: %s", decision.reason)
                 return {"status": "error",
-                        "error": f"WRITE_FILE denied: {path} is outside the writable-root allowlist"}
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-            return {"written": str(path), "bytes": len(content)}
+                        "error": f"WRITE_FILE denied: {raw_path} is outside the writable-root allowlist"}
+            path = decision.canonical_path
+            byte_count = atomic_write_text(path, str(content))
+            return {"written": str(path), "bytes": byte_count}
 
         # ------------------------------------------------------------------ #
         # RUN_TERMINAL — run a shell command and capture output
@@ -932,14 +1361,13 @@ class CommandExecutor:
         # ------------------------------------------------------------------ #
         if action == "RUN_TERMINAL":
             command = p.get("command", cmd.text)
-            cwd = p.get("cwd") or None
-            # M2: a non-default cwd must be inside the writable-root allowlist.
-            # On Windows run_sandboxed has no namespace jail, so this is the only
-            # working-directory containment. Fail-closed.
-            if cwd is not None and not _path_in_scope(str(cwd), self._writable_roots):
-                log.warning("RUN_TERMINAL denied: cwd %s is outside writable roots", cwd)
+            raw_cwd = p.get("cwd") or None
+            decision = self._execution_scope.authorize_cwd(raw_cwd)
+            if not decision.allowed or decision.canonical_path is None:
+                log.warning("RUN_TERMINAL denied: %s", decision.reason)
                 return {"status": "error",
-                        "error": f"RUN_TERMINAL denied: cwd {cwd} is outside the writable-root allowlist"}
+                        "error": f"RUN_TERMINAL denied: cwd {raw_cwd} is outside the writable-root allowlist"}
+            cwd = str(decision.canonical_path)
             # Slopsquatting guard (GAP-7): refuse a `pip install` of a package
             # that doesn't exist on PyPI (or via a redirected index) before it
             # runs. Mirrors DevAgent._run_terminal so BOTH RUN_TERMINAL paths are
@@ -952,9 +1380,15 @@ class CommandExecutor:
             # Sandbox (mistake-containment): cwd-jail + caps. Network granted only
             # for curated package/VCS/fetch ops, or when the caller explicitly
             # passes allow_network in params (e.g. an approved network step).
-            from inference.sandbox import run_sandboxed, command_needs_network
+            from inference.sandbox import command_needs_network, run_sandboxed
             net = bool(p.get("allow_network")) or command_needs_network(command)
-            result = run_sandboxed(command, project_dir=cwd, timeout=60, allow_network=net)
+            process_timeout_s = float(p.get("_process_timeout_s", 60.0))
+            result = run_sandboxed(
+                command,
+                project_dir=cwd,
+                timeout=process_timeout_s,
+                allow_network=net,
+            )
             return {
                 "stdout": result.stdout.strip(),
                 "stderr": result.stderr.strip(),

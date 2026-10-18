@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.proc_utils import run_capped
+from core.proxy_auth import sanitized_child_env
 
 log = logging.getLogger(__name__)
 
@@ -160,8 +161,8 @@ _ASSUME_YES_RE = re.compile(r"(?:^|\s)(--yes|--assume-yes|-y)\b")
 
 
 def noninteractive_env(base: Optional[dict] = None) -> dict:
-    """Inherited env + the non-interactive vars (setdefault — user wins)."""
-    env = dict(base if base is not None else os.environ)
+    """Inherited env, minus proxy auth, plus non-interactive defaults."""
+    env = sanitized_child_env(base)
     for k, v in _NONINTERACTIVE_ENV.items():
         env.setdefault(k, v)
     return env

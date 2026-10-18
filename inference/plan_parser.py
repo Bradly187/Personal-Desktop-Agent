@@ -3,6 +3,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from core.action_lifecycle import ActionStatus
+
 # Step model
 # ---------------------------------------------------------------------------
 
@@ -50,6 +52,10 @@ class AgentStep:
     result: Optional[str] = None
     success: Optional[bool] = None
     latency_ms: float = 0.0
+    # Runtime-only lifecycle identity. Existing persistence uses the text/result
+    # fields, so this does not require or imply a database schema change.
+    lifecycle_status: ActionStatus | None = None
+    action_id: str = ""
     # 1-based indices of steps this one depends on (gap A). Empty = no declared
     # dependency. Parsed from an optional `(after: N, M)` / `[deps: N]` annotation.
     deps: list[int] = field(default_factory=list)

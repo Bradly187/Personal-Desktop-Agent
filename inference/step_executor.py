@@ -6,6 +6,8 @@ import webbrowser
 from typing import Optional, TYPE_CHECKING
 from pathlib import Path
 
+from core.action_lifecycle import ActionIdentity, ActionOutcome
+from core.atomic_file import atomic_write_text
 from inference.executors.git_executor import git_status, git_diff, git_commit, git_checkout, github_pr
 from inference.executors.terminal_executor import run_terminal
 from inference.executors.web_executor import fetch_url, capture_screenshot
@@ -27,6 +29,28 @@ log = logging.getLogger(__name__)
 
 _CONFIRM_DIFF_MAX_LINES = 400   # spec: chat-workbench-parity R5.1
 
+
+async def prepare_file_candidate(agent: "DevAgent", step: AgentStep) -> tuple[str, str]:
+    """Authorize and resolve the exact bytes for a pending file action off-loop."""
+    action = step.action.upper()
+    target = (step.args or "").strip()
+    decision = await asyncio.to_thread(
+        agent._execution_scope.authorize_path, target, operation=action
+    )
+    if not decision.allowed or decision.canonical_path is None:
+        raise PermissionError(decision.reason or f"{action} denied")
+    target = str(decision.canonical_path)
+    step.args = target
+    edit_format = (
+        SEARCH_REPLACE if action == "EDIT_FILE"
+        else agent._router.edit_format_for(agent._active_plan_model)
+    )
+    new_text = await asyncio.to_thread(
+        apply_edit, target, step.body, edit_format, agent._edit_applier
+    )
+    return target, new_text
+
+
 async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
     action = step.action.upper()
 
@@ -38,75 +62,59 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         # regardless of the model's per-model WRITE_FILE knob; WRITE_FILE
         # uses the configured format (whole_file / hashline). Both share the
         # same lint gate, Critic, snapshot, and tester path below.
-        target = (step.args or "").strip()
-        fmt_override = SEARCH_REPLACE if action == "EDIT_FILE" else None
+        # Resolve the scope-authorized, lint-gated candidate before any approval
+        # or write. This candidate is the only text written.
+        target, new_text = await prepare_file_candidate(agent, step)
 
         if agent._critic is None or not agent._critic_enabled:
-            # ── Legacy path (Critic OFF) — byte-identical to pre-feature ──
-            # (The edit is applied AFTER approval here, so the chat card can
-            # only carry the target path - no diff exists yet; R5.4.)
             if not await confirm_destructive_op(
                 agent,
                 f"Approve writing file {target[:60]}?",
                 card={"file_path": target},
             ):
                 return f"{action} cancelled by user"
-            # Lint-gate + format-aware apply BEFORE snapshot/write so a
-            # syntactically broken (or non-matching) edit fails closed (file
-            # untouched) and the loop replans with a diagnostic
-            # (specs/edit-format-aci R1, R2, R5). An EditError raised here
-            # marks the step failed (both verbs are non-retryable) → replan;
-            # nothing is snapshotted or written.
-            new_text = await asyncio.to_thread(
-                apply_edit, step.args, step.body, fmt_override or agent._router.edit_format_for(agent._active_plan_model), agent._edit_applier
-            )
-            # Snapshot BEFORE writing so a saga rollback restores an
-            # overwritten file instead of deleting it. Captured even though
-            # we're about to write — if the write fails, no compensation is
-            # registered anyway.
             step.comp_args = json.dumps(await asyncio.to_thread(
-                agent._saga_manager._snapshot_for_write, step.args
+                agent._saga_manager.snapshot_for_write, target
             ))
-            result = await asyncio.to_thread(write_file, step.args, new_text)
+            result = await asyncio.to_thread(write_file, target, new_text)
             return await agent._maybe_run_tester(step, result)
 
-        # ── Critic-enabled path (specs/dev-agent-critic) ────────────────
-        # Apply (lint gate) FIRST so the Critic reviews the actual resulting
-        # text; an EditError still fails closed → replan (unchanged). The
-        # Critic runs BEFORE the approval gate so it can escalate it.
-        new_text = await asyncio.to_thread(
-            apply_edit, step.args, step.body, fmt_override or agent._router.edit_format_for(agent._active_plan_model), agent._edit_applier
-        )
+        # The Critic reviews the already-resolved candidate before authority is
+        # claimed. It may block or force its own distinct exact-action request.
         verdict = await agent._critic_review(step, new_text)
         if verdict.decision in (REVISE, BLOCK):
-            # No write, no snapshot/compensation — the diagnostic becomes the
-            # step result the replan loop reacts to (R1.4, R1.6, R2.4).
             return agent._critic_reject_message(step, verdict)
-        # PASS: a non-pass-confidence verdict forces an explicit confirm even
-        # for an upfront-authorized plan; it can never WEAKEN an existing gate
-        # (R2.2, R2.3). new_text exists here, so the chat approval card can
-        # show the exact pending diff (specs/chat-workbench-parity R5.1).
         if not await confirm_destructive_op(
             agent, f"Approve writing file {target[:60]}?", force=verdict.escalate,
             card={"file_path": target,
                   "diff": await asyncio.to_thread(
-                      diff_for_confirm, step.args, new_text)},
+                      diff_for_confirm, target, new_text)},
         ):
             return f"{action} cancelled by user"
         step.comp_args = json.dumps(await asyncio.to_thread(
-            agent._saga_manager._snapshot_for_write, step.args
+            agent._saga_manager.snapshot_for_write, target
         ))
-        result = await asyncio.to_thread(write_file, step.args, new_text)
+        result = await asyncio.to_thread(write_file, target, new_text)
         return await agent._maybe_run_tester(step, result)
 
     if action == "RUN_TERMINAL":
         cmd = step.args or step.body
+        cwd_decision = await asyncio.to_thread(
+            agent._execution_scope.authorize_cwd, None
+        )
+        if not cwd_decision.allowed or cwd_decision.canonical_path is None:
+            raise PermissionError(cwd_decision.reason or "RUN_TERMINAL cwd denied")
+        cwd = str(cwd_decision.canonical_path)
         if not await confirm_destructive_op(
             agent, f"Approve running command: {cmd.strip()[:60]}?",
             card={"command": cmd.strip()[:500]},
         ):
             return "RUN_TERMINAL cancelled by user"
-        return await asyncio.to_thread(run_terminal, cmd)
+        return await asyncio.to_thread(
+            run_terminal,
+            cmd,
+            cwd=cwd,
+        )
 
     if action == "EXPLAIN":
         # Return text to the caller; no desktop action
@@ -145,35 +153,47 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
 
     # ── Git-native verbs (roadmap item #3) ──────────────────────────────
 
+    async def authorized_git_cwd() -> str:
+        decision = await asyncio.to_thread(
+            agent._execution_scope.authorize_cwd, None
+        )
+        if not decision.allowed or decision.canonical_path is None:
+            raise PermissionError(decision.reason or f"{action} cwd denied")
+        return str(decision.canonical_path)
+
     if action == "GIT_STATUS":
-        return await asyncio.to_thread(git_status)
+        cwd = await authorized_git_cwd()
+        return await asyncio.to_thread(git_status, cwd=cwd)
 
     if action == "GIT_DIFF":
         # args: optional "--staged" or a file path
         flags = (step.args or "").strip()
-        return await asyncio.to_thread(git_diff, flags)
+        cwd = await authorized_git_cwd()
+        return await asyncio.to_thread(git_diff, flags, cwd=cwd)
 
     if action == "GIT_COMMIT":
         # args: commit message
         msg = (step.args or step.body or "").strip()
         if not msg:
             raise ValueError("GIT_COMMIT requires a commit message")
+        cwd = await authorized_git_cwd()
         if not await confirm_destructive_op(
             agent, f"Approve git commit: {msg[:60]}?",
             card={"command": f"git commit -m {msg[:200]!r}"},
         ):
             return "GIT_COMMIT cancelled by user"
-        return await asyncio.to_thread(git_commit, msg)
+        return await asyncio.to_thread(git_commit, msg, cwd=cwd)
 
     if action == "GIT_CHECKOUT":
         # args: [-b] <branch>
         branch_args = (step.args or "").strip()
+        cwd = await authorized_git_cwd()
         if not await confirm_destructive_op(
             agent, f"Approve git checkout {branch_args[:40]}?",
             card={"command": f"git checkout {branch_args[:200]}"},
         ):
             return "GIT_CHECKOUT cancelled by user"
-        return await asyncio.to_thread(git_checkout, branch_args)
+        return await asyncio.to_thread(git_checkout, branch_args, cwd=cwd)
 
     # ── GitHub integration (roadmap item #3) ────────────────────────────
 
@@ -183,11 +203,12 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
         body = (step.body or "").strip()
         if not title:
             raise ValueError("GITHUB_PR requires a title in args")
+        cwd = await authorized_git_cwd()
         if not await confirm_destructive_op(
-            agent, f"Approve opening pull request: {title[:60]}?"
+            agent, f"Approve opening pull request: {title[:60]}?",
         ):
             return "GITHUB_PR cancelled by user"
-        return await asyncio.to_thread(github_pr, title, body)
+        return await asyncio.to_thread(github_pr, title, body, cwd=cwd)
 
     # ── Web retrieval (roadmap item #3) ─────────────────────────────────
 
@@ -237,9 +258,28 @@ async def execute_step(agent: "DevAgent", step: AgentStep) -> str:
             action=action,
             source="dev_agent",
             params=_parse_accessibility_params(action, step.args),
+            trace_id=agent._active_trace_id,
+            action_id=step.action_id,
+            run_id=step.run_id,
+            step_num=step.step_num,
         )
-        result_dict = await agent._coordinator._executor.execute(action_cmd)
-        return json.dumps(result_dict)
+        executor = agent._coordinator._executor
+        if hasattr(executor, "execute_with_registry"):
+            result_dict = await executor.execute_with_registry(
+                action_cmd, agent._action_registry
+            )
+        else:
+            result_dict = await executor.execute(action_cmd)
+        return ActionOutcome.from_dict(
+            result_dict,
+            identity=ActionIdentity(
+                step.action_id,
+                action,
+                agent._active_trace_id,
+                step.run_id,
+                step.step_num,
+            ),
+        )
 
     return f"No executor for action: {action}"
 
@@ -293,10 +333,9 @@ def diff_for_confirm(path_str: str, new_text: str) -> str:
 
 def write_file(path_str: str, content: str) -> str:
     path = Path(path_str.strip().strip("'\""))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    log.info("DevAgent: wrote %d bytes to %s", len(content), path)
-    return f"Written {len(content)} bytes to {path}"
+    byte_count = atomic_write_text(path, content)
+    log.info("DevAgent: wrote %d bytes to %s", byte_count, path)
+    return f"Written {byte_count} bytes to {path}"
 
 def read_file(path_str: str, max_chars: int = 8000) -> str:
     """Read a file and return its contents (truncated to max_chars)."""

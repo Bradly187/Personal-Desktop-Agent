@@ -61,4 +61,5 @@ def test_command_dto_fields():
     from core.command_executor import Command
     assert [f.name for f in dataclasses.fields(Command)] == [
         "text", "action", "source", "whisper_logprob", "gesture_confidence",
-        "session_context", "gaze_coords", "params", "trace_id"], _HOWTO
+        "session_context", "gaze_coords", "params", "trace_id",
+        "action_id", "run_id", "step_num"], _HOWTO

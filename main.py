@@ -741,15 +741,17 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             log.warning("CloudPlanRouter wiring failed (%s) — planning stays local", _cpr_exc)
             dev_router = router
 
+        from core.execution_policy import ExecutionScope
+        execution_scope = ExecutionScope()
         coordinator = HybridCoordinator(
             local=local, config=cfg, trainer=trainer,
             agent_db=agent_db, session_id=session_id,
             content_filter=content_filter, audit_log=audit,
-            twin_state=twin_state,
+            twin_state=twin_state, execution_scope=execution_scope,
         )
         dev_agent = DevAgent(
             router=dev_router, coordinator=coordinator, trainer=trainer,
-            agent_db=agent_db,
+            agent_db=agent_db, execution_scope=execution_scope,
         )
         coordinator.set_dev_agent(dev_agent)
         # E4: drain any escalations the DB couldn't accept on a prior run (DB-down at
@@ -1031,7 +1033,9 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         except Exception as _cfg_exc:
             log.debug("Could not read ui_automation cache config: %s", _cfg_exc)
 
-        bridge = IPadBridge(port=args.port, host=args.host)
+        bridge = IPadBridge(
+            port=args.port, host=args.host, execution_scope=execution_scope
+        )
         bridge.set_fusion_engine(fusion)
         bridge.set_lidar(lidar)
         bridge.set_gesture_processor(gesture)

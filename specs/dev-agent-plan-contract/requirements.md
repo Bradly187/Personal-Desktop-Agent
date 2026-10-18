@@ -39,7 +39,8 @@ Smallest-first: (a) replace silent drop / empty-halt with a **bounded corrective
 re-prompt** through the existing replan channel; (b) constrain the cloud plan path
 via the backend's structured-output mechanism, degrading to (a) where unsupported.
 
-**Status:** Draft
+**Status:** Shipped — default ON ratified by Brad, 2026-09-27
+**Approved:** Brad, 2026-09-27
 **Owner / author session:** Claude Code (Opus 4.8)
 **Related:** `../edit-format-aci/` (the `EditError`→`_replan` auto-repair this
 mirrors for plans), `../dev-agent-critic/` (sibling sprint — the Critic reviews a
@@ -92,35 +93,21 @@ action it meant to take.
 5. IF repair is exhausted, THEN THE DevAgent SHALL fail safe — halt / CLARIFY and
    execute NOTHING, never run a partial or guessed plan (AGENTS.md #4).
 
-### Requirement 2: Constrain the cloud plan path — DEFERRED (no current surface)
+### Requirement 2: Constrain every executable cloud plan path — SATISFIED
 
-> **Finding (2026-06-21, verified against the code):** there is no executable
-> cloud plan path to constrain. `DevAgent.plan_and_run` generates executable plans
-> only via `ModelRouter.infer` ([inference/model_router.py:1060](../../inference/model_router.py)),
-> which routes to **vLLM/Ollama only — no cloud branch** (the local path already
-> carries the `format=_PLAN_JSON_SCHEMA` grammar constraint). The cloud agent
-> (`CloudDevAgent`) is reached on a *separate* coordinator branch
-> ([core/hybrid_coordinator.py:1068](../../core/hybrid_coordinator.py)) that calls
-> `CloudDevAgent.run(...)` and returns `"steps": 0` — its `domain="plan"` output is
-> **advisory numbered text shown to the user, never parsed into executable steps**.
->
-> Therefore the R2 premise ("a Bedrock plan the parser has to guess at") does not
-> occur. Forcing that advisory text into JSON would *regress* its readability for
-> zero execution benefit. And R1's auto-repair is **backend-agnostic** — if a
-> future change ever routes a cloud-generated plan into `_acquire_plan_steps`, the
-> repair loop already covers malformed JSON with no R2-specific code.
->
-> **R2 is deferred until/unless the architecture makes the cloud an
-> executable-plan source.** Re-open this requirement then; do not add speculative
-> tool-use plumbing now (AGENTS.md #10 — no untested dead code).
+The later `cloud-plan-routing` feature introduced an executable cloud plan path
+through `CloudPlanRouter`. It reuses `_PLAN_JSON_SCHEMA` as a forced Bedrock tool
+schema and returns the same `{"steps": [...]}` text consumed by
+`_parse_plan_json_report`; schema-invalid output falls back to local planning.
+See `../cloud-plan-routing/`.
 
-#### Acceptance Criteria (deferred)
-1. ~~constrain the cloud plan response at decode time~~ — N/A: no executable cloud
-   plan path exists (see finding above).
-2. THE local plan path (`format=_PLAN_JSON_SCHEMA`) SHALL remain unchanged (met —
-   R2 added nothing).
-3. IF a future change routes a cloud plan into the executor, THEN R1 auto-repair
-   SHALL cover malformed output (already true — backend-agnostic).
+#### Acceptance Criteria
+1. WHEN a cloud-generated plan can reach the executor, THE cloud adapter SHALL
+   constrain it to `_PLAN_JSON_SCHEMA` before returning it to DevAgent.
+2. THE local plan path (`format=_PLAN_JSON_SCHEMA`) SHALL remain unchanged.
+3. IF cloud output is unavailable or schema-invalid, THEN THE adapter SHALL fall
+   back to the constrained local plan path; R1 auto-repair SHALL remain
+   backend-agnostic.
 
 ### Requirement 3: Flag-gated, observable, eval-gated
 
@@ -128,14 +115,14 @@ action it meant to take.
 behavior, like every other dev-agent change.
 
 #### Acceptance Criteria
-1. THE auto-repair loop and the cloud constraint SHALL each ship behind config,
-   **default OFF**; with both unset the plan-parse path is byte-identical to today
-   (silent-drop preserved only until the eval baseline confirms the repair path is
-   a net win).
-2. THE auto-repair re-prompt SHALL emit the existing inference span (tokens/cost
-   via `cost_ledger`) so the added cost of a retry is observable.
-3. THE feature SHALL NOT be made default-on until its `evals/` baseline is locked
-   and shows fewer silently-dropped steps with no correctness regression.
+1. THE auto-repair loop SHALL default ON after its deterministic eval baseline
+   is locked; explicit `DA_PLAN_REPAIR=0` SHALL preserve the legacy rollback path.
+   Cloud plan routing remains independently gated and default OFF.
+2. THE auto-repair re-prompt SHALL emit the existing inference span (tokens/cost)
+   so the added cost of a retry is observable.
+3. THE default-ON behavior SHALL remain gated by the locked `plan_contract`
+   baseline; a regression SHALL block shipment rather than silently disabling or
+   re-baselining the safety behavior.
 
 ---
 
@@ -157,13 +144,13 @@ behavior, like every other dev-agent change.
   the named failures (e.g. `step 3 used unknown verb "EDITT"; valid verbs: …` /
   `no parseable steps array`). Reuses `_PLAN_VERBS`/`_PLAN_JSON_SCHEMA` as the
   source of truth so it can't drift.
-- **Cloud constraint:** add a structured-output path in `core/cloud_backend.py`
-  (Bedrock) — pass the plan JSON schema via the backend's tool-use/JSON mechanism
-  when the active model supports it; `ModelRouter` selects it for the plan domain.
-  Falls back to free-text + R1 when unsupported.
-- **Models / VRAM (AGENTS.md #6):** no new model; the repair re-prompt reuses the
-  already-loaded planner. Cloud constraint is a request-shaping change, no roster
-  impact.
+- **Cloud constraint:** `inference/cloud_plan_router.py` wraps `ModelRouter` only
+  when `DA_CLOUD_PLAN=1`. It forces Bedrock tool output through
+  `_PLAN_JSON_SCHEMA`, returns the same JSON contract as local Ollama, and falls
+  back to the constrained local planner on SDK, credential, network, or schema
+  failure. See `../cloud-plan-routing/`.
+- **Models / VRAM (AGENTS.md #6):** no new local model; repair reuses the active
+  planner and CloudPlanRouter retains the local plan model as offline fallback.
 - **60 Hz loop (AGENTS.md #2):** unaffected — async DevAgent path only.
 - **Persistence:** none. No `agent.db` schema change; `PRAGMA user_version`
   unchanged (AGENTS.md #1). Dropped-step events go to the existing audit log via
@@ -173,13 +160,13 @@ behavior, like every other dev-agent change.
 ### Configuration (flat YAML)
 
 ```yaml
+# Environment-backed runtime flags (shown as YAML for review)
 dev_agent_plan_contract:
   auto_repair:
-    enabled: false           # OFF → today's silent-drop/halt, byte-identical
-    max_repair_prompts: 1     # bounded corrective re-prompts before halt
-  cloud_constraint:
-    enabled: false           # constrain Bedrock plan output to the schema
-                              # (degrades to free-text + auto_repair if unsupported)
+    enabled: true            # DA_PLAN_REPAIR=1; ratified default ON
+    max_repair_prompts: 1    # DA_PLAN_REPAIR_MAX; bounded
+  cloud_plan_routing:
+    enabled: false           # DA_CLOUD_PLAN=0; separate spec, default OFF
 ```
 
 ---
@@ -215,17 +202,15 @@ Each criterion in §3 maps to at least one test/eval above.
       `_PLAN_ACTIONS` as the valid-verb source — satisfies R1.3.
 - [x] 3. `_acquire_plan_steps` bounded auto-repair wired into `_plan_and_run_locked`
       (structured → regex → repair → EXPLAIN fail-safe); `DA_PLAN_REPAIR` (default
-      OFF) + `DA_PLAN_REPAIR_MAX` (default 1) instance flags — satisfies R1.2, R1.4,
+      ON, ratified 2026-09-27) + `DA_PLAN_REPAIR_MAX` (default 1) instance flags — satisfies R1.2, R1.4,
       R1.5, R3.1, and R3.2 (the repair re-infer emits its own inference span).
-- [~] 4. Cloud structured-output path — **DEFERRED (no current surface).** Verified
-      the executable plan path (`plan_and_run` → `ModelRouter.infer`) is local-only
-      (vLLM/Ollama, already `format=`-constrained); the cloud agent's plan output
-      is advisory text (`steps: 0`), never parsed for execution. R1 is
-      backend-agnostic, so a future cloud-executable plan is already covered. No
-      code added (AGENTS.md #10). See R2 finding.
-- [~] 5. Config plumbing — env flags done (instance attrs, test-overridable);
-      config-file (`dev_agent_plan_contract.*`) mapping + audit-log drop events
-      pending. R3.1/R3.2 met via env flags + inference span; WARNING surfaces drops.
+- [x] 4. Cloud structured-output path shipped separately in
+      `inference/cloud_plan_router.py`: executable Bedrock plans use forced
+      `_PLAN_JSON_SCHEMA` tool output and fall back locally on any invalid result.
+      `DA_CLOUD_PLAN` remains default OFF. See `../cloud-plan-routing/`.
+- [x] 5. Config/observability: env flags are instance-testable; repair inference
+      emits the existing span and dropped-step warnings are logged. The locked
+      baseline justified the default-ON ratification.
 - [x] 5t. `tests/test_plan_contract.py` — 13 tests over R1.1/R1.2/R1.3/R1.4/R1.5/
       R3.1 + regex-rescue + back-compat wrapper.
 - [x] 6. **Model-free eval shipped + baseline locked.** `evals/plan_contract.py`

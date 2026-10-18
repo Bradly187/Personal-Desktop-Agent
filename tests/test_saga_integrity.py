@@ -9,7 +9,7 @@ Covers:
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, AsyncMock
 
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -48,13 +48,13 @@ async def test_compensation_throws_escalates(tmp_path):
         run_id, step_id, "DELETE_FILE", "/root/protected.py"
     )
 
-    with patch("inference.saga_manager.Path") as mock_path_cls:
-        mock_path_instance = MagicMock()
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.unlink.side_effect = PermissionError("access denied")
-        mock_path_cls.return_value = mock_path_instance
+    mock_path_instance = MagicMock()
+    mock_path_instance.exists.return_value = True
+    mock_path_instance.unlink.side_effect = PermissionError("access denied")
+    decision = MagicMock(allowed=True, canonical_path=mock_path_instance)
+    agent._execution_scope.authorize_path = MagicMock(return_value=decision)
 
-        await agent._run_compensations(run_id)
+    await agent._run_compensations(run_id)
 
     # Verify compensation marked failed
     async with db._conn.execute(

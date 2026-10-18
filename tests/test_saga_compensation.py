@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -212,14 +212,15 @@ async def test_run_compensations_compensation_failure_marks_failed(tmp_path):
         run_id, step_id, "DELETE_FILE", "/root/protected.py"
     )
 
-    # Sabotage Path.unlink to raise PermissionError
-    with patch("inference.saga_manager.Path") as mock_path_cls:
-        mock_path_instance = MagicMock()
-        mock_path_instance.exists.return_value = True
-        mock_path_instance.unlink.side_effect = PermissionError("access denied")
-        mock_path_cls.return_value = mock_path_instance
+    # Authorize an in-scope stand-in, then sabotage unlink to exercise the
+    # post-policy filesystem-failure path independently of scope denial.
+    mock_path_instance = MagicMock()
+    mock_path_instance.exists.return_value = True
+    mock_path_instance.unlink.side_effect = PermissionError("access denied")
+    decision = MagicMock(allowed=True, canonical_path=mock_path_instance)
+    agent._execution_scope.authorize_path = MagicMock(return_value=decision)
 
-        await agent._run_compensations(run_id)
+    await agent._run_compensations(run_id)
 
     async with db._conn.execute(
         "SELECT status, error FROM saga_compensations WHERE id = ?", (comp_id,)
@@ -451,4 +452,25 @@ async def test_skip_pending_compensations_returns_count(tmp_path):
     n = await db.sagas.skip_pending_compensations(run_id)
     assert n == 3
     assert await db.sagas.skip_pending_compensations(run_id) == 0   # idempotent
+    await db.close()
+
+
+async def test_finalize_interrupted_unknown_preserves_pending_compensation(tmp_path):
+    from inference.dev_agent import AgentResult
+
+    db = await _open_db(tmp_path)
+    agent = await _make_agent(db)
+    run_id = await _seed_run(db)
+    step = _make_step("WRITE_FILE", args=str(tmp_path / "out.py"), success=True)
+    await agent._persist_step(run_id, 1, step)
+
+    result = AgentResult(
+        goal="g", domain="plan", model_used="m", steps=[step],
+        success=False, error="outcome_unknown action_id=abc",
+    )
+    await agent._finalize_run(run_id, result, "interrupted")
+
+    assert len(await db.sagas.get_pending_compensations(run_id)) == 1
+    interrupted = await db.runs.get_interrupted_runs(limit=1)
+    assert interrupted and interrupted[0]["id"] == run_id
     await db.close()

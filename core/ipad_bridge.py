@@ -59,6 +59,7 @@ from aiohttp import web
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent / "mcp_server"))
 
 from core.command_executor import Command, CommandExecutor
+from core.execution_policy import ExecutionScope
 
 log = logging.getLogger("ipad_bridge")
 
@@ -153,7 +154,8 @@ class IPadBridge:
     _TRACE_WINDOW_S: float = 2.0
 
     def __init__(self, port: int = 8765, host: str = "0.0.0.0",
-                 token: Optional[str] = None):
+                 token: Optional[str] = None,
+                 execution_scope: ExecutionScope | None = None):
         self.port = port
         self.host = host
 
@@ -169,7 +171,8 @@ class IPadBridge:
         self._active_dwell_action: str = "left_click"
 
         # Direct executor for Phase 1 touch/trackpad commands
-        self._executor = CommandExecutor()
+        self._execution_scope = execution_scope or ExecutionScope()
+        self._executor = CommandExecutor(self._execution_scope)
 
         # Phase 2+ pipeline components (wired by main.py)
         self._fusion: Optional["FusionEngine"] = None

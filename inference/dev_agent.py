@@ -31,7 +31,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from core.action_lifecycle import TrackedWorkRegistry
 from core.domain_classifier import DomainClassifier
+from core.execution_policy import ExecutionScope
 from core.events import (
     TOPIC_DAG_STEP_STARTED, TOPIC_DAG_STEP_DONE,
     TOPIC_CHAT_TOKEN, TOPIC_DAG_WALKTHROUGH,
@@ -140,6 +142,9 @@ class DevAgent:
     # 300s plan ceiling, starving every queued dev command. On timeout the step is
     # recorded as a failure and the loop replans instead of wedging.
     STEP_TIMEOUT_S = 180
+    RECONCILIATION_GRACE_S = 2.0
+    UNKNOWN_REGISTRY_LIMIT = 32
+    UNKNOWN_REGISTRY_TTL_S = 300.0
 
     # Tighter bound for skill (MCP stdio) calls specifically — the registry has no
     # internal timeout, so an unresponsive skill server would otherwise hang the
@@ -151,7 +156,7 @@ class DevAgent:
     # shell command could double-apply) — they go straight to replan-or-halt.
     _RETRYABLE_VERBS: frozenset[str] = frozenset({
         "READ_FILE", "GREP", "READ_SCREEN", "GIT_STATUS", "GIT_DIFF",
-        "FETCH_URL", "SEARCH_WEB", "EXPLAIN",
+        "FETCH_URL", "EXPLAIN",
     })
 
     # Verbs whose execution has side effects (writes files, runs shell, mutates
@@ -163,6 +168,13 @@ class DevAgent:
     _DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
         "WRITE_FILE", "EDIT_FILE", "RUN_TERMINAL", "GIT_COMMIT", "GIT_CHECKOUT",
         "GITHUB_PR",
+    })
+
+    # Plan verbs delegated through CommandExecutor. That executor owns their
+    # timeout and late-result lifecycle, so PlanExecutor must not wrap them in a
+    # second registry entry with the same action_id.
+    _COMMAND_DELEGATED_VERBS: frozenset[str] = frozenset({
+        "CLICK", "OPEN", "HOTKEY", "SCROLL", "TYPE",
     })
 
     # Pure context-gathering verbs (gap #1 fan-out): read-only, no side effects,
@@ -192,11 +204,17 @@ class DevAgent:
         trainer: Optional["ContinuousTrainer"] = None,
         session_context: Optional[list[str]] = None,
         agent_db: Optional["AgentDB"] = None,
+        execution_scope: ExecutionScope | None = None,
     ) -> None:
         self._router = router
         self._coordinator = coordinator
         self._trainer = trainer
         self._agent_db = agent_db
+        self._execution_scope = execution_scope or ExecutionScope()
+        self._action_registry = TrackedWorkRegistry(
+            limit=self.UNKNOWN_REGISTRY_LIMIT,
+            ttl_s=self.UNKNOWN_REGISTRY_TTL_S,
+        )
         self._classifier = DomainClassifier()
         self._context: list[str] = session_context or []
         self._results_log: list[AgentResult] = []  # kept for get_last_result()
@@ -212,7 +230,10 @@ class DevAgent:
         self._edit_applier = EditApplier()
 
         self._context_builder = ContextBuilder(agent=self, agent_db=self._agent_db, memory=self._memory, session_context=session_context)
-        self._saga_manager = SagaManager(agent=self, agent_db=self._agent_db)
+        self._saga_manager = SagaManager(
+            agent=self, agent_db=self._agent_db,
+            execution_scope=self._execution_scope,
+        )
 
         # Plan-contract auto-repair (specs/dev-agent-plan-contract). When the
         # planner drops steps (unknown verb) or returns nothing parseable,
@@ -267,7 +288,11 @@ class DevAgent:
         self._tester_enabled: bool = os.environ.get(
             "DA_TESTER", "1").strip().lower() in ("1", "true", "on", "yes")
         self._tester: Optional[Tester] = (
-            Tester(router, code_domain=os.environ.get("DA_TESTER_DOMAIN", "code"))
+            Tester(
+                router,
+                execution_scope=self._execution_scope,
+                code_domain=os.environ.get("DA_TESTER_DOMAIN", "code"),
+            )
             if self._tester_enabled else None
         )
         # Optional flare/resource gate (R3.6): a callable -> bool; True == skip.
@@ -474,8 +499,13 @@ class DevAgent:
         self._repo_root = rp
         return True
 
-    async def handle(self, text: str, screenshot_b64: Optional[str] = None,
-                     trace_id: str = "", attachment_context: str = "") -> AgentResult:
+    async def handle(
+        self,
+        text: str,
+        screenshot_b64: Optional[str] = None,
+        trace_id: str = "",
+        attachment_context: str = "",
+    ) -> AgentResult:
         """Classify, route, and execute a user query.
 
         - COMMAND domain → passes through to HybridCoordinator (existing pipeline)
@@ -497,7 +527,12 @@ class DevAgent:
         if domain == "command" and self._coordinator:
             # Pass through to the accessibility pipeline
             from core.command_executor import Command
-            cmd = Command(text=text, action="CLARIFY", source="voice", trace_id=trace_id)
+            cmd = Command(
+                text=text,
+                action="CLARIFY",
+                source="voice",
+                trace_id=trace_id,
+            )
             result_dict = await self._coordinator.route(cmd)
             return AgentResult(
                 goal=text,
@@ -521,7 +556,10 @@ class DevAgent:
 
         if domain == "plan":
             return await self.plan_and_run(
-                text, trace_id=trace_id, extra_context=attachment_context)
+                text,
+                trace_id=trace_id,
+                extra_context=attachment_context,
+            )
 
         if domain == "vision" and screenshot_b64 is None:
             # Auto-capture screen for vision queries
@@ -1028,14 +1066,9 @@ class DevAgent:
     # Class-level aliases for static/class helpers moved to SagaManager and
     
     @staticmethod
-    def _run_terminal(cmd: str) -> str:
-        from inference.executors.terminal_executor import run_terminal
-        return run_terminal(cmd)
-        
-    @staticmethod
-    def _git_commit(message: str) -> str:
+    def _git_commit(message: str, *, cwd: str) -> str:
         from inference.executors.git_executor import git_commit
-        return git_commit(message)
+        return git_commit(message, cwd=cwd)
 
     @staticmethod
     async def _fetch_url(url: str) -> str:

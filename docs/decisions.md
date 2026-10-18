@@ -9,6 +9,12 @@ See AGENTS.md Rule 12 for when and how to add entries.
 
 ## Index (newest first)
 
+- [D039 — 2026-09-27 — Containment is command-effective and trust only downgrades](#d039)
+- [D038 — 2026-09-27 — Remote approval windows seal before local fallback](#d038)
+- [D037 — 2026-09-27 — Destructive approval claims are ordered, consuming, and serial](#d037)
+- [D036 — 2026-09-27 — Action identity spans local plans and the authenticated WSL proxy](#d036)
+- [D035 — 2026-09-27 — Scheduler bounds preserve measured envelopes and reserve accessibility](#d035)
+- [D034 — 2026-09-27 — Shared harness authorities close split-path policy gaps; autonomous shell requires namespace jail](#d034)
 - [D032 — 2026-08-16 — R6 mouth-sound control struck; magnetic click replaced it, Switch Control succeeds it](#d032)
 - [D031 — 2026-08-16 — Scientific keypad struck; Pencil canvas covers the job at lower joint cost](#d031)
 - [D030 — 2026-08-16 — iPad camera/LiDAR producers struck; L515 keeps the same message types](#d030)
@@ -33,21 +39,101 @@ See AGENTS.md Rule 12 for when and how to add entries.
 - [D011 — 2026-06-24 — DA_TRAJECTORY_REDUCE held OFF despite passing gate](#d011)
 - [D010 — 2026-06-22 — Self-skilling rung 4 (autonomous authoring) explicitly forbidden](#d010)
 - [D009 — 2026-06-27 — DevAgent saga uses per-step compensation, not whole-tree git stash](#d009)
-- [D008 — 2026-06-21 — Tester failure is a safe-observation; it never rolls back a good write](#d008)
-- [D007 — 2026-06-21 — Critic REVISE runs pre-disk-commit; no snapshot before Critic](#d007)
-- [D006 — 2026-06-20 — Whole-file edit format is the default (not hashline or udiff)](#d006)
-- [D005 — 2026-06-21 — WSL terminal routing is ON by default](#d005)
-- [D004 — 2026-06-23 — L515 head-pointer: depth_comp=0 (depth compensation disabled)](#d004)
-- [D003 — 2026-06-07 — gemma4:12b fills the general-domain slot (gemma3:27b retired)](#d003)
 
 *Index holds the 30 most recent. Older entries remain in full in the body below and their
-anchors still resolve — D002 (Bedrock-only cloud backend) and D001 (MOUSEDOWN/MOUSEUP
-synchronous, no `asyncio.to_thread`) are both still live, and D001 is referenced from
-CLAUDE.md §Action Vocabulary.*
+anchors still resolve — D008 (Tester failure is a safe-observation), D007 (Critic pre-disk review), D006 (whole-file edit default),
+D004 (L515 depth compensation), D003 (gemma4 general-domain slot), D002 (Bedrock-only
+cloud backend), and D001 (MOUSEDOWN/MOUSEUP synchronous) are still live; D001 is
+referenced from CLAUDE.md §Action Vocabulary.*
 
 ---
 
 ## Entries
+
+---
+
+### D037 — Destructive approval claims are ordered, consuming, and serial {#d037}
+**Date:** 2026-09-27
+**Chose:** Bind file approvals to final resolved candidate bytes, bind skill sends to
+shared parsed and secret-scrubbed material, preserve ordered digest multiplicity, and
+atomically consume one grant position per action. Run destructive DAG steps serially
+in approved plan order while retaining read-only fan-out.
+**Rejected:** Reusable unordered digest membership, raw planner bodies/skill arguments
+as authority, or preclaiming a batch of destructive actions before concurrent DAG
+workers start.
+**Why:** Reusable membership allowed reverse and repeated execution; raw material did
+not identify final file effects or actual skill egress. Serial destructive dispatch is
+the smallest race-free design: final candidates can be recomputed immediately before
+one atomic claim, with no unused preclaims surviving cancellation or worker failure.
+**Ref:** `specs/harness-boundary-hardening/design.md` §3.4,
+`core/approval_authority.py`, `inference/executors/plan_executor.py`
+
+---
+
+### D036 — Action identity spans local plans and the authenticated WSL proxy {#d036}
+**Date:** 2026-09-27
+**Chose:** Carry one unguessable action ID plus action/trace/run/step identity through
+PlanExecutor, CommandExecutor, and the internal signed WSL proxy. Keep a bounded
+plan-selected local reconciliation task polling the separately bounded receiver
+registry until terminal evidence or TTL.
+**Rejected:** Treat a caller or HTTP timeout as failure, keep only the Windows-side
+registry with a short one-shot polling grace, or allocate independent plan and
+command identities for delegated desktop actions.
+**Why:** A timeout can leave side effects running after the waiter returns. Remote-only
+or split identity tracking either strands interrupted-run resume after the initial
+grace or lets the controller retry, replan, or compensate while the original action
+may still finish. Exact signed identity matching and retained local/receiver records
+preserve idempotency and late evidence without changing the iPad WebSocket protocol
+or database schema.
+**Ref:** `specs/harness-boundary-hardening/design.md` §3.3,
+`core/action_lifecycle.py`, `windows_action_proxy.py`
+
+---
+
+### D035 — Scheduler bounds preserve measured envelopes and reserve accessibility {#d035}
+**Date:** 2026-09-27
+**Chose:** Use constructor-injected scheduler defaults of 10 BACKGROUND, 16 combined
+DEV admission, 21 total non-accessibility work, a 16-slot accessibility reserve,
+and a 256-item absolute queued-plus-running ceiling. Apply the same config to
+Fusion's no-scheduler degraded path.
+**Rejected:** Keep the old 256 pending-queue check plus the separate `>20`
+degraded breaker, or replace both with a new unexplained small hard cap.
+**Why:** The old worker drained pending items into unbounded off-queue tasks, while
+the degraded breaker, watchdog warning, and parked cap independently established
+useful envelopes of approximately 21, 10, and 16. Centralizing those anchors keeps
+BACKGROUND and DEV work inside the existing operating envelope, preserves explicit
+capacity for direct accessibility commands during pain-day pause, and turns the
+existing 256 queue bound into a real process bound without inventing hardware
+throughput claims. Tiny-limit deterministic tests prove policy; the 60 Hz hardware
+soak remains a separate manual gate.
+**Ref:** `specs/harness-boundary-hardening/design.md` §3.2,
+`tests/test_scheduler_admission.py`
+
+---
+
+### D034 — Shared harness authorities close split-path policy gaps; autonomous shell requires namespace jail {#d034}
+**Date:** 2026-09-27
+**Chose:** Use one injected `ExecutionScope` for writable roots and one
+scheduler-owned load/accounting authority across production paths. Treat timed-out
+side effects as `outcome_unknown`, bind destructive approvals to an expiring
+nonce plus exact action digest, and require `namespace_jail` for autonomous or
+untrusted terminal work while retaining the documented approved fallback for
+trusted manual goals.
+**Rejected (primary):** Patch `_path_in_scope` into StepExecutor and track returned
+scheduler futures in Fusion as independent permanent fixes. Those patches close
+individual symptoms but preserve duplicate owners, allowing the next execution or
+dispatch path to drift again.
+**Rejected (secondary):** Either require a namespace jail for every trusted manual
+command, which would disable approved personal workflows on native Windows, or
+allow autonomous/untrusted work to degrade to `native_unconfined`, which would
+make sandbox availability advisory at the riskiest boundary.
+**Why:** The reviewed failures share one cause: a safety invariant is authoritative
+on one path but optional or invisible on another. Shared typed authorities fix the
+class of bug without rewriting the harness. Explicit unknown outcomes prevent
+unsafe retries, exact approval binding closes stale-response races without adding
+prompts, and trust-sensitive containment preserves Brad's reliable low-friction
+manual control while failing closed for unattended or tainted execution.
+**Ref:** `specs/harness-boundary-hardening/`, AGENTS.md Rules 2, 4, 5, 7
 
 ---
 
@@ -389,3 +475,47 @@ Chatterbox is dead code maintenance burden on a production accessibility depende
 **Rejected:** Treat them like other blocking verbs and offload to `asyncio.to_thread`.  
 **Why:** These verbs are timing-critical for drag-select operations — the gap between `MOUSEDOWN` and the subsequent `MOUSEUP` or `SCROLL` must be deterministic. Offloading to a thread introduces scheduling jitter that competes with tilt/trackpad moves arriving on the same loop tick, breaking drag-select reliability. Every other blocking I/O uses `asyncio.to_thread` per AGENTS.md #2, but MOUSEDOWN/MOUSEUP are the explicit exception.  
 **Ref:** `command_executor.py`, AGENTS.md §Architecture note
+
+---
+
+### D038 — Remote approval windows seal before local fallback {#d038}
+**Date:** 2026-09-27
+**Chose:** Give chat, streamed voice, and iPad A2UI responders a request-bound,
+cross-process response window that is atomically and verifiably closed before a
+PC-microphone fallback can publish. Keep browser and iPad approval UI pending until
+a request-correlated publication acknowledgement arrives.
+**Rejected:** Let remote cards remain writable for the request TTL while local fallback
+runs, or optimistically display approval immediately after a client send.
+**Why:** A late remote response could otherwise collide with the local response and
+invalidate a valid request as ambiguous. Unacknowledged sends also made stale,
+duplicate, disconnected, or rejected responses look accepted even though the sole
+authority denied them. If window closure cannot be proven, denial is safer than
+opening a competing responder.
+**Ref:** `specs/harness-boundary-hardening/requirements.md` R4.4, R4.9-R4.10;
+`core/approval_authority.py`; `inference/executors/plan_executor.py`;
+`inference/executors/voice_approval_gate.py`; `core/chat_server.py`;
+`iPadApp/DesktopAgent/Network/WebSocketManager.swift`
+
+---
+
+### D039 — Containment is command-effective and trust only downgrades {#d039}
+**Date:** 2026-09-27
+**Chose:** Classify the effective containment of each terminal command after its
+platform, WSL compatibility, path translation, configuration, and tool probe are
+known. Map WSL+bwrap and native bwrap/firejail to `namespace_jail`, POSIX fallback
+with enforced rlimits to `cwd_and_resource_limits`, and Windows-native fallback to
+`native_unconfined`. Carry one plan-scoped `WorkTrust` value; retrieved web,
+personal-document, or MCP skill output can only downgrade it to
+autonomous/untrusted. Unknown provenance starts autonomous/untrusted.
+**Rejected:** Publish configured sandbox intent as runtime status, classify the
+Windows timeout/cwd/output controls as resource containment, or recompute trust
+from the final command/source label after retrieved content has influenced a run.
+Those alternatives overstate effective isolation or allow a later manual-looking
+hop to erase taint.
+**Why:** Containment varies by command on Windows, and admission must use what will
+actually execute rather than what is installed or configured. Monotonic trust is
+the smallest deterministic rule that preserves explicit manual fallback while
+preventing scheduled, unknown, or retrieval-derived terminal work from silently
+downgrading below namespace isolation.
+**Ref:** `specs/harness-boundary-hardening/` R5/R6.7/R7.6,
+`inference/sandbox.py`, `inference/step_executor.py`

@@ -29,7 +29,8 @@ Related: `inference/cloud_dev_agent.py` (answer path), `core/cloud_backend.py`
 (Bedrock seam), `specs/dev-agent-plan-contract/` (plan JSON schema + auto-repair),
 `specs/dev-agent-critic/` (the replan loop a better plan shortens).
 
-**Status:** Draft
+**Status:** Shipped — implementation ratified by Brad, 2026-09-27; default OFF
+**Approved:** Brad, 2026-09-27
 **Owner / author session:** Claude Code
 
 ---
@@ -242,14 +243,25 @@ on the Bedrock account; otherwise R2.1 keeps planning local (logged).
 
 ## 6. Tasks
 
-- [ ] 1. Add `inference/cloud_plan_router.py` — `CloudPlanRouter` proxy with the
-      plan intercept, forced-tool-use Bedrock call, and transparent fallback —
-      satisfies R1.1–R1.4, R2.1, R2.3.
-- [ ] 2. Scrub + critical-finding force-local + INFO logging — satisfies R3.1–R3.3.
-- [ ] 3. Cost-ledger `insert_inference` + rate-limiter share — satisfies R4.1, R4.2.
-- [ ] 4. Wire into `main.py` behind `DA_CLOUD_PLAN` (default OFF); pass raw router
-      when off — satisfies R2.2. Add the startup `check(...)` line like the cloud
-      answer path so status is visible.
-- [ ] 5. `tests/test_cloud_plan_router.py` — one test per criterion above.
-- [ ] 6. Update `CLAUDE.md` Known Gotchas + the model-router docstring note, and add
-      a memory pointer.
+- [x] 1. Added `inference/cloud_plan_router.py` — transparent plan-only proxy,
+      forced-tool-use Bedrock call, and local fallback — satisfies R1.1–R1.4,
+      R2.1, R2.3.
+- [x] 2. Added goal/context scrubbing, critical-finding force-local behavior, and
+      INFO logging — satisfies R3.1–R3.3.
+- [x] 3. Added cost-ledger persistence and shared `anthropic` rate-limiter wiring
+      in `main.py` — satisfies R4.1, R4.2.
+- [x] 4. Wired the proxy in `main.py` behind `DA_CLOUD_PLAN`; raw ModelRouter is
+      retained when disabled — satisfies R2.2.
+- [x] 5. Added `tests/test_cloud_plan_router.py` for delegation, structured output,
+      fallback, privacy, default-OFF behavior, and cost accounting.
+- [x] 6. Updated runtime documentation and the CLAUDE.md feature-flag table; PR
+      #150 is recorded as shipped.
+- [x] 7. Added the default-OFF literal plan-word trigger and focused
+      `tests/test_plan_word_trigger.py` coverage — satisfies R5.1–R5.4.
+
+## 7. Ratification
+
+The implementation was already present on `master` while this spec still said
+Draft. Brad explicitly ratified the implementation on 2026-09-27 with
+`DA_CLOUD_PLAN` remaining default OFF. Ratification does not enable cloud egress;
+that still requires the explicit environment flag and a Bedrock credential.

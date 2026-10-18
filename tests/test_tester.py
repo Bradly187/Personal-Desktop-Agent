@@ -8,6 +8,7 @@ safe-observation wiring (append outcome to the step result; never roll back).
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -16,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import inference.sandbox as sandbox
+from core.execution_policy import ExecutionScope
 from inference.tester import (
     Tester, TestOutcome, _extract_code_block, is_testable_source,
 )
@@ -69,8 +71,11 @@ class _SB:
 
 
 def _tester(result, tmp_path):
-    return Tester(_Router(result), code_domain="code",
-                  scratch_root=str(tmp_path), project_dir=str(tmp_path))
+    scope = ExecutionScope(tmp_path, [tmp_path])
+    return Tester(
+        _Router(result), execution_scope=scope, code_domain="code",
+        scratch_root=str(tmp_path),
+    )
 
 
 async def test_generate_and_run_passing(monkeypatch, tmp_path):
@@ -175,3 +180,42 @@ async def test_wiring_disabled_is_noop(monkeypatch):
     assert agent._tester is None and agent._tester_enabled is False
     out = await agent._maybe_run_tester(AgentStep(action="WRITE_FILE", args="foo.py", body="x"), "Written")
     assert out == "Written"
+
+
+async def test_pytest_cwd_tracks_shared_scope_active_root(monkeypatch, tmp_path):
+    repository = tmp_path / "repository"
+    alternate = tmp_path / "alternate"
+    scratch = tmp_path / "scratch"
+    repository.mkdir()
+    alternate.mkdir()
+    scope = ExecutionScope(repository, [tmp_path])
+    tester = Tester(
+        _Router(_Result("```python\ndef test_x():\n    assert True\n```")),
+        execution_scope=scope,
+        scratch_root=str(scratch),
+    )
+    project_dirs = []
+
+    def run_sandboxed(*args, **kwargs):
+        project_dirs.append(kwargs["project_dir"])
+        return _SB(0, "1 passed")
+
+    monkeypatch.setattr(sandbox, "run_sandboxed", run_sandboxed)
+
+    first = await tester.generate_and_run("g", "foo.py", "x = 1")
+    assert first.passed is True
+    assert scope.set_active_root(str(alternate), human_confirmed=False).allowed
+    second = await tester.generate_and_run("g", "foo.py", "x = 2")
+
+    assert second.passed is True
+    assert project_dirs == [str(repository), str(alternate)]
+
+
+def test_default_artifact_path_stays_in_temp_scratch(tmp_path):
+    tester = Tester(
+        _Router(_Result("")),
+        execution_scope=ExecutionScope(tmp_path, [tmp_path]),
+    )
+    path = tester._artifact_path("pkg/module.py", str(tmp_path))
+    assert path.parent == Path(tempfile.gettempdir()) / "pda_dev_tests"
+    assert path.name == "test_gen_module.py"

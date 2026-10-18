@@ -98,3 +98,89 @@ def test_run_capped_closes_stdin_by_default():
     )
     assert r.returncode == 0
     assert "''" in (r.stdout or "")
+
+
+def test_run_capped_child_cannot_inherit_proxy_auth(monkeypatch):
+    monkeypatch.setenv("WSL_ACTION_PROXY_TOKEN", "secret-token")
+    monkeypatch.setenv("WSL_ACTION_PROXY_INSTANCE", "instance-id")
+    monkeypatch.setenv("CUSTOM_VALUE", "keep-me")
+    code = (
+        "import json,os; print(json.dumps({"
+        "'token': os.environ.get('WSL_ACTION_PROXY_TOKEN'), "
+        "'instance': os.environ.get('WSL_ACTION_PROXY_INSTANCE'), "
+        "'custom': os.environ.get('CUSTOM_VALUE')}))"
+    )
+
+    result = run_capped(
+        [sys.executable, "-c", code],
+        timeout=10,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == '{"token": null, "instance": null, "custom": "keep-me"}'
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_run_capped_timeout_exposes_termination_evidence(monkeypatch, verified):
+    import core.proc_utils as proc_utils
+    from core.proc_utils import ProcessTimeoutError, TerminationEvidence
+
+    class FakeProcess:
+        pid = 12345
+        returncode = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def communicate(self, timeout):
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired("cmd", timeout)
+            return "out", "err"
+
+    fake = FakeProcess()
+    monkeypatch.setattr(proc_utils.subprocess, "Popen", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        proc_utils,
+        "kill_process_tree",
+        lambda pid: TerminationEvidence(verified, "test", () if verified else (pid,)),
+    )
+
+    with pytest.raises(ProcessTimeoutError) as captured:
+        run_capped("cmd", timeout=0.01, capture_output=True, text=True, shell=True)
+
+    assert captured.value.termination_verified is verified
+    assert ("verified" if verified else "unverified") in captured.value.termination_detail
+    assert fake.calls == 2
+
+
+def test_kill_process_tree_returns_verified_evidence_for_missing_pid():
+    evidence = kill_process_tree(2_000_000_000)
+    assert evidence.verified is True
+
+
+def test_posix_fallback_signal_delivery_is_not_claimed_verified(monkeypatch):
+    import core.proc_utils as proc_utils
+
+    monkeypatch.setattr(proc_utils, "_IS_WINDOWS", False)
+    monkeypatch.setattr(proc_utils.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(proc_utils.os, "killpg", lambda pgid, signal: None, raising=False)
+    evidence = proc_utils._kill_tree_no_psutil(123)
+    assert evidence.verified is False
+    assert evidence.alive_pids == (123,)
+
+
+def test_windows_fallback_taskkill_success_is_still_conservative(monkeypatch):
+    import core.proc_utils as proc_utils
+
+    monkeypatch.setattr(proc_utils, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        proc_utils.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+    )
+    evidence = proc_utils._kill_tree_no_psutil(456)
+    assert evidence.verified is False
+    assert evidence.alive_pids == (456,)
