@@ -16,8 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import core.scheduler as sched_mod
-from core.scheduler import AccessibilityScheduler, Priority
+from core.scheduler import AccessibilityScheduler, Priority, SchedulerConfig
 
 
 async def _idle():
@@ -42,9 +41,16 @@ async def test_parked_tasks_resume_under_cap():
         await sched.stop()
 
 
-async def test_excess_parked_tasks_are_shed(monkeypatch):
-    monkeypatch.setattr(sched_mod, "_MAX_PARKED_DEV", 2)
-    sched = AccessibilityScheduler()
+async def test_excess_parked_tasks_are_shed():
+    config = SchedulerConfig(
+        hard_limit=8,
+        accessibility_reserve=2,
+        non_accessibility_limit=6,
+        dev_agent_limit=5,
+        background_limit=2,
+        max_parked_dev=2,
+    )
+    sched = AccessibilityScheduler(config)
     await sched.start()
     try:
         sched.pause_dev()
@@ -94,3 +100,32 @@ async def test_parked_count_resets_on_stop_cancel():
     assert sched.get_status()["dev_parked"] == 1
     await sched.stop()                     # cancels the parked task
     assert sched._dev_parked == 0
+
+
+async def test_parked_work_remains_authoritatively_running():
+    sched = AccessibilityScheduler()
+    await sched.start()
+    sched.pause_dev()
+    try:
+        futures = [
+            sched.submit(_idle(), Priority.DEV_AGENT, label=f"parked-{index}")
+            for index in range(3)
+        ]
+        for _ in range(100):
+            if sched.load_snapshot().parked_dev == 3:
+                break
+            await asyncio.sleep(0)
+
+        snapshot = sched.load_snapshot()
+        assert snapshot.queued_total == 0
+        assert snapshot.running_total == 3
+        assert snapshot.running_by_priority[Priority.DEV_AGENT] == 3
+        assert snapshot.parked_dev == 3
+
+        sched.resume_dev()
+        assert await asyncio.wait_for(asyncio.gather(*futures), timeout=2.0) == [
+            "done", "done", "done"
+        ]
+        assert sched.load_snapshot().running_total == 0
+    finally:
+        await sched.stop()

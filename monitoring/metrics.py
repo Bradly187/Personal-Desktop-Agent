@@ -64,7 +64,7 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Optional, TYPE_CHECKING
+from typing import Callable, Mapping, NamedTuple, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import aiohttp.web
@@ -158,6 +158,13 @@ class RollingWindow:
 # Metrics — the main singleton
 # ---------------------------------------------------------------------------
 
+class _GaugeProviderRecord(NamedTuple):
+    """Strong process-lifetime provider plus its currently owned gauge keys."""
+
+    provider: Callable[[], Mapping[str, float]]
+    owned_keys: frozenset[str]
+
+
 class Metrics:
     """Thread-safe in-process metrics store.
 
@@ -185,6 +192,7 @@ class Metrics:
             "corrections": 0,
             "whisper_hallucinations": 0,
             "gesture_rejections": 0,
+            # Phase 6 migration telemetry; strict production mode keeps this zero.
             # FusionEngine circuit breaker (commands shed during acoustic storms/latency spikes)
             "route_task_breaker_sheds": 0,
             # Ollama hang-timeout (FINDING 4): incremented when DA_OLLAMA_TIMEOUT_S fires
@@ -204,9 +212,48 @@ class Metrics:
             # Scheduler visibility (AccessibilityScheduler.set_metrics)
             "scheduler_queue_depth": 0.0,
             "scheduler_dev_inflight": 0.0,
-            # FusionEngine circuit breaker (commands shed during acoustic storms)
-            "coordinator_route_tasks_inflight": 0.0,
+            "scheduler_dev_parked": 0.0,
+            "scheduler_subagent_inflight": 0.0,
+            "scheduler_shed_total": 0.0,
+            "scheduler_denied_total": 0.0,
+            "scheduler_coalesced_total": 0.0,
+            "scheduler_stale_total": 0.0,
+            "scheduler_reason_denied_background_limit": 0.0,
+            "scheduler_reason_denied_dev_agent_limit": 0.0,
+            "scheduler_reason_denied_accessibility_reserve": 0.0,
+            "scheduler_reason_denied_hard_limit": 0.0,
+            "scheduler_reason_denied_parked_limit": 0.0,
+            "scheduler_reason_coalesced_exact_key": 0.0,
+            "scheduler_reason_stale_before_dispatch": 0.0,
+            "scheduler_queued_total": 0.0,
+            "scheduler_running_total": 0.0,
+            "scheduler_queued_accessibility": 0.0,
+            "scheduler_running_accessibility": 0.0,
+            "scheduler_queued_voice": 0.0,
+            "scheduler_running_voice": 0.0,
+            "scheduler_queued_gesture": 0.0,
+            "scheduler_running_gesture": 0.0,
+            "scheduler_queued_dev_agent": 0.0,
+            "scheduler_running_dev_agent": 0.0,
+            "scheduler_queued_background": 0.0,
+            "scheduler_running_background": 0.0,
+            # Scheduler and degraded Fusion visibility. The compatibility alias
+            # is derived under the reader lock in get_snapshot().
+            "fusion_degraded_route_tasks_inflight": 0.0,
+            "fusion_degraded_denied_total": 0.0,
+            "fusion_degraded_coalesced_total": 0.0,
+            "fusion_voice_exact_coalesced_total": 0.0,
+            "fusion_degraded_reason_denied_background_limit": 0.0,
+            "fusion_degraded_reason_denied_dev_agent_limit": 0.0,
+            "fusion_degraded_reason_denied_accessibility_reserve": 0.0,
+            "fusion_degraded_reason_denied_hard_limit": 0.0,
+            "fusion_degraded_reason_coalesced_exact_key": 0.0,
         }
+
+        # Dynamic providers are process-lifetime records that replace by name.
+        # Identity, key ownership, and initial values commit atomically.
+        self._gauge_providers: dict[str, _GaugeProviderRecord] = {}
+        self._gauge_provider_generation = 0
 
         # ── Histograms ────────────────────────────────────────────────────
         self._histograms: dict[str, Histogram] = {
@@ -246,6 +293,70 @@ class Metrics:
         """Set a gauge to `value`."""
         with self._lock:
             self._gauges[name] = value
+
+    def set_many(
+        self,
+        values: Mapping[str, float],
+        *,
+        blocking: bool = True,
+    ) -> bool:
+        """Atomically set gauges, optionally skipping publication if lock-busy."""
+        acquired = self._lock.acquire(blocking=blocking)
+        if not acquired:
+            return False
+        try:
+            self._gauges.update(values)
+        finally:
+            self._lock.release()
+        return True
+
+    def register_gauge_provider(
+        self,
+        name: str,
+        provider: Callable[[], Mapping[str, float]],
+    ) -> None:
+        """Register or replace a strong synchronous live-gauge provider."""
+        # Provider code is arbitrary component code and must never run while the
+        # metrics lock is held. The completed sample is the atomic install unit.
+        try:
+            initial_values = dict(provider())
+        except Exception as exc:
+            log.debug("metrics gauge provider %r failed: %s", name, exc)
+            return
+
+        record = _GaugeProviderRecord(provider, frozenset(initial_values))
+        with self._lock:
+            previous = self._gauge_providers.get(name)
+            self._gauge_providers[name] = record
+            self._gauges.update(initial_values)
+            self._gauge_provider_generation += 1
+            if previous is not None:
+                self._clear_unowned_provider_gauges_locked(
+                    previous.owned_keys - record.owned_keys
+                )
+
+    def unregister_gauge_provider(self, name: str) -> bool:
+        """Remove a provider and zero keys after their final owner releases them."""
+        with self._lock:
+            previous = self._gauge_providers.pop(name, None)
+            if previous is None:
+                return False
+            self._gauge_provider_generation += 1
+            self._clear_unowned_provider_gauges_locked(previous.owned_keys)
+            return True
+
+    def _clear_unowned_provider_gauges_locked(
+        self,
+        keys: set[str] | frozenset[str],
+        snapshot_gauges: Optional[dict[str, Optional[float]]] = None,
+    ) -> None:
+        """Zero provider-owned backing gauges after their final owner releases them."""
+        for key in keys:
+            if any(key in record.owned_keys for record in self._gauge_providers.values()):
+                continue
+            self._gauges[key] = 0.0
+            if snapshot_gauges is not None:
+                snapshot_gauges[key] = 0.0
 
     def observe(self, name: str, value: float) -> None:
         """Record an observation in a histogram."""
@@ -371,20 +482,62 @@ class Metrics:
     # ---------------------------------------------------------------------- #
 
     def get_snapshot(self) -> dict:
-        """Return a JSON-serialisable snapshot of all metrics."""
-        with self._lock:
-            uptime = time.time() - self._start_ts
-            return {
-                "uptime_s": round(uptime, 1),
-                "counters": dict(self._counters),
-                "gauges": {k: (_round(v) if isinstance(v, float) else v)
-                           for k, v in self._gauges.items()},
-                "histograms": {k: h.to_dict() for k, h in self._histograms.items()},
-                "source_counts": dict(self._source_counts),
-                "domain_counts": dict(self._domain_counts),
-                "recent_commands": list(self._recent_commands),
-                "ts": time.time(),
-            }
+        """Return a JSON-serialisable snapshot with live provider gauges overlaid."""
+        while True:
+            with self._lock:
+                generation = self._gauge_provider_generation
+                provider_items = tuple(self._gauge_providers.items())
+
+            provider_values = []
+            for name, record in provider_items:
+                try:
+                    provider_values.append((name, record, dict(record.provider())))
+                except Exception as exc:
+                    log.debug("metrics gauge provider %r failed: %s", name, exc)
+
+            with self._lock:
+                if generation != self._gauge_provider_generation:
+                    continue
+
+                stale_keys: set[str] = set()
+                ownership_changed = False
+                live_values = []
+                for name, record, values in provider_values:
+                    current_keys = frozenset(values)
+                    if current_keys != record.owned_keys:
+                        self._gauge_providers[name] = _GaugeProviderRecord(
+                            record.provider, current_keys
+                        )
+                        stale_keys.update(record.owned_keys - current_keys)
+                        ownership_changed = True
+                    live_values.append(values)
+
+                # Advance the registry generation for ownership changes before
+                # releasing the lock so competing snapshots retry their capture.
+                if ownership_changed:
+                    self._gauge_provider_generation += 1
+                self._clear_unowned_provider_gauges_locked(stale_keys)
+
+                uptime = time.time() - self._start_ts
+                gauges = dict(self._gauges)
+                for values in live_values:
+                    gauges.update(values)
+                gauges["coordinator_route_tasks_inflight"] = (
+                    gauges.get("scheduler_queued_total", 0.0)
+                    + gauges.get("scheduler_running_total", 0.0)
+                    + gauges.get("fusion_degraded_route_tasks_inflight", 0.0)
+                )
+                return {
+                    "uptime_s": round(uptime, 1),
+                    "counters": dict(self._counters),
+                    "gauges": {k: (_round(v) if isinstance(v, float) else v)
+                               for k, v in gauges.items()},
+                    "histograms": {k: h.to_dict() for k, h in self._histograms.items()},
+                    "source_counts": dict(self._source_counts),
+                    "domain_counts": dict(self._domain_counts),
+                    "recent_commands": list(self._recent_commands),
+                    "ts": time.time(),
+                }
 
     # ---------------------------------------------------------------------- #
     # aiohttp route handler
