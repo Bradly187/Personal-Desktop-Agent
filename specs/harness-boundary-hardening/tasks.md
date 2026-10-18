@@ -273,7 +273,7 @@ approval remains the common UX.
 - [x] 7.7 Test every containment level and mechanism, trusted fallback,
       autonomous/untrusted denial, unknown provenance, status/metrics, and
       notification deduplication — satisfies R7.6.
-- [ ] 7.8 Run focused sandbox/goal-session/trust tests, full pytest, model-free
+- [x] 7.8 Run focused sandbox/goal-session/trust tests, full pytest, model-free
       evals, and sandbox eval mode where available.
 
 **Exit:** effective sandbox strength is visible; autonomous/untrusted shell work
@@ -283,22 +283,22 @@ cannot silently run unconfined.
 
 ## Phase 8 / PR 6 — Final integration, security review, and documentation
 
-- [ ] 8.1 Run the full pytest suite and all model-free eval gates — satisfies R7.7.
-- [ ] 8.2 With Ollama available, run plan-contract and trajectory gates; report any
+- [x] 8.1 Run the full pytest suite and all model-free eval gates — satisfies R7.7.
+- [x] 8.2 With Ollama available, run plan-contract and trajectory gates; report any
       unavailable model-backed gate explicitly and never rewrite a baseline merely
       to pass — satisfies R7.8–R7.9.
-- [ ] 8.3 Run the repository security scan over changed code and resolve or
+- [x] 8.3 Run the repository security scan over changed code and resolve or
       explicitly document findings.
-- [ ] 8.4 Run a final invariant audit:
+- [x] 8.4 Run a final invariant audit:
       - no raw side-effect path bypasses ExecutionScope;
       - scheduler owns all normal-path load accounting;
       - destructive unknown outcomes cannot retry;
       - approvals are nonce/digest/expiry bound;
       - autonomous/untrusted terminal work requires namespace jail;
       - 60 Hz, pain-day, ResourceGovernor, crash recovery, and saga behavior remain.
-- [ ] 8.5 Update the spec's verification evidence and residual-risk section; update
+- [x] 8.5 Update the spec's verification evidence and residual-risk section; update
       statuses only to the state actually reached.
-- [ ] 8.6 Run `/doc-update`; route history to `docs/CHANGELOG.md`, keep CLAUDE.md
+- [x] 8.6 Run `/doc-update`; route history to `docs/CHANGELOG.md`, keep CLAUDE.md
       additions within the Rule 13 matrix, and avoid duplicating spec content.
 - [ ] 8.7 Present the final diff and validation results. Do not commit, push, or
       create PRs unless Brad explicitly requests those actions.

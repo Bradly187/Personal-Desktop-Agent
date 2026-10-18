@@ -739,4 +739,77 @@ insufficient, schema work requires a separate approved migration design.
 Gate 1 passed when Brad approved this requirements/design package and selected
 `namespace_jail` as the minimum for autonomous/untrusted terminal execution on
 2026-09-27. Gate 2 passed when Brad approved `tasks.md` on the same date. The
-specification is **Building**.
+specification is **Building**: implementation and Phase 8 verification are
+complete, but nothing has been committed, reviewed as a PR, or merged.
+
+---
+
+## 13. Verification Evidence (Phase 8, 2026-10-18)
+
+Run on branch `feat/harness-boundary-hardening-verify` (base `516da3b`), with
+the working-tree WIP applied unchanged plus the test and lint fixes below.
+
+| Gate | Result |
+|------|--------|
+| Full pytest | 2966 passed, 9 skipped, 0 failed after three test fixes (below) |
+| Router / skill-trigger / bypass (model-free) | 93.8% / 100% / 100%, all equal to baseline |
+| Token budget (model-free) | ~675 / 5000 tokens |
+| Plan contract | 8/8, no regression |
+| Trajectory (`qwen3-coder:30b`, Ollama) | 63.6%, equal to baseline |
+| Replan (`qwen3-coder:30b`, Ollama) | 50% vs baseline 100%; **identical on clean `master`**, so not caused by this feature; baseline not rewritten (R7.9) |
+| Sandbox eval mode (`sandbox_demo`) | 0/2; no locked baseline; planner downgraded to `gemma4:12b` under VRAM pressure. Not treated as a gate |
+| Ruff 0.16.0 (CI pin) | clean after removing 7 F401/F811/F402 findings the WIP introduced |
+| Bandit (medium+) over changed non-test files | 19 findings, all pre-existing on `master`; none from this feature |
+
+**Test fixes made during verification:**
+
+- `test_direct_command_executor_unknown_source_denies_before_workload`: expected
+  the exception to propagate. `CommandExecutor` returns a structured
+  `status=error` result carrying the containment report, the same way every
+  other RUN_TERMINAL denial reports. R5.5 is satisfied either way, and the test
+  still asserts the workload never launched.
+- `test_autonomous_tester_requires_namespace_jail`: the fixture never created the
+  generated test file, which `Tester._run_pytest` reads before the containment
+  check. The fixture now writes the file.
+- `test_wsl_drvfs_paths_translate_into_the_windows_proxy_scope`: hard-coded
+  `/Personal_Desktop_Agent/` as the repo root, so it failed outside
+  `E:\Personal_Desktop_Agent` (worktrees, Windows CI). The path is now derived
+  from `_REPO_ROOT`.
+
+**Invariant audit (task 8.4):**
+
+- *Scope:* in changed runtime code, process creation goes only through
+  `proc_utils`, `sandbox`, `git_executor`, and `saga_manager`, plus
+  `_launch_detached` / `os.startfile` for the OPEN verb, which predates this
+  feature. Git helpers now require a keyword `cwd`, which `StepExecutor` resolves
+  through `ExecutionScope.authorize_cwd`. Saga compensation authorizes every
+  path.
+- *Scheduler:* Fusion's degraded path reads `SchedulerConfig` limits; it does not
+  keep a separate breaker. Gauges are computed synchronously, without I/O.
+- *Timeouts:* `OUTCOME_UNKNOWN` only waits for the original task within a
+  reconciliation grace period. It is never re-dispatched.
+- *Approvals:* grants are digest-bound, have an expiry, and are consumed once
+  (`consumed/` plus ambiguity race handling).
+- *Containment:* autonomous/untrusted RUN_TERMINAL and Tester runs raise
+  `ContainmentDeniedError` before process creation below `namespace_jail`.
+  Unknown sources fail closed.
+- *Untouched:* `inference/model_router.py`, ResourceGovernor, and pain-day
+  modules have no diff. Fusion adds only in-memory state and pure key
+  computation, with no blocking I/O.
+
+## 14. Residual Risk
+
+1. **Delivery shape.** Tasks planned one PR per phase (PR 1–6), but the work
+   exists as one ~7.6k-line working-tree change. Splitting it, or getting an
+   explicit decision to ship it as one PR, is still open.
+2. **L515 changes are mixed in.** `requirements-realsense.txt`,
+   `sensors/whisper_stream.py`, `scripts/Start-L515AlignmentViewer.ps1`,
+   `specs/realsense-l515-head-pointer/`, and D033 belong to the separate L515
+   feature and must be excluded from this feature's commits (§9).
+3. **No hardware soak.** The 60 Hz watchdog under representative load, live WSL
+   proxy authentication, and a real `namespace_jail` (bwrap) run were not
+   exercised. All containment and proxy evidence comes from unit tests with
+   mocks.
+4. **Pre-existing replan regression** (50% vs 100%) needs separate
+   investigation, probably model or Ollama drift since the baseline was locked.
+5. **Judge-based gates did not run.** `gemma3:27b` is not installed.
