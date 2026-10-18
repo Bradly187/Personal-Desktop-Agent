@@ -92,13 +92,16 @@ def test_build_wsl_argv_default_distro():
 
 
 # --------------------------------------------------------------------------- #
-# _maybe_run_wsl decision order (monkeypatched availability)
+# Effective route selection and integration (monkeypatched availability)
 # --------------------------------------------------------------------------- #
 
 def _enable(monkeypatch, cfg=None, available=True):
     monkeypatch.setattr(sb, "_POSIX", False)            # pretend Windows host
-    monkeypatch.setattr(sb, "_wsl_routing_config",
-                        lambda: cfg if cfg is not None else {"enabled": True, "distro": "Ubuntu"})
+    monkeypatch.setattr(
+        sb,
+        "_wsl_routing_config",
+        lambda: cfg if cfg is not None else {"enabled": True, "distro": "Ubuntu"},
+    )
     monkeypatch.setattr(sb, "wsl_available", lambda distro="": available)
 
 
@@ -111,67 +114,91 @@ def test_routes_safe_command_through_wsl_jail(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     monkeypatch.setattr(sb, "run_capped", fake_run_capped)
-    res = sb._maybe_run_wsl("pytest -q", "E:\\proj", 60, False, 200_000)
-    assert res is not None and res.sandboxed is True and res.returncode == 0
+    res = sb.run_sandboxed("pytest -q", project_dir="E:\\proj", timeout=60)
+    assert res.sandboxed is True and res.returncode == 0
+    assert res.containment.level is sb.ContainmentLevel.NAMESPACE_JAIL
     argv = captured["argv"]
     assert argv[0] == "wsl.exe" and "Ubuntu" in argv and "bwrap" in argv
-    # Binds the TRANSLATED project dir — never the Windows path (R1.2/R2.2).
     assert any("/mnt/e/proj" in a for a in argv)
     assert all("E:\\proj" not in a for a in argv)
-    assert "--unshare-net" in argv                       # offline by default
+    assert "--unshare-net" in argv
 
 
 def test_network_op_grants_network_in_wsl(monkeypatch):
     _enable(monkeypatch)
     captured = {}
-    monkeypatch.setattr(sb, "run_capped",
-                        lambda argv, **kw: captured.update(argv=argv) or
-                        subprocess.CompletedProcess(argv, 0, "", ""))
-    sb._maybe_run_wsl("pip install requests", "E:\\proj", 60, True, 1000)
-    assert "--unshare-net" not in captured["argv"]       # allow_network honored
+    monkeypatch.setattr(
+        sb,
+        "run_capped",
+        lambda argv, **kw: captured.update(argv=argv)
+        or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    sb.run_sandboxed(
+        "pip install requests",
+        project_dir="E:\\proj",
+        timeout=60,
+        allow_network=True,
+    )
+    assert "--unshare-net" not in captured["argv"]
 
 
-def test_disabled_returns_none(monkeypatch):
-    _enable(monkeypatch, cfg={"enabled": False})
-    assert sb._maybe_run_wsl("pytest", "E:\\p", 60, False, 1000) is None
+@pytest.mark.parametrize(
+    "command,project,cfg,available,reason",
+    [
+        ("pytest", "E:\\p", {"enabled": False}, True, "disabled"),
+        ("powershell -c ls", "E:\\p", None, True, "not WSL-compatible"),
+        ("pytest", "\\\\srv\\share", None, True, "cannot be translated"),
+        ("pytest", "E:\\p", None, False, "unavailable"),
+    ],
+)
+def test_windows_fallback_reports_effective_reason(
+    monkeypatch, command, project, cfg, available, reason
+):
+    _enable(monkeypatch, cfg=cfg, available=available)
+    report = sb.detect_containment(command, project)
+    assert report.level is sb.ContainmentLevel.NATIVE_UNCONFINED
+    assert report.mechanism == "windows_native"
+    assert reason in (report.reason or "")
 
 
-def test_none_on_posix_host(monkeypatch):
+def test_posix_without_tool_reports_resource_limited_fallback(monkeypatch):
     monkeypatch.setattr(sb, "_POSIX", True)
-    monkeypatch.setattr(sb, "_wsl_routing_config", lambda: {"enabled": True})
-    assert sb._maybe_run_wsl("pytest", "E:\\p", 60, False, 1000) is None
+    monkeypatch.setattr(sb, "sandbox_tool", lambda: None)
+    report = sb.detect_containment("pytest", "/project")
+    assert report.level is sb.ContainmentLevel.CWD_AND_RESOURCE_LIMITS
+    assert report.mechanism == "posix+rlimits"
 
 
-def test_unsafe_command_falls_back_native(monkeypatch):
-    _enable(monkeypatch)
-    assert sb._maybe_run_wsl("powershell -c ls", "E:\\p", 60, False, 1000) is None
-
-
-def test_untranslatable_path_falls_back_native(monkeypatch):
-    _enable(monkeypatch)
-    assert sb._maybe_run_wsl("pytest", "\\\\srv\\share", 60, False, 1000) is None
-
-
-def test_wsl_unavailable_falls_back_native(monkeypatch):
+def test_trusted_manual_native_fallback_still_executes(monkeypatch):
     _enable(monkeypatch, available=False)
-    assert sb._maybe_run_wsl("pytest", "E:\\p", 60, False, 1000) is None
+    monkeypatch.setattr(sb, "sandbox_tool", lambda: None)
+    monkeypatch.setattr(
+        sb,
+        "run_capped",
+        lambda command, **kw: subprocess.CompletedProcess(command, 0, "1\n", ""),
+    )
+    result = sb.run_sandboxed(
+        "pytest",
+        project_dir="E:\\proj",
+        timeout=30,
+        work_trust=sb.WorkTrust.TRUSTED_MANUAL,
+    )
+    assert result.sandboxed is False and result.returncode == 0
 
 
-# --------------------------------------------------------------------------- #
-# run_sandboxed integration
-# --------------------------------------------------------------------------- #
+def test_autonomous_native_fallback_denies_before_workload(monkeypatch):
+    _enable(monkeypatch, available=False)
+    called = False
 
-def test_run_sandboxed_uses_wsl_result_when_offered(monkeypatch):
-    fake = sb.SandboxResult(stdout="x", stderr="", returncode=0, sandboxed=True)
-    monkeypatch.setattr(sb, "_maybe_run_wsl", lambda *a, **k: fake)
-    assert sb.run_sandboxed("pytest -q", project_dir="E:\\proj", timeout=5) is fake
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("workload launched")
 
-
-def test_run_sandboxed_native_when_wsl_declines(monkeypatch):
-    monkeypatch.setattr(sb, "_maybe_run_wsl", lambda *a, **k: None)   # routing off/declined
-    monkeypatch.setattr(sb, "sandbox_tool", lambda: None)            # force native fallback
-    r = sb.run_sandboxed(f'{sys.executable} -c "print(1)"', timeout=30)
-    assert r.sandboxed is False and r.returncode == 0                # legacy path unchanged
+    monkeypatch.setattr(sb, "run_capped", fail_if_called)
+    with pytest.raises(sb.ContainmentDeniedError):
+        sb.run_sandboxed("pytest", project_dir="E:\\proj", timeout=30)
+    assert called is False
 
 
 def test_default_config_is_enabled(tmp_path, monkeypatch):

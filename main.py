@@ -761,16 +761,20 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
             dev_router = router
 
         from core.execution_policy import ExecutionScope
+        from inference.sandbox import get_containment_policy
         execution_scope = ExecutionScope()
+        containment_policy = get_containment_policy()
         coordinator = HybridCoordinator(
             local=local, config=cfg, trainer=trainer,
             agent_db=agent_db, session_id=session_id,
             content_filter=content_filter, audit_log=audit,
             twin_state=twin_state, execution_scope=execution_scope,
+            containment_policy=containment_policy,
         )
         dev_agent = DevAgent(
             router=dev_router, coordinator=coordinator, trainer=trainer,
             agent_db=agent_db, execution_scope=execution_scope,
+            containment_policy=containment_policy,
         )
         coordinator.set_dev_agent(dev_agent)
         # E4: drain any escalations the DB couldn't accept on a prior run (DB-down at
@@ -932,6 +936,7 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         scheduler = AccessibilityScheduler()
         await scheduler.start()
         scheduler.set_metrics(m)        # queue-depth / dev-inflight visibility in /metrics
+        m.register_gauge_provider("containment", containment_policy.metrics)
         fusion.set_scheduler(scheduler)
         dev_agent.set_scheduler(scheduler)
 
@@ -1231,6 +1236,22 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         from core.proactive_scheduler import ProactiveScheduler
         from core.event_rule_engine import EventRuleEngine
         notifier = Notifier(bridge=bridge)
+        # Sandbox assessment runs in worker threads. Marshal one quiet,
+        # state-transition-only notice back onto the main loop without adding a
+        # new iPad protocol message type.
+        from core.async_utils import fire_and_log
+        _containment_loop = asyncio.get_running_loop()
+
+        def _containment_notice(title: str, body: str) -> None:
+            def _schedule() -> None:
+                fire_and_log(
+                    notifier.notify(title, body, speak=False, push=True),
+                    log,
+                    label="containment notice",
+                )
+            _containment_loop.call_soon_threadsafe(_schedule)
+
+        containment_policy.set_notice_sink(_containment_notice)
         # Flush store-and-forward notifications when an iPad (re)connects (E12).
         if bridge is not None:
             bridge.register_connect_handler(notifier.flush_pending)
@@ -1347,7 +1368,6 @@ async def _run_pipeline(args: argparse.Namespace) -> None:
         # Durable goal backlog (gap D): drain any goals queued/requeued from a previous
         # session now that the full pipeline is wired. Fire-and-forget — each goal runs
         # through plan_and_run with its own approval gate + crash-recoverable ledger.
-        from core.async_utils import fire_and_log
         fire_and_log(dev_agent.drain_goal_queue(), log, label="startup_goal_drain")
 
         # Warm the command model so the FIRST real command doesn't pay the cold-load

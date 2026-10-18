@@ -618,10 +618,15 @@ class CommandExecutor:
         execution_scope: ExecutionScope | None = None,
         *,
         action_registry: TrackedWorkRegistry | None = None,
+        containment_policy=None,
     ) -> None:
         self._agent_db = None  # AgentDB — set via set_agent_db(); optional
         self._audit_log = None  # AuditLog — set via set_audit_log(); optional
         self._execution_scope = execution_scope or ExecutionScope()
+        if containment_policy is None:
+            from inference.sandbox import get_containment_policy
+            containment_policy = get_containment_policy()
+        self._containment_policy = containment_policy
         self._action_registry = action_registry or TrackedWorkRegistry(
             limit=_UNKNOWN_REGISTRY_LIMIT, ttl_s=_UNKNOWN_REGISTRY_TTL_S
         )
@@ -749,6 +754,28 @@ class CommandExecutor:
             raise ValueError("proxy response has invalid lifecycle status")
         return ActionOutcome.from_dict(data, identity=identity)
 
+    def _observe_proxy_containment(
+        self, cmd: Command, outcome: ActionOutcome
+    ) -> None:
+        """Mirror a validated receiver report into this process's status cache."""
+        if cmd.action.upper() != "RUN_TERMINAL" or not isinstance(outcome.result, dict):
+            return
+        payload = outcome.result.get("containment")
+        if payload is None:
+            return
+        try:
+            from inference.sandbox import (
+                ContainmentReport,
+                work_trust_from_source,
+            )
+
+            report = ContainmentReport.from_dict(payload)
+            self._containment_policy.observe(
+                report, work_trust_from_source(cmd.source)
+            )
+        except (TypeError, ValueError) as exc:
+            log.warning("Ignoring invalid proxy containment report: %s", exc)
+
     async def _proxy_execute(
         self,
         cmd: Command,
@@ -802,6 +829,7 @@ class CommandExecutor:
                     ).to_dict()
                 if 200 <= status < 300:
                     observed = self._validate_proxy_outcome(result, identity_obj)
+                    self._observe_proxy_containment(cmd, observed)
                     if observed.status is not ActionStatus.OUTCOME_UNKNOWN:
                         return observed.to_dict()
                 else:
@@ -832,6 +860,7 @@ class CommandExecutor:
                     # versioned success envelope can settle the action.
                     if 200 <= status < 300:
                         observed = self._validate_proxy_outcome(result, identity_obj)
+                        self._observe_proxy_containment(cmd, observed)
                         if observed.status is not ActionStatus.OUTCOME_UNKNOWN:
                             return observed.to_dict()
                 except Exception as exc:
@@ -1380,20 +1409,41 @@ class CommandExecutor:
             # Sandbox (mistake-containment): cwd-jail + caps. Network granted only
             # for curated package/VCS/fetch ops, or when the caller explicitly
             # passes allow_network in params (e.g. an approved network step).
-            from inference.sandbox import command_needs_network, run_sandboxed
+            from inference.sandbox import (
+                ContainmentDeniedError,
+                command_needs_network,
+                run_sandboxed,
+                work_trust_from_source,
+            )
             net = bool(p.get("allow_network")) or command_needs_network(command)
             process_timeout_s = float(p.get("_process_timeout_s", 60.0))
-            result = run_sandboxed(
-                command,
-                project_dir=cwd,
-                timeout=process_timeout_s,
-                allow_network=net,
-            )
+            try:
+                result = run_sandboxed(
+                    command,
+                    project_dir=cwd,
+                    timeout=process_timeout_s,
+                    allow_network=net,
+                    work_trust=work_trust_from_source(cmd.source),
+                    containment_policy=self._containment_policy,
+                )
+            except ContainmentDeniedError as exc:
+                return {
+                    "status": "error",
+                    "error": str(exc),
+                    "sandboxed": False,
+                    "containment": exc.report.to_dict(),
+                    "network": net,
+                }
             return {
                 "stdout": result.stdout.strip(),
                 "stderr": result.stderr.strip(),
                 "returncode": result.returncode,
                 "sandboxed": result.sandboxed,
+                "containment": (
+                    getattr(result, "containment", None).to_dict()
+                    if getattr(result, "containment", None)
+                    else None
+                ),
                 "network": net,
             }
 

@@ -87,4 +87,9 @@ async def test_enqueue_goal_action():
         "goal_template": "fix the build", "action_kind": "enqueue_goal",
         "cooldown_s": 0, "last_fired_at": None, "name": "b"}], dev=dev)
     assert await eng.on_event({"topic": "build.failed", "payload": {"id": 99}}) == 1
-    db.goals.enqueue_goal.assert_awaited()
+    db.goals.enqueue_goal.assert_awaited_once_with(
+        "fix the build",
+        domain="plan",
+        idempotency_key="event_rule:2:99",
+        source_trigger="event_rule:2",
+    )

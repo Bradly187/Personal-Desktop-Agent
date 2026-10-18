@@ -26,6 +26,11 @@ PROJECT = r"E:\Personal_Desktop_Agent"
 results: list[tuple[str, bool, str]] = []
 
 
+def run_trusted(*args, **kwargs):
+    kwargs["work_trust"] = sb.WorkTrust.TRUSTED_MANUAL
+    return sb.run_sandboxed(*args, **kwargs)
+
+
 def check(label: str, ok: bool, detail: str = "") -> None:
     status = "PASS" if ok else "FAIL"
     print(f"  [{status}] {label}" + (f"  -- {detail}" if detail else ""))
@@ -38,7 +43,7 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 print("\nTest 1 -- POSIX dev commands route through WSL+bwrap")
 posix_cmds = ["pytest --version", "git status", "pip list", "ls -la"]
 for cmd in posix_cmds:
-    r = sb.run_sandboxed(cmd, project_dir=PROJECT, timeout=30)
+    r = run_trusted(cmd, project_dir=PROJECT, timeout=30)
     tag = "JAILED" if r.sandboxed else "NATIVE"
     print(f"    [{tag}] {cmd!r:42s}  rc={r.returncode}")
     check(f"R1.1 sandboxed: {cmd!r}", r.sandboxed,
@@ -57,7 +62,7 @@ check("R1.2 to_wsl_path produces /mnt/e/ prefix", wsl_proj is not None and wsl_p
 print("\nTest 2 -- Windows-only commands stay native")
 win_cmds = ["powershell -c Get-Date", "where python"]
 for cmd in win_cmds:
-    r = sb.run_sandboxed(cmd, project_dir=PROJECT, timeout=30)
+    r = run_trusted(cmd, project_dir=PROJECT, timeout=30)
     tag = "JAILED" if r.sandboxed else "NATIVE"
     print(f"    [{tag}] {cmd!r}")
     check(f"R2.1 native: {cmd!r}", not r.sandboxed)
@@ -66,7 +71,7 @@ for cmd in win_cmds:
 # Test 3 -- write outside project bind fails (R2.2)
 # -------------------------------------------------------------------------
 print("\nTest 3 -- write outside project bind returns Read-only file system (R2.2)")
-r3 = sb.run_sandboxed(
+r3 = run_trusted(
     r"sh -c 'echo bad > /mnt/e/escape_test.txt'",
     project_dir=PROJECT,
     timeout=10,
@@ -101,7 +106,7 @@ except Exception as e:
 if renamed:
     # Clear the availability cache so the probe re-runs.
     sb._wsl_avail_cache.clear()
-    r4 = sb.run_sandboxed("ls -la", project_dir=PROJECT, timeout=15)
+    r4 = run_trusted("ls -la", project_dir=PROJECT, timeout=15)
     tag = "JAILED" if r4.sandboxed else "NATIVE"
     print(f"    [{tag}] ls -la  rc={r4.returncode}")
     check("R3.1 falls back to NATIVE when bwrap absent", not r4.sandboxed,
@@ -135,7 +140,7 @@ cfg_path.write_text(json.dumps(disabled_cfg), encoding="utf-8")
 # Clear cache so new config is read.
 sb._wsl_avail_cache.clear()
 
-r5 = sb.run_sandboxed("ls -la", project_dir=PROJECT, timeout=15)
+r5 = run_trusted("ls -la", project_dir=PROJECT, timeout=15)
 tag = "JAILED" if r5.sandboxed else "NATIVE"
 print(f"    [{tag}] ls -la  rc={r5.returncode}")
 check("R3.3 routing disabled -> sandboxed=False", not r5.sandboxed,

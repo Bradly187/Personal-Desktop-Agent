@@ -13,6 +13,11 @@ from core.approval_authority import (
     ApprovalResponse, plan_digest, sha256_digest, step_action_digest,
 )
 from inference.executors.skill_executor import prepare_skill_action, skill_action_digest
+from inference.sandbox import (
+    WorkTrust,
+    combine_work_trust,
+    work_trust_from_source,
+)
 from inference.step_executor import prepare_file_candidate
 from core.approval_keywords import classify_confirmation
 from core.events import (
@@ -33,6 +38,16 @@ from inference.plan_parser import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _taint_from_context(agent, context: object) -> None:
+    """Monotonically mark plan work derived from non-empty context as untrusted."""
+    if not context:
+        return
+    agent._active_work_trust = combine_work_trust(
+        agent._active_work_trust,
+        WorkTrust.AUTONOMOUS_OR_UNTRUSTED,
+    )
 
 
 async def _acquire_plan_steps(agent, goal, plan_result, extra_ctx):
@@ -91,7 +106,8 @@ async def _acquire_plan_steps(agent, goal, plan_result, extra_ctx):
 
 async def plan_and_run(
     agent, goal: str, trace_id: str = "", seed_context: str = "",
-    extra_context: str = "",
+    extra_context: str = "", *,
+    work_trust: WorkTrust | None = None,
 ) -> AgentResult:
     """Decompose a complex goal into steps and execute them sequentially.
 
@@ -110,6 +126,18 @@ async def plan_and_run(
     """
     async with agent._plan_lock:
         try:
+            candidate_trust = work_trust
+            if candidate_trust is None:
+                candidate_trust = getattr(
+                    agent,
+                    "_next_work_trust",
+                    WorkTrust.AUTONOMOUS_OR_UNTRUSTED,
+                )
+            agent._next_work_trust = WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+            try:
+                agent._active_work_trust = WorkTrust(candidate_trust)
+            except (TypeError, ValueError):
+                agent._active_work_trust = WorkTrust.AUTONOMOUS_OR_UNTRUSTED
             return await agent._plan_and_run_locked(
                 goal, trace_id, seed_context, extra_context
             )
@@ -140,21 +168,29 @@ async def _plan_and_run_locked(
     _trace_tok = _tracer.set_current(trace_id)
     _tracer.record_span("plan", trace_id=trace_id, goal=goal[:80])
 
+    # Uploaded/extracted turn context can materially shape the initial plan.
+    # Approval does not erase that provenance, so terminal work remains tainted.
+    _taint_from_context(agent, turn_context)
+
     # Step 1: Generate plan — inject RAG context + git/IDE context
     extra_ctx = agent._format_context()
+    _taint_from_context(agent, extra_ctx)
     # Make registered skills available to the planner — data-driven, no
     # per-feature prompt edit. describe_for_prompt() is "" when no skills load.
     if agent._skill_registry is not None:
         skills_desc = agent._skill_registry.describe_for_prompt()
         if skills_desc:
+            _taint_from_context(agent, skills_desc)
             extra_ctx = f"{skills_desc}\n\n{extra_ctx}" if extra_ctx else skills_desc
     rag = await agent._rag_context(goal, n=4)
     if rag:
+        _taint_from_context(agent, rag)
         extra_ctx = f"{rag}\n\n{extra_ctx}" if extra_ctx else rag
 
     # Git context injection (item #8): gives LLM branch/diff awareness
     git_ctx = await agent._git_context()
     if git_ctx:
+        _taint_from_context(agent, git_ctx)
         extra_ctx = f"{git_ctx}\n\n{extra_ctx}" if extra_ctx else git_ctx
 
     # Live repo-context (Gap A): stable workspace facts (AGENTS.md/CLAUDE.md
@@ -163,6 +199,7 @@ async def _plan_and_run_locked(
     # R4.4). The dynamic working-tree diff stays in _git_context above (R3.3).
     workspace = agent._workspace_context()
     if workspace:
+        _taint_from_context(agent, workspace)
         extra_ctx = f"{workspace}\n\n{extra_ctx}" if extra_ctx else workspace
 
     # Resume working-memory (Gap C): a caller-supplied seed block describing what
@@ -177,6 +214,7 @@ async def _plan_and_run_locked(
     if not seed_context:
         seed_context = await agent._session_seed_context(goal)
     if seed_context:
+        _taint_from_context(agent, seed_context)
         extra_ctx = f"{seed_context}\n\n{extra_ctx}" if extra_ctx else seed_context
 
     # Per-turn context (specs/chat-context-attachments R2.4): extracted file
@@ -1054,6 +1092,7 @@ async def resume_pending_plan(agent) -> Optional[dict]:
     await agent.plan_and_run(
         goal,
         seed_context=seed,
+        work_trust=WorkTrust.TRUSTED_MANUAL,
     )
     return run
 
@@ -1137,6 +1176,9 @@ async def drain_goal_queue(agent, max_goals: int = 0) -> int:
                 })
                 _g_status, _g_ok = "failed", False
                 try:
+                    agent._next_work_trust = work_trust_from_source(
+                        goal.get("source_trigger")
+                    )
                     result = await agent.plan_and_run(goal["goal"])
                     _g_ok = bool(result.success)
                     _g_status = "done" if _g_ok else "failed"
@@ -1447,5 +1489,6 @@ def _reset_plan_state(agent) -> None:
     agent._current_step = 0
     agent._total_steps = 0
     agent._active_plan_model = ""
+    agent._active_work_trust = WorkTrust.AUTONOMOUS_OR_UNTRUSTED
     agent._critic_revise_counts = {}
 

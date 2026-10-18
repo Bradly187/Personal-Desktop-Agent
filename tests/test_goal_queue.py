@@ -245,3 +245,48 @@ async def test_plan_and_run_is_serialized():
         ["start:a", "end:a", "start:b", "end:b"],
         ["start:b", "end:b", "start:a", "end:a"],
     )
+
+
+async def test_goal_source_trigger_persists_and_revives(db):
+    gid = await db.goals.enqueue_goal(
+        "manual goal", idempotency_key="source-key", source_trigger="manual"
+    )
+    claimed = await db.goals.claim_next_goal()
+    assert claimed["source_trigger"] == "manual"
+    await db.goals.complete_goal(gid, "done")
+
+    revived = await db.goals.enqueue_goal(
+        "event goal",
+        idempotency_key="source-key",
+        source_trigger="event_rule:4",
+    )
+    assert revived == gid
+    claimed_again = await db.goals.claim_next_goal()
+    assert claimed_again["goal"] == "event goal"
+    assert claimed_again["source_trigger"] == "event_rule:4"
+
+
+async def test_drain_maps_persisted_provenance_conservatively(db, monkeypatch):
+    from inference.sandbox import WorkTrust
+
+    await db.goals.enqueue_goal(
+        "manual", idempotency_key="manual-source", source_trigger="manual"
+    )
+    await db.goals.enqueue_goal(
+        "event", idempotency_key="event-source", source_trigger="event_rule:8"
+    )
+    await db.goals.enqueue_goal("legacy unknown", idempotency_key="legacy-source")
+    agent = _agent(db)
+    observed = []
+
+    async def _fake_plan(goal):
+        observed.append((goal, agent._next_work_trust))
+        return AgentResult(goal=goal, domain="plan", model_used="m", success=True)
+
+    monkeypatch.setattr(agent, "plan_and_run", _fake_plan)
+    assert await agent.drain_goal_queue() == 3
+    assert observed == [
+        ("manual", WorkTrust.TRUSTED_MANUAL),
+        ("event", WorkTrust.AUTONOMOUS_OR_UNTRUSTED),
+        ("legacy unknown", WorkTrust.AUTONOMOUS_OR_UNTRUSTED),
+    ]

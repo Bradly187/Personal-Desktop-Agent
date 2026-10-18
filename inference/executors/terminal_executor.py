@@ -6,8 +6,13 @@ def run_terminal(
     cmd: str,
     *,
     cwd: str,
+    work_trust=None,
+    containment_policy=None,
 ) -> str:
+    from inference.sandbox import WorkTrust
+
     cmd = cmd.strip()
+    trust = work_trust or WorkTrust.AUTONOMOUS_OR_UNTRUSTED
     log.info("DevAgent: running terminal command: %s", cmd)
     # Sandbox (mistake-containment): cwd-jail + resource/output caps. Network
     # is granted only for curated package/VCS/fetch ops (pip install, git
@@ -28,6 +33,8 @@ def run_terminal(
         project_dir=cwd,
         timeout=60,
         allow_network=net,
+        work_trust=trust,
+        containment_policy=containment_policy,
     )
     output = (result.stdout + result.stderr).strip()
     status = "ok" if result.returncode == 0 else f"exit {result.returncode}"

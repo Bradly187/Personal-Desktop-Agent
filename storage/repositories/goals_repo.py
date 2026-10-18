@@ -20,6 +20,7 @@ class GoalsRepo:
         domain: str = "plan",
         idempotency_key: Optional[str] = None,
         max_attempts: int = 3,
+        source_trigger: Optional[str] = None,
     ) -> int:
         """Persist a goal to the durable backlog. Returns its row id, or -1.
 
@@ -35,9 +36,13 @@ class GoalsRepo:
         try:
             await self._conn.execute(
                 """INSERT OR IGNORE INTO goal_queue
-                   (ts, goal, domain, status, idempotency_key, max_attempts)
-                   VALUES (?, ?, ?, 'queued', ?, ?)""",
-                (time.time(), goal, domain, idempotency_key, max_attempts),
+                   (ts, goal, domain, status, idempotency_key, max_attempts,
+                    source_trigger)
+                   VALUES (?, ?, ?, 'queued', ?, ?, ?)""",
+                (
+                    time.time(), goal, domain, idempotency_key, max_attempts,
+                    source_trigger,
+                ),
             )
             await self._conn.commit()
             if idempotency_key is not None:
@@ -54,8 +59,8 @@ class GoalsRepo:
                     await self._conn.execute(
                         "UPDATE goal_queue SET status='queued', goal=?, domain=?, "
                         "attempts=0, last_error=NULL, owner_pid=NULL, "
-                        "claimed_at=NULL, ts=? WHERE id=?",
-                        (goal, domain, time.time(), gid),
+                        "claimed_at=NULL, source_trigger=?, ts=? WHERE id=?",
+                        (goal, domain, source_trigger, time.time(), gid),
                     )
                     await self._conn.commit()
                 return gid

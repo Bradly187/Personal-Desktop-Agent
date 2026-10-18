@@ -16,8 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import inference.sandbox as sb
 from inference.sandbox import (
-    build_sandbox_argv, run_sandboxed, sandbox_tool, command_needs_network,
+    build_sandbox_argv, sandbox_tool, command_needs_network,
 )
+
+
+def _run_trusted(*args, **kwargs):
+    kwargs["work_trust"] = sb.WorkTrust.TRUSTED_MANUAL
+    return sb.run_sandboxed(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +128,7 @@ def test_sandbox_tool_none_on_windows(monkeypatch):
 def test_run_sandboxed_fallback_executes(monkeypatch):
     monkeypatch.setattr(sb, "sandbox_tool", lambda: None)   # force fallback
     # A trivially-portable command: python prints OK.
-    r = run_sandboxed(f'{sys.executable} -c "print(\'OK\')"', timeout=30)
+    r = _run_trusted(f'{sys.executable} -c "print(\'OK\')"', timeout=30)
     assert r.returncode == 0
     assert "OK" in r.stdout
     assert r.sandboxed is False
@@ -133,19 +138,20 @@ def test_da_sandbox_flag_disables(monkeypatch):
     monkeypatch.setenv("DA_SANDBOX", "0")
     assert sb._enabled() is False
     # With the flag off, sandbox_tool isn't consulted → fallback.
-    r = run_sandboxed(f'{sys.executable} -c "print(1)"', timeout=30)
+    r = _run_trusted(f'{sys.executable} -c "print(1)"', timeout=30)
     assert r.sandboxed is False
 
 
 def test_output_is_capped(monkeypatch):
     monkeypatch.setattr(sb, "sandbox_tool", lambda: None)
     big = f'{sys.executable} -c "print(\'x\'*100000)"'
-    r = run_sandboxed(big, timeout=30, output_cap=500)
+    r = _run_trusted(big, timeout=30, output_cap=500)
     assert len(r.stdout) <= 500
 
 
 def test_run_sandboxed_uses_jail_when_tool_present(monkeypatch):
     """When a tool is detected, run_sandboxed builds the jail argv (mock subprocess)."""
+    monkeypatch.setattr(sb, "_POSIX", True)
     monkeypatch.setattr(sb, "sandbox_tool", lambda: "bwrap")
     monkeypatch.setattr(sb, "_wsl_routing_config", lambda: {})  # disable WSL routing; test native bwrap path
     captured = {}
@@ -160,7 +166,7 @@ def test_run_sandboxed_uses_jail_when_tool_present(monkeypatch):
     # run_sandboxed now dispatches through proc_utils.run_capped (tree-kill on
     # timeout) rather than subprocess.run directly — patch where it's used.
     monkeypatch.setattr(sb, "run_capped", _fake_run)
-    r = run_sandboxed("echo hi", project_dir="/proj", timeout=10)
+    r = _run_trusted("echo hi", project_dir="/proj", timeout=10)
     assert r.sandboxed is True
     assert captured["argv"][0] == "bwrap"
     assert "--unshare-net" in captured["argv"]
@@ -221,7 +227,7 @@ def test_run_sandboxed_passes_devnull_stdin_and_env(monkeypatch):
 
     monkeypatch.setattr(sb, "run_capped", _fake_run)
     monkeypatch.setattr(sb, "sandbox_tool", lambda: None)   # fallback branch
-    r = run_sandboxed("echo hi", timeout=5)
+    r = _run_trusted("echo hi", timeout=5)
     assert r.returncode == 0
     assert captured["kw"].get("stdin") == _sp.DEVNULL
     assert captured["kw"]["env"]["PIP_NO_INPUT"] == "1"
@@ -232,7 +238,7 @@ def test_run_sandboxed_stdin_closed_fails_fast(monkeypatch):
     # return promptly — NOT block until the wall timeout. Real run_capped,
     # fallback path; if stdin were a live TTY/pipe this would time out.
     monkeypatch.setattr(sb, "sandbox_tool", lambda: None)
-    r = run_sandboxed(
+    r = _run_trusted(
         f'{sys.executable} -c "import sys; print(repr(sys.stdin.read()))"',
         timeout=10,
     )
@@ -273,7 +279,7 @@ def test_run_sandboxed_child_env_cannot_see_proxy_auth(monkeypatch):
     monkeypatch.setattr(sb, "run_capped", _fake_run)
     monkeypatch.setattr(sb, "sandbox_tool", lambda: None)
 
-    result = run_sandboxed("echo safe", timeout=5)
+    result = _run_trusted("echo safe", timeout=5)
 
     assert result.returncode == 0
     assert "WSL_ACTION_PROXY_TOKEN" not in captured

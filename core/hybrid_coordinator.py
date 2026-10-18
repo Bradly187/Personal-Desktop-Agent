@@ -298,12 +298,15 @@ class HybridCoordinator:
         twin_state: Optional["BehavioralTwinState"] = None,
         whisper_stream=None,
         execution_scope: ExecutionScope | None = None,
+        containment_policy=None,
     ) -> None:
         self._local = local or OllamaInference()
         self._cfg = config or CoordinatorConfig()
         self._cloud = _CloudInference(self._cfg.anthropic_model)
         self._execution_scope = execution_scope or ExecutionScope()
-        self._executor = CommandExecutor(self._execution_scope)
+        self._executor = CommandExecutor(
+            self._execution_scope, containment_policy=containment_policy
+        )
         self._trainer = trainer
         self._dev_agent = dev_agent
         self._skill_registry = None     # SkillRegistry | None — voice 'help' listing
@@ -812,6 +815,7 @@ class HybridCoordinator:
         return {
             "local_backend": self._local.get_status(),
             "latency_ema_ms": round(self._gates.latency_ema, 1) if self._gates.latency_ema else None,
+            "containment": self._executor._containment_policy.status(),
             "config": {
                 "whisper_logprob_min": self._cfg.whisper_logprob_min,
                 "gesture_confidence_min": self._cfg.gesture_confidence_min,

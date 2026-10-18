@@ -341,7 +341,10 @@ class VoiceSystemControl:
                 if agent_db and agent_db.available:
                     key = f"authorize:{goal_text[:80]}:{_time.time():.3f}"  # fix #7
                     await agent_db.goals.enqueue_goal(
-                        goal_text, domain="plan", idempotency_key=key,
+                        goal_text,
+                        domain="plan",
+                        idempotency_key=key,
+                        source_trigger="manual",
                     )
                     dev_agent = self._dev_agent()
                     if dev_agent is not None:

@@ -149,7 +149,12 @@ class EventRuleEngine:
         rendered = _render(rule.get("goal_template", ""), payload)
         if rule.get("action_kind") == "enqueue_goal" and self._dev_agent is not None:
             key = f"event_rule:{rule['id']}:{payload.get('id', now)}"
-            await self._db.goals.enqueue_goal(rendered, domain="plan", idempotency_key=key)
+            await self._db.goals.enqueue_goal(
+                rendered,
+                domain="plan",
+                idempotency_key=key,
+                source_trigger=f"event_rule:{rule['id']}",
+            )
             t = asyncio.create_task(self._dev_agent.drain_goal_queue())
             self._bg.add(t)
             t.add_done_callback(self._bg.discard)

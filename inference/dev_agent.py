@@ -45,6 +45,12 @@ from inference.edit_format import (
 from inference.critic import Critic
 from inference.tester import Tester
 from inference.model_router import ModelRouter, RouterResult
+from inference.sandbox import (
+    ContainmentPolicy,
+    WorkTrust,
+    get_containment_policy,
+    work_trust_from_source,
+)
 
 if TYPE_CHECKING:
     from inference.codebase_indexer import CodebaseIndexer
@@ -204,6 +210,7 @@ class DevAgent:
         agent_db: Optional["AgentDB"] = None,
         execution_scope: ExecutionScope | None = None,
         approval_authority: ApprovalAuthority | None = None,
+        containment_policy: ContainmentPolicy | None = None,
     ) -> None:
         self._router = router
         self._coordinator = coordinator
@@ -211,6 +218,9 @@ class DevAgent:
         self._agent_db = agent_db
         self._execution_scope = execution_scope or ExecutionScope()
         self._approval_authority = approval_authority or ApprovalAuthority()
+        self._containment_policy = containment_policy or get_containment_policy()
+        self._active_work_trust = WorkTrust.AUTONOMOUS_OR_UNTRUSTED
+        self._next_work_trust = WorkTrust.AUTONOMOUS_OR_UNTRUSTED
         self._action_registry = TrackedWorkRegistry(
             limit=self.UNKNOWN_REGISTRY_LIMIT,
             ttl_s=self.UNKNOWN_REGISTRY_TTL_S,
@@ -291,6 +301,7 @@ class DevAgent:
             Tester(
                 router,
                 execution_scope=self._execution_scope,
+                containment_policy=self._containment_policy,
                 code_domain=os.environ.get("DA_TESTER_DOMAIN", "code"),
             )
             if self._tester_enabled else None
@@ -508,6 +519,7 @@ class DevAgent:
         screenshot_b64: Optional[str] = None,
         trace_id: str = "",
         attachment_context: str = "",
+        source: Optional[str] = None,
     ) -> AgentResult:
         """Classify, route, and execute a user query.
 
@@ -524,6 +536,7 @@ class DevAgent:
         """
         t0 = time.monotonic()
         self._active_trace_id = trace_id
+        request_trust = work_trust_from_source(source)
         domain = self._classifier.classify(text)
         log.info("DevAgent: domain=%s  text=%r", domain, text[:80])
 
@@ -533,7 +546,7 @@ class DevAgent:
             cmd = Command(
                 text=text,
                 action="CLARIFY",
-                source="voice",
+                source=source or "voice",
                 trace_id=trace_id,
             )
             result_dict = await self._coordinator.route(cmd)
@@ -548,7 +561,7 @@ class DevAgent:
         if domain == "skill" and self._skill_registry is not None \
                 and self._skill_registry.match_intent(text):
             from inference.executors.skill_executor import handle_skill
-            return await handle_skill(self, text)
+            return await handle_skill(self, text, work_trust=request_trust)
 
         # Personal-document questions ("what did I write in my notes about …")
         # answer from the PersonalKB — never from model hallucination.
@@ -562,6 +575,7 @@ class DevAgent:
                 text,
                 trace_id=trace_id,
                 extra_context=attachment_context,
+                work_trust=request_trust,
             )
 
         if domain == "vision" and screenshot_b64 is None:
@@ -1047,6 +1061,7 @@ class DevAgent:
                 self._bridge.get_status() if self._bridge is not None else "not wired"
             ),
             "plan": self.get_plan_status(),
+            "containment": self._containment_policy.status(),
         }
 
     def get_last_result(self) -> Optional[AgentResult]:
